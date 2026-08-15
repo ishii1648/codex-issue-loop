@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality gates
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Show toolchain and architecture
+        run: |
+          go version
+          uname -a
+          test "$(uname -m)" = "arm64"
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Check schemas
+        run: make schema-check
+
+      - name: Check module files
+        run: make tidy-check
+
+      - name: Run tests
+        run: make test
+
+      - name: Run race detector
+        run: make test-race
+
+      - name: Run go vet
+        run: make vet
+
+      - name: Build CLI
+        run: make build
+
+      - name: Check working tree
+        run: |
+          git diff --check
+          git diff --exit-code
