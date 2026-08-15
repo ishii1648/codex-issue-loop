@@ -47,6 +47,17 @@ watch:
 	if cfg.Logs.RotateBytes != 16*1024*1024 || cfg.Logs.Generations != 7 || cfg.Logs.WorkerRunMaxCount != 100 {
 		t.Fatalf("unexpected log defaults: %+v", cfg.Logs)
 	}
+	if cfg.Worktrees.CompletedMaxAge.Duration != 7*24*time.Hour || cfg.Worktrees.FailedMaxAge.Duration != 30*24*time.Hour ||
+		cfg.Worktrees.BlockedMaxAge.Duration != 0 || cfg.Worktrees.NeedsInputMaxAge.Duration != 0 {
+		t.Fatalf("unexpected worktree retention defaults: %+v", cfg.Worktrees)
+	}
+}
+
+func TestLoadRejectsNegativeWorktreeRetention(t *testing.T) {
+	dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nworktrees:\n  completed_max_age: -1h\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "worktree retention") {
+		t.Fatalf("negative retention accepted: %v", err)
+	}
 }
 
 func TestLoadRejectsInvalidLogRetention(t *testing.T) {

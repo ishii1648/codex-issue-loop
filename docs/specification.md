@@ -195,6 +195,12 @@ completion:
   create_draft_pr: true
   close_issue: false
 
+worktrees:
+  completed_max_age: 168h
+  failed_max_age: 720h
+  blocked_max_age: 0s
+  needs_input_max_age: 0s
+
 logs:
   rotate_bytes: 16777216
   rotate_interval: 24h
@@ -223,6 +229,7 @@ security:
 - secretsを設定ファイルに記述しない。
 - `security.redact_env`には追加でマスクする値そのものではなく、値を保持する環境変数名だけを記述する。
 - `git.worktree_root`を指定する場合は絶対pathとし、branch prefix、base branch、GitHub repository名はargv/refとして安全な形式だけを許可する。
+- worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、その他の非terminal状態は期間にかかわらず保持する。
 - event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
 
 ### 5.2 log rotationと容量保護
@@ -262,6 +269,8 @@ agent-loop <command> [options]
 | `watch` | イベントを追跡する |
 | `answer` | 未回答requestへ回答を登録する |
 | `logs` | supervisorまたはIssue別ログを表示する |
+| `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
+| `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
 | `doctor` | 依存関係、認証、設定、電源条件、状態整合性を検査する |
 | `bootstrap-labels --repo PATH [--apply]` | 必須GitHubラベルの変更計画を表示し、明示時だけ不足分を作成する |
 | `run` | launchd専用の内部supervisorエントリーポイント |
@@ -447,6 +456,10 @@ GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リ
 - 未コミット変更があるworktreeを自動削除しない
 - force pushを行わない
 - 完了後もPRがopenの間はworktreeを保持できる設定を用意する
+- cleanupは既定read-onlyとし、`--apply`でもdirty、未push commit、open PR、未回答requestを削除しない
+- cleanup/purge適用時はLaunchAgent停止を必須とし、`git worktree remove`後に`git worktree prune`を実行する
+- cleanupはlocal branchを残し、削除前後を`worktree_cleanup_started` / `worktree_cleaned`へ監査記録する
+- purgeはIssue単位の完全一致確認tokenを必須とし、`worktree_purge_started` / `worktree_purged`へ安全性と復元元を記録する
 
 ## 11. Codexワーカー仕様
 
@@ -853,7 +866,6 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - Codex CLIの最低対応version
 - `gh` JSON fieldとlabel更新の具体コマンド
 - worker timeout時のgrace period
-- worktreeの既定保持期間
 - desktop app更新によるRemote/通知表示差異のE2E手順
 - event通知方式（Unix domain socket、ファイル通知、プロセス内IPC）の最終選定
 - Codex CLI session resumeのversion別capabilityとfallback

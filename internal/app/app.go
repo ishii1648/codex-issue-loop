@@ -137,6 +137,10 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.answer(l, args)
 	case "logs":
 		return a.logs(l, args)
+	case "cleanup":
+		return a.cleanup(ctx, l, args)
+	case "purge":
+		return a.purge(ctx, l, args)
 	case "doctor":
 		return a.doctor(ctx, l, args)
 	case "bootstrap-labels":
@@ -169,6 +173,8 @@ Commands:
   watch         Wait for needs_input, blocked, stopped, or optional idle
   answer        Record an answer for a pending request
   logs          Print supervisor logs
+  cleanup       Preview or remove expired safe worktrees
+  purge         Force-remove one explicitly confirmed worktree
   doctor        Validate dependencies, auth, config, and registration
   bootstrap-labels  Preview or create required GitHub labels
   run           Run the supervisor (used by launchd)`)

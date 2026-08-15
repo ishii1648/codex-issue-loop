@@ -297,7 +297,7 @@ agent-loop unregister --repo /absolute/path/to/repository --json
 agent-loop uninstall --json
 ```
 
-`uninstall`もstateとworktreeを保持する。完全削除は通常手順に含めない。保持不要と判断したデータはbackupとレビューを経て、CLIとは別の明示的な作業として削除する。
+`uninstall`もstateとworktreeを保持する。worktreeの整理は直接削除せず、[Worktree保持・cleanup・purge runbook](worktree-lifecycle.md)に従う。通常は`cleanup --json`でpreviewし、対象と理由をレビューしてからloop停止中に`cleanup --apply`する。dirty、未push、open PR、未回答requestを含む対象の`purge`はbackupと完全一致確認tokenを必須とする。
 
 ## 9. log収集とescalation
 

@@ -1,6 +1,6 @@
 ---
 name: agent-loop
-description: Operate and monitor the codex-issue-loop supervisor from Codex. Use for starting, stopping, inspecting, watching, or answering a loop-managed GitHub Issue queue.
+description: Operate and monitor the codex-issue-loop supervisor from Codex. Use for starting, stopping, inspecting, watching, answering, or safely cleaning up a loop-managed GitHub Issue queue.
 ---
 
 # agent-loop
@@ -23,5 +23,7 @@ Use the `agent-loop` CLI as the only control interface. The Skill does not own t
 6. Do not implement a Codex-side polling loop. The Go watch process combines OS events with reconciliation polling internally.
 7. When watch returns `needs_input`, preserve the request ID, ask the question with its recommendation and options, then record the answer with `agent-loop answer --request-id <id> --message-file -`.
 8. Return to one blocking watch call after the answer is recorded.
+
+For worktree retention, run `agent-loop cleanup --repo <path> --json` first and present every candidate, reason, safety flag, recovery source, and purge confirmation token. `cleanup --apply` requires the named repository loop to be stopped and explicit user authorization. Never use `cleanup --apply` for an entry marked dirty, unpushed, open-PR, or unanswered-request; the CLI must also reject it. Use `purge` only for the single Issue the user explicitly authorized, copy the exact confirmation token from the current cleanup preview, and explain that dirty changes are not recoverable. Never infer or synthesize approval for purge.
 
 Confirm the exact repository and impact before `stop`, `restart`, `unregister`, `update`, `migrate --apply`, either rollback, or `uninstall`. Use only a checksum- and attestation-verified release artifact for update. Use only the exact managed backup paths returned by update and migrate for rollback. When rolling back across schema versions, restore the schema backup before the installation backup. None of these commands should delete state, worktrees, or uncommitted changes.

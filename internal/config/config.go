@@ -39,6 +39,7 @@ type Config struct {
 	Watch      Watch      `yaml:"watch" json:"watch"`
 	Git        Git        `yaml:"git" json:"git"`
 	Completion Completion `yaml:"completion" json:"completion"`
+	Worktrees  Worktrees  `yaml:"worktrees" json:"worktrees"`
 	Logs       Logs       `yaml:"logs" json:"logs"`
 	Security   Security   `yaml:"security" json:"security"`
 	RepoPath   string     `yaml:"-" json:"repo_path"`
@@ -133,6 +134,13 @@ type Completion struct {
 	CloseIssue    bool `yaml:"close_issue" json:"close_issue"`
 }
 
+type Worktrees struct {
+	CompletedMaxAge  Duration `yaml:"completed_max_age" json:"completed_max_age"`
+	FailedMaxAge     Duration `yaml:"failed_max_age" json:"failed_max_age"`
+	BlockedMaxAge    Duration `yaml:"blocked_max_age" json:"blocked_max_age"`
+	NeedsInputMaxAge Duration `yaml:"needs_input_max_age" json:"needs_input_max_age"`
+}
+
 type Logs struct {
 	RotateBytes       int64    `yaml:"rotate_bytes" json:"rotate_bytes"`
 	RotateInterval    Duration `yaml:"rotate_interval" json:"rotate_interval"`
@@ -188,6 +196,12 @@ func Defaults() Config {
 			BaseBranch:   "main",
 		},
 		Completion: Completion{CreateDraftPR: true},
+		Worktrees: Worktrees{
+			CompletedMaxAge:  Duration{7 * 24 * time.Hour},
+			FailedMaxAge:     Duration{30 * 24 * time.Hour},
+			BlockedMaxAge:    Duration{0},
+			NeedsInputMaxAge: Duration{0},
+		},
 		Logs: Logs{
 			RotateBytes:       16 * 1024 * 1024,
 			RotateInterval:    Duration{24 * time.Hour},
@@ -279,6 +293,10 @@ func (c Config) Validate() error {
 	}
 	if c.Logs.WorkerRunMaxAge.Duration <= 0 || c.Logs.WorkerRunMaxCount < 1 {
 		return fmt.Errorf("logs worker run retention requires positive worker_run_max_age and worker_run_max_count >= 1")
+	}
+	if c.Worktrees.CompletedMaxAge.Duration < 0 || c.Worktrees.FailedMaxAge.Duration < 0 ||
+		c.Worktrees.BlockedMaxAge.Duration < 0 || c.Worktrees.NeedsInputMaxAge.Duration < 0 {
+		return fmt.Errorf("worktree retention durations must not be negative; 0 keeps a status indefinitely")
 	}
 	if c.Queue.MaxAttempts < 1 {
 		return fmt.Errorf("queue.max_attempts must be at least 1")
