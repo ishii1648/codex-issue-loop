@@ -156,7 +156,15 @@ func (m Manager) Stop(ctx context.Context, entry registry.Entry) error {
 	if err != nil {
 		return fmt.Errorf("launchctl bootout: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, _ = m.Status(ctx, entry)
+		if !status.Loaded {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("LaunchAgent did not become unloaded")
 }
 
 func (m Manager) Restart(ctx context.Context, entry registry.Entry) error {

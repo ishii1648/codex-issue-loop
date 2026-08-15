@@ -18,6 +18,8 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 )
 
+const testProcessReadyTimeout = 5 * time.Second
+
 func TestResultValidation(t *testing.T) {
 	valid := Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Git: &GitResult{}}
 	if err := valid.Validate(); err != nil {
@@ -114,7 +116,7 @@ while :; do :; done
 	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_grace", Attempts: 1}, "", func(pid int) error {
 		workerPID = pid
 		workerPGID, _ = syscall.Getpgid(pid)
-		return waitForTestFile(ready, time.Second)
+		return waitForTestFile(ready, testProcessReadyTimeout)
 	})
 	if workerPGID != workerPID {
 		t.Fatalf("worker pid=%d pgid=%d", workerPID, workerPGID)
@@ -154,7 +156,7 @@ func TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace(t *testing.T) 
 	cfg.Worker.Timeout.Duration = 100 * time.Millisecond
 	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
 	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_force", Attempts: 1}, "", func(int) error {
-		return waitForTestFile(childPath, time.Second)
+		return waitForTestFile(childPath, testProcessReadyTimeout)
 	})
 	var termination *TerminationError
 	if !errors.As(err, &termination) || !termination.Forced || !strings.Contains(err.Error(), "SIGKILL") {
@@ -191,7 +193,7 @@ func TestWorkerProcessHelper(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}
-		if err := waitForTestFile(os.Getenv("AGENT_LOOP_TEST_CHILD_READY"), time.Second); err != nil {
+		if err := waitForTestFile(os.Getenv("AGENT_LOOP_TEST_CHILD_READY"), testProcessReadyTimeout); err != nil {
 			os.Exit(2)
 		}
 		if err := os.WriteFile(os.Getenv("AGENT_LOOP_TEST_CHILD_PID"), []byte(fmt.Sprint(child.Process.Pid)), 0o600); err != nil {
@@ -280,7 +282,7 @@ func TestPromptDoesNotAskForProfileAndIncludesCompletion(t *testing.T) {
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Completion.CreateDraftPR = true
 	prompt := BuildPrompt(cfg, gh.Issue{Number: 1, Title: "Test", Body: "Body"}, state.Issue{RunID: "run", Attempts: 1}, "")
-	for _, expected := range []string{"Do not ask the user to choose the execution profile", "Create or update a draft pull request", "continue directly into implementation"} {
+	for _, expected := range []string{"Do not ask the user to choose the execution profile", "supervisor will create or update a draft pull request", "Do not stage, commit, push", "continue directly into implementation"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("prompt missing %q", expected)
 		}

@@ -466,10 +466,23 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 - 過去の質問とユーザー回答
 - 実行可能な範囲と禁止事項
 - 対象リポジトリのAGENTS.mdに従う指示
-- 実装、テスト、commit、push、draft PRに関する完了条件
+- 実装とテストに関する完了条件
+- `git add`、commit、push、PR作成、`agent-loop`の再帰起動を行わず、公開処理をsupervisorへ返す指示
 - 構造化結果の意味
 - 質問すべき条件と、推測して進めてよい条件
 - preflightの分類規則と、曖昧な場合は質問せず`extended`を選ぶ指示
+
+### 11.3.1 決定論的な公開境界
+
+Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked worktreeのGit metadataは元repositoryの`.git/worktrees`配下にありsandbox外なので、workerへ書き込み権限を広げない。workerが`completed`を返した後、supervisor内のpublisherが次を順に実行する。
+
+1. `git status --porcelain`で差分を確認し、差分があれば`git add --all`と`git diff --cached --check`を行う。
+2. `git -c commit.gpgsign=false ... commit`で対話的な署名promptを発生させずcommitする。
+3. 対象branchをpushする。
+4. 同じhead branchのopen PRを検索し、1件なら再利用、0件ならdraft PRを作成、複数なら安全側で停止する。
+5. `gh`が警告文を併記しても出力内の有効なPR URLを抽出し、異なるURLが複数なら拒否する。
+
+この境界により、モデルのsandboxをremote操作のために広げず、公開処理の引数、順序、冪等性をGo側で固定する。
 
 ### 11.4 質問ポリシー
 

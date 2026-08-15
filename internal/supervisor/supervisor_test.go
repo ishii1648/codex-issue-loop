@@ -88,6 +88,17 @@ type fakeWorker struct {
 	err    error
 }
 
+type fakePublisher struct {
+	called bool
+	result worker.GitResult
+	err    error
+}
+
+func (f *fakePublisher) Publish(context.Context, config.Config, gh.Issue, string, string, string) (worker.GitResult, error) {
+	f.called = true
+	return f.result, f.err
+}
+
 type recordingWorker struct {
 	result        worker.Result
 	runPrompts    []string
@@ -180,6 +191,28 @@ func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	}
 	if scripted.runs != 1 || scripted.resumes != 0 {
 		t.Fatalf("runs=%d resumes=%d", scripted.runs, scripted.resumes)
+	}
+}
+
+func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done"}
+	loop, github := testLoop(t, result)
+	publisher := &fakePublisher{result: worker.GitResult{
+		Branch: "codex/issue-1-test", Commit: "abc", PullRequestURL: "https://example.test/pr/1",
+	}}
+	loop.Publisher = publisher
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !publisher.called || !github.done {
+		t.Fatalf("publisher called=%v github done=%v", publisher.called, github.done)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Issues["1"].PullRequestURL; got != publisher.result.PullRequestURL {
+		t.Fatalf("pull request=%q, want %q", got, publisher.result.PullRequestURL)
 	}
 }
 

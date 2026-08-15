@@ -24,6 +24,10 @@ type WorktreeManager interface {
 	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
 }
 
+type Publisher interface {
+	Publish(context.Context, config.Config, gh.Issue, string, string, string) (worker.GitResult, error)
+}
+
 type ProcessInspector interface {
 	Alive(pid int) bool
 }
@@ -34,6 +38,7 @@ type Loop struct {
 	GitHub    gh.Client
 	Worktrees WorktreeManager
 	Worker    worker.Runner
+	Publisher Publisher
 	Processes ProcessInspector
 	Clock     Clock
 	Random    RandomSource
@@ -403,6 +408,16 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	}
 	switch result.Status {
 	case "completed":
+		if l.Publisher != nil {
+			published, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, result.Summary)
+			if publishErr != nil {
+				return l.scheduleRetry(ctx, current, "publish completed work: "+publishErr.Error())
+			}
+			result.Git = &published
+		}
+		if result.Git == nil {
+			return l.scheduleRetry(ctx, current, "completed work has not been published")
+		}
 		prURL := ""
 		if result.Git != nil {
 			prURL = result.Git.PullRequestURL
