@@ -116,6 +116,9 @@ target-repository/
 
 ```text
 ~/Library/Application Support/codex-issue-loop/
+├─ bin/agent-loop
+├─ install.json
+├─ backups/<timestamp>-<version>/
 ├─ registry.json
 ├─ worktrees/<repo-id>/issue-<number>/
 └─ repos/<repo-id>/
@@ -133,10 +136,13 @@ target-repository/
 └─ com.codex-issue-loop.<repo-id>.plist
 
 ~/.codex/skills/agent-loop/
-└─ SKILL.md
+├─ SKILL.md
+└─ VERSION
 ```
 
 `repo-id` は GitHub の `owner/repo` とcanonicalなローカルパスから生成した、人間が識別可能なprefix付きstable hashとする。リポジトリ移動時は再登録を必要とする。
+
+`install.json`はrelease version、Git commit、binaryとSkillのSHA-256を保持する。`update`はinstall一式を`backups`へ保存してから、稼働中だったLaunchAgentだけを停止し、binary・Skill・plistを置換して再開する。途中失敗時は自動rollbackする。state、event、registry、worktreeはinstall/update/uninstallの対象外とする。
 
 ## 5. 設定仕様
 

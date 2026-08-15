@@ -60,7 +60,7 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 		return exitError{2, err}
 	}
 
-	diagnostics := diagnoseHost(ctx)
+	diagnostics := diagnoseHost(ctx, l)
 	registryStore := registry.Store{Path: l.RegistryPath}
 	registered, registryErr := registryStore.Load()
 	if registryErr != nil {
@@ -98,8 +98,8 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 	return nil
 }
 
-func diagnoseHost(ctx context.Context) []diagnostic {
-	diagnostics := []diagnostic{}
+func diagnoseHost(ctx context.Context, l layout.Layout) []diagnostic {
+	diagnostics := diagnoseInstallation(l)
 	paths := map[string]string{}
 	for _, name := range []string{"git", "gh", "codex", "launchctl", "pmset"} {
 		path, err := exec.LookPath(name)
@@ -163,6 +163,28 @@ func diagnoseHost(ctx context.Context) []diagnostic {
 		}
 	}
 	return diagnostics
+}
+
+func diagnoseInstallation(l layout.Layout) []diagnostic {
+	manifestPath := filepath.Join(l.Root, "install.json")
+	manifest, err := readInstallManifest(manifestPath)
+	if errors.Is(err, os.ErrNotExist) {
+		if _, binaryErr := os.Stat(filepath.Join(l.BinDir, "agent-loop")); errors.Is(binaryErr, os.ErrNotExist) {
+			return []diagnostic{passedDiagnostic("INSTALL_NOT_PRESENT", "host", "", "agent-loopはユーザー領域へ未インストールです", "source buildからdoctorを実行しています")}
+		}
+		return []diagnostic{failedDiagnostic("INSTALL_MANIFEST_MISSING", "host", "", "install manifestがありません", manifestPath, instruction("同じversionのbinaryからagent-loop installを再実行してください"))}
+	}
+	if err != nil {
+		return []diagnostic{failedDiagnostic("INSTALL_MANIFEST_INVALID", "host", "", "install manifestを読み取れません", err.Error(), instruction("install directoryをbackupし、検証済みreleaseから再installしてください"))}
+	}
+	binaryHash, binaryErr := fileSHA256(filepath.Join(l.BinDir, "agent-loop"))
+	skillHash, skillErr := fileSHA256(filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"))
+	skillVersion, versionErr := os.ReadFile(filepath.Join(l.SkillsDir, "agent-loop", "VERSION"))
+	if binaryErr != nil || skillErr != nil || versionErr != nil || binaryHash != manifest.BinarySHA256 || skillHash != manifest.SkillSHA256 || strings.TrimSpace(string(skillVersion)) != manifest.Version {
+		detail := fmt.Sprintf("manifest_version=%s binary_error=%v skill_error=%v version_error=%v", manifest.Version, binaryErr, skillErr, versionErr)
+		return []diagnostic{failedDiagnostic("INSTALL_VERSION_MISMATCH", "host", "", "binaryとSkillのinstall versionまたはchecksumが一致しません", detail, instruction("loopを停止し、検証済みreleaseからagent-loop updateまたはrollbackを実行してください"))}
+	}
+	return []diagnostic{passedDiagnostic("INSTALL_VERSION_CONSISTENT", "host", "", "binaryとSkillのinstall versionが一致します", fmt.Sprintf("version=%s commit=%s", manifest.Version, manifest.Commit))}
 }
 
 func diagnoseExplicitRepository(ctx context.Context, l layout.Layout, registryStore registry.Store, path string) []diagnostic {

@@ -84,6 +84,10 @@ make ci
 
 - `~/Library/Application Support/codex-issue-loop/bin/agent-loop`
 - `~/.codex/skills/agent-loop/SKILL.md`
+- `~/.codex/skills/agent-loop/VERSION`
+- `~/Library/Application Support/codex-issue-loop/install.json`
+
+tag付きreleaseの検証、新規install、安全なupdateとrollbackは[Release・install・update方針](docs/release.md)を参照してください。
 
 `register`はリポジトリ別の永続状態ディレクトリと`~/Library/LaunchAgents/com.codex-issue-loop.<repo-id>.plist`を作成します。認証tokenはコピーしません。
 

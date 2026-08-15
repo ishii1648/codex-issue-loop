@@ -227,3 +227,65 @@ func TestRecordSupervisorControlReplacesStaleStoppedState(t *testing.T) {
 		t.Fatalf("unexpected supervisor state: %+v", got)
 	}
 }
+
+func TestInstallArtifactsAreIdempotentAndVersioned(t *testing.T) {
+	_, l := testEnvironment(t)
+	source := filepath.Join(t.TempDir(), "agent-loop")
+	if err := os.WriteFile(source, []byte("release-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first, changed, err := installArtifacts(l, source, "v1.2.3", "abc123")
+	if err != nil || !changed {
+		t.Fatalf("first=%+v changed=%v err=%v", first, changed, err)
+	}
+	second, changed, err := installArtifacts(l, source, "v1.2.3", "abc123")
+	if err != nil || changed || second != first {
+		t.Fatalf("second=%+v changed=%v err=%v", second, changed, err)
+	}
+	version, err := os.ReadFile(filepath.Join(l.SkillsDir, "agent-loop", "VERSION"))
+	if err != nil || string(version) != "v1.2.3\n" {
+		t.Fatalf("version=%q err=%v", version, err)
+	}
+	match, err := installationMatches(l, source, "v1.2.3", "abc123")
+	if err != nil || !match {
+		t.Fatalf("match=%v err=%v", match, err)
+	}
+}
+
+func TestUpdateBackupCanRestoreBinarySkillAndManifest(t *testing.T) {
+	_, l := testEnvironment(t)
+	oldSource := filepath.Join(t.TempDir(), "old-agent-loop")
+	newSource := filepath.Join(t.TempDir(), "new-agent-loop")
+	if err := os.WriteFile(oldSource, []byte("old-release"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newSource, []byte("new-release"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldManifest, _, err := installArtifacts(l, oldSource, "v1.0.0", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := backupInstallation(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := installArtifacts(l, newSource, "v1.1.0", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreInstallation(l, backup); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := readInstallManifest(filepath.Join(l.Root, "install.json"))
+	if err != nil || restored != oldManifest {
+		t.Fatalf("restored=%+v want=%+v err=%v", restored, oldManifest, err)
+	}
+	resolved, err := validateBackupPath(l, backup)
+	expectedBackup, resolveErr := filepath.EvalSymlinks(backup)
+	if err != nil || resolveErr != nil || resolved != expectedBackup {
+		t.Fatalf("resolved=%q expected=%q err=%v resolveErr=%v", resolved, expectedBackup, err, resolveErr)
+	}
+	if _, err := validateBackupPath(l, filepath.Dir(l.Root)); err == nil {
+		t.Fatal("outside backup path accepted")
+	}
+}

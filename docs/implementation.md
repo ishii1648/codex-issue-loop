@@ -33,6 +33,8 @@
 - `TestFault` prefixで独立実行できる障害注入・復旧suiteと仕様17.2の対応表
 - Mac miniへの初回導入、Codex Remoteからの日常操作、障害復旧、backup・restore、手動update・rollback、撤去、実機受け入れを一連で扱う常駐運用runbook
 - event checkpointを用いた復旧可能なrotation、gzip世代保持、worker run保持上限、容量reserveによるblocked化
+- tag由来version、再現build、SPDX SBOM、checksum、artifact attestationを含むGitHub Release workflow
+- binary/Skill manifest、稼働LaunchAgentを保ったupdate、自動rollback、明示backup rollback
 
 ## 運用前に必要なもの
 
