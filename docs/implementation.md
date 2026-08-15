@@ -53,6 +53,7 @@
 - 起動時reconciliationはactive run、write-ahead claim、未反映GitHub状態、未記録のpush/PR、merge/close済みPRを復旧する。branch・worktree・labelの人手変更と二重workerの可能性は自動上書きせず、理由を残してblockedへ移す。
 - Codex taskが接続されていない場合のスマートフォンへの直接push adapterは未実装である。
 - 実GitHub repositoryと実Codex workerを使うend-to-end testは、利用者のtest repositoryで実施する必要がある。
+- Codex CLI 0.136.0以降とGitHub CLI 2.69.0以降を対応下限とし、起動時に必須capabilityを検査する。resume非対応時は既存worktreeと永続状態を使う新規sessionへfallbackする。詳細は`docs/compatibility.md`を正本とする。
 
 ## テスト
 

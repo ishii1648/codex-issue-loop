@@ -15,6 +15,7 @@ import (
 	"time"
 
 	assets "github.com/ishii1648/codex-issue-loop"
+	"github.com/ishii1648/codex-issue-loop/internal/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
@@ -491,25 +492,12 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 	ghAuthOut, ghAuthErr := exec.CommandContext(ctx, "gh", "auth", "status").CombinedOutput()
 	checks = append(checks, check{Name: "gh_auth", OK: ghAuthErr == nil, Detail: truncate(strings.TrimSpace(string(ghAuthOut)), 300)})
 	failed = failed || ghAuthErr != nil
-	for _, spec := range []struct {
-		name           string
-		args, required []string
-	}{
-		{"codex_exec", []string{"exec", "--help"}, []string{"--json", "--output-schema", "--output-last-message", "--sandbox"}},
-		{"codex_resume", []string{"exec", "resume", "--help"}, []string{"--json", "--output-schema", "--output-last-message"}},
-	} {
-		out, err := exec.CommandContext(ctx, "codex", spec.args...).CombinedOutput()
-		if err == nil {
-			for _, required := range spec.required {
-				if !strings.Contains(string(out), required) {
-					err = fmt.Errorf("missing required option %s", required)
-					break
-				}
-			}
-		}
-		checks = append(checks, check{Name: spec.name, OK: err == nil, Detail: truncate(strings.TrimSpace(string(out)), 300)})
-		failed = failed || err != nil
-	}
+	codexCompatibility := compat.ProbeCodex(ctx, "codex")
+	checks = append(checks, check{Name: "codex_compat", OK: codexCompatibility.OK(), Detail: compatibilityDetail(codexCompatibility)})
+	failed = failed || !codexCompatibility.OK()
+	ghCompatibility := compat.ProbeGH(ctx, "gh")
+	checks = append(checks, check{Name: "gh_compat", OK: ghCompatibility.OK(), Detail: compatibilityDetail(ghCompatibility)})
+	failed = failed || !ghCompatibility.OK()
 	pmsetOut, pmsetErr := exec.CommandContext(ctx, "pmset", "-g", "custom").CombinedOutput()
 	sleepOK, sleepDetail := evaluateSleepSettings(string(pmsetOut), pmsetErr)
 	checks = append(checks, check{Name: "macos_sleep", OK: sleepOK, Detail: sleepDetail})
@@ -577,6 +565,14 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	if err != nil {
 		return err
 	}
+	codexCompatibility := compat.ProbeCodex(ctx, entry.Commands["codex"])
+	if !codexCompatibility.OK() {
+		return fmt.Errorf("unsupported Codex CLI: %s", compatibilityDetail(codexCompatibility))
+	}
+	ghCompatibility := compat.ProbeGH(ctx, entry.Commands["gh"])
+	if !ghCompatibility.OK() {
+		return fmt.Errorf("unsupported gh CLI: %s", compatibilityDetail(ghCompatibility))
+	}
 	secrets := cfg.RedactionValues()
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: secrets}
 	cfg.Worker.Command = entry.Commands["codex"]
@@ -584,7 +580,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	loop := &supervisor.Loop{
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
 		Worktrees: worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
-		Worker:    worker.Codex{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets},
+		Worker:    worker.Codex{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets, ResumeSupported: boolPointer(codexCompatibility.Has("session_resume"))},
 		Logger:    log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
 	}
 	err = loop.Run(ctx)
@@ -595,6 +591,22 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	}
 	return err
 }
+
+func compatibilityDetail(report compat.Report) string {
+	value := fmt.Sprintf("version=%s minimum=%s", report.Version, report.Minimum)
+	if len(report.Missing) > 0 {
+		value += " missing=" + strings.Join(report.Missing, ",")
+	}
+	if !report.Has("session_resume") && report.Tool == "codex" && report.Has("exec_structured") {
+		value += " session_resume=fresh-session-fallback"
+	}
+	if report.Detail != "" {
+		value += " detail=" + report.Detail
+	}
+	return value
+}
+
+func boolPointer(value bool) *bool { return &value }
 
 func (a App) resolve(l layout.Layout, name string, args []string) (registry.Entry, bool, error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)

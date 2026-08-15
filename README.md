@@ -12,6 +12,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [システム仕様](docs/specification.md)
 - [脅威モデル](docs/threat-model.md)
 - [セキュリティ運用runbook](docs/security-runbook.md)
+- [CLI互換性マトリクス](docs/compatibility.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
 
@@ -31,8 +32,8 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - Apple Silicon macOS
 - Go 1.22以降（ソースからビルドする場合）
 - `git`
-- `gh`と対象リポジトリへの認証
-- `codex`と有効なCodex認証
+- `gh` 2.69.0以降と対象リポジトリへの認証
+- `codex` 0.136.0以降と有効なCodex認証
 - ログイン中のmacOSユーザーセッション（LaunchAgentを使用）
 
 Mac miniでは、macOSの「ディスプレイがオフのときに自動でスリープさせない」を有効にすることを推奨します。
@@ -79,6 +80,8 @@ make ci
 - `~/.codex/skills/agent-loop/SKILL.md`
 
 `register`はリポジトリ別の永続状態ディレクトリと`~/Library/LaunchAgents/com.codex-issue-loop.<repo-id>.plist`を作成します。認証tokenはコピーしません。
+
+`doctor`はversion文字列だけでなく、実行に必要なCLI optionとGitHub Issue操作を検査します。必須capabilityがない場合は開始を拒否します。Codexのsession resumeだけが利用できない場合は、既存worktreeと永続状態を引き継いだ新規sessionへ安全にfallbackします。対応範囲と更新確認の手順は[CLI互換性マトリクス](docs/compatibility.md)を参照してください。
 
 ## Operation
 

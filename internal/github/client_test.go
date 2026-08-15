@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,6 +104,47 @@ func TestFaultGitHubAdapterRejectsMalformedResponse(t *testing.T) {
 	cfg.GitHub.Repo = "owner/repo"
 	if _, err := (CLI{Path: fake}).ListReady(context.Background(), cfg); err == nil {
 		t.Fatal("malformed GitHub response was accepted")
+	}
+}
+
+func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	responsePath := filepath.Join(dir, "issues.json")
+	argsPath := filepath.Join(dir, "args.txt")
+	items := make([]map[string]any, 120)
+	for index := range items {
+		items[index] = map[string]any{
+			"number": index + 1, "title": fmt.Sprintf("Issue %d", index+1), "body": "", "url": "https://example.test/issues",
+			"labels": []map[string]string{{"name": "codex-loop:ready"}}, "assignees": []any{}, "milestone": nil,
+		}
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(responsePath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" > %q\ncat %q\n", argsPath, responsePath)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	issues, err := (CLI{Path: fake}).ListReady(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 120 || issues[0].Number != 1 || issues[119].Number != 120 {
+		t.Fatalf("unexpected queue: len=%d first=%d last=%d", len(issues), issues[0].Number, issues[len(issues)-1].Number)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--limit 1000") {
+		t.Fatalf("large queue limit missing: %s", args)
 	}
 }
 

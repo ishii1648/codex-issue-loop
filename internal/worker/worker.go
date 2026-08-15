@@ -65,8 +65,9 @@ type Runner interface {
 type Started func(pid int) error
 
 type Codex struct {
-	StateDir string
-	Secrets  []string
+	StateDir        string
+	Secrets         []string
+	ResumeSupported *bool
 }
 
 func (c Codex) Run(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, promptSuffix string, started Started) (Result, error) {
@@ -75,6 +76,9 @@ func (c Codex) Run(ctx context.Context, cfg config.Config, issue gh.Issue, curre
 }
 
 func (c Codex) Resume(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, prompt string, started Started) (Result, error) {
+	if c.ResumeSupported != nil && !*c.ResumeSupported {
+		return c.Run(ctx, cfg, issue, current, "The installed Codex CLI cannot resume the prior session. Continue safely in a new session from the existing worktree and durable state.\n\n"+prompt, started)
+	}
 	if current.SessionID == "" {
 		return Result{}, fmt.Errorf("cannot resume Issue #%d without a session ID", issue.Number)
 	}
@@ -197,17 +201,45 @@ func findSessionID(path string) string {
 	scanner := bufio.NewScanner(f)
 	session := ""
 	for scanner.Scan() {
-		var event map[string]any
+		var event any
 		if json.Unmarshal(scanner.Bytes(), &event) != nil {
 			continue
 		}
-		for _, key := range []string{"thread_id", "session_id"} {
-			if value, ok := event[key].(string); ok && value != "" {
-				session = value
-			}
+		if discovered := findSessionIDInValue(event); discovered != "" {
+			session = discovered
 		}
 	}
 	return session
+}
+
+func findSessionIDInValue(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"thread_id", "session_id"} {
+			if id, ok := typed[key].(string); ok && id != "" {
+				return id
+			}
+		}
+		for _, key := range []string{"thread", "session"} {
+			if container, ok := typed[key].(map[string]any); ok {
+				if id, ok := container["id"].(string); ok && id != "" {
+					return id
+				}
+			}
+		}
+		for _, nested := range typed {
+			if id := findSessionIDInValue(nested); id != "" {
+				return id
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if id := findSessionIDInValue(nested); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 func (r Result) Validate() error {
