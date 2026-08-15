@@ -18,6 +18,7 @@
 - fsnotifyによるmacOS event起床と低頻度reconciliation
 - 回答保存時のsupervisor即時起床
 - GitHub Issueのfilter、再取得、決定論的sort、write-ahead claim
+- Issue番号、作成日時、priority labelを使うconfigurableなqueue orderingと安定tie-break
 - Issue別branchとGit worktree
 - workerのworktree内実装と、supervisor publisherによるcommit・push・draft PR作成の分離
 - schema付き`codex exec`、session ID保存、`codex exec resume`
@@ -42,7 +43,7 @@
 
 ## 運用前に必要なもの
 
-対象GitHub repositoryには、設定したready、running、needs-input、failed、done、blocked labelを事前に作成する。`doctor`はrepository accessと必須labelを検査するが、外部状態を自動作成しない。
+対象GitHub repositoryには、設定したready、running、needs-input、failed、done、blocked、priority labelを事前に作成する。`doctor`はrepository accessと必須labelを検査するが、外部状態を自動作成しない。
 
 `doctor`では次も検査する。
 

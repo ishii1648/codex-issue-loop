@@ -63,6 +63,7 @@ type Queue struct {
 	PollInterval            Duration `yaml:"poll_interval" json:"poll_interval"`
 	Concurrency             int      `yaml:"concurrency" json:"concurrency"`
 	Order                   string   `yaml:"order" json:"order"`
+	PriorityLabels          []string `yaml:"priority_labels" json:"priority_labels,omitempty"`
 	MaxAttempts             int      `yaml:"max_attempts" json:"max_attempts"`
 	ContinueAfterNeedsInput bool     `yaml:"continue_after_needs_input" json:"continue_after_needs_input"`
 }
@@ -296,8 +297,29 @@ func (c Config) Validate() error {
 	if c.Queue.Concurrency != 1 {
 		return fmt.Errorf("queue.concurrency must be 1 in version %d", CurrentVersion)
 	}
-	if c.Queue.Order != "issue_number_asc" {
-		return fmt.Errorf("queue.order must be issue_number_asc in version %d", CurrentVersion)
+	switch c.Queue.Order {
+	case "issue_number_asc", "created_at_asc":
+	case "priority_then_created_at":
+		if len(c.Queue.PriorityLabels) == 0 {
+			return fmt.Errorf("queue.priority_labels must not be empty when queue.order is priority_then_created_at")
+		}
+	default:
+		return fmt.Errorf("queue.order must be issue_number_asc, created_at_asc, or priority_then_created_at")
+	}
+	seenPriorities := map[string]bool{}
+	for _, label := range c.Queue.PriorityLabels {
+		trimmed := strings.TrimSpace(label)
+		canonical := strings.ToLower(trimmed)
+		if canonical == "" {
+			return fmt.Errorf("queue.priority_labels must not contain empty labels")
+		}
+		if trimmed != label {
+			return fmt.Errorf("queue.priority_labels must not contain leading or trailing whitespace in %q", label)
+		}
+		if seenPriorities[canonical] {
+			return fmt.Errorf("queue.priority_labels must not contain duplicate label %q", label)
+		}
+		seenPriorities[canonical] = true
 	}
 	if c.Queue.PollInterval.Duration <= 0 || c.Watch.ReconcileInterval.Duration <= 0 || c.Worker.Timeout.Duration <= 0 {
 		return fmt.Errorf("durations must be positive")

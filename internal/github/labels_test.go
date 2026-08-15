@@ -102,6 +102,19 @@ func TestBootstrapLabelsIsIdempotentWhenEveryLabelExists(t *testing.T) {
 	}
 }
 
+func TestRequiredLabelSpecsIncludesPriorityLabelsWithoutCaseDuplicate(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Queue.PriorityLabels = []string{"priority:high", "PRIORITY:LOW", strings.ToUpper(cfg.GitHub.ReadyLabels[0])}
+	specs := RequiredLabelSpecs(cfg)
+	counts := map[string]int{}
+	for _, spec := range specs {
+		counts[strings.ToLower(spec.Name)]++
+	}
+	if counts["priority:high"] != 1 || counts["priority:low"] != 1 || counts[strings.ToLower(cfg.GitHub.ReadyLabels[0])] != 1 {
+		t.Fatalf("priority label specs are missing or duplicated: %+v", specs)
+	}
+}
+
 func TestFaultBootstrapLabelsReportsPartialSuccessAndCanBeRerun(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"

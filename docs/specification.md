@@ -165,6 +165,7 @@ queue:
   poll_interval: 60s
   concurrency: 1
   order: issue_number_asc
+  priority_labels: []
   max_attempts: 3
   continue_after_needs_input: true
 
@@ -217,6 +218,8 @@ security:
 - `version` は必須。現行は`2`とし、v1は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
 - `queue.concurrency` はMVPでは `1` のみ許可する。将来の単一host並列化と複数host冗長化は別のmigrationであり、この値だけでdistributed modeを有効化しない。
+- `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
+- `priority_then_created_at`では`queue.priority_labels`を高い順に1件以上指定する。labelなしは最低順位、複数該当は最上位一致とする。
 - `worker.model: null` はユーザーのCodex既定値を使う。
 - `worker.sandbox` の既定値は `workspace-write` とする。
 - `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。terminal状態へ到達したIssueのsession IDはactive stateから外す。
@@ -431,7 +434,9 @@ Issueのauthor、作成場所、作成に使ったclientは着手可能条件に
 
 ### 9.2 並び順
 
-MVPの既定はIssue番号昇順とする。将来、priorityラベルと作成日時を追加できるが、GitHub APIの返却順には依存しない。
+既定はIssue番号昇順とする。`created_at_asc`は作成日時、Issue番号の順、`priority_then_created_at`はconfigured priority、作成日時、Issue番号の順で比較する。configured priority labelがないIssueはpriority付きIssueの後へ置き、複数付いている場合は設定上の最高順位を採用する。
+
+GitHub CLIのpaginationが完了した候補集合をlocalでsortし、APIの返却順やpage境界には依存しない。設定変更時もactiveなIssueはそのまま継続し、未claim候補の次回選択から新しい順序を使う。詳細とtarget repositoryのlabel準備は[Queue ordering](queue-ordering.md)を参照する。
 
 ### 9.3 claim手順
 
