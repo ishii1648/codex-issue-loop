@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
@@ -145,5 +147,54 @@ AC Power:
 	ok, _ = evaluateSleepSettings("AC Power:\n sleep 1\n", nil)
 	if ok {
 		t.Fatal("enabled sleep was accepted")
+	}
+}
+
+func TestBootstrapLabelsCommandRequiresApplyToMutate(t *testing.T) {
+	repo, _ := testEnvironment(t)
+	binDir := filepath.Join(filepath.Dir(repo), "bin")
+	logPath := filepath.Join(filepath.Dir(repo), "label-calls.log")
+	fakeGH := filepath.Join(binDir, "gh")
+	script := "#!/bin/sh\ncase \"$1 $2\" in\n  \"label list\") printf '[]\\n' ;;\n  \"label create\") printf '%s\\n' \"$*\" >> \"$AGENT_LOOP_LABEL_LOG\" ;;\n  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_LOOP_LABEL_LOG", logPath)
+	for _, test := range []struct {
+		name  string
+		apply bool
+	}{
+		{name: "preview"},
+		{name: "apply", apply: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			args := []string{"bootstrap-labels", "--repo", repo, "--json"}
+			if test.apply {
+				args = append(args, "--apply")
+			}
+			if code := (App{Out: &out, Err: &stderr}).Run(context.Background(), args); code != 0 {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+			var result gh.LabelBootstrapResult
+			if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Applied != test.apply {
+				t.Fatalf("result=%+v", result)
+			}
+			if !test.apply {
+				if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+					t.Fatalf("preview mutated labels: %v", err)
+				}
+			}
+		})
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "label create") != len(gh.RequiredLabelSpecs(mustConfig(t, repo))) {
+		t.Fatalf("calls=%s", calls)
 	}
 }

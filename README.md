@@ -13,6 +13,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [脅威モデル](docs/threat-model.md)
 - [セキュリティ運用runbook](docs/security-runbook.md)
 - [CLI互換性マトリクス](docs/compatibility.md)
+- [GitHubラベルbootstrap runbook](docs/github-labels.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
 
@@ -65,10 +66,13 @@ make ci
 
 1. 対象リポジトリに`.agent-loop.yaml`を追加します。[設定例](.agent-loop.example.yaml)を参照してください。
 2. CLIとCodex Skillをユーザー領域へインストールします。
-3. 対象リポジトリを登録し、診断後に開始します。
+3. 必須GitHubラベルの変更計画を確認し、作成します。
+4. 対象リポジトリを登録し、診断後に開始します。
 
 ```sh
 ./bin/agent-loop install
+~/Library/Application\ Support/codex-issue-loop/bin/agent-loop bootstrap-labels --repo /absolute/path/to/repository
+~/Library/Application\ Support/codex-issue-loop/bin/agent-loop bootstrap-labels --repo /absolute/path/to/repository --apply
 ~/Library/Application\ Support/codex-issue-loop/bin/agent-loop register --repo /absolute/path/to/repository
 ~/Library/Application\ Support/codex-issue-loop/bin/agent-loop doctor --repo /absolute/path/to/repository
 ~/Library/Application\ Support/codex-issue-loop/bin/agent-loop start --repo /absolute/path/to/repository
@@ -80,6 +84,8 @@ make ci
 - `~/.codex/skills/agent-loop/SKILL.md`
 
 `register`はリポジトリ別の永続状態ディレクトリと`~/Library/LaunchAgents/com.codex-issue-loop.<repo-id>.plist`を作成します。認証tokenはコピーしません。
+
+`bootstrap-labels`は既定ではpreviewだけを表示し、`--apply`を指定した場合だけ不足ラベルを作成します。既存ラベルの色・説明は一致しない場合も保持し、ラベルの更新・削除は行いません。詳細は[GitHubラベルbootstrap runbook](docs/github-labels.md)を参照してください。
 
 `doctor`はversion文字列だけでなく、実行に必要なCLI optionとGitHub Issue操作を検査します。必須capabilityがない場合は開始を拒否します。Codexのsession resumeだけが利用できない場合は、既存worktreeと永続状態を引き継いだ新規sessionへ安全にfallbackします。対応範囲と更新確認の手順は[CLI互換性マトリクス](docs/compatibility.md)を参照してください。
 

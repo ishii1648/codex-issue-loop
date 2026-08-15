@@ -237,7 +237,10 @@ agent-loop <command> [options]
 | `answer` | 未回答requestへ回答を登録する |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `doctor` | 依存関係、認証、設定、電源条件、状態整合性を検査する |
+| `bootstrap-labels --repo PATH [--apply]` | 必須GitHubラベルの変更計画を表示し、明示時だけ不足分を作成する |
 | `run` | launchd専用の内部supervisorエントリーポイント |
+
+`bootstrap-labels`は`--apply`なしではread-onlyのplanを返す。`--apply`時も不足ラベルの`gh label create`だけを実行し、既存ラベルに`--force`を指定せず、更新・削除を行わない。部分成功は成功分を保持してlabel別のfailureを返し、再実行で不足分だけを処理する。`doctor`が不足ラベルを検出した場合はこの修復コマンドを表示する。
 
 ### 6.3 start
 
