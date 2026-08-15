@@ -216,7 +216,7 @@ security:
 
 - `version` は必須。現行は`2`とし、v1は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
-- `queue.concurrency` はMVPでは `1` のみ許可する。
+- `queue.concurrency` はMVPでは `1` のみ許可する。将来の単一host並列化と複数host冗長化は別のmigrationであり、この値だけでdistributed modeを有効化しない。
 - `worker.model: null` はユーザーのCodex既定値を使う。
 - `worker.sandbox` の既定値は `workspace-write` とする。
 - `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。terminal状態へ到達したIssueのsession IDはactive stateから外す。
@@ -444,7 +444,7 @@ MVPの既定はIssue番号昇順とする。将来、priorityラベルと作成�
 
 `claiming`で停止した場合は、再起動後に最新Issueを再取得し、同じrun IDと冪等markerでclaimを再実行する。
 
-GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リポジトリを処理するsupervisorは1つ」という運用制約を置く。複数ホスト対応時はGitHub外の分散lockが必要になる。
+GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リポジトリを処理するsupervisorは1つ」という運用制約を置く。local `flock`は同一hostだけを保護する。複数host対応では単なる分散lockだけでなく、線形化可能なcoordinator、epoch、durable publication intent、GitHub副作用を集約するfenced publication gatewayを必要とする。[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
 
 ## 10. worktreeとGit仕様
 
@@ -858,6 +858,8 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - extended workerだけが設定上限内でresumeされること
 - 外部pushのoutbox永続化、重複抑止、再送、rate limit、回答後取消、adapter障害からのsupervisor分離
 - 外部push credentialの0600保存、無出力、redaction、通知本文の詳細opt-in
+- 将来のsingle-host worker slotで同一Issueを二重割当しないこと、およびclaim/publishの直列化
+- coordinator adapterのCAS、epoch、lease expiry、partition、古いhost拒否、publication takeover conformance
 
 ### 17.3 macOS E2E
 
@@ -869,6 +871,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - 監視task未接続時の外部push到達、再起動後の非重複、provider障害中のloop継続
 - ChatGPT desktop taskを閉じた後のsupervisor継続
 - Codexによる定期status確認なしでwatchがattentionまで待機すること
+- multi-host障害環境でpartition中に片側だけが進行し、二重branch・Pull Requestを作らないこと
 
 ## 18. 実装時に確定する項目
 
@@ -882,3 +885,4 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - event通知方式（Unix domain socket、ファイル通知、プロセス内IPC）の最終選定
 - Codex CLI session resumeのversion別capabilityとfallback
 - Codexの保留中tool callに関する公式token計測仕様
+- distributed coordinatorとpublication gatewayのbackend、認証、backup、障害環境
