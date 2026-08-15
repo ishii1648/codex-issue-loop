@@ -15,6 +15,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
 )
 
 type Entry struct {
@@ -31,10 +32,12 @@ type Registry struct {
 	Repos   map[string]Entry `json:"repos"`
 }
 
+const CurrentVersion = schemaversion.Current
+
 type Store struct{ Path string }
 
 func (s Store) Load() (Registry, error) {
-	r := Registry{Version: 1, Repos: map[string]Entry{}}
+	r := Registry{Version: CurrentVersion, Repos: map[string]Entry{}}
 	info, err := os.Lstat(s.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return r, nil
@@ -55,8 +58,11 @@ func (s Store) Load() (Registry, error) {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return Registry{}, fmt.Errorf("decode registry: %w", err)
 	}
-	if r.Version != 1 {
-		return Registry{}, fmt.Errorf("unsupported registry version %d", r.Version)
+	if r.Version != CurrentVersion {
+		if r.Version == schemaversion.Previous {
+			return Registry{}, fmt.Errorf("registry schema migration required from version 1 to %d; stop loops and run agent-loop migrate --apply", CurrentVersion)
+		}
+		return Registry{}, fmt.Errorf("unsupported registry version %d; this binary supports version %d", r.Version, CurrentVersion)
 	}
 	if r.Repos == nil {
 		r.Repos = map[string]Entry{}

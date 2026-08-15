@@ -23,6 +23,7 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
+	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
@@ -45,11 +46,12 @@ type versionInfo struct {
 }
 
 type installManifest struct {
-	Version      string    `json:"version"`
-	Commit       string    `json:"commit"`
-	BinarySHA256 string    `json:"binary_sha256"`
-	SkillSHA256  string    `json:"skill_sha256"`
-	InstalledAt  time.Time `json:"installed_at"`
+	Version       string    `json:"version"`
+	Commit        string    `json:"commit"`
+	SchemaVersion int       `json:"schema_version"`
+	BinarySHA256  string    `json:"binary_sha256"`
+	SkillSHA256   string    `json:"skill_sha256"`
+	InstalledAt   time.Time `json:"installed_at"`
 }
 
 type App struct {
@@ -117,6 +119,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.update(ctx, l, args)
 	case "rollback":
 		return a.rollback(ctx, l, args)
+	case "migrate":
+		return a.migrate(ctx, l, args)
 	case "uninstall":
 		return a.uninstall(ctx, l, args)
 	case "register":
@@ -154,6 +158,7 @@ Commands:
   install       Install the binary and Codex Skill
   update        Safely replace the binary and Skill, preserving state
   rollback      Restore a backup created by update
+  migrate       Inspect, apply, or roll back durable schema migrations
   uninstall     Remove installed binary and Skill when no loop is running
   register      Register a repository and write its LaunchAgent
   unregister    Stop and unregister a repository
@@ -228,6 +233,14 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
 	}
+	schemaReport, err := schema.Inspect(l)
+	if err != nil {
+		return fmt.Errorf("inspect schema compatibility: %w", err)
+	}
+	if len(schemaReport.Unsupported) > 0 {
+		return fmt.Errorf("update refused: unsupported schema versions detected; run agent-loop migrate --json")
+	}
+	migrationNeeded := schemaReport.NeedsMigration
 	source, err := os.Executable()
 	if err != nil {
 		return err
@@ -242,11 +255,22 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 	}
 	if match {
 		manifest, _ := readInstallManifest(filepath.Join(l.Root, "install.json"))
-		return a.output(*jsonOut, map[string]any{"changed": false, "manifest": manifest})
+		return a.output(*jsonOut, map[string]any{"changed": false, "manifest": manifest, "schema_migration_required": migrationNeeded})
 	}
-	loaded, err := loadedEntries(ctx, l)
-	if err != nil {
-		return err
+	var loaded []registry.Entry
+	if migrationNeeded {
+		loaded, err = loadedMigrationEntries(ctx, l, schemaReport.Repositories)
+		if err != nil {
+			return err
+		}
+		if len(loaded) > 0 {
+			return fmt.Errorf("update to a schema-changing binary requires every registered LaunchAgent to be stopped; loaded: %v", repoIDs(loaded))
+		}
+	} else {
+		loaded, err = loadedEntries(ctx, l)
+		if err != nil {
+			return err
+		}
 	}
 	backup, err := backupInstallation(l)
 	if err != nil {
@@ -257,7 +281,7 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 		return err
 	}
 	manifest, _, updateErr := installArtifacts(l, source, Version, Commit)
-	if updateErr == nil {
+	if updateErr == nil && !migrationNeeded {
 		updateErr = rewritePlists(l)
 	}
 	if updateErr == nil {
@@ -272,7 +296,7 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 		}
 		return fmt.Errorf("update failed and was rolled back: %w", updateErr)
 	}
-	return a.output(*jsonOut, map[string]any{"changed": true, "backup": backup, "manifest": manifest, "restarted": repoIDs(loaded)})
+	return a.output(*jsonOut, map[string]any{"changed": true, "backup": backup, "manifest": manifest, "restarted": repoIDs(loaded), "schema_migration_required": migrationNeeded})
 }
 
 func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error {
@@ -287,9 +311,38 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 	if err != nil {
 		return exitError{2, err}
 	}
-	loaded, err := loadedEntries(ctx, l)
+	backupManifest, err := readInstallManifest(filepath.Join(resolved, "install.json"))
 	if err != nil {
 		return err
+	}
+	backupSchemaVersion := backupManifest.SchemaVersion
+	if backupSchemaVersion == 0 {
+		backupSchemaVersion = 1
+	}
+	schemaReport, err := schema.Inspect(l)
+	if err != nil {
+		return err
+	}
+	for _, artifact := range schemaReport.Artifacts {
+		if artifact.Version != 0 && artifact.Version != backupSchemaVersion {
+			return fmt.Errorf("installation rollback requires schema version %d but %s is version %d; restore the matching migration backup first", backupSchemaVersion, artifact.Path, artifact.Version)
+		}
+	}
+	legacySchemaRollback := backupSchemaVersion != schema.CurrentVersion
+	var loaded []registry.Entry
+	if legacySchemaRollback {
+		loaded, err = loadedMigrationEntries(ctx, l, schemaReport.Repositories)
+		if err != nil {
+			return err
+		}
+		if len(loaded) > 0 {
+			return fmt.Errorf("installation rollback across schema versions requires every registered LaunchAgent to be stopped; loaded: %v", repoIDs(loaded))
+		}
+	} else {
+		loaded, err = loadedEntries(ctx, l)
+		if err != nil {
+			return err
+		}
 	}
 	if err := stopEntries(ctx, l, loaded); err != nil {
 		_ = startEntries(ctx, l, loaded)
@@ -299,9 +352,11 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
-	if err := rewritePlists(l); err != nil {
-		_ = startEntries(ctx, l, loaded)
-		return err
+	if !legacySchemaRollback {
+		if err := rewritePlists(l); err != nil {
+			_ = startEntries(ctx, l, loaded)
+			return err
+		}
 	}
 	if err := startEntries(ctx, l, loaded); err != nil {
 		return err
@@ -343,7 +398,7 @@ func installArtifacts(l layout.Layout, source, version, commit string) (installM
 	if err := fsutil.WriteFile(filepath.Join(skillDir, "VERSION"), []byte(version+"\n"), 0o600); err != nil {
 		return installManifest{}, false, fmt.Errorf("install Skill version: %w", err)
 	}
-	manifest := installManifest{Version: version, Commit: commit, BinarySHA256: binaryHash, SkillSHA256: skillHash, InstalledAt: time.Now().UTC()}
+	manifest := installManifest{Version: version, Commit: commit, SchemaVersion: schema.CurrentVersion, BinarySHA256: binaryHash, SkillSHA256: skillHash, InstalledAt: time.Now().UTC()}
 	if err := fsutil.WriteJSON(manifestPath, manifest, 0o600); err != nil {
 		return installManifest{}, false, fmt.Errorf("write install manifest: %w", err)
 	}
@@ -358,7 +413,7 @@ func installationMatches(l layout.Layout, source, version, commit string) (bool,
 	if err != nil {
 		return false, err
 	}
-	if manifest.Version != version || manifest.Commit != commit {
+	if manifest.Version != version || manifest.Commit != commit || manifest.SchemaVersion != schema.CurrentVersion {
 		return false, nil
 	}
 	sourceHash, err := fileSHA256(source)

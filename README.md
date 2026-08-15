@@ -60,8 +60,9 @@ make ci
 - `go vet ./...`
 - 到達可能なGo脆弱性の`govulncheck`
 - `make build`
+- release artifactの再現build検査
 
-個別に実行する場合は、`make fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。障害注入ケースと仕様17.2の対応は[テストマトリクス](docs/testing.md)に記載しています。
+個別に実行する場合は、`make fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build release-check`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。障害注入ケースと仕様17.2の対応は[テストマトリクス](docs/testing.md)に記載しています。
 
 `vuln-check`は再現可能な検査のため`govulncheck v1.6.0`と脆弱性修正済みのGo 1.25.8 toolchainを固定し、Goのtoolchain機能で初回にdownloadします。アプリ本体の最小Go versionは1.22のままです。
 
@@ -89,6 +90,8 @@ make ci
 - `~/Library/Application Support/codex-issue-loop/install.json`
 
 tag付きreleaseの検証、新規install、安全なupdateとrollbackは[Release・install・update方針](docs/release.md)を参照してください。
+
+永続schemaの更新が必要なreleaseでは、全loopを停止し、`update`で新binaryを配置してから`migrate --apply`を実行します。`migrate`は既定ではread-onlyのpreviewです。backup、途中停止からの再実行、schemaとbinaryを組で戻す手順は[永続schema migration runbook](docs/migration.md)を参照してください。
 
 `register`はリポジトリ別の永続状態ディレクトリと`~/Library/LaunchAgents/com.codex-issue-loop.<repo-id>.plist`を作成します。認証tokenはコピーしません。
 

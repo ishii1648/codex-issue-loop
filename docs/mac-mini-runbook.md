@@ -277,6 +277,8 @@ release artifactの検証と更新方針は[Release・install・update方針](re
 4. `update`が元々稼働していたLaunchAgentを再開し、全登録repositoryのplistを再生成したことを出力で確認する。
 5. `doctor`と各repositoryの`status`を確認する。
 
+`update`が`schema_migration_required: true`を返すreleaseでは全loopを停止したままにし、[永続schema migration runbook](migration.md)に従って`migrate --apply`を完了してからdoctorとstartへ進む。
+
 更新後に失敗した場合は`update`が返したbackupを`rollback --backup`へ指定する。binaryだけを戻して新schemaのstateを読み込ませない。旧binaryと互換性のあるstate/config backupへ組で戻し、doctor、start、statusの順で確認する。復旧にstateの削除や未定義のschema変換が必要なら自動実行せずescalationする。
 
 ## 8. 登録解除とuninstall

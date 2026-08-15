@@ -416,7 +416,7 @@ func TestFaultSupervisorStopsBeforeRecoveryBlockedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString("{\"version\":1,\"event_id\":\"evt_gap\",\"sequence\":99,\"repo_id\":\"repo-deadbeef\",\"type\":\"gap\"}\n"); err != nil {
+	if _, err := f.WriteString("{\"version\":2,\"event_id\":\"evt_gap\",\"sequence\":99,\"repo_id\":\"repo-deadbeef\",\"type\":\"gap\"}\n"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {

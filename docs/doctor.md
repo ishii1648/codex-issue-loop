@@ -24,7 +24,12 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | `INSTALL_NOT_PRESENT` | source treeから実行中でinstallなし | 必要なら検証済みreleaseをinstall |
 | `INSTALL_MANIFEST_MISSING` / `INSTALL_MANIFEST_INVALID` | install metadataがない・破損 | install directoryをbackupして再install |
 | `INSTALL_VERSION_MISMATCH` | binary、Skill、manifestのversion/checksum不一致 | 検証済みreleaseからupdateまたはrollback |
+| `INSTALL_SCHEMA_INCOMPATIBLE` | installed binaryが想定する永続schemaと不一致 | binary updateとschema migrationを組で実行 |
 | `INSTALL_VERSION_CONSISTENT` | binary、Skill、manifestが一致 | 対応不要 |
+| `SCHEMA_MIGRATION_REQUIRED` | v1のconfig・registry・state・event等が残る | 全loop停止後にpreviewを確認して`migrate --apply` |
+| `SCHEMA_VERSION_UNSUPPORTED` | v3以上など対応外schema | fileを変更せず対応binary・migration手順を確認 |
+| `SCHEMA_INSPECTION_FAILED` | schema version自体を安全に読み取れない | fileを削除せずbackupして調査 |
+| `SCHEMA_VERSION_SUPPORTED` | 全永続schemaがv2 | 対応不要 |
 | `GITHUB_AUTH_INVALID` | `gh auth status`が失敗 | `gh auth login`後に対象repository権限を確認 |
 | `CODEX_AUTH_INVALID` | `codex login status`が失敗 | `codex login`、headless時は`codex login --device-auth` |
 | `GH_CLI_INCOMPATIBLE` / `CODEX_CLI_INCOMPATIBLE` | versionまたはcapability不足 | 対応versionへ更新しdoctorを再実行 |

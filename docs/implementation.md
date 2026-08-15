@@ -35,6 +35,7 @@
 - event checkpointを用いた復旧可能なrotation、gzip世代保持、worker run保持上限、容量reserveによるblocked化
 - tag由来version、再現build、SPDX SBOM、checksum、artifact attestationを含むGitHub Release workflow
 - binary/Skill manifest、稼働LaunchAgentを保ったupdate、自動rollback、明示backup rollback
+- config・registry・state・active event・transactionのv1→v2 migration、checksum backup、journal再開、paired rollback
 
 ## 運用前に必要なもの
 

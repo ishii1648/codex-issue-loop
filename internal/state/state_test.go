@@ -1,7 +1,10 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,10 +125,10 @@ func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 			next.Supervisor.Message = "transaction completed"
 			next.Supervisor.UpdatedAt = time.Now().UTC()
 			event := Event{
-				Version: 1, EventID: "evt_transaction", Sequence: next.StateRevision,
+				Version: CurrentVersion, EventID: "evt_transaction", Sequence: next.StateRevision,
 				Timestamp: time.Now().UTC(), RepoID: store.RepoID, Type: "second",
 			}
-			if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: 1, Snapshot: next, Event: event}, 0o600); err != nil {
+			if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: next, Event: event}, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if crashPoint == "event_appended" || crashPoint == "snapshot_written" {
@@ -166,7 +169,7 @@ func TestFaultPartialEventTailIsTruncatedAndRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString(`{"version":1,"sequence":2`); err != nil {
+	if _, err := f.WriteString(`{"version":2,"sequence":2`); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
@@ -193,7 +196,7 @@ func TestFaultRevisionMismatchIsQuarantined(t *testing.T) {
 	}
 	payload, _ := json.Marshal(map[string]string{"cause": "missing transaction"})
 	if err := store.appendEventUnlocked(Event{
-		Version: 1, EventID: "evt_orphan", Sequence: 2, Timestamp: time.Now().UTC(),
+		Version: CurrentVersion, EventID: "evt_orphan", Sequence: 2, Timestamp: time.Now().UTC(),
 		RepoID: store.RepoID, Type: "orphan", Payload: payload,
 	}); err != nil {
 		t.Fatal(err)
@@ -231,6 +234,41 @@ func TestFaultCorruptSnapshotIsQuarantined(t *testing.T) {
 	}
 	if loaded.Recovery == nil || !strings.Contains(loaded.Recovery.Reason, "decode state") {
 		t.Fatalf("loaded=%+v", loaded)
+	}
+}
+
+func TestUnsupportedSchemaVersionIsRejectedWithoutQuarantine(t *testing.T) {
+	for _, version := range []int{1, CurrentVersion + 1} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			store := newStore(t)
+			data, err := os.ReadFile(store.StatePath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot Snapshot
+			if err := json.Unmarshal(data, &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			snapshot.Version = version
+			modified, err := json.MarshalIndent(snapshot, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			modified = append(modified, '\n')
+			if err := os.WriteFile(store.StatePath(), modified, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Load(); err == nil {
+				t.Fatal("unsupported schema was accepted")
+			}
+			after, err := os.ReadFile(store.StatePath())
+			if err != nil || !bytes.Equal(after, modified) {
+				t.Fatalf("unsupported state was modified: err=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(store.Dir, "recovery")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsupported state was quarantined: %v", err)
+			}
+		})
 	}
 }
 
