@@ -4,12 +4,12 @@
   "additionalProperties": false,
   "required": ["version", "status", "execution_profile", "summary", "question", "tests", "git", "retry"],
   "properties": {
-    "version": {"const": 1},
-    "status": {"enum": ["completed", "needs_input", "retryable_failure", "blocked"]},
-    "execution_profile": {"enum": ["standard", "extended"]},
+    "version": {"type": "integer", "const": 1},
+    "status": {"type": "string", "enum": ["completed", "needs_input", "retryable_failure", "blocked"]},
+    "execution_profile": {"type": "string", "enum": ["standard", "extended"]},
     "summary": {"type": "string"},
     "question": {
-      "oneOf": [
+      "anyOf": [
         {"type": "null"},
         {
           "type": "object",
@@ -44,7 +44,7 @@
       }
     },
     "git": {
-      "oneOf": [
+      "anyOf": [
         {"type": "null"},
         {
           "type": "object",
@@ -59,7 +59,7 @@
       ]
     },
     "retry": {
-      "oneOf": [
+      "anyOf": [
         {"type": "null"},
         {
           "type": "object",
