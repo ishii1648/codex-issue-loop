@@ -43,6 +43,8 @@ Codex worker   = 1 Issue内の非決定的な開発作業
 GitHub         = producerとループが共有する仕事のキュー
 ```
 
+現行のownership境界は1 host・1 supervisor・1 workerである。将来の単一host並列化は同じsupervisor内のworker slotとして実装し、複数host冗長化は外部の線形化可能なcoordinatorとfenced publication gatewayを必須とする。GitHub labelを分散lockとして使わない。詳細は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
+
 ## 4. 通常の実行フロー
 
 1. 任意のproducerが着手可能ラベル付きのGitHub Issueを作成する。
@@ -161,6 +163,7 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 - eventを状態そのものとして扱わない。
 - Codexによる定期pollingを行わない。
 - 1 Issueにつき同時に1つのwriterだけを許可する。
+- GitHubへ公開できるpublisherをrepository単位で1つの論理writerに限定する。
 - workerに次Issueの選択や無限ループを任せない。
 - preflightの実行経路選択でユーザーを止めない。
 - Goalを永続supervisorの代替にしない。

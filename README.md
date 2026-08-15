@@ -18,6 +18,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [Mac mini常駐運用runbook](docs/mac-mini-runbook.md)
 - [スマートフォン直接push通知](docs/notifications.md)
 - [ADR-0001: macOS実行モデル](docs/adr/0001-macos-execution-model.md)
+- [ADR-0002: 単一ホスト並列化と複数ホスト冗長化](docs/adr/0002-concurrency-and-multi-host.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview-v2.png)
 
@@ -32,6 +33,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - ユーザーへの質問が必要になった場合は状態を永続化し、監視用 task を通して回答できるようにする
 - `watch` は永続状態を正本とし、イベント通知と60秒間隔のreconciliationを併用する
 - Codex Goalは外側のIssueループには使わず、単一目的の長時間作業に限定して活用する
+- 現行は1 host・1 workerを維持し、将来の単一host並列化と複数host冗長化は別機能として扱う
 
 ## Requirements
 
@@ -142,6 +144,7 @@ Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部
 - `stop`、`unregister`、`uninstall`後もIssueの状態とworktreeを保持します。
 - worker timeout時はprocess groupへSIGTERMを送り、`worker.timeout_grace`を超えた場合だけSIGKILLします。途中のworktreeは保持して再試行時に検査します。
 - 未回答requestは回答されるまでstickyに保持されます。
+- 現行のlocal `flock`は同一Mac上だけを保護します。同じrepositoryを複数hostから処理しないでください。将来設計は[ADR-0002](docs/adr/0002-concurrency-and-multi-host.md)を参照してください。
 - GitHub Issue本文は信頼済みのshell入力として扱いません。
 - Issue入力はサイズと制御文字を制限し、prompt内では命令ではないJSONデータとして分離します。
 - state、event、worker log/result、GitHub通知では既知token形式と`security.redact_env`の値をマスクします。秘密を回答として渡さないでください。

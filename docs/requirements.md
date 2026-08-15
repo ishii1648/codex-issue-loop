@@ -204,6 +204,15 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-072**: cleanup/purge適用時はloop停止を要求し、`git worktree prune`と整合させ、削除前後を監査eventへ記録すること。
 - **FR-073**: purgeは通常cleanupと分離し、Issue単位の完全一致確認tokenと復元可能性の表示を必須にすること。
 
+### 6.9 将来の並列化と複数host冗長化
+
+- **FR-080**: 単一hostのworker並列化と、複数hostの冗長化を独立したmode・migrationとして扱うこと。
+- **FR-081**: 単一host並列化では1つのsupervisorがIssue claim、state更新、GitHub公開、rate limitを直列化し、worker slotだけを並列化すること。
+- **FR-082**: 複数host modeはGitHub外の線形化可能なcoordinator、単調増加epoch、期限付きlease、条件付き更新を必要とし、coordinator喪失時はfail closedすること。
+- **FR-083**: 複数hostのworkerはGitHubへ直接公開せず、durable publication intentを介してfenced publication gatewayだけがbranch、comment、Pull Requestを更新すること。
+- **FR-084**: status/watchは複数hostのownership、Issue状態、attentionをcoordinatorから集約し、event取りこぼしをreconciliationで修復すること。
+- **FR-085**: distributed modeの有効化前にbackend conformance、credential、backup、partition、publication takeoverをdoctorまたは運用検証で確認すること。
+
 ## 7. 非機能要件
 
 ### 7.1 信頼性
@@ -214,6 +223,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **NFR-004**: 再起動後に GitHub とローカル状態を照合し、安全に処理を再開すること。
 - **NFR-005**: attention状態はユーザーの回答または明示的な取消までstickyに保持し、一過性eventの欠落で解除されないこと。
 - **NFR-006**: 永続状態に単調増加するrevisionを持たせ、監視の再接続とrace検出に利用できること。
+- **NFR-007**: network partitionではavailabilityよりsafetyを優先し、古いepochのhostによるclaim、state更新、GitHub公開を拒否すること。
+- **NFR-008**: GitHub API応答を失った場合も、同じpublication intent、branch、冪等markerを照合して再開し、別PRを作って回避しないこと。
 
 ### 7.2 セキュリティ
 
@@ -238,6 +249,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **NFR-031**: コアロジックは `launchd`、GitHub、Codex のアダプターから分離すること。
 - **NFR-032**: 設定ファイルとCLIの後方互換性を管理するため、schema versionを持つこと。
 - **NFR-033**: ユニットテストでは GitHub や Codex の実サービスを必要としないこと。
+- **NFR-034**: 現行v2の設定・stateは暗黙に並列・distributed modeへ移行せず、concurrency 1の動作を維持すること。
 
 ## 8. 運用上の前提
 
