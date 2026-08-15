@@ -52,10 +52,11 @@ func RequiredLabelSpecs(cfg config.Config) []LabelSpec {
 	specs := []LabelSpec{}
 	add := func(names []string, color, description string) {
 		for _, name := range names {
-			if name == "" || seen[name] {
+			key := strings.ToLower(name)
+			if name == "" || seen[key] {
 				continue
 			}
-			seen[name] = true
+			seen[key] = true
 			specs = append(specs, LabelSpec{Name: name, Color: color, Description: description})
 		}
 	}
@@ -64,6 +65,7 @@ func RequiredLabelSpecs(cfg config.Config) []LabelSpec {
 	add([]string{cfg.GitHub.NeedsInputLabel}, "FBCA04", "Waiting for user input in codex-issue-loop")
 	add([]string{cfg.GitHub.FailedLabel}, "D73A4A", "codex-issue-loop processing failed")
 	add([]string{cfg.GitHub.DoneLabel}, "5319E7", "Completed by codex-issue-loop")
+	add(cfg.Queue.PriorityLabels, "BFD4F2", "Priority for codex-issue-loop queue ordering")
 	for _, name := range cfg.GitHub.ExcludeLabels {
 		if strings.EqualFold(name, "blocked") {
 			add([]string{name}, "B60205", "Blocked from automated processing")

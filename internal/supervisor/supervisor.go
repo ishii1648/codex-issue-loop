@@ -237,7 +237,7 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	for number, issue := range snapshot.Issues {
 		statuses[number] = issue.Status
 	}
-	selected, ok := gh.SelectReady(issues, statuses)
+	selected, ok := gh.SelectReady(issues, statuses, l.Config.Queue)
 	if !ok {
 		return false, l.markPolling("")
 	}

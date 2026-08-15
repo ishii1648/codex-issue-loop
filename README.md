@@ -14,6 +14,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [セキュリティ運用runbook](docs/security-runbook.md)
 - [CLI互換性マトリクス](docs/compatibility.md)
 - [GitHubラベルbootstrap runbook](docs/github-labels.md)
+- [Queue ordering](docs/queue-ordering.md)
 - [doctor診断・復旧runbook](docs/doctor.md)
 - [Mac mini常駐運用runbook](docs/mac-mini-runbook.md)
 - [スマートフォン直接push通知](docs/notifications.md)
@@ -34,6 +35,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - `watch` は永続状態を正本とし、イベント通知と60秒間隔のreconciliationを併用する
 - Codex Goalは外側のIssueループには使わず、単一目的の長時間作業に限定して活用する
 - 現行は1 host・1 workerを維持し、将来の単一host並列化と複数host冗長化は別機能として扱う
+- Issueの選択順は番号、作成日時、priority labelから明示設定でき、GitHub APIの返却順には依存しない
 
 ## Requirements
 

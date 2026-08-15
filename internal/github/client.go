@@ -19,6 +19,7 @@ type Issue struct {
 	Title     string
 	Body      string
 	URL       string
+	CreatedAt time.Time
 	Labels    []string
 	Assignees []string
 	Milestone string
@@ -64,12 +65,13 @@ const (
 )
 
 type rawIssue struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	URL    string `json:"url"`
-	State  string `json:"state"`
-	Labels []struct {
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	URL       string    `json:"url"`
+	CreatedAt time.Time `json:"createdAt"`
+	State     string    `json:"state"`
+	Labels    []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 	Assignees []struct {
@@ -90,7 +92,7 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 	}
 	// gh paginates internally up to the requested limit. Keep this above the
 	// MVP's original 100 so large queues are not silently truncated.
-	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,labels,assignees,milestone"}
+	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,createdAt,labels,assignees,milestone"}
 	if cfg.GitHub.Assignee != "" {
 		args = append(args, "--assignee", cfg.GitHub.Assignee)
 	}
@@ -123,11 +125,11 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 			milestone = item.Milestone.Title
 		}
 		issues = append(issues, NormalizeIssue(Issue{
-			Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL,
+			Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt,
 			Labels: labels, Assignees: assignees, Milestone: milestone,
 		}))
 	}
-	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
+	OrderIssues(issues, cfg.Queue)
 	return issues, nil
 }
 
@@ -136,7 +138,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,state,labels,assignees,milestone,comments").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,labels,assignees,milestone,comments").CombinedOutput()
 	if err != nil {
 		return Issue{}, fmt.Errorf("get GitHub Issue #%d: %w: %s", number, err, c.safe(out))
 	}
@@ -160,7 +162,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	for _, comment := range item.Comments {
 		comments = append(comments, comment.Body)
 	}
-	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State}), nil
+	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State}), nil
 }
 
 func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (RemoteState, error) {
@@ -376,8 +378,47 @@ func safeText(value string, limit int) string {
 	return value + "\n[TRUNCATED]"
 }
 
-func SelectReady(issues []Issue, snapshotIssues map[string]string) (Issue, bool) {
-	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
+func OrderIssues(issues []Issue, queue config.Queue) {
+	priorityRank := make(map[string]int, len(queue.PriorityLabels))
+	for index, label := range queue.PriorityLabels {
+		priorityRank[strings.ToLower(label)] = index
+	}
+	rank := func(issue Issue) int {
+		result := len(priorityRank)
+		for _, label := range issue.Labels {
+			if candidate, ok := priorityRank[strings.ToLower(label)]; ok && candidate < result {
+				result = candidate
+			}
+		}
+		return result
+	}
+	createdBefore := func(left, right Issue) bool {
+		if left.CreatedAt.IsZero() != right.CreatedAt.IsZero() {
+			return !left.CreatedAt.IsZero()
+		}
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.Before(right.CreatedAt)
+		}
+		return left.Number < right.Number
+	}
+	sort.SliceStable(issues, func(i, j int) bool {
+		switch queue.Order {
+		case "created_at_asc":
+			return createdBefore(issues[i], issues[j])
+		case "priority_then_created_at":
+			left, right := rank(issues[i]), rank(issues[j])
+			if left != right {
+				return left < right
+			}
+			return createdBefore(issues[i], issues[j])
+		default:
+			return issues[i].Number < issues[j].Number
+		}
+	})
+}
+
+func SelectReady(issues []Issue, snapshotIssues map[string]string, queue config.Queue) (Issue, bool) {
+	OrderIssues(issues, queue)
 	for _, issue := range issues {
 		status := snapshotIssues[fmt.Sprint(issue.Number)]
 		if status == "running" || status == "claimed" || status == "needs_input" || status == "completed" || status == "blocked" {

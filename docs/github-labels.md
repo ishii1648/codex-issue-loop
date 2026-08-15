@@ -1,6 +1,6 @@
 # GitHubラベルbootstrap runbook
 
-`agent-loop`は`.agent-loop.yaml`で指定されたready、running、needs-input、failed、done、および`blocked`除外ラベルを使用する。`bootstrap-labels`は対象リポジトリの不足ラベルだけを安全に作成する。
+`agent-loop`は`.agent-loop.yaml`で指定されたready、running、needs-input、failed、done、`blocked`除外ラベル、およびqueueのpriority labelを使用する。`bootstrap-labels`は対象リポジトリの不足ラベルだけを安全に作成する。priorityの順位と運用は[Queue ordering](queue-ordering.md)を参照する。
 
 ## 標準手順
 

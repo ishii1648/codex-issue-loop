@@ -109,6 +109,34 @@ func TestLoadRejectsInvalidTimeoutGrace(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsQueueOrderStrategies(t *testing.T) {
+	for _, fragment := range []string{
+		"order: issue_number_asc\n",
+		"order: created_at_asc\n",
+		"order: priority_then_created_at\n  priority_labels: [priority:critical, priority:high]\n",
+	} {
+		dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nqueue:\n  "+fragment)
+		if _, err := Load(dir); err != nil {
+			t.Fatalf("valid queue order rejected: %s: %v", fragment, err)
+		}
+	}
+}
+
+func TestLoadRejectsInvalidQueueOrderConfiguration(t *testing.T) {
+	for _, fragment := range []string{
+		"order: random\n",
+		"order: priority_then_created_at\n",
+		"order: priority_then_created_at\n  priority_labels: ['']\n",
+		"order: priority_then_created_at\n  priority_labels: [' priority:high']\n",
+		"order: priority_then_created_at\n  priority_labels: [priority:high, PRIORITY:HIGH]\n",
+	} {
+		dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nqueue:\n  "+fragment)
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "queue.") {
+			t.Fatalf("invalid queue order accepted: %s: %v", fragment, err)
+		}
+	}
+}
+
 func TestLoadRejectsUnknownNestedKey(t *testing.T) {
 	dir := writeConfig(t, `version: 2
 github:

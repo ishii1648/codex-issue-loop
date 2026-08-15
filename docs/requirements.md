@@ -146,11 +146,13 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 ### 6.3 Issue選択
 
 - **FR-020**: GitHub から open Issue を取得し、設定された ready ラベル、除外ラベル、assignee、milestone等で絞り込めること。
-- **FR-021**: 同じ入力に対して同じ Issue を選ぶ決定論的な順序を持つこと。
+- **FR-021**: Issue番号昇順、作成日時昇順、priority label・作成日時順を明示設定でき、同じ入力に対して同じIssueを選ぶ決定論的な順序を持つこと。
 - **FR-022**: 選択した Issue を GitHub ラベルとローカル状態の両方で claim し、重複実行を防ぐこと。
 - **FR-023**: キューが空の間は低負荷で待機し、定期的に再取得すること。
 - **FR-024**: Issue が入力待ちまたは恒久的失敗になっても、設定に応じて他の着手可能な Issue へ進めること。
 - **FR-025**: Issueの作成主体、作成場所、作成手段を着手可能性の条件にせず、GitHub上の状態、ラベル、設定されたassignee・milestone、ローカル処理状態だけで選択すること。
+- **FR-026**: queue orderingは全pageの候補取得後に適用し、作成日時とIssue番号で安定したtie-breakを行うこと。
+- **FR-027**: priority labelの順位は設定配列で定義し、labelなしを最低順位、複数該当を最上位一致として扱うこと。不正設定は起動前に拒否すること。
 
 ### 6.4 Codexワーカー
 

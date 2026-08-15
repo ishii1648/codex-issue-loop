@@ -40,6 +40,7 @@ make test-race
 | atomic fileとmarshal失敗 | `TestFaultAtomicWriteReplacesContentAndPreservesMode`、`TestFaultJSONMarshalFailureDoesNotCreateDestination` |
 | layout isolationとpermission | `TestFaultLayoutUsesIsolatedRootsAndPrivateDirectories` |
 | GitHub CLI response破損 | `TestFaultGitHubAdapterRejectsMalformedResponse` |
+| queue strategy・tie-break・pagination後sort | `TestOrderIssuesSupportsCreatedAtAndPriorityWithStableTieBreaks`、`TestListReadyOrdersAfterCollectingPaginatedFixture`、`TestSelectReadyAppliesChangedOrderOnlyToUnclaimedIssues` |
 | GitHubラベルのpreview・冪等作成・部分成功 | `TestBootstrapLabelsPreviewsCreatesAndPreservesExistingMetadata`、`TestBootstrapLabelsIsIdempotentWhenEveryLabelExists`、`TestFaultBootstrapLabelsReportsPartialSuccessAndCanBeRerun` |
 | doctorの安定code・認証・sleep・state・停止理由 | `TestDoctorOutputHasStableSchemaCodesAndSafeRemediations`、`TestFaultDoctorHostAuthAndSleepFixturesHaveUniqueCodes`、`TestFaultDoctorDetectsCorruptStateWithoutModifyingIt`、`TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog` |
 | 回復不能なsnapshot/event不整合 | `TestFaultRevisionMismatchIsQuarantined`、`TestFaultCorruptSnapshotIsQuarantined` |
