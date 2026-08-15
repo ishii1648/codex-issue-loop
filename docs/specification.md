@@ -8,36 +8,35 @@
 
 ## 2. 全体構成
 
-![codex-issue-loopの全体構成](images/architecture-overview.png)
+![codex-issue-loopの全体構成](images/architecture-overview-v2.png)
 
 ```text
-ChatGPT mobile app
-        │ Codex Remote
-        ▼
-ChatGPT desktop app on Mac mini
-        │
-        ├─ [LOOP] monitor task
-        │      └─ Skill ──► agent-loop CLI
-        │                       ├─ start ──► launchctl ──► launchd
-        │                       │                         └─ supervisor
-        │                       ├─ status / answer ───────────┤
-        │                       └─ watch ── event + 60s ──────┤
-        │                                      reconcile     ▼
-        │                                             durable state/events
-        │
-        └─ [INTAKE] new issue task ──► GitHub Issue
-
-supervisor ──► GitHub Issues ── pick/claim ──► worktree + codex exec
-     ▲                                                   │
-     └────────────── durable state/events ◄──────────────┘
-                                                         ▼
-                                                branch / draft PR
+Issue producers (outside Mac mini)
+  ├─ Codex intake task on any host
+  ├─ GitHub UI
+  ├─ CLI / GitHub API
+  └─ automation ─────────────────────────► GitHub Issues
+                                                  │ ready queue
+                                                  ▼
+Mac mini — execution host
+  ├─ ChatGPT mobile app ── Codex Remote ──► [LOOP] monitor task
+  │          ◄──────────── Codex notification ────────┘
+  │                                             └─ Skill ──► agent-loop CLI
+  │                                                            ├─ start ──► launchctl ──► launchd
+  │                                                            ├─ status / answer ───────────┤
+  │                                                            └─ watch ── event + 60s ──────┤
+  │                                                                         reconcile        ▼
+  └─ supervisor ◄──────── GitHub Issues                            durable state/events
+         └─ pick/claim ──► worktree + codex exec ──► branch / draft PR
 ```
+
+Codex notificationは、`watch`がattention状態を返した監視taskからChatGPTモバイルアプリへ届く。supervisorや永続状態からスマートフォンへ直接pushするadapterは、この経路に含めない。
 
 ### 2.1 責務境界
 
 | コンポーネント | 責務 | 保持しないもの |
 | --- | --- | --- |
+| Issue producer | GitHub Issue作成、要望・完了条件の記載、着手可能ラベル付与 | ループ制御、Mac mini上の状態 |
 | Codex監視task | ユーザーとの会話、CLI操作、質問表示 | ループの正本状態 |
 | agent-loop Skill | 自然言語からCLIへの安全な操作手順 | 常駐プロセス、Issue選択ロジック |
 | agent-loop CLI | 設定、プロセス制御、監視、回答登録 | 実装判断、監視状態の正本 |
@@ -47,7 +46,7 @@ supervisor ──► GitHub Issues ── pick/claim ──► worktree + codex 
 | GitHub | Issue/PRの共有状態 | ローカル実行詳細 |
 | 永続snapshot/event log | supervisor状態、attention request、revision | ユーザーとの会話 |
 
-Codex Skill の実行主体はCodex taskである。Skillは実行可能プロセスではなく、Codexが読む操作手順である。長時間動き続ける実行主体は `agent-loop run` supervisor である。
+Codex Skill の実行主体はCodex taskである。Skillは実行可能プロセスではなく、Codexが読む操作手順である。長時間動き続ける実行主体は `agent-loop run` supervisor である。Issue producerはこの実行経路から独立しており、Mac mini上で動作する必要はない。
 
 ## 3. 技術選定
 
@@ -416,6 +415,8 @@ Issueは以下をすべて満たす場合に着手可能とする。
 - running、needs-input、done、failedラベルを持たない
 - Pull Requestではない
 - ローカル状態で処理中ではない
+
+Issueのauthor、作成場所、作成に使ったclientは着手可能条件に含めない。producerは着手可能ラベルを付与できるGitHub権限、または同ラベルを付与するautomationを持つ必要がある。
 
 ### 9.2 並び順
 

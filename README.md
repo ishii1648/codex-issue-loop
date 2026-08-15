@@ -17,7 +17,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [doctor診断・復旧runbook](docs/doctor.md)
 - [Mac mini常駐運用runbook](docs/mac-mini-runbook.md)
 
-![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
+![codex-issue-loop アーキテクチャ](docs/images/architecture-overview-v2.png)
 
 ## 設計の要点
 
@@ -25,7 +25,8 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - macOS の `launchd` がループの生存を管理する
 - Issue ごとに独立した `codex exec` ワーカーを起動する
 - Codex Skill は起動・停止・監視・回答を CLI に橋渡しする薄い操作層とする
-- スマートフォンでは、監視用 task と Issue 作成用 task の2つを主な入口にする
+- GitHub Issueを投入境界とし、Issueの作成主体・作成場所・作成手段をMac mini上のCodexに限定しない
+- スマートフォンでは監視用taskを主な操作入口とし、Issue作成用taskは任意のproducerの一例とする
 - ユーザーへの質問が必要になった場合は状態を永続化し、監視用 task を通して回答できるようにする
 - `watch` は永続状態を正本とし、イベント通知と60秒間隔のreconciliationを併用する
 - Codex Goalは外側のIssueループには使わず、単一目的の長時間作業に限定して活用する

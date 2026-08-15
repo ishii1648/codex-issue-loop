@@ -107,9 +107,9 @@ Mac miniのCodex desktop appでSettingsのConnectionsを開き、「Control this
 
 Codex desktop appを終了、sign out、またはRemote Controlを無効化するとスマートフォン経路は切れる。再login後はRemote Controlを再度有効化する。Mac側のCodex設定で、Remote接続中にMacをawakeに保つoptionが利用できる場合も有効にする。ただし常駐運用ではmacOSのEnergy設定を正本とし、desktop appのoptionだけに依存しない。
 
-## 3. Codex app上の2つのtask
+## 3. Codex app上の監視taskと任意のIssue作成task
 
-通常運用では、repositoryごとに次の2 taskを分ける。会話履歴や役割が混ざらず、監視taskがblocking watch中でも新しい仕事を投入できる。
+通常運用ではrepositoryごとに監視taskを用意する。Issue作成taskを使う場合は監視taskと分けると、会話履歴や役割が混ざらず、監視taskがblocking watch中でも新しい仕事を投入できる。
 
 ### 監視task
 
@@ -121,7 +121,9 @@ Codex desktop appを終了、sign out、またはRemote Controlを無効化す�
 
 ### Issue作成task
 
-名前の例は`[issues] owner/repository`とする。Issueの背景、完了条件、対象repository、着手可能かを会話で整理し、`codex-loop:ready`を付けてキューへ投入する。監視やloop processの所有はこのtaskに持たせない。
+Issue作成taskは任意である。名前の例は`[issues] owner/repository`とする。Issueの背景、完了条件、対象repository、着手可能かを会話で整理し、`codex-loop:ready`を付けてキューへ投入する。監視やloop processの所有はこのtaskに持たせない。
+
+IssueはGitHub UI、`gh`、GitHub API、GitHub Actions等のautomation、または別ホストのCodexから作成してもよい。Mac miniは実行ホストであり、Issue作成元ではない。どの経路でも、対象repositoryにopen Issueを作成し、設定されたreadyラベルと任意のassignee・milestone条件を満たせば同じキューへ入る。readyラベルを付ける主体には対象repositoryの適切なGitHub権限が必要である。
 
 ## 4. スマートフォンからの日常操作
 
