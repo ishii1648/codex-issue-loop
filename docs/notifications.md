@@ -6,13 +6,13 @@
 
 初期adapterには`ntfy`を採用する。HTTP POSTとBearer tokenだけで送信でき、iOS/Android appがあり、hosted serviceとself-hostを選べるためである。adapter interfaceはprovider-neutralに保ち、provider固有処理をsupervisorやoutboxへ混ぜない。
 
-2026-08-16時点で確認できたOpenAI公式文書には、外部processから既存Codex taskを任意にwakeする公開APIは記載されていない。ChatGPTの[Notifications](https://learn.chatgpt.com/docs/notifications)、[Scheduled tasks](https://learn.chatgpt.com/docs/automations)、Codex [App Server](https://learn.chatgpt.com/docs/app-server)、Codex CLIの[`notify`](https://developers.openai.com/codex/config-reference/#notifications)を確認した。CLIの`notify`が扱うeventは現在`agent-turn-complete`であり、停止中の監視taskを外部supervisorから起こすAPIではない。この判断は公開文書からの推論であり、公式APIが追加された場合はそれを優先するadapterを再評価する。
+2026-08-16時点で、App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できる。一方、任意のChatGPT desktop taskを外部processからwakeし、その表示を`Needs input`へ変えてmobile pushする公開契約は記載されていない。ChatGPTの[Notifications](https://learn.chatgpt.com/docs/notifications)、[Scheduled tasks](https://learn.chatgpt.com/docs/automations)、Codex [App Server](https://learn.chatgpt.com/docs/app-server)、Codex CLIの[`notify`](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications)を確認した。CLIの`notify`が扱うeventは現在`agent-turn-complete`だけである。詳細な判定は[Codex公式仕様確認](codex-capability-review.md)を正本とする。
 
 ## 2. provider比較
 
 | 候補 | push/導入 | credential | 費用・運用 | 判断 |
 | --- | --- | --- | --- | --- |
-| OpenAI公式 | ChatGPT/Codex内の通知とscheduled taskは利用可能 | OpenAI既存認証 | 既存契約内だが、任意task wake APIは未確認 | 将来の優先候補 |
+| OpenAI公式 | ChatGPT/Codex内の通知、scheduled task、App Server thread継続は利用可能 | OpenAI既存認証 | 任意Desktop task wakeとmobile Needs input連携は公開契約なし | 将来の優先候補 |
 | ntfy | 単純なHTTP API、iOS/Android app、self-host可 | publish用access tokenと非推測topic | hosted free/paid tierまたはself-hostのinfra運用 | 初期採用 |
 | Pushover | HTTPS Message API、専用mobile app | application tokenとuser key | 個人利用はplatformごとの買い切り、送信上限あり | 次点 |
 | Slack | Incoming WebhookとSlack mobile通知 | secretを含むwebhook URL | workspace/app管理が必要。mobile通知はユーザー設定にも依存 | team運用向け候補 |

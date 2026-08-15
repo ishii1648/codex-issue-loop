@@ -87,10 +87,10 @@ Codex Goalは、一つの具体的な目的と検証可能な完了条件を追�
 このため、次の境界を設ける。
 
 - Goalを外側のIssueループ、プロセス監視、永続状態の正本にはしない。
-- 現行のheadless workerは `standard` / `extended` profileで制御する。
+- 現行のheadless workerは `standard` / `extended` profileと`codex exec`で制御する。
 - `extended` の継続はsupervisorが `codex exec resume` を管理する。
 - 監視taskで「この障害を復旧する」など単一目的を追う場合は、ユーザーがGoalを利用してよい。
-- 将来、公式のheadless Goal APIが提供された場合は、`extended` profileのoptional adapterとして評価する。
+- App ServerのGoal APIは公式提供済みである。`extended` profileのoptional adapterとしてIssue #53で検証し、導入までは現行workerを維持する。
 
 したがってGoalは排除せず、適用範囲を単一目的の内側に限定する。
 
@@ -154,7 +154,7 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 | supervisorが異常終了 | snapshot、event log、GitHub状態 | launchd再起動後にreconciliation |
 | Macがスリープ | 実行は停止し得る | macOSの「ディスプレイoff時もスリープさせない」を有効化 |
 
-外部supervisorからCodex taskを直接wakeする公開APIには依存しない。監視taskが接続されていない期間は、opt-inのntfy adapterが`needs_input`とsupervisor blockedを永続outboxから通知する。詳細は[スマートフォン直接push通知](notifications.md)を参照する。
+App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できるが、外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。監視taskが接続されていない期間は、opt-inのntfy adapterが`needs_input`とsupervisor blockedを永続outboxから通知する。詳細は[公式仕様確認](codex-capability-review.md)と[スマートフォン直接push通知](notifications.md)を参照する。
 
 ## 10. 設計上の不変条件
 

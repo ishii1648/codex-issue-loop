@@ -500,7 +500,7 @@ preflightは別プロセスではなく、初回worker promptに含める論理�
 
 初回workerはpreflight結果を実行ログへ構造化eventとして出力するが、preflightだけで終了しない。したがって `extended` の判定だけを理由に2つのworkerが必ず動くわけではない。初回runで完了しなかった場合に限り、supervisorが保存されたsession ID、worktree、検証結果を使って `codex exec resume` を起動する。ユーザー回答後の再開は自動continuation budgetとは別に扱う。
 
-MVPではnative Goalをheadless workerの実行機構にしない。Goalは監視task内の単一目的の復旧作業等に利用できるが、Issueキュー、process lifetime、永続状態を所有しない。公式に利用可能なheadless Goal interfaceが提供された場合のみ、`extended` profileのoptional adapterとして追加を検討する。
+MVPではnative Goalをheadless workerの実行機構にしない。Goalは監視task内の単一目的の復旧作業等に利用できるが、Issueキュー、process lifetime、永続状態を所有しない。App Serverの`thread/goal/set|get|clear`、`thread/resume`、`turn/start`は公式提供済みであり、`extended` profileのoptional adapterをIssue #53で検証する。導入までは`codex exec resume`を維持する。[Codex公式仕様確認](codex-capability-review.md)を正本とする。
 
 ### 11.3 ワーカープロンプト
 
@@ -721,7 +721,7 @@ watch呼び出し後、Codexは独自のtimerや定期status確認を開始し�
 
 `Needs input` のCodex内表示は、監視task内で実行中のwatchが戻り、Codex自身がユーザーへ質問することで成立する。監視taskが接続されていない間も質問は永続状態に残り、opt-inの外部push adapterは永続outboxからスマートフォンへ直接通知できる。再接続時には通知の成否に関係なく未回答質問をsnapshotから即時表示する。
 
-将来、公式に利用可能なtask wakeupまたは通知APIが提供された場合は、optional adapterとして追加できる。
+App Server所有threadのprogrammatic continuationと、任意のDesktop taskを外部processからwakeしてmobile表示を変更する機能は別契約として扱う。後者の公式APIが提供された場合はoptional adapterとして追加できる。
 
 ### 13.2.1 外部push adapter
 
@@ -731,7 +731,7 @@ watch呼び出し後、Codexは独自のtimerや定期status確認を開始し�
 
 credentialはrepository別管理directoryのmode `0600` fileへ専用CLIで保存し、設定file、LaunchAgent plist、repository、command引数へ置かない。endpointはHTTPS、topicは推測困難かつaccess control済みとする。通知tapはGitHub Issueを開き、安定した公式deep linkが提供されるまではCodex taskを直接起動しない。詳細は[スマートフォン直接push通知](notifications.md)を正本とする。
 
-CodexにはClaude Codeのmonitor toolと同じ公開契約を持つ汎用的なtoken-free monitorがあるとは仮定しない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。保留中のtool callを含むCodex製品全体のtoken計測や課金については、公式に保証された範囲を超えて断定しない。
+Codex App Serverは`thread/tokenUsage/updated`とGoalの`tokensUsed`を提供し、`codex exec --json`もturn完了時のusageを返す。一方、Claude Codeのmonitor toolと同じ汎用的なtoken-free契約や、保留中tool call・long commandの厳密なzero-token/zero-costは公式に保証されていない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。[Codex公式仕様確認](codex-capability-review.md)を参照する。
 
 ### 13.3 eventとreconciliationの役割
 
@@ -890,5 +890,4 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - worker timeout時のgrace period
 - desktop app更新によるRemote/通知表示差異のE2E手順
 - Codex CLI session resumeのversion別capabilityとfallback
-- Codexの保留中tool callに関する公式token計測仕様
 - distributed coordinatorとpublication gatewayのbackend、認証、backup、障害環境
