@@ -99,7 +99,7 @@ func TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(store.Dir, "supervisor.err.log"), []byte("older\nlatest failure context\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(store.Dir, "launchd.stderr.log"), []byte("older\nlatest failure context\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			code := "SUPERVISOR_" + strings.ToUpper(supervisorState)

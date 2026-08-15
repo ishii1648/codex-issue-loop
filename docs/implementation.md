@@ -32,6 +32,7 @@
 - fake GitHub/Codex統合テスト、実Git worktreeテスト、race test
 - `TestFault` prefixで独立実行できる障害注入・復旧suiteと仕様17.2の対応表
 - Mac miniへの初回導入、Codex Remoteからの日常操作、障害復旧、backup・restore、手動update・rollback、撤去、実機受け入れを一連で扱う常駐運用runbook
+- event checkpointを用いた復旧可能なrotation、gzip世代保持、worker run保持上限、容量reserveによるblocked化
 
 ## 運用前に必要なもの
 
@@ -53,7 +54,6 @@
 - 1 repositoryにつきconcurrencyは1である。
 - 同じrepositoryを複数hostから処理しない。
 - GitHub labelは自動作成しない。
-- event logとsupervisor logのrotationは未実装である。
 - 起動時reconciliationはactive run、write-ahead claim、未反映GitHub状態、未記録のpush/PR、merge/close済みPRを復旧する。branch・worktree・labelの人手変更と二重workerの可能性は自動上書きせず、理由を残してblockedへ移す。
 - Codex taskが接続されていない場合のスマートフォンへの直接push adapterは未実装である。
 - 実GitHub repositoryと実Codex workerを使うMac mini E2Eの結果は[`docs/e2e/2026-08-15-mac-mini.md`](e2e/2026-08-15-mac-mini.md)に記録している。スマートフォンUI、display off、logout、OS再起動など物理操作が必要な項目は未確認として分離している。

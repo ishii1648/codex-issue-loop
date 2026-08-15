@@ -125,4 +125,5 @@ Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部
 - GitHub Issue本文は信頼済みのshell入力として扱いません。
 - Issue入力はサイズと制御文字を制限し、prompt内では命令ではないJSONデータとして分離します。
 - state、event、worker log/result、GitHub通知では既知token形式と`security.redact_env`の値をマスクします。秘密を回答として渡さないでください。
+- event、supervisor、launchd、worker logは既定16 MiBまたは24時間でgzip rotationし、7世代を保持します。terminal worker runは既定30日・100件の範囲に整理され、削除は監査eventへ記録されます。
 - 権限、認証、backupの本番チェックは[セキュリティ運用runbook](docs/security-runbook.md)に従ってください。

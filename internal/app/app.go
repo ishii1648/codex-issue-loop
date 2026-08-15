@@ -25,6 +25,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
+	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
@@ -509,18 +510,9 @@ func (a App) logs(l layout.Layout, args []string) error {
 	}
 	name := "supervisor.log"
 	if *stderrLog {
-		name = "supervisor.err.log"
+		name = "launchd.stderr.log"
 	}
-	f, err := os.Open(filepath.Join(l.RepoDir(entry.RepoID), name))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = io.Copy(a.Out, f)
-	return err
+	return retention.WriteHistory(a.Out, filepath.Join(l.RepoDir(entry.RepoID), name))
 }
 
 func (a App) supervise(ctx context.Context, l layout.Layout, args []string) error {
@@ -547,9 +539,21 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		return fmt.Errorf("unsupported gh CLI: %s", compatibilityDetail(ghCompatibility))
 	}
 	secrets := cfg.RedactionValues()
-	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: secrets}
+	logPolicy := retention.Policy{MaxBytes: cfg.Logs.RotateBytes, MaxAge: cfg.Logs.RotateInterval.Duration, Keep: cfg.Logs.Generations}
+	for _, name := range []string{"launchd.stdout.log", "launchd.stderr.log"} {
+		if err := retention.RotateExisting(filepath.Join(l.RepoDir(entry.RepoID), name), logPolicy); err != nil {
+			return fmt.Errorf("rotate %s: %w", name, err)
+		}
+	}
+	supervisorLog, err := retention.OpenWriter(filepath.Join(l.RepoDir(entry.RepoID), "supervisor.log"), logPolicy)
+	if err != nil {
+		return fmt.Errorf("open supervisor log: %w", err)
+	}
+	defer supervisorLog.Close()
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: secrets, EventRetention: logPolicy}
 	cfg.Worker.Command = entry.Commands["codex"]
-	safeLog := redact.NewLineWriterWithSecrets(a.Err, secrets)
+	safeLog := redact.NewLineWriterWithSecrets(supervisorLog, secrets)
+	defer safeLog.Flush()
 	loop := &supervisor.Loop{
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
 		Worktrees: worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},

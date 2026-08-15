@@ -14,6 +14,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
+	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
 
 type Supervisor struct {
@@ -105,10 +106,11 @@ type Event struct {
 }
 
 type Store struct {
-	Dir      string
-	RepoID   string
-	RepoPath string
-	Secrets  []string
+	Dir            string
+	RepoID         string
+	RepoPath       string
+	Secrets        []string
+	EventRetention retention.Policy
 }
 
 func (s Store) StatePath() string  { return filepath.Join(s.Dir, "state.json") }
@@ -154,6 +156,9 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
 		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
 	}
+	if err := s.rotateEventsUnlocked(snapshot); err != nil {
+		return Snapshot{}, fmt.Errorf("rotate event log: %w", err)
+	}
 	if err := mutate(&snapshot); err != nil {
 		return Snapshot{}, err
 	}
@@ -190,6 +195,36 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func (s Store) rotateEventsUnlocked(snapshot Snapshot) error {
+	policy := s.EventRetention
+	if policy.MaxBytes <= 0 || policy.MaxAge <= 0 || policy.Keep <= 0 || snapshot.StateRevision == 0 {
+		return nil
+	}
+	info, err := os.Stat(s.EventsPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Size() <= policy.MaxBytes && time.Since(info.ModTime()) <= policy.MaxAge {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]uint64{"archived_through": snapshot.StateRevision})
+	if err != nil {
+		return err
+	}
+	checkpoint := Event{
+		Version: 1, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
+		Timestamp: time.Now().UTC(), RepoID: s.RepoID, Type: "event_log_checkpoint", Payload: payload,
+	}
+	line, err := json.Marshal(checkpoint)
+	if err != nil {
+		return err
+	}
+	return retention.ArchiveAndReplace(s.EventsPath(), append(line, '\n'), policy)
 }
 
 func (s Store) Initialize() error {

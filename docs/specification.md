@@ -121,8 +121,10 @@ target-repository/
 └─ repos/<repo-id>/
    ├─ state.json
    ├─ events.jsonl
+   ├─ events.jsonl.<timestamp>.gz
    ├─ supervisor.log
-   ├─ supervisor.err.log
+   ├─ launchd.stdout.log
+   ├─ launchd.stderr.log
    ├─ lock
    ├─ prompts/
    └─ runs/<run-id>/
@@ -186,6 +188,13 @@ completion:
   create_draft_pr: true
   close_issue: false
 
+logs:
+  rotate_bytes: 16777216
+  rotate_interval: 24h
+  generations: 7
+  worker_run_max_age: 720h
+  worker_run_max_count: 100
+
 security:
   redact_env: []
 ```
@@ -207,6 +216,16 @@ security:
 - secretsを設定ファイルに記述しない。
 - `security.redact_env`には追加でマスクする値そのものではなく、値を保持する環境変数名だけを記述する。
 - `git.worktree_root`を指定する場合は絶対pathとし、branch prefix、base branch、GitHub repository名はargv/refとして安全な形式だけを許可する。
+- event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
+
+### 5.2 log rotationと容量保護
+
+- `events.jsonl`はstate lock内で、現行logをgzip archiveへcopyした後、現在の`state_revision`を持つ`event_log_checkpoint`へ原子的に置換する。以後のsequenceはcheckpointから連続させる。
+- archive作成中に停止した場合、active logは置換前の完全な履歴または置換後のcheckpointのどちらかであり、次回Loadで検証できる。余分なarchiveは世代整理で除去する。
+- supervisorとworkerのstream logは書込前に閾値を検査し、close、gzip、active file再作成の順でrotationする。
+- launchdが直接開くstdout/stderrは起動時にrotationする。常時の運用logはprocess管理の`supervisor.log`へ出力し、`logs`はgzip archiveからactive fileまで時系列で表示する。
+- terminal worker runを削除した場合は`worker_logs_pruned`監査eventを残す。未回答requestとactive/retry中のrunは保持する。
+- 利用可能容量がrotation閾値の2倍未満なら、新しいworkerを起動する前にsupervisorを`blocked`へ移し、`doctor`と容量復旧手順で扱う。
 
 ## 6. CLI仕様
 
@@ -806,7 +825,6 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 以下は要件を変えずに実装検証で確定する。
 
 - Goの最低version
-- event logのrotation閾値
 - Codex CLIの最低対応version
 - `gh` JSON fieldとlabel更新の具体コマンド
 - worker timeout時のgrace period
