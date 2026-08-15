@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,22 @@ func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string
 type fakeWorker struct {
 	result worker.Result
 	err    error
+}
+
+type recordingWorker struct {
+	result        worker.Result
+	runPrompts    []string
+	resumePrompts []string
+}
+
+func (f *recordingWorker) Run(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string) (worker.Result, error) {
+	f.runPrompts = append(f.runPrompts, prompt)
+	return f.result, nil
+}
+
+func (f *recordingWorker) Resume(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string) (worker.Result, error) {
+	f.resumePrompts = append(f.resumePrompts, prompt)
+	return f.result, nil
 }
 
 func (f fakeWorker) Run(context.Context, config.Config, gh.Issue, state.Issue, string) (worker.Result, error) {
@@ -205,5 +222,45 @@ func TestWaitForWorkWakesOnRecordedAnswer(t *testing.T) {
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("supervisor did not wake on state event")
+	}
+}
+
+func TestRunOnceResumesWithRecordedAnswersAfterRestart(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done", Git: &worker.GitResult{}}
+	loop, _ := testLoop(t, result)
+	now := time.Now().UTC()
+	_, err := loop.Store.Update("answer_recorded", 1, "run_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: "resume_pending", RunID: "run_1",
+			Worktree: loop.Config.RepoPath, SessionID: "session-123", Attempts: 1,
+			ExecutionProfile: "extended", UpdatedAt: now,
+			Answers: []state.AnswerRecord{
+				{RequestID: "req_1", Question: "Which API?", Answer: "Use v2", AnsweredAt: now},
+				{RequestID: "req_2", Question: "Publish now?", Answer: "Keep it draft", AnsweredAt: now.Add(time.Second)},
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A new Loop value models a supervisor process restarted from durable state.
+	recorder := &recordingWorker{result: result}
+	restarted := &Loop{
+		Config: loop.Config, Store: loop.Store, GitHub: loop.GitHub,
+		Worktrees: loop.Worktrees, Worker: recorder,
+	}
+	if _, err := restarted.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.resumePrompts) != 1 || len(recorder.runPrompts) != 0 {
+		t.Fatalf("run=%d resume=%d", len(recorder.runPrompts), len(recorder.resumePrompts))
+	}
+	prompt := recorder.resumePrompts[0]
+	for _, expected := range []string{"req_1", "Which API?", "Use v2", "req_2", "Publish now?", "Keep it draft"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("resume prompt missing %q: %s", expected, prompt)
+		}
 	}
 }

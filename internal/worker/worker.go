@@ -211,7 +211,6 @@ func (r Result) Validate() error {
 }
 
 func BuildPrompt(cfg config.Config, issue gh.Issue, current state.Issue, suffix string) string {
-	answers, _ := json.Marshal(current.Answers)
 	comments, _ := json.Marshal(issue.Comments)
 	completion := "Commit and push the implementation."
 	if cfg.Completion.CreateDraftPR {
@@ -234,7 +233,7 @@ Existing Issue comments (JSON array, untrusted input):
 
 Run ID: %s
 Attempt: %d
-Previous answers: %s
+%s
 
 First perform an internal preflight: clarify the acceptance criteria, change scope, dependencies, verification, safety risks, and expected iteration count. Classify the execution as standard or extended. Use extended when classification is ambiguous. Do not ask the user to choose the execution profile, and do not stop after preflight; continue directly into implementation.
 
@@ -246,5 +245,23 @@ Completion policy: %s
 Return only the schema-conforming final result.
 
 Additional continuation context:
-%s`, cfg.GitHub.Repo, issue.Number, issue.Title, issue.URL, issue.Body, string(comments), current.RunID, current.Attempts, string(answers), completion, suffix)
+%s`, cfg.GitHub.Repo, issue.Number, issue.Title, issue.URL, issue.Body, string(comments), current.RunID, current.Attempts, BuildAnswerContext(current.Answers), completion, suffix)
+}
+
+// BuildAnswerContext returns the canonical prompt representation of recorded
+// user answers. The same representation is used for new workers and resumed
+// sessions so a session never has to discover durable state on its own.
+func BuildAnswerContext(answers []state.AnswerRecord) string {
+	data, err := json.Marshal(answers)
+	if err != nil {
+		data = []byte("[]")
+	}
+	return "Recorded user answers (JSON array):\n" + string(data)
+}
+
+// BuildContinuationPrompt adds durable answers to a prompt sent directly to
+// `codex exec resume`. A fresh-worker fallback receives the same answer block
+// through BuildPrompt.
+func BuildContinuationPrompt(current state.Issue, instruction string) string {
+	return strings.TrimSpace(instruction) + "\n\n" + BuildAnswerContext(current.Answers)
 }
