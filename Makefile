@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet fmt-check schema-check tidy-check ci clean
+.PHONY: build test fault-test test-race vet fmt-check schema-check tidy-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -8,6 +8,9 @@ build:
 
 test:
 	$(GO) test ./...
+
+fault-test:
+	$(GO) test ./... -run '^TestFault' -count=1
 
 test-race:
 	$(GO) test -race ./...
@@ -29,7 +32,7 @@ tidy-check:
 	$(GO) mod tidy
 	git diff --exit-code -- go.mod go.sum
 
-ci: fmt-check schema-check tidy-check test test-race vet build
+ci: fmt-check schema-check tidy-check test fault-test test-race vet build
 
 clean:
 	$(GO) clean

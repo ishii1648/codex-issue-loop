@@ -48,11 +48,12 @@ make ci
 - worker result schemaの同期検査
 - `go mod tidy`後の`go.mod` / `go.sum`差分検査
 - `go test ./...`
+- `go test ./... -run '^TestFault' -count=1`
 - `go test -race ./...`
 - `go vet ./...`
 - `make build`
 
-個別に実行する場合は、`make fmt-check schema-check tidy-check test test-race vet build`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。
+個別に実行する場合は、`make fmt-check schema-check tidy-check test fault-test test-race vet build`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。障害注入ケースと仕様17.2の対応は[テストマトリクス](docs/testing.md)に記載しています。
 
 ## Setup
 

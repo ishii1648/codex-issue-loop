@@ -18,7 +18,7 @@ type fakeProcesses map[int]bool
 
 func (f fakeProcesses) Alive(pid int) bool { return f[pid] }
 
-func TestReconciliationDecisions(t *testing.T) {
+func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
 	base := state.Issue{
@@ -100,7 +100,7 @@ func TestReconciliationDecisions(t *testing.T) {
 	}
 }
 
-func TestStartupReconciliationPersistsDiscoveredPullRequest(t *testing.T) {
+func TestFaultStartupReconciliationPersistsDiscoveredPullRequest(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Git: &worker.GitResult{}}
 	loop, github := testLoop(t, result)
 	now := time.Now().UTC()

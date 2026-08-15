@@ -17,6 +17,10 @@ type Result struct {
 }
 
 func Wait(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool) (Result, error) {
+	return waitWithSubscribeHook(ctx, store, interval, jitter, untilIdle, nil)
+}
+
+func waitWithSubscribeHook(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool, subscribed func()) (Result, error) {
 	if interval <= 0 {
 		return Result{}, fmt.Errorf("reconcile interval must be positive")
 	}
@@ -31,6 +35,9 @@ func Wait(ctx context.Context, store state.Store, interval time.Duration, jitter
 	defer w.Close()
 	if err := w.Add(filepath.Clean(store.Dir)); err != nil {
 		return Result{}, fmt.Errorf("watch state directory: %w", err)
+	}
+	if subscribed != nil {
+		subscribed()
 	}
 
 	// Read again after subscribing so a transition between the first read and
@@ -84,9 +91,14 @@ func wait(ctx context.Context, store state.Store, interval time.Duration, jitter
 		select {
 		case <-ctx.Done():
 			return Result{}, ctx.Err()
-		case <-wake:
+		case _, ok := <-wake:
+			if !ok {
+				wake = nil
+			}
 		case err, ok := <-eventErrors:
-			if ok && err != nil {
+			if !ok {
+				eventErrors = nil
+			} else if err != nil {
 				// Event delivery is only an optimization. Continue to the durable
 				// reconciliation path instead of failing the watch.
 			}

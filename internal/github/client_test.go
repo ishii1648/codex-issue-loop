@@ -2,8 +2,10 @@ package github
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
@@ -22,7 +24,7 @@ func TestEligibleRequiresReadyAndRejectsStateLabels(t *testing.T) {
 	}
 }
 
-func TestCLIInspectReturnsIssueAndPullRequests(t *testing.T) {
+func TestFaultCLIInspectReturnsIssueAndPullRequests(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")
 	script := `#!/bin/sh
@@ -47,6 +49,60 @@ esac
 	}
 	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" {
 		t.Fatalf("remote=%+v", remote)
+	}
+}
+
+func TestFaultPartialLabelCommentSyncCanBeRetried(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	logPath := filepath.Join(dir, "calls.log")
+	failedOnce := filepath.Join(dir, "failed-once")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue edit") exit 0 ;;
+  "issue view") printf '%%s\n' '' ;;
+  "issue comment")
+    if [ ! -f %q ]; then
+      touch %q
+      exit 1
+    fi
+    exit 0
+    ;;
+  *) exit 2 ;;
+esac
+`, logPath, failedOnce, failedOnce)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	client := CLI{Path: fake}
+	if err := client.MarkDone(context.Background(), cfg, 7, "https://example.test/pull/1"); err == nil {
+		t.Fatal("injected comment failure was not returned")
+	}
+	if err := client.MarkDone(context.Background(), cfg, 7, "https://example.test/pull/1"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "issue edit") != 2 || strings.Count(string(calls), "issue comment") != 2 {
+		t.Fatalf("unexpected calls:\n%s", calls)
+	}
+}
+
+func TestFaultGitHubAdapterRejectsMalformedResponse(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' '{broken'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	if _, err := (CLI{Path: fake}).ListReady(context.Background(), cfg); err == nil {
+		t.Fatal("malformed GitHub response was accepted")
 	}
 }
 
