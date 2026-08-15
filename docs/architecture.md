@@ -16,6 +16,8 @@
 
 図中の `DURABLE STATE` がループ状態の正本である。socket等のevent通知は即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしを修復する。
 
+スマートフォンから監視taskへの紺色の矢印はCodex Remoteによる操作経路、`WATCH`から監視taskを経てスマートフォンへ戻るオレンジ色の破線はCodexの通知経路を表す。後者は`watch`が`needs_input`等のattention状態を返したときに監視taskから届く通知であり、supervisorからスマートフォンへの直接pushではない。
+
 ## 3. コンポーネントと責務
 
 | コンポーネント | 実行主体 | 主な責務 |

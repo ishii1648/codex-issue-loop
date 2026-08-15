@@ -20,6 +20,7 @@ Issue producers (outside Mac mini)
                                                   ▼
 Mac mini — execution host
   ├─ ChatGPT mobile app ── Codex Remote ──► [LOOP] monitor task
+  │          ◄──────────── Codex notification ────────┘
   │                                             └─ Skill ──► agent-loop CLI
   │                                                            ├─ start ──► launchctl ──► launchd
   │                                                            ├─ status / answer ───────────┤
@@ -28,6 +29,8 @@ Mac mini — execution host
   └─ supervisor ◄──────── GitHub Issues                            durable state/events
          └─ pick/claim ──► worktree + codex exec ──► branch / draft PR
 ```
+
+Codex notificationは、`watch`がattention状態を返した監視taskからChatGPTモバイルアプリへ届く。supervisorや永続状態からスマートフォンへ直接pushするadapterは、この経路に含めない。
 
 ### 2.1 責務境界
 
