@@ -38,10 +38,21 @@ Mac miniでは、macOSの「ディスプレイがオフのときに自動でス�
 ## Build and test
 
 ```sh
-make test
-make build
+make ci
 ./bin/agent-loop --version
 ```
+
+`make ci`はGitHub Actionsと同じ品質ゲートをローカルで再現し、次を順に実行します。
+
+- `gofmt`の差分検査
+- worker result schemaの同期検査
+- `go mod tidy`後の`go.mod` / `go.sum`差分検査
+- `go test ./...`
+- `go test -race ./...`
+- `go vet ./...`
+- `make build`
+
+個別に実行する場合は、`make fmt-check schema-check tidy-check test test-race vet build`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。
 
 ## Setup
 
