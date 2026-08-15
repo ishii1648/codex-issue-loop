@@ -14,6 +14,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [セキュリティ運用runbook](docs/security-runbook.md)
 - [CLI互換性マトリクス](docs/compatibility.md)
 - [GitHubラベルbootstrap runbook](docs/github-labels.md)
+- [doctor診断・復旧runbook](docs/doctor.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
 
@@ -88,6 +89,8 @@ make ci
 `bootstrap-labels`は既定ではpreviewだけを表示し、`--apply`を指定した場合だけ不足ラベルを作成します。既存ラベルの色・説明は一致しない場合も保持し、ラベルの更新・削除は行いません。詳細は[GitHubラベルbootstrap runbook](docs/github-labels.md)を参照してください。
 
 `doctor`はversion文字列だけでなく、実行に必要なCLI optionとGitHub Issue操作を検査します。必須capabilityがない場合は開始を拒否します。Codexのsession resumeだけが利用できない場合は、既存worktreeと永続状態を引き継いだ新規sessionへ安全にfallbackします。対応範囲と更新確認の手順は[CLI互換性マトリクス](docs/compatibility.md)を参照してください。
+
+`doctor --repo`は対象repositoryを、`doctor`はhostと登録済みrepository全体を診断します。JSONは`schema_version`と安定した`diagnostics[].code`を持ち、blocked/stopped状態には直近event・logと具体的な次の操作を添えます。修復は自動実行しません。[doctor診断・復旧runbook](docs/doctor.md)を参照してください。
 
 ## Operation
 

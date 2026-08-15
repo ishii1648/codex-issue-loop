@@ -242,6 +242,8 @@ agent-loop <command> [options]
 
 `bootstrap-labels`は`--apply`なしではread-onlyのplanを返す。`--apply`時も不足ラベルの`gh label create`だけを実行し、既存ラベルに`--force`を指定せず、更新・削除を行わない。部分成功は成功分を保持してlabel別のfailureを返し、再実行で不足分だけを処理する。`doctor`が不足ラベルを検出した場合はこの修復コマンドを表示する。
 
+`doctor --repo PATH`はhostと対象repository、`doctor`はhostとregistry内の全repositoryを診断する。JSONは`schema_version: 1`、全体`ok`、`generated_at`、`diagnostics`から成る。各diagnosticは安定した`code`、`ok`、`scope`、任意の`repo_id`、人間向けsummary/detail、0件以上のremediationを持つ。remediationはkind、summary、command/settings、automatic、destructiveを持つ。doctor自身は修復を実行せず、state破損時にもfileを変更しない。
+
 ### 6.3 start
 
 ```text
