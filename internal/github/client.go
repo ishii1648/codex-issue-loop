@@ -88,7 +88,9 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 	if path == "" {
 		path = "gh"
 	}
-	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "100", "--json", "number,title,body,url,labels,assignees,milestone"}
+	// gh paginates internally up to the requested limit. Keep this above the
+	// MVP's original 100 so large queues are not silently truncated.
+	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,labels,assignees,milestone"}
 	if cfg.GitHub.Assignee != "" {
 		args = append(args, "--assignee", cfg.GitHub.Assignee)
 	}

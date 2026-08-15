@@ -214,3 +214,61 @@ printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"standard"
 		t.Fatalf("answer order changed: %s", got)
 	}
 }
+
+func TestResumeFallsBackToFreshSessionWhenCapabilityIsUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-codex")
+	capturedArgs := filepath.Join(dir, "args.txt")
+	capturedPrompt := filepath.Join(dir, "prompt.txt")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" > %q
+result=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then shift; result="$1"; fi
+  shift
+done
+cat > %q
+printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"standard","summary":"done","question":null,"tests":[],"git":{"branch":"codex/issue-1-test","commit":"abc","pull_request_url":"https://example.test/pr/1"},"retry":null}' > "$result"
+`, capturedArgs, capturedPrompt)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo, cfg.RepoPath, cfg.Worker.Command = "owner/repo", dir, fake
+	current := state.Issue{RunID: "run_fallback", Attempts: 2, SessionID: "old-session"}
+	resumeSupported := false
+	if _, err := (Codex{StateDir: dir, ResumeSupported: &resumeSupported}).Resume(context.Background(), cfg, gh.Issue{Number: 1, Title: "Continue me"}, current, "Use the recorded answer.", nil); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(capturedArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(args), " resume ") || !strings.Contains(string(args), "--cd "+dir) {
+		t.Fatalf("fallback did not start a fresh worker in the existing worktree: %s", args)
+	}
+	prompt, err := os.ReadFile(capturedPrompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"Continue me", "existing worktree and durable state", "Use the recorded answer."} {
+		if !strings.Contains(string(prompt), expected) {
+			t.Fatalf("fallback prompt missing %q: %s", expected, prompt)
+		}
+	}
+}
+
+func TestFindSessionIDAcceptsKnownEventShapes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	events := "not-json\n" +
+		`{"type":"thread.started","thread_id":"thread-top-level"}` + "\n" +
+		`{"event":{"session_id":"session-nested"}}` + "\n" +
+		`{"data":{"thread":{"id":"thread-container"}}}` + "\n"
+	if err := os.WriteFile(path, []byte(events), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := findSessionID(path); got != "thread-container" {
+		t.Fatalf("findSessionID()=%q", got)
+	}
+}

@@ -1,0 +1,49 @@
+# CLI互換性マトリクス
+
+最終確認日: 2026-08-15
+
+`agent-loop`はversion番号だけでCLIの挙動を推測せず、起動時と`doctor`で実際のhelp出力から必要なcapabilityを検査する。minimum versionは継続的に検証する下限であり、capability検査を省略する条件ではない。
+
+## 対応範囲
+
+| CLI | minimum supported | 実環境で確認したversion | 必須capability |
+| --- | --- | --- | --- |
+| Codex CLI | 0.136.0 | 0.136.0 / macOS arm64 | `codex exec`の`--json`、`--output-schema`、`--output-last-message`、`--sandbox`、`--cd` |
+| GitHub CLI | 2.69.0 | 2.69.0 / macOS arm64 | Issue listの`--json`、`--limit`、`--label`、`--assignee`、`--milestone`、label追加・削除、comment追加 |
+
+Codexの`exec resume`と、その`--json`、`--output-schema`、`--output-last-message`は任意capabilityとして扱う。利用できる場合は保存したsession IDを再開し、利用できない場合は同じIssue worktree、run ID、回答履歴をpromptへ再構成して新規sessionを起動する。新規sessionでもsandboxと承認禁止の制約は変えない。
+
+最低version未満、Codexの構造化初回実行、またはGitHubのIssue取得・label・comment操作が欠ける環境は安全なfallbackを定義できないため、`doctor`を失敗させ、supervisorの開始を拒否する。
+
+## 既知の形式差
+
+- session IDはJSONL event内の`thread_id`または`session_id`を受け付ける。
+- event wrapper内に同じfieldが入る形式と、`thread.id`または`session.id`形式も再帰的に受け付ける。
+- working directoryは初回sessionで`codex exec --cd <worktree>`を使う。resume非対応fallbackでも同じIssue worktreeを指定する。
+- GitHub Issueは`gh issue list --limit 1000`で取得し、Issue番号順に選択する。100件を超えるqueueをfixtureで検証する。1000件を超える単一queueは現在の対応上限である。
+
+## 確認手順
+
+実CLIを更新する前後に、対象Macで次を実行する。
+
+```sh
+codex --version
+codex exec --help
+codex exec resume --help
+gh --version
+gh issue list --help
+gh issue edit --help
+gh issue comment --help
+agent-loop doctor --repo /absolute/path/to/repository --json
+```
+
+`doctor`の`codex_compat`と`gh_compat`が`ok`で、表示versionとminimumが意図どおりであることを確認する。`fresh-session fallback`が表示された場合はresumeのみ非対応である。開始後はテスト用Issueで初回実行と回答後の継続を1回ずつ確認する。
+
+互換性範囲を更新するときは、次を同じPull Requestへ含める。
+
+1. 新旧CLIのhelp出力に対応するcapability fixtureとparser test
+2. 初回実行、resumeまたは新規session fallback、100件超のIssue取得test
+3. 本文書とREADMEのminimum version・実環境確認version
+4. 実CLIによる`doctor`結果とテスト用IssueのE2E結果
+
+参照する一次資料は、[Codex CLI command line options](https://learn.chatgpt.com/docs/developer-commands?surface=cli)と[GitHub CLI manual](https://cli.github.com/manual/gh)である。更新時は必ず最新の公式仕様と実際のhelp出力を照合する。

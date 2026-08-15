@@ -431,7 +431,7 @@ codex exec \
 
 初回runはpreflight後に `extended` と判定された場合にresumeできるよう、resumable sessionとして起動する。supervisorは出力からsession IDを取得してIssue状態へ保存する。`standard` が完了した場合はsession IDをactive stateから外し、以降のloop状態をCodex sessionへ依存させない。
 
-実際の引数は起動前に `codex exec --help` とversion capabilityを検査する。非対応versionでは推測で継続せず `blocked` とする。session IDを安全に取得・resumeできないCodex CLI versionでは、`extended` continuationを無効化してIssueをblockedにする。
+実際の引数は起動前に `codex exec --help` とversion capabilityを検査する。構造化された初回実行を安全に行えないversionでは推測で継続せず、supervisorの開始を拒否する。session resumeだけが利用できない場合は、同じIssue worktree、run ID、永続化された回答履歴を使って新規sessionを起動する。session IDはJSONL内の`thread_id`、`session_id`、および既知のnested形式を受け付ける。
 
 ### 11.2 preflightとexecution profile
 
