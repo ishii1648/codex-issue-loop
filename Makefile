@@ -1,4 +1,4 @@
-.PHONY: build test fault-test test-race vet vuln-check fmt-check schema-check tidy-check ci clean
+.PHONY: build test fault-test test-race vet vuln-check fmt-check schema-check tidy-check release-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -37,7 +37,10 @@ tidy-check:
 	$(GO) mod tidy
 	git diff --exit-code -- go.mod go.sum
 
-ci: fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build
+release-check:
+	scripts/check-release.sh
+
+ci: fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build release-check
 
 clean:
 	$(GO) clean

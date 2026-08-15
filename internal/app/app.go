@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,7 +34,23 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
 
-const Version = "0.1.0-dev"
+var (
+	Version = "0.1.0-dev"
+	Commit  = "unknown"
+)
+
+type versionInfo struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+}
+
+type installManifest struct {
+	Version      string    `json:"version"`
+	Commit       string    `json:"commit"`
+	BinarySHA256 string    `json:"binary_sha256"`
+	SkillSHA256  string    `json:"skill_sha256"`
+	InstalledAt  time.Time `json:"installed_at"`
+}
 
 type App struct {
 	In  io.Reader
@@ -62,7 +80,11 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return 2
 	}
 	if args[0] == "--version" || args[0] == "version" {
-		fmt.Fprintf(a.Out, "agent-loop %s\n", Version)
+		if len(args) > 1 && args[1] == "--json" {
+			_ = json.NewEncoder(a.Out).Encode(versionInfo{Version: Version, Commit: Commit})
+		} else {
+			fmt.Fprintf(a.Out, "agent-loop %s (%s)\n", Version, Commit)
+		}
 		return 0
 	}
 	l, err := layout.New()
@@ -90,7 +112,11 @@ func (a App) Run(ctx context.Context, args []string) int {
 func (a App) run(ctx context.Context, l layout.Layout, command string, args []string) error {
 	switch command {
 	case "install":
-		return a.install(l, args)
+		return a.install(ctx, l, args)
+	case "update":
+		return a.update(ctx, l, args)
+	case "rollback":
+		return a.rollback(ctx, l, args)
 	case "uninstall":
 		return a.uninstall(ctx, l, args)
 	case "register":
@@ -126,6 +152,8 @@ func (a App) usage() {
 
 Commands:
   install       Install the binary and Codex Skill
+  update        Safely replace the binary and Skill, preserving state
+  rollback      Restore a backup created by update
   uninstall     Remove installed binary and Skill when no loop is running
   register      Register a repository and write its LaunchAgent
   unregister    Stop and unregister a repository
@@ -164,8 +192,37 @@ func (a App) bootstrapLabels(ctx context.Context, args []string) error {
 	return bootstrapErr
 }
 
-func (a App) install(l layout.Layout, args []string) error {
+func (a App) install(ctx context.Context, l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	loaded, err := loadedEntries(ctx, l)
+	if err != nil {
+		return err
+	}
+	if len(loaded) > 0 {
+		return fmt.Errorf("cannot install over running supervisors; use agent-loop update")
+	}
+	source, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	source, err = filepath.EvalSymlinks(source)
+	if err != nil {
+		return err
+	}
+	manifest, changed, err := installArtifacts(l, source, Version, Commit)
+	if err != nil {
+		return err
+	}
+	return a.output(*jsonOut, map[string]any{"binary": filepath.Join(l.BinDir, "agent-loop"), "skill": filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"), "manifest": manifest, "changed": changed})
+}
+
+func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
@@ -179,24 +236,320 @@ func (a App) install(l layout.Layout, args []string) error {
 	if err != nil {
 		return err
 	}
+	match, err := installationMatches(l, source, Version, Commit)
+	if err != nil {
+		return err
+	}
+	if match {
+		manifest, _ := readInstallManifest(filepath.Join(l.Root, "install.json"))
+		return a.output(*jsonOut, map[string]any{"changed": false, "manifest": manifest})
+	}
+	loaded, err := loadedEntries(ctx, l)
+	if err != nil {
+		return err
+	}
+	backup, err := backupInstallation(l)
+	if err != nil {
+		return fmt.Errorf("backup current installation: %w", err)
+	}
+	if err := stopEntries(ctx, l, loaded); err != nil {
+		_ = startEntries(ctx, l, loaded)
+		return err
+	}
+	manifest, _, updateErr := installArtifacts(l, source, Version, Commit)
+	if updateErr == nil {
+		updateErr = rewritePlists(l)
+	}
+	if updateErr == nil {
+		updateErr = startEntries(ctx, l, loaded)
+	}
+	if updateErr != nil {
+		rollbackErr := restoreInstallation(l, backup)
+		_ = rewritePlists(l)
+		_ = startEntries(ctx, l, loaded)
+		if rollbackErr != nil {
+			return fmt.Errorf("update failed: %v; automatic rollback failed: %w", updateErr, rollbackErr)
+		}
+		return fmt.Errorf("update failed and was rolled back: %w", updateErr)
+	}
+	return a.output(*jsonOut, map[string]any{"changed": true, "backup": backup, "manifest": manifest, "restarted": repoIDs(loaded)})
+}
+
+func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	backup := fs.String("backup", "", "backup directory returned by update")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	resolved, err := validateBackupPath(l, *backup)
+	if err != nil {
+		return exitError{2, err}
+	}
+	loaded, err := loadedEntries(ctx, l)
+	if err != nil {
+		return err
+	}
+	if err := stopEntries(ctx, l, loaded); err != nil {
+		_ = startEntries(ctx, l, loaded)
+		return err
+	}
+	if err := restoreInstallation(l, resolved); err != nil {
+		_ = startEntries(ctx, l, loaded)
+		return err
+	}
+	if err := rewritePlists(l); err != nil {
+		_ = startEntries(ctx, l, loaded)
+		return err
+	}
+	if err := startEntries(ctx, l, loaded); err != nil {
+		return err
+	}
+	manifest, err := readInstallManifest(filepath.Join(l.Root, "install.json"))
+	if err != nil {
+		return err
+	}
+	return a.output(*jsonOut, map[string]any{"restored": resolved, "manifest": manifest, "restarted": repoIDs(loaded), "state_preserved": true})
+}
+
+func installArtifacts(l layout.Layout, source, version, commit string) (installManifest, bool, error) {
+	binary, err := os.ReadFile(source)
+	if err != nil {
+		return installManifest{}, false, err
+	}
+	binaryHash := fmt.Sprintf("%x", sha256.Sum256(binary))
+	skillHash := fmt.Sprintf("%x", sha256.Sum256(assets.AgentLoopSkill))
+	manifestPath := filepath.Join(l.Root, "install.json")
+	if current, err := readInstallManifest(manifestPath); err == nil && current.Version == version && current.Commit == commit && current.BinarySHA256 == binaryHash && current.SkillSHA256 == skillHash {
+		if match, _ := installationMatches(l, source, version, commit); match {
+			return current, false, nil
+		}
+	}
 	destination := filepath.Join(l.BinDir, "agent-loop")
-	if source != destination {
+	skillDir := filepath.Join(l.SkillsDir, "agent-loop")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		return installManifest{}, false, err
+	}
+	if err := os.Chmod(skillDir, 0o700); err != nil {
+		return installManifest{}, false, err
+	}
+	if err := fsutil.WriteFile(destination, binary, 0o755); err != nil {
+		return installManifest{}, false, fmt.Errorf("install binary: %w", err)
+	}
+	if err := fsutil.WriteFile(filepath.Join(skillDir, "SKILL.md"), assets.AgentLoopSkill, 0o600); err != nil {
+		return installManifest{}, false, fmt.Errorf("install Skill: %w", err)
+	}
+	if err := fsutil.WriteFile(filepath.Join(skillDir, "VERSION"), []byte(version+"\n"), 0o600); err != nil {
+		return installManifest{}, false, fmt.Errorf("install Skill version: %w", err)
+	}
+	manifest := installManifest{Version: version, Commit: commit, BinarySHA256: binaryHash, SkillSHA256: skillHash, InstalledAt: time.Now().UTC()}
+	if err := fsutil.WriteJSON(manifestPath, manifest, 0o600); err != nil {
+		return installManifest{}, false, fmt.Errorf("write install manifest: %w", err)
+	}
+	return manifest, true, nil
+}
+
+func installationMatches(l layout.Layout, source, version, commit string) (bool, error) {
+	manifest, err := readInstallManifest(filepath.Join(l.Root, "install.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if manifest.Version != version || manifest.Commit != commit {
+		return false, nil
+	}
+	sourceHash, err := fileSHA256(source)
+	if err != nil {
+		return false, err
+	}
+	installedHash, err := fileSHA256(filepath.Join(l.BinDir, "agent-loop"))
+	if err != nil {
+		return false, nil
+	}
+	skillHash, err := fileSHA256(filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"))
+	if err != nil {
+		return false, nil
+	}
+	versionData, err := os.ReadFile(filepath.Join(l.SkillsDir, "agent-loop", "VERSION"))
+	if err != nil {
+		return false, nil
+	}
+	return sourceHash == installedHash && installedHash == manifest.BinarySHA256 && skillHash == manifest.SkillSHA256 && strings.TrimSpace(string(versionData)) == version, nil
+}
+
+func backupInstallation(l layout.Layout) (string, error) {
+	manifest, err := readInstallManifest(filepath.Join(l.Root, "install.json"))
+	if err != nil {
+		return "", fmt.Errorf("existing install manifest is required: %w", err)
+	}
+	backup := filepath.Join(l.Root, "backups", time.Now().UTC().Format("20060102T150405.000000000Z")+"-"+safeVersion(manifest.Version))
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		return "", err
+	}
+	files := map[string]string{
+		filepath.Join(l.BinDir, "agent-loop"):                filepath.Join(backup, "agent-loop"),
+		filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"): filepath.Join(backup, "SKILL.md"),
+		filepath.Join(l.SkillsDir, "agent-loop", "VERSION"):  filepath.Join(backup, "VERSION"),
+		filepath.Join(l.Root, "install.json"):                filepath.Join(backup, "install.json"),
+	}
+	for source, destination := range files {
 		data, err := os.ReadFile(source)
+		if err != nil {
+			return "", err
+		}
+		mode := os.FileMode(0o600)
+		if filepath.Base(destination) == "agent-loop" {
+			mode = 0o700
+		}
+		if err := fsutil.WriteFile(destination, data, mode); err != nil {
+			return "", err
+		}
+	}
+	return backup, nil
+}
+
+func restoreInstallation(l layout.Layout, backup string) error {
+	manifest, err := readInstallManifest(filepath.Join(backup, "install.json"))
+	if err != nil {
+		return err
+	}
+	binaryHash, err := fileSHA256(filepath.Join(backup, "agent-loop"))
+	if err != nil || binaryHash != manifest.BinarySHA256 {
+		return fmt.Errorf("backup binary checksum mismatch")
+	}
+	skillHash, err := fileSHA256(filepath.Join(backup, "SKILL.md"))
+	if err != nil || skillHash != manifest.SkillSHA256 {
+		return fmt.Errorf("backup Skill checksum mismatch")
+	}
+	files := map[string]struct {
+		destination string
+		mode        os.FileMode
+	}{
+		"agent-loop":   {filepath.Join(l.BinDir, "agent-loop"), 0o755},
+		"SKILL.md":     {filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"), 0o600},
+		"VERSION":      {filepath.Join(l.SkillsDir, "agent-loop", "VERSION"), 0o600},
+		"install.json": {filepath.Join(l.Root, "install.json"), 0o600},
+	}
+	for name, target := range files {
+		data, err := os.ReadFile(filepath.Join(backup, name))
 		if err != nil {
 			return err
 		}
-		if err := fsutil.WriteFile(destination, data, 0o755); err != nil {
-			return fmt.Errorf("install binary: %w", err)
+		if err := fsutil.WriteFile(target.destination, data, target.mode); err != nil {
+			return err
 		}
 	}
-	skillDir := filepath.Join(l.SkillsDir, "agent-loop")
-	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+	return nil
+}
+
+func validateBackupPath(l layout.Layout, path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", fmt.Errorf("--backup must be an absolute path returned by update")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.EvalSymlinks(filepath.Join(l.Root, "backups"))
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || relative == ".." {
+		return "", fmt.Errorf("backup must be a child of %s", root)
+	}
+	return resolved, nil
+}
+
+func readInstallManifest(path string) (installManifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return installManifest{}, err
+	}
+	var manifest installManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return installManifest{}, err
+	}
+	return manifest, nil
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+func safeVersion(version string) string {
+	return strings.Map(func(value rune) rune {
+		if value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '.' || value == '-' {
+			return value
+		}
+		return '-'
+	}, version)
+}
+
+func loadedEntries(ctx context.Context, l layout.Layout) ([]registry.Entry, error) {
+	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
+		return nil, err
+	}
+	var loaded []registry.Entry
+	for _, entry := range registered.Repos {
+		status, err := (launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}).Status(ctx, entry)
+		if err != nil {
+			return nil, err
+		}
+		if status.Loaded {
+			loaded = append(loaded, entry)
+		}
+	}
+	sort.Slice(loaded, func(i, j int) bool { return loaded[i].RepoID < loaded[j].RepoID })
+	return loaded, nil
+}
+
+func stopEntries(ctx context.Context, l layout.Layout, entries []registry.Entry) error {
+	for _, entry := range entries {
+		if err := (launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}).Stop(ctx, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func startEntries(ctx context.Context, l layout.Layout, entries []registry.Entry) error {
+	for _, entry := range entries {
+		if err := (launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}).Start(ctx, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rewritePlists(l layout.Layout) error {
+	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), assets.AgentLoopSkill, 0o600); err != nil {
-		return err
+	binary := filepath.Join(l.BinDir, "agent-loop")
+	for _, entry := range registered.Repos {
+		if err := (launchd.Manager{Layout: l}).WritePlist(entry, binary); err != nil {
+			return err
+		}
 	}
-	return a.output(*jsonOut, map[string]any{"binary": destination, "skill": filepath.Join(skillDir, "SKILL.md")})
+	return nil
+}
+
+func repoIDs(entries []registry.Entry) []string {
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.RepoID)
+	}
+	return ids
 }
 
 func (a App) uninstall(ctx context.Context, l layout.Layout, args []string) error {
@@ -221,7 +574,12 @@ func (a App) uninstall(ctx context.Context, l layout.Layout, args []string) erro
 		}
 	}
 	removed := []string{}
-	for _, path := range []string{filepath.Join(l.BinDir, "agent-loop"), filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md")} {
+	for _, path := range []string{
+		filepath.Join(l.BinDir, "agent-loop"),
+		filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"),
+		filepath.Join(l.SkillsDir, "agent-loop", "VERSION"),
+		filepath.Join(l.Root, "install.json"),
+	} {
 		if err := os.Remove(path); err == nil {
 			removed = append(removed, path)
 		} else if !errors.Is(err, os.ErrNotExist) {

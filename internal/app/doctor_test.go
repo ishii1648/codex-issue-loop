@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 )
@@ -174,7 +175,7 @@ exit 2
 		}
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	diagnostics := diagnoseHost(context.Background())
+	diagnostics := diagnoseHost(context.Background(), layout.Layout{Root: root, BinDir: filepath.Join(root, "installed-bin"), SkillsDir: filepath.Join(root, "skills")})
 	for _, code := range []string{"GITHUB_AUTH_INVALID", "CODEX_AUTH_INVALID", "MACOS_SLEEP_ENABLED"} {
 		item := diagnosticByCode(t, diagnostics, code)
 		if item.OK || len(item.Remediations) == 0 {
@@ -187,6 +188,32 @@ exit 2
 			t.Fatalf("duplicate host diagnostic code %s", item.Code)
 		}
 		seen[item.Code] = true
+	}
+}
+
+func TestDoctorDetectsInstalledBinaryAndSkillMismatch(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root, BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills")}
+	for _, dir := range []string{l.BinDir, filepath.Join(l.SkillsDir, "agent-loop")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := filepath.Join(root, "source")
+	if err := os.WriteFile(source, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := installArtifacts(l, source, "v1.0.0", "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnosticByCode(t, diagnoseInstallation(l), "INSTALL_VERSION_CONSISTENT"); !item.OK {
+		t.Fatalf("diagnostic=%+v", item)
+	}
+	if err := os.WriteFile(filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnosticByCode(t, diagnoseInstallation(l), "INSTALL_VERSION_MISMATCH"); item.OK {
+		t.Fatalf("diagnostic=%+v", item)
 	}
 }
 
