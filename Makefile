@@ -1,7 +1,9 @@
-.PHONY: build test fault-test test-race vet fmt-check schema-check tidy-check ci clean
+.PHONY: build test fault-test test-race vet vuln-check fmt-check schema-check tidy-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
+GOVULNCHECK_VERSION ?= v1.6.0
+VULN_GO_TOOLCHAIN ?= go1.25.8
 
 build:
 	$(GO) build -trimpath -o bin/agent-loop ./cmd/agent-loop
@@ -18,6 +20,9 @@ test-race:
 vet:
 	$(GO) vet ./...
 
+vuln-check:
+	env GOTOOLCHAIN=$(VULN_GO_TOOLCHAIN) $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
 fmt-check:
 	@files="$$($(GOFMT) -l .)"; \
 	if [ -n "$$files" ]; then \
@@ -32,7 +37,7 @@ tidy-check:
 	$(GO) mod tidy
 	git diff --exit-code -- go.mod go.sum
 
-ci: fmt-check schema-check tidy-check test fault-test test-race vet build
+ci: fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build
 
 clean:
 	$(GO) clean

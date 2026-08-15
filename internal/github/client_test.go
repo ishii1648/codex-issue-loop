@@ -113,3 +113,40 @@ func TestSelectReadyIsDeterministic(t *testing.T) {
 		t.Fatalf("selected=%+v ok=%v", selected, ok)
 	}
 }
+
+func TestIssueInputIsBoundedAndControlCharactersAreRemoved(t *testing.T) {
+	comments := make([]string, 25)
+	for index := range comments {
+		comments[index] = fmt.Sprintf("comment-%02d\x00", index) + strings.Repeat("x", maxCommentBytes)
+	}
+	issue := NormalizeIssue(Issue{Title: "bad\x00title" + strings.Repeat("t", maxIssueTitleBytes), Body: strings.Repeat("b", maxIssueBodyBytes+10), Comments: comments})
+	if strings.ContainsRune(issue.Title, '\x00') || len(issue.Title) > maxIssueTitleBytes+len("\n[TRUNCATED]") {
+		t.Fatalf("unsafe title length=%d value=%q", len(issue.Title), issue.Title)
+	}
+	if len(issue.Body) > maxIssueBodyBytes+len("\n[TRUNCATED]") || len(issue.Comments) != maxIssueComments || !strings.HasPrefix(issue.Comments[0], "comment-05") {
+		t.Fatalf("input limits not enforced: body=%d comments=%d first=%q", len(issue.Body), len(issue.Comments), issue.Comments[0][:10])
+	}
+}
+
+func TestGitHubCommentsAndErrorsRedactSecrets(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	calls := filepath.Join(dir, "calls")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nif [ \"$1 $2\" = \"issue view\" ]; then exit 0; fi\nif [ \"$1 $2\" = \"issue comment\" ]; then exit 0; fi\nprintf '%%s\\n' 'custom-secret-value ghp_abcdefghijklmnopqrstuvwxyz123456' >&2\nexit 1\n", calls)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := CLI{Path: fake, Secrets: []string{"custom-secret-value"}}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	if err := client.MarkFailed(context.Background(), cfg, 7, "custom-secret-value ghp_abcdefghijklmnopqrstuvwxyz123456", false); err == nil || strings.Contains(err.Error(), "custom-secret-value") || strings.Contains(err.Error(), "ghp_") {
+		t.Fatalf("unsafe error: %v", err)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "custom-secret-value") || strings.Contains(string(data), "ghp_") {
+		t.Fatalf("secret sent to GitHub command: %s", data)
+	}
+}

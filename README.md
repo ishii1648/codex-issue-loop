@@ -10,6 +10,8 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [MVP実装状況](docs/implementation.md)
 - [要件定義](docs/requirements.md)
 - [システム仕様](docs/specification.md)
+- [脅威モデル](docs/threat-model.md)
+- [セキュリティ運用runbook](docs/security-runbook.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
 
@@ -51,9 +53,12 @@ make ci
 - `go test ./... -run '^TestFault' -count=1`
 - `go test -race ./...`
 - `go vet ./...`
+- 到達可能なGo脆弱性の`govulncheck`
 - `make build`
 
-個別に実行する場合は、`make fmt-check schema-check tidy-check test fault-test test-race vet build`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。障害注入ケースと仕様17.2の対応は[テストマトリクス](docs/testing.md)に記載しています。
+個別に実行する場合は、`make fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。障害注入ケースと仕様17.2の対応は[テストマトリクス](docs/testing.md)に記載しています。
+
+`vuln-check`は再現可能な検査のため`govulncheck v1.6.0`と脆弱性修正済みのGo 1.25.8 toolchainを固定し、Goのtoolchain機能で初回にdownloadします。アプリ本体の最小Go versionは1.22のままです。
 
 ## Setup
 
@@ -104,3 +109,6 @@ Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部
 - `stop`、`unregister`、`uninstall`後もIssueの状態とworktreeを保持します。
 - 未回答requestは回答されるまでstickyに保持されます。
 - GitHub Issue本文は信頼済みのshell入力として扱いません。
+- Issue入力はサイズと制御文字を制限し、prompt内では命令ではないJSONデータとして分離します。
+- state、event、worker log/result、GitHub通知では既知token形式と`security.redact_env`の値をマスクします。秘密を回答として渡さないでください。
+- 権限、認証、backupの本番チェックは[セキュリティ運用runbook](docs/security-runbook.md)に従ってください。

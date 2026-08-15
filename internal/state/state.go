@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/redact"
 )
 
 type Supervisor struct {
@@ -107,6 +108,7 @@ type Store struct {
 	Dir      string
 	RepoID   string
 	RepoPath string
+	Secrets  []string
 }
 
 func (s Store) StatePath() string  { return filepath.Join(s.Dir, "state.json") }
@@ -116,7 +118,7 @@ func (s Store) TransactionPath() string { return filepath.Join(s.Dir, "state.txn
 func (s Store) lockPath() string        { return filepath.Join(s.Dir, "state.lock") }
 
 func (s Store) Ensure() error {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+	if err := s.ensureDir(); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
 	_, err := s.Load()
@@ -124,7 +126,7 @@ func (s Store) Ensure() error {
 }
 
 func (s Store) Load() (Snapshot, error) {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+	if err := s.ensureDir(); err != nil {
 		return Snapshot{}, err
 	}
 	// Loading may complete a prepared transaction or repair a partial log tail.
@@ -137,7 +139,7 @@ func (s Store) Load() (Snapshot, error) {
 }
 
 func (s Store) Update(eventType string, issueNumber int, runID string, payload any, mutate func(*Snapshot) error) (Snapshot, error) {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+	if err := s.ensureDir(); err != nil {
 		return Snapshot{}, err
 	}
 	lock, err := s.lock(true)
@@ -158,7 +160,14 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	snapshot.StateRevision++
 	now := time.Now().UTC()
 	snapshot.Supervisor.UpdatedAt = now
-	payloadJSON, err := json.Marshal(payload)
+	snapshotJSON, err := redact.Marshal(snapshot, s.Secrets)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("sanitize state snapshot: %w", err)
+	}
+	if err := json.Unmarshal(snapshotJSON, &snapshot); err != nil {
+		return Snapshot{}, fmt.Errorf("decode sanitized state snapshot: %w", err)
+	}
+	payloadJSON, err := redact.Marshal(payload, s.Secrets)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("marshal event payload: %w", err)
 	}
@@ -184,7 +193,7 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 }
 
 func (s Store) Initialize() error {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+	if err := s.ensureDir(); err != nil {
 		return err
 	}
 	lock, err := s.lock(true)
@@ -206,7 +215,7 @@ func (s Store) Initialize() error {
 
 func (s Store) AcquireSupervisorLock() (*os.File, error) {
 	path := filepath.Join(s.Dir, "supervisor.lock")
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+	if err := s.ensureDir(); err != nil {
 		return nil, err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
@@ -218,6 +227,31 @@ func (s Store) AcquireSupervisorLock() (*os.File, error) {
 		return nil, fmt.Errorf("another supervisor holds %s: %w", path, err)
 	}
 	return f, nil
+}
+
+func (s Store) ensureDir() error {
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(s.Dir, 0o700); err != nil {
+		return err
+	}
+	for _, path := range []string{s.StatePath(), s.EventsPath(), s.TransactionPath(), s.lockPath(), filepath.Join(s.Dir, "supervisor.lock")} {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("managed state path is not a regular file: %s", path)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ReleaseSupervisorLock(f *os.File) {

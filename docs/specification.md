@@ -184,6 +184,9 @@ git:
 completion:
   create_draft_pr: true
   close_issue: false
+
+security:
+  redact_env: []
 ```
 
 ### 5.1 設定規則
@@ -201,6 +204,8 @@ completion:
 - durationはGo duration形式とする。
 - 未知キーは設定ミスを検出するため既定でエラーとする。
 - secretsを設定ファイルに記述しない。
+- `security.redact_env`には追加でマスクする値そのものではなく、値を保持する環境変数名だけを記述する。
+- `git.worktree_root`を指定する場合は絶対pathとし、branch prefix、base branch、GitHub repository名はargv/refとして安全な形式だけを許可する。
 
 ## 6. CLI仕様
 
@@ -719,14 +724,18 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 
 - subprocess引数はshell文字列として連結せず、argv配列で起動する
 - Issue本文をshellとして評価しない
-- worktree pathはcanonical化し、許可root配下であることを確認する
-- plistと状態ファイルをユーザー所有、最小permissionで作成する
+- Issueのタイトル・本文・コメントは件数とbyte数を制限し、制御文字を除去してuntrusted JSON dataとしてprompt命令から分離する
+- worktree pathはcanonical化し、許可root配下であることを確認し、root逸脱とworktree symbolic linkを拒否する
+- 管理directoryは0700、plist、registry、状態、event、transaction、worker/supervisor logは0600で作成する
 - credentialをpromptへ明示的に埋め込まない
-- Codex sandboxは既定で `workspace-write`
+- 既知credential形式と`security.redact_env`の値をstdout/stderr、worker result、state、event、GitHub通知の境界でmaskする
+- Codex sandboxは既定で `workspace-write`とし、worker起動時に`approval_policy="never"`を上書きする
 - dangerous bypassは設定schemaでもMVPでは許可しない
 - GitHub Issueは信頼済み入力とはみなさず、prompt injectionの可能性をworkerへ明示する
 - stopはプロセスを終了するが、worktreeや未コミット変更を削除しない
 - reset/purgeを実装する場合は別コマンドとし、明示確認を必須にする
+- CIで到達可能なGo依存脆弱性を`govulncheck`により検出する
+- 信頼境界、残余risk、最小権限、backup、credential棚卸しは`docs/threat-model.md`と`docs/security-runbook.md`を正本とする
 
 ## 17. テスト仕様
 

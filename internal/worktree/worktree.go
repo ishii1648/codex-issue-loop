@@ -34,11 +34,46 @@ type Inspection struct {
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
+var validRepoID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,100}$`)
 
 func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, issueNumber int, title string) (Result, error) {
+	if !validRepoID.MatchString(repoID) {
+		return Result{}, fmt.Errorf("invalid repository ID %q", repoID)
+	}
+	if issueNumber <= 0 {
+		return Result{}, fmt.Errorf("issue number must be positive")
+	}
 	root := cfg.Git.WorktreeRoot
 	if root == "" {
 		root = filepath.Join(m.StateRoot, "worktrees")
+	}
+	secureRoot, err := canonicalPrivateRoot(root)
+	if err != nil {
+		return Result{}, err
+	}
+	repoRoot := filepath.Join(secureRoot, repoID)
+	if !within(secureRoot, repoRoot) {
+		return Result{}, fmt.Errorf("worktree repository path escapes configured root")
+	}
+	if err := os.MkdirAll(repoRoot, 0o700); err != nil {
+		return Result{}, fmt.Errorf("create worktree repository directory: %w", err)
+	}
+	repoInfo, err := os.Lstat(repoRoot)
+	if err != nil {
+		return Result{}, fmt.Errorf("inspect worktree repository directory: %w", err)
+	}
+	if repoInfo.Mode()&os.ModeSymlink != 0 || !repoInfo.IsDir() {
+		return Result{}, fmt.Errorf("worktree repository path must be a real directory: %s", repoRoot)
+	}
+	if err := os.Chmod(repoRoot, 0o700); err != nil {
+		return Result{}, fmt.Errorf("secure worktree repository directory: %w", err)
+	}
+	canonicalRepoRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve worktree repository directory: %w", err)
+	}
+	if !within(secureRoot, canonicalRepoRoot) {
+		return Result{}, fmt.Errorf("worktree repository directory escapes configured root")
 	}
 	slug := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(title), "-"), "-")
 	if slug == "" {
@@ -48,8 +83,13 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 		slug = strings.Trim(slug[:40], "-")
 	}
 	branch := fmt.Sprintf("%s%d-%s", cfg.Git.BranchPrefix, issueNumber, slug)
-	path := filepath.Join(root, repoID, fmt.Sprintf("issue-%d", issueNumber))
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
+	path := filepath.Join(canonicalRepoRoot, fmt.Sprintf("issue-%d", issueNumber))
+	if !within(secureRoot, path) {
+		return Result{}, fmt.Errorf("worktree path escapes configured root")
+	}
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return Result{}, fmt.Errorf("worktree path must not be a symbolic link: %s", path)
+	} else if err == nil && info.IsDir() {
 		inspection, inspectErr := m.Inspect(ctx, cfg, path, branch)
 		if inspectErr != nil {
 			return Result{}, fmt.Errorf("inspect existing worktree: %w", inspectErr)
@@ -58,9 +98,6 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 			return Result{}, fmt.Errorf("existing worktree path is incomplete or belongs to another branch: %s", path)
 		}
 		return Result{Path: path, Branch: branch}, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return Result{}, err
 	}
 	git := m.GitPath
 	if git == "" {
@@ -84,12 +121,34 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 
 func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch string) (Inspection, error) {
 	inspection := Inspection{}
-	info, err := os.Stat(path)
+	root := cfg.Git.WorktreeRoot
+	if root == "" {
+		root = filepath.Join(m.StateRoot, "worktrees")
+	}
+	secureRoot, err := canonicalPrivateRoot(root)
+	if err != nil {
+		return inspection, err
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil || !within(secureRoot, absPath) {
+		return inspection, fmt.Errorf("worktree path is outside configured root: %s", path)
+	}
+	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return inspection, nil
 	}
 	if err != nil {
 		return inspection, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return inspection, fmt.Errorf("worktree path must not be a symbolic link: %s", path)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return inspection, fmt.Errorf("resolve worktree path: %w", err)
+	}
+	if !within(secureRoot, resolvedPath) {
+		return inspection, fmt.Errorf("worktree path resolves outside configured root: %s", path)
 	}
 	inspection.Exists = info.IsDir()
 	if !inspection.Exists {
@@ -125,4 +184,24 @@ func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch st
 		inspection.RemoteBranchExists = strings.TrimSpace(string(out)) != ""
 	}
 	return inspection, nil
+}
+
+func canonicalPrivateRoot(root string) (string, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree root: %w", err)
+	}
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		return "", fmt.Errorf("create worktree root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree root symlinks: %w", err)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func within(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }

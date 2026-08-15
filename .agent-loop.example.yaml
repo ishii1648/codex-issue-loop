@@ -41,3 +41,8 @@ git:
 completion:
   create_draft_pr: true
   close_issue: false
+
+# Values are read from these environment variables at runtime. Never put the
+# secret values themselves in this file.
+security:
+  redact_env: []

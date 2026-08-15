@@ -73,3 +73,25 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 		t.Fatal("partially created directory was treated as a reusable worktree")
 	}
 }
+
+func TestWorktreeRejectsTraversalAndSymbolicLink(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Git.WorktreeRoot = filepath.Join(root, "worktrees")
+	cfg.RepoPath = root
+	manager := Manager{StateRoot: root}
+	if _, err := manager.Ensure(context.Background(), cfg, "../outside", 1, "test"); err == nil {
+		t.Fatal("repository ID traversal was accepted")
+	}
+	repoRoot := filepath.Join(cfg.Git.WorktreeRoot, "repo-id")
+	if err := os.MkdirAll(repoRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(repoRoot, "issue-1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Ensure(context.Background(), cfg, "repo-id", 1, "test"); err == nil {
+		t.Fatal("symbolic-link worktree was accepted")
+	}
+}

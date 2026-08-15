@@ -45,10 +45,34 @@ func (m Manager) WritePlist(entry registry.Entry, binary string) error {
 		pathEnv = entry.EnvironmentPath
 	}
 	stateDir := m.Layout.RepoDir(entry.RepoID)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return fmt.Errorf("create state directory for launchd logs: %w", err)
+	}
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		return fmt.Errorf("secure state directory for launchd logs: %w", err)
+	}
 	values := map[string]string{
 		"label": m.Layout.Label(entry.RepoID), "binary": binary, "repo": entry.RepoPath,
 		"stdout": filepath.Join(stateDir, "supervisor.log"), "stderr": filepath.Join(stateDir, "supervisor.err.log"),
 		"home": home, "path": pathEnv,
+	}
+	for _, logPath := range []string{values["stdout"], values["stderr"]} {
+		if info, statErr := os.Lstat(logPath); statErr == nil && !info.Mode().IsRegular() {
+			return fmt.Errorf("supervisor log path is not a regular file: %s", logPath)
+		} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("inspect supervisor log %s: %w", logPath, statErr)
+		}
+		file, openErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if openErr != nil {
+			return fmt.Errorf("create private supervisor log %s: %w", logPath, openErr)
+		}
+		if chmodErr := file.Chmod(0o600); chmodErr != nil {
+			_ = file.Close()
+			return fmt.Errorf("secure supervisor log %s: %w", logPath, chmodErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return closeErr
+		}
 	}
 	plist := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

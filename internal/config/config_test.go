@@ -68,3 +68,27 @@ worker:
 		t.Fatalf("expected sandbox error, got %v", err)
 	}
 }
+
+func TestLoadRejectsUnsafePathsRefsAndSecretNames(t *testing.T) {
+	tests := []string{
+		"git:\n  worktree_root: ../outside\n",
+		"git:\n  branch_prefix: ../escape\n",
+		"security:\n  redact_env: [\"BAD=NAME\"]\n",
+	}
+	for _, fragment := range tests {
+		dir := writeConfig(t, "version: 1\ngithub:\n  repo: owner/repo\n"+fragment)
+		if _, err := Load(dir); err == nil {
+			t.Fatalf("unsafe config accepted: %s", fragment)
+		}
+	}
+}
+
+func TestRedactionValuesReadsNamedEnvironmentOnly(t *testing.T) {
+	t.Setenv("AGENT_LOOP_TEST_SECRET", "configured-value")
+	cfg := Defaults()
+	cfg.Security.RedactEnv = []string{"AGENT_LOOP_TEST_SECRET"}
+	values := cfg.RedactionValues()
+	if len(values) != 1 || values[0] != "configured-value" {
+		t.Fatalf("values=%q", values)
+	}
+}

@@ -8,8 +8,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	"github.com/ishii1648/codex-issue-loop/internal/redact"
 )
 
 type Issue struct {
@@ -50,8 +52,16 @@ type Client interface {
 }
 
 type CLI struct {
-	Path string
+	Path    string
+	Secrets []string
 }
+
+const (
+	maxIssueTitleBytes = 512
+	maxIssueBodyBytes  = 64 * 1024
+	maxIssueComments   = 20
+	maxCommentBytes    = 8 * 1024
+)
 
 type rawIssue struct {
 	Number int    `json:"number"`
@@ -87,7 +97,7 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 	}
 	out, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("list GitHub Issues: %w: %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("list GitHub Issues: %w: %s", err, c.safe(out))
 	}
 	var raw []rawIssue
 	if err := json.Unmarshal(out, &raw); err != nil {
@@ -110,10 +120,10 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 		if item.Milestone != nil {
 			milestone = item.Milestone.Title
 		}
-		issues = append(issues, Issue{
+		issues = append(issues, NormalizeIssue(Issue{
 			Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL,
 			Labels: labels, Assignees: assignees, Milestone: milestone,
-		})
+		}))
 	}
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
 	return issues, nil
@@ -126,7 +136,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	}
 	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,state,labels,assignees,milestone,comments").CombinedOutput()
 	if err != nil {
-		return Issue{}, fmt.Errorf("get GitHub Issue #%d: %w: %s", number, err, strings.TrimSpace(string(out)))
+		return Issue{}, fmt.Errorf("get GitHub Issue #%d: %w: %s", number, err, c.safe(out))
 	}
 	var item rawIssue
 	if err := json.Unmarshal(out, &item); err != nil {
@@ -148,7 +158,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	for _, comment := range item.Comments {
 		comments = append(comments, comment.Body)
 	}
-	return Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State}, nil
+	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State}), nil
 }
 
 func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (RemoteState, error) {
@@ -166,7 +176,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	}
 	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName").CombinedOutput()
 	if err != nil {
-		return RemoteState{}, fmt.Errorf("inspect Pull Requests for branch %s: %w: %s", branch, err, strings.TrimSpace(string(out)))
+		return RemoteState{}, fmt.Errorf("inspect Pull Requests for branch %s: %w: %s", branch, err, c.safe(out))
 	}
 	var raw []struct {
 		Number      int        `json:"number"`
@@ -242,7 +252,7 @@ func (c CLI) MarkNeedsInput(ctx context.Context, cfg config.Config, number int, 
 		return err
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:request:%s -->", requestID)
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, marker+"\nInput required: "+question)
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, marker+"\nInput required: "+redact.StringWithSecrets(question, c.Secrets))
 }
 
 func (c CLI) MarkDone(ctx context.Context, cfg config.Config, number int, prURL string) error {
@@ -264,7 +274,7 @@ func (c CLI) MarkDone(ctx context.Context, cfg config.Config, number int, prURL 
 		}
 		out, err := exec.CommandContext(ctx, path, "issue", "close", fmt.Sprint(number), "--repo", cfg.GitHub.Repo).CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("close Issue #%d: %w: %s", number, err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("close Issue #%d: %w: %s", number, err, c.safe(out))
 		}
 	}
 	return nil
@@ -284,7 +294,7 @@ func (c CLI) MarkFailed(ctx context.Context, cfg config.Config, number int, reas
 		return err
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", number)
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, marker+"\nAutomation stopped: "+reason)
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, marker+"\nAutomation stopped: "+redact.StringWithSecrets(reason, c.Secrets))
 }
 
 func (c CLI) MarkRunning(ctx context.Context, cfg config.Config, number int) error {
@@ -309,7 +319,7 @@ func (c CLI) editLabels(ctx context.Context, repo string, number int, add, remov
 	}
 	out, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("update Issue #%d labels: %w: %s", number, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("update Issue #%d labels: %w: %s", number, err, c.safe(out))
 	}
 	return nil
 }
@@ -325,9 +335,43 @@ func (c CLI) ensureComment(ctx context.Context, repo string, number int, marker,
 	}
 	out, err := exec.CommandContext(ctx, path, "issue", "comment", fmt.Sprint(number), "--repo", repo, "--body", body).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("comment on Issue #%d: %w: %s", number, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("comment on Issue #%d: %w: %s", number, err, c.safe(out))
 	}
 	return nil
+}
+
+func (c CLI) safe(data []byte) string {
+	return strings.TrimSpace(redact.StringWithSecrets(string(data), c.Secrets))
+}
+
+func NormalizeIssue(issue Issue) Issue {
+	issue.Title = safeText(issue.Title, maxIssueTitleBytes)
+	issue.Body = safeText(issue.Body, maxIssueBodyBytes)
+	issue.URL = safeText(issue.URL, 2048)
+	if len(issue.Comments) > maxIssueComments {
+		issue.Comments = issue.Comments[len(issue.Comments)-maxIssueComments:]
+	}
+	for index := range issue.Comments {
+		issue.Comments[index] = safeText(issue.Comments[index], maxCommentBytes)
+	}
+	return issue
+}
+
+func safeText(value string, limit int) string {
+	value = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || r >= ' ' && r != 0x7f {
+			return r
+		}
+		return -1
+	}, value)
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value + "\n[TRUNCATED]"
 }
 
 func SelectReady(issues []Issue, snapshotIssues map[string]string) (Issue, bool) {

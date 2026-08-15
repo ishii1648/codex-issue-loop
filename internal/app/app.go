@@ -21,6 +21,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
+	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/supervisor"
@@ -236,7 +237,7 @@ func (a App) register(l layout.Layout, args []string) error {
 	if err != nil {
 		return err
 	}
-	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 	if err := store.Initialize(); err != nil {
 		return err
 	}
@@ -269,7 +270,8 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 	if err != nil {
 		return err
 	}
-	if _, err := config.Load(entry.RepoPath); err != nil {
+	cfg, err := config.Load(entry.RepoPath)
+	if err != nil {
 		return err
 	}
 	lm := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
@@ -285,7 +287,7 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		return err
 	}
 	if command == "stop" {
-		store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+		store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 		_, _ = store.Update("supervisor_stopped", 0, "", map[string]string{"reason": "explicit stop"}, func(s *state.Snapshot) error {
 			s.Supervisor.State, s.Supervisor.PID, s.Supervisor.Message = "stopped", 0, "explicit stop"
 			return nil
@@ -300,7 +302,11 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 	if err != nil {
 		return err
 	}
-	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	cfg, err := config.Load(entry.RepoPath)
+	if err != nil {
+		return err
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 	snapshot, err := store.Load()
 	if err != nil {
 		return err
@@ -333,7 +339,7 @@ func (a App) watch(ctx context.Context, l layout.Layout, args []string) error {
 	if err != nil {
 		return err
 	}
-	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 	result, err := observe.Wait(ctx, store, cfg.Watch.ReconcileInterval.Duration, cfg.Watch.ReconcileJitter, *untilIdle)
 	if err != nil {
 		return err
@@ -342,6 +348,7 @@ func (a App) watch(ctx context.Context, l layout.Layout, args []string) error {
 }
 
 func (a App) answer(l layout.Layout, args []string) error {
+	const maxAnswerBytes = 16 * 1024
 	fs := flag.NewFlagSet("answer", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
 	repo := fs.String("repo", "", "repository path")
@@ -363,9 +370,14 @@ func (a App) answer(l layout.Layout, args []string) error {
 		var data []byte
 		var err error
 		if *messageFile == "-" {
-			data, err = io.ReadAll(a.In)
+			data, err = io.ReadAll(io.LimitReader(a.In, maxAnswerBytes+1))
 		} else {
-			data, err = os.ReadFile(*messageFile)
+			file, openErr := os.Open(*messageFile)
+			if openErr != nil {
+				return openErr
+			}
+			data, err = io.ReadAll(io.LimitReader(file, maxAnswerBytes+1))
+			_ = file.Close()
 		}
 		if err != nil {
 			return err
@@ -375,11 +387,22 @@ func (a App) answer(l layout.Layout, args []string) error {
 	if answer == "" {
 		return exitError{2, fmt.Errorf("answer must not be empty")}
 	}
+	if len(answer) > maxAnswerBytes {
+		return exitError{2, fmt.Errorf("answer must not exceed %d bytes", maxAnswerBytes)}
+	}
 	entry, err := a.resolvePath(l, *repo)
 	if err != nil {
 		return err
 	}
-	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	cfg, err := config.Load(entry.RepoPath)
+	if err != nil {
+		return err
+	}
+	secrets := cfg.RedactionValues()
+	if redact.StringWithSecrets(answer, secrets) != answer {
+		return exitError{2, fmt.Errorf("answer must not contain a credential or configured secret")}
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: secrets}
 	currentSnapshot, err := store.Load()
 	if err != nil {
 		return err
@@ -554,13 +577,15 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	if err != nil {
 		return err
 	}
-	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	secrets := cfg.RedactionValues()
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: secrets}
 	cfg.Worker.Command = entry.Commands["codex"]
+	safeLog := redact.NewLineWriterWithSecrets(a.Err, secrets)
 	loop := &supervisor.Loop{
-		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"]},
+		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
 		Worktrees: worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
-		Worker:    worker.Codex{StateDir: l.RepoDir(entry.RepoID)},
-		Logger:    log.New(a.Err, "agent-loop: ", log.LstdFlags|log.LUTC),
+		Worker:    worker.Codex{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets},
+		Logger:    log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
 	}
 	err = loop.Run(ctx)
 	var blocked supervisor.BlockedError
