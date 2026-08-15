@@ -46,6 +46,14 @@ Codex の単一 task や goal は、一つの具体的な目的を継続的に�
 
 ループ実装を対象リポジトリから分離し、設定ファイルとインストール手順によって任意の GitHub リポジトリへ導入できること。
 
+### G-6: 停止させない実行経路選択
+
+各Issueのpreflightで通常実行と長時間実行を自動選択し、分類が難しいこと自体を理由にユーザー確認を要求しないこと。安全性を保ったまま判断できない場合は、より強い長時間実行profileへ倒すこと。
+
+### G-7: 低コストで取りこぼしのない監視
+
+監視は永続状態を正本とし、event通知による低遅延な起床と低頻度reconciliation pollingを併用すること。待機中の確認をGoプロセス内で完結させ、Codexに定期的なstatus確認をさせないこと。
+
 ## 4. 非ゴール
 
 初期リリースでは次を対象外とする。
@@ -149,6 +157,9 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-034**: ワーカーは対象リポジトリの `AGENTS.md`、Issue 本文、既存コメント、ループ設定を入力として利用できること。
 - **FR-035**: ユーザー回答後は、保存済み worktree、Issue コンテキスト、過去の質問と回答を与えた新しいワーカーで再開できること。
 - **FR-036**: 承認とsandboxを無効化する危険な Codex オプションを既定で使用しないこと。
+- **FR-037**: 各Issueの初回workerは、実装前にpreflightを行い、`standard` または `extended` execution profileを構造化結果として記録すること。
+- **FR-038**: preflightは初回worker内の論理フェーズとして実行し、そのまま実装へ進めること。profile判定だけを目的とする別workerを必須にしないこと。
+- **FR-039**: profile判定が曖昧な場合は、ユーザーへ質問せず `extended` を選択すること。`extended` は必要に応じてsupervisor管理のcontinuationを許可すること。
 
 ### 6.5 GitHubへの反映
 
@@ -167,6 +178,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-055**: 質問には安定した request ID、Issue番号、質問文、理由、選択肢、自由記述可否、作成時刻を含めること。
 - **FR-056**: 回答は request ID に対して一度だけ受理し、重複送信を安全に扱うこと。
 - **FR-057**: 未回答質問は監視 task が切断しても失われないこと。
+- **FR-058**: `watch` は永続snapshotを正本とし、event通知を状態変化のヒントとして扱うこと。event payloadだけでattention状態を確定しないこと。
+- **FR-059**: `watch` はeventを取りこぼしても検出できるよう、既定60秒間隔の内部reconciliationを行うこと。reconciliation中はCodexへheartbeatや途中結果を返さないこと。
 
 ### 6.7 Codex Skill
 
@@ -184,6 +197,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **NFR-002**: 状態更新は原子的に行い、途中書き込みを有効状態として読み込まないこと。
 - **NFR-003**: Codex、GitHub、ネットワークの一時障害には、上限付き exponential backoff で再試行すること。
 - **NFR-004**: 再起動後に GitHub とローカル状態を照合し、安全に処理を再開すること。
+- **NFR-005**: attention状態はユーザーの回答または明示的な取消までstickyに保持し、一過性eventの欠落で解除されないこと。
+- **NFR-006**: 永続状態に単調増加するrevisionを持たせ、監視の再接続とrace検出に利用できること。
 
 ### 7.2 セキュリティ
 
@@ -199,6 +214,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **NFR-021**: すべての状態遷移にリポジトリID、Issue番号、run ID、時刻、理由を含めること。
 - **NFR-022**: ログローテーションまたは保持上限を持つこと。
 - **NFR-023**: `doctor` で停止理由と復旧手順を提示できること。
+- **NFR-024**: 待機中の監視はモデル呼び出しを発生させないこと。モデルを使うのはattention発生後の要約、質問、回答反映に限定すること。
 
 ### 7.4 移植性と保守性
 
@@ -249,6 +265,14 @@ Codex ワーカーまたは supervisor を強制終了しても、LaunchAgent �
 
 Mac mini に物理アクセスせず、Codex Remote から起動、状態確認、質問への回答、停止ができる。
 
+### AC-7: event取りこぼしからの復旧
+
+`needs_input` 保存後のevent通知を意図的に破棄しても、watchがreconciliation間隔内に永続状態から質問を検出する。
+
+### AC-8: preflightで停止しない
+
+実行profileを一意に判定できないIssueでもユーザー確認を要求せず `extended` を選び、初回worker内で実装へ進む。
+
 ## 10. 実装フェーズ
 
 ### Phase 1: ローカルMVP
@@ -263,6 +287,8 @@ Mac mini に物理アクセスせず、Codex Remote から起動、状態確認�
 - `gh` によるIssue選択とclaim
 - worktree作成
 - `codex exec` と構造化結果
+- preflightと`standard` / `extended` execution profile
+- supervisor管理のcontinuation
 - draft PR 作成
 
 ### Phase 3: 常駐化
@@ -275,6 +301,7 @@ Mac mini に物理アクセスせず、Codex Remote から起動、状態確認�
 
 - Codex Skill
 - watch/answerフロー
+- event通知と60秒reconciliationを組み合わせたwatch
 - 監視task切断と再接続
 - 通知を含むE2E確認
 
@@ -292,7 +319,10 @@ Mac mini に物理アクセスせず、Codex Remote から起動、状態確認�
 - [Codex Remote](https://learn.chatgpt.com/docs/remote): 接続済みコンピューター上の task をスマートフォンから開始・監視・指示・承認できる
 - [Projects and chats](https://learn.chatgpt.com/docs/projects): 同一ローカルプロジェクトで複数taskを整理し、頻繁に使うtaskをピン留めできる
 - [Notifications](https://learn.chatgpt.com/docs/notifications): task の `Running`、`Needs input`、`Ready`、`Blocked` 状態を確認できる
-- [Developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli): `codex exec`、`--ephemeral`、`--json`、`--output-schema`、sandbox指定
+- [Long-running work](https://learn.chatgpt.com/docs/long-running-work): Goalは明確な成果、制約、完了条件を持つ長時間作業に使い、desktop app、対話的CLI、IDE extensionから操作する
+- [Integrated terminal](https://learn.chatgpt.com/docs/integrated-terminal): Codex taskから実行中のterminal出力を確認できる
+- [Developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli): `codex exec`、session resume、`--json`、`--output-schema`、sandbox指定
 
 外部製品の未公開APIや、外部プロセスからCodex taskの表示状態を直接変更する機能には依存しない。Codex taskが `watch` を実行し、そのコマンドが入力待ちイベントを返すことで、Codexがユーザーへ質問する。
 
+Goalは外側のIssueキューsupervisorの代替には使わない。公式仕様でheadless Goalの利用方法が確立するまでは、非対話workerの長時間継続をsupervisor管理のexecution profileと `codex exec resume` で実現する。また、待機中のtool callに対する製品全体の厳密なゼロトークン保証は要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。

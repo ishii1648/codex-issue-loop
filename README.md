@@ -6,8 +6,11 @@ GitHub Issue をキューとして、着手可能な Issue が存在する限り
 
 ## Documents
 
+- [アーキテクチャ概要](docs/architecture.md)
 - [要件定義](docs/requirements.md)
 - [システム仕様](docs/specification.md)
+
+![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
 
 ## 設計の要点
 
@@ -17,4 +20,5 @@ GitHub Issue をキューとして、着手可能な Issue が存在する限り
 - Codex Skill は起動・停止・監視・回答を CLI に橋渡しする薄い操作層とする
 - スマートフォンでは、監視用 task と Issue 作成用 task の2つを主な入口にする
 - ユーザーへの質問が必要になった場合は状態を永続化し、監視用 task を通して回答できるようにする
-
+- `watch` は永続状態を正本とし、イベント通知と60秒間隔のreconciliationを併用する
+- Codex Goalは外側のIssueループには使わず、単一目的の長時間作業に限定して活用する
