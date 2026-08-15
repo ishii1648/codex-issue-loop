@@ -12,6 +12,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
@@ -34,6 +35,8 @@ type Loop struct {
 	Worktrees WorktreeManager
 	Worker    worker.Runner
 	Processes ProcessInspector
+	Clock     Clock
+	Random    RandomSource
 	Logger    *log.Logger
 }
 
@@ -74,7 +77,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	} else {
 		defer watcher.Close()
 	}
-	now := time.Now().UTC()
+	now := l.now()
 	_, err = l.Store.Update("supervisor_started", 0, "", nil, func(s *state.Snapshot) error {
 		s.Supervisor.State = "starting"
 		s.Supervisor.PID = os.Getpid()
@@ -86,7 +89,12 @@ func (l *Loop) Run(ctx context.Context) error {
 		return err
 	}
 
-	consecutiveFailures := 0
+	// Persisted failures survive launchd restarts. Only a successful cycle resets
+	// the counter, so repeatedly crashing between retries cannot avoid the limit.
+	consecutiveFailures := snapshot.Supervisor.ConsecutiveFailures
+	if consecutiveFailures > 0 && snapshot.Supervisor.RetryAfter != nil && snapshot.Supervisor.RetryAfter.After(l.now()) {
+		l.waitForDelay(ctx, snapshot.Supervisor.RetryAfter.Sub(l.now()))
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			_, _ = l.Store.Update("supervisor_stopped", 0, "", map[string]string{"reason": err.Error()}, func(s *state.Snapshot) error {
@@ -99,28 +107,46 @@ func (l *Loop) Run(ctx context.Context) error {
 		}
 		worked, err := l.RunOnce(ctx)
 		if err != nil {
-			consecutiveFailures++
-			l.Logger.Printf("cycle failed (%d): %v", consecutiveFailures, err)
-			if consecutiveFailures >= 5 {
-				_, _ = l.Store.Update("supervisor_blocked", 0, "", map[string]string{"error": err.Error()}, func(s *state.Snapshot) error {
-					s.Supervisor.State = "blocked"
-					s.Supervisor.Message = err.Error()
-					return nil
-				})
-				return BlockedError{Err: err}
+			kind := failure.KindOf(err)
+			if kind == failure.Supervisor {
+				return l.blockSupervisor(err, kind, consecutiveFailures+1)
 			}
+			consecutiveFailures++
+			l.Logger.Printf("cycle failed (%d, %s): %v", consecutiveFailures, kind, err)
+			if consecutiveFailures >= 5 {
+				return l.blockSupervisor(err, kind, consecutiveFailures)
+			}
+			delay := l.retryDelay(consecutiveFailures)
+			if recordErr := l.recordSupervisorRetry(err, kind, consecutiveFailures, delay); recordErr != nil {
+				return BlockedError{Err: failure.Wrap(failure.Supervisor, "persist supervisor retry", recordErr)}
+			}
+			// State files written while recording the retry are not a reason to
+			// bypass backoff. Retry waits are timer-only and remain cancellable.
+			l.waitForDelay(ctx, delay)
+			continue
 		} else {
+			if consecutiveFailures > 0 {
+				if resetErr := l.resetSupervisorFailures(consecutiveFailures); resetErr != nil {
+					return BlockedError{Err: failure.Wrap(failure.Supervisor, "reset supervisor failure counter", resetErr)}
+				}
+			}
 			consecutiveFailures = 0
 		}
 
-		delay := l.Config.Queue.PollInterval.Duration
+		delay := l.pollDelay(l.Config.Queue.PollInterval.Duration)
 		if worked {
 			delay = time.Second
 		}
-		if consecutiveFailures > 0 {
-			delay = retryDelay(consecutiveFailures)
-		}
 		l.waitForWork(ctx, delay, watcher)
+	}
+}
+
+func (l *Loop) waitForDelay(ctx context.Context, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 
@@ -154,7 +180,7 @@ func (l *Loop) waitForWork(ctx context.Context, delay time.Duration, watcher *fs
 			if err != nil {
 				continue
 			}
-			if nextPending(snapshot) != nil {
+			if nextPending(snapshot, l.now()) != nil {
 				return
 			}
 		}
@@ -164,9 +190,9 @@ func (l *Loop) waitForWork(ctx context.Context, delay time.Duration, watcher *fs
 func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	snapshot, err := l.Store.Load()
 	if err != nil {
-		return false, err
+		return false, failure.Wrap(failure.Supervisor, "load durable state", err)
 	}
-	if issueState := nextPending(snapshot); issueState != nil {
+	if issueState := nextPending(snapshot, l.now()); issueState != nil {
 		return true, l.processExisting(ctx, *issueState)
 	}
 	if !l.Config.Queue.ContinueAfterNeedsInput {
@@ -176,7 +202,7 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	}
 	issues, err := l.GitHub.ListReady(ctx, l.Config)
 	if err != nil {
-		return false, err
+		return false, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
 	statuses := map[string]string{}
 	for number, issue := range snapshot.Issues {
@@ -189,13 +215,13 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	return true, l.startIssue(ctx, selected)
 }
 
-func nextPending(snapshot state.Snapshot) *state.Issue {
+func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
 		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "retry_wait" && issue.GitHubSync == "" {
 			continue
 		}
-		if issue.RetryAfter != nil && issue.RetryAfter.After(time.Now()) {
+		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
 			continue
 		}
 		if selected == nil || issue.Number < selected.Number {
@@ -209,14 +235,14 @@ func nextPending(snapshot state.Snapshot) *state.Issue {
 func (l *Loop) startIssue(ctx context.Context, issue gh.Issue) error {
 	latest, err := l.GitHub.Get(ctx, l.Config, issue.Number)
 	if err != nil {
-		return err
+		return failure.Wrap(failure.Transient, "refresh GitHub Issue before claim", err)
 	}
 	if !gh.Eligible(latest.Labels, l.Config.GitHub) {
 		return nil
 	}
 	issue = latest
 	runID := state.NewID("run")
-	now := time.Now().UTC()
+	now := l.now()
 	_, err = l.Store.Update("claim_started", issue.Number, runID, map[string]any{"title": issue.Title}, func(s *state.Snapshot) error {
 		s.Supervisor.State = "running"
 		s.Issues[strconv.Itoa(issue.Number)] = &state.Issue{
@@ -226,25 +252,25 @@ func (l *Loop) startIssue(ctx context.Context, issue gh.Issue) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return failure.Wrap(failure.Supervisor, "persist claim start", err)
 	}
 	return l.claimAndRun(ctx, issue, runID)
 }
 
 func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) error {
 	if err := l.GitHub.Claim(ctx, l.Config, issue, runID); err != nil {
-		return err
+		return failure.Wrap(failure.Transient, "claim GitHub Issue", err)
 	}
 	_, err := l.Store.Update("issue_claimed", issue.Number, runID, map[string]any{"title": issue.Title}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
 		if item == nil {
 			return fmt.Errorf("Issue #%d disappeared while claiming", issue.Number)
 		}
-		item.Status, item.UpdatedAt = "claimed", time.Now().UTC()
+		item.Status, item.UpdatedAt = "claimed", l.now()
 		return nil
 	})
 	if err != nil {
-		return err
+		return failure.Wrap(failure.Supervisor, "persist claimed Issue", err)
 	}
 	return l.prepareAndRun(ctx, issue, runID)
 }
@@ -252,15 +278,15 @@ func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) er
 func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) error {
 	wt, err := l.Worktrees.Ensure(ctx, l.Config, l.Store.RepoID, issue.Number, issue.Title)
 	if err != nil {
-		return l.failIssue(ctx, issue.Number, err, false)
+		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "prepare Issue worktree", err), false)
 	}
 	_, err = l.Store.Update("worker_started", issue.Number, runID, map[string]string{"worktree": wt.Path, "branch": wt.Branch}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
-		item.Status, item.Worktree, item.Branch, item.UpdatedAt = "running", wt.Path, wt.Branch, time.Now().UTC()
+		item.Status, item.Worktree, item.Branch, item.UpdatedAt = "running", wt.Path, wt.Branch, l.now()
 		return nil
 	})
 	if err != nil {
-		return err
+		return failure.Wrap(failure.Supervisor, "persist worker start", err)
 	}
 	current, err := l.issueState(issue.Number)
 	if err != nil {
@@ -278,14 +304,14 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	}
 	issue, err := l.GitHub.Get(ctx, l.Config, current.Number)
 	if err != nil {
-		return err
+		return failure.Wrap(failure.Transient, "refresh existing GitHub Issue", err)
 	}
 	if current.Status == "claiming" {
 		return l.claimAndRun(ctx, issue, current.RunID)
 	}
 	if current.Status == "resume_pending" {
 		if err := l.GitHub.MarkRunning(ctx, l.Config, current.Number); err != nil {
-			return err
+			return failure.Wrap(failure.Transient, "mark resumed Issue running", err)
 		}
 		current.Status = "running"
 		current.RetryAfter = nil
@@ -293,11 +319,11 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
 			item.Status = "running"
 			item.RetryAfter = nil
-			item.UpdatedAt = time.Now().UTC()
+			item.UpdatedAt = l.now()
 			return nil
 		})
 		if err != nil {
-			return err
+			return failure.Wrap(failure.Supervisor, "persist answer resume", err)
 		}
 		workerCfg := l.Config
 		workerCfg.RepoPath = current.Worktree
@@ -326,7 +352,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			return nil
 		})
 		if err != nil {
-			return err
+			return failure.Wrap(failure.Supervisor, "persist worker continuation", err)
 		}
 		result, err = l.Worker.Resume(ctx, workerCfg, issue, current, "Continue the implementation from the previous run. Resolve the retry reason, run verification, and return the schema-conforming final result.", l.recordWorkerPID(current.Number, current.RunID))
 	} else {
@@ -340,7 +366,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			return nil
 		})
 		if err != nil {
-			return err
+			return failure.Wrap(failure.Supervisor, "persist worker retry start", err)
 		}
 		result, err = l.Worker.Run(ctx, workerCfg, issue, current, "Retry the Issue after the previous recoverable failure. Inspect the existing worktree first and preserve valid work.", l.recordWorkerPID(current.Number, current.RunID))
 	}
@@ -362,11 +388,11 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		if result.SessionID != "" {
 			item.SessionID = result.SessionID
 		}
-		item.UpdatedAt = time.Now().UTC()
+		item.UpdatedAt = l.now()
 		return nil
 	})
 	if err != nil {
-		return err
+		return failure.Wrap(failure.Supervisor, "persist worker result", err)
 	}
 	current, err = l.issueState(issue.Number)
 	if err != nil {
@@ -384,12 +410,13 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		_, err := l.Store.Update("issue_completed", issue.Number, current.RunID, result, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
 			item.Status, item.PullRequestURL, item.LastError, item.SessionID = "completed", prURL, "", ""
+			item.FailureKind = ""
 			item.GitHubSync = "done"
-			item.RetryAfter, item.UpdatedAt = nil, time.Now().UTC()
+			item.RetryAfter, item.UpdatedAt = nil, l.now()
 			return nil
 		})
 		if err != nil {
-			return err
+			return failure.Wrap(failure.Supervisor, "persist Issue completion", err)
 		}
 		updated, stateErr := l.issueState(issue.Number)
 		if stateErr != nil {
@@ -401,17 +428,18 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		q := result.Question
 		_, err := l.Store.Update("input_requested", issue.Number, current.RunID, q, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
-			item.Status, item.UpdatedAt = "needs_input", time.Now().UTC()
+			item.Status, item.UpdatedAt = "needs_input", l.now()
+			item.FailureKind = ""
 			item.GitHubSync = "needs_input"
 			s.PendingRequests[requestID] = &state.Request{
 				ID: requestID, IssueNumber: issue.Number, Question: q.Text, Reason: q.Reason,
 				Recommended: q.RecommendedOption, Options: q.Options, AllowFreeText: q.AllowFreeText,
-				Status: "pending", CreatedAt: time.Now().UTC(),
+				Status: "pending", CreatedAt: l.now(),
 			}
 			return nil
 		})
 		if err != nil {
-			return err
+			return failure.Wrap(failure.Supervisor, "persist input request", err)
 		}
 		updated, stateErr := l.issueState(issue.Number)
 		if stateErr != nil {
@@ -425,7 +453,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		}
 		return l.scheduleRetry(ctx, current, reason)
 	case "blocked":
-		return l.failIssue(ctx, issue.Number, errors.New(result.Summary), true)
+		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "worker blocked", errors.New(result.Summary)), true)
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
 	}
@@ -439,7 +467,7 @@ func (l *Loop) recordWorkerPID(number int, runID string) worker.Started {
 				return fmt.Errorf("Issue #%d run %s is no longer active", number, runID)
 			}
 			item.WorkerPID = pid
-			item.UpdatedAt = time.Now().UTC()
+			item.UpdatedAt = l.now()
 			return nil
 		})
 		return err
@@ -450,17 +478,20 @@ func (l *Loop) scheduleRetry(ctx context.Context, issue state.Issue, reason stri
 	canContinue := issue.ExecutionProfile == "extended" && issue.SessionID != "" && issue.Continuations < l.maxContinuations()
 	canRetry := issue.Attempts < l.Config.Queue.MaxAttempts
 	if !canContinue && !canRetry {
-		return l.failIssue(ctx, issue.Number, fmt.Errorf("retry limit reached: %s", reason), false)
+		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "worker retry limit reached", errors.New(reason)), false)
 	}
-	delay := retryDelay(issue.Attempts + issue.Continuations)
-	retryAt := time.Now().UTC().Add(delay)
-	_, err := l.Store.Update("retry_scheduled", issue.Number, issue.RunID, map[string]any{"reason": reason, "retry_at": retryAt}, func(s *state.Snapshot) error {
+	delay := l.retryDelay(issue.Attempts + issue.Continuations)
+	retryAt := l.now().Add(delay)
+	_, err := l.Store.Update("retry_scheduled", issue.Number, issue.RunID, map[string]any{
+		"failure_kind": failure.Transient, "reason": reason, "retry_at": retryAt, "delay": delay.String(),
+	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
 		item.Status, item.LastError, item.RetryAfter = "retry_wait", reason, &retryAt
-		item.UpdatedAt = time.Now().UTC()
+		item.FailureKind = string(failure.Transient)
+		item.UpdatedAt = l.now()
 		return nil
 	})
-	return err
+	return failure.Wrap(failure.Supervisor, "persist Issue retry", err)
 }
 
 func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked bool) error {
@@ -469,19 +500,21 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 		status = "blocked"
 	}
 	current, _ := l.issueState(number)
-	_, err := l.Store.Update("issue_"+status, number, current.RunID, map[string]string{"error": cause.Error()}, func(s *state.Snapshot) error {
+	kind := failure.KindOf(cause)
+	_, err := l.Store.Update("issue_"+status, number, current.RunID, map[string]string{"error": cause.Error(), "failure_kind": string(kind)}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(number)]
 		if item == nil {
 			item = &state.Issue{Number: number}
 			s.Issues[strconv.Itoa(number)] = item
 		}
 		item.Status, item.LastError, item.SessionID = status, cause.Error(), ""
+		item.FailureKind = string(kind)
 		item.GitHubSync = status
-		item.RetryAfter, item.UpdatedAt = nil, time.Now().UTC()
+		item.RetryAfter, item.UpdatedAt = nil, l.now()
 		return nil
 	})
 	if err != nil {
-		return err
+		return failure.Wrap(failure.Supervisor, "persist Issue failure", err)
 	}
 	updated, stateErr := l.issueState(number)
 	if stateErr != nil {
@@ -517,7 +550,7 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		return fmt.Errorf("unknown GitHub sync state %q", issue.GitHubSync)
 	}
 	if err != nil {
-		return err
+		return failure.Wrap(failure.Transient, "sync GitHub Issue state", err)
 	}
 	_, err = l.Store.Update("github_state_synced", issue.Number, issue.RunID, map[string]string{"state": issue.GitHubSync}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
@@ -527,10 +560,10 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		if item.GitHubSync == issue.GitHubSync {
 			item.GitHubSync = ""
 		}
-		item.UpdatedAt = time.Now().UTC()
+		item.UpdatedAt = l.now()
 		return nil
 	})
-	return err
+	return failure.Wrap(failure.Supervisor, "persist GitHub synchronization", err)
 }
 
 func (l *Loop) issueState(number int) (state.Issue, error) {
@@ -553,20 +586,46 @@ func (l *Loop) markPolling(message string) error {
 	return err
 }
 
-func (l *Loop) maxContinuations() int {
-	return l.Config.Worker.Profiles["extended"].MaxContinuations
+func (l *Loop) recordSupervisorRetry(cause error, kind failure.Kind, consecutive int, delay time.Duration) error {
+	retryAt := l.now().Add(delay)
+	_, err := l.Store.Update("supervisor_retry_scheduled", 0, "", map[string]any{
+		"failure_kind": kind, "reason": cause.Error(), "consecutive_failures": consecutive,
+		"retry_at": retryAt, "delay": delay.String(),
+	}, func(s *state.Snapshot) error {
+		s.Supervisor.State = "retry_wait"
+		s.Supervisor.Message = cause.Error()
+		s.Supervisor.FailureKind = string(kind)
+		s.Supervisor.ConsecutiveFailures = consecutive
+		s.Supervisor.RetryAfter = &retryAt
+		return nil
+	})
+	return err
 }
 
-func retryDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
-	}
-	delay := 5 * time.Second
-	for i := 1; i < attempt && delay < 5*time.Minute; i++ {
-		delay *= 2
-	}
-	if delay > 5*time.Minute {
-		delay = 5 * time.Minute
-	}
-	return delay
+func (l *Loop) resetSupervisorFailures(previous int) error {
+	_, err := l.Store.Update("supervisor_recovered", 0, "", map[string]int{"previous_consecutive_failures": previous}, func(s *state.Snapshot) error {
+		s.Supervisor.FailureKind = ""
+		s.Supervisor.ConsecutiveFailures = 0
+		s.Supervisor.RetryAfter = nil
+		return nil
+	})
+	return err
+}
+
+func (l *Loop) blockSupervisor(cause error, kind failure.Kind, consecutive int) error {
+	_, _ = l.Store.Update("supervisor_blocked", 0, "", map[string]any{
+		"error": cause.Error(), "failure_kind": kind, "consecutive_failures": consecutive,
+	}, func(s *state.Snapshot) error {
+		s.Supervisor.State = "blocked"
+		s.Supervisor.Message = cause.Error()
+		s.Supervisor.FailureKind = string(kind)
+		s.Supervisor.ConsecutiveFailures = consecutive
+		s.Supervisor.RetryAfter = nil
+		return nil
+	})
+	return BlockedError{Err: cause}
+}
+
+func (l *Loop) maxContinuations() int {
+	return l.Config.Worker.Profiles["extended"].MaxContinuations
 }

@@ -660,6 +660,8 @@ CodexにはClaude Codeのmonitor toolと同じ公開契約を持つ汎用的なt
 | supervisor全体の障害 | auth失効、config不正、binary消失 | supervisorをblockedにして通知対象 |
 | ユーザー入力待ち | product判断、権限承認 | requestを保存し、設定に応じて次へ |
 
+実装上はerrorを `transient`、`issue`、`supervisor` のtyped classificationで伝播させる。未分類errorは安全側に倒して `supervisor` とみなし、文字列の部分一致で遷移を決めない。workerが返す `needs_input` はerrorではなく状態遷移として扱う。
+
 ### 14.2 backoff
 
 - 初回: 5秒
@@ -668,6 +670,12 @@ CodexにはClaude Codeのmonitor toolと同じ公開契約を持つ汎用的なt
 - jitter: ±20%
 - Issueワーカーの既定上限: 3回
 - polling失敗はsupervisorを終了させず、連続失敗閾値でblockedにする
+
+worker retry、GitHub queue polling、GitHub同期retryの待機時間に独立した乱数を適用する。exponential backoffはjitter適用後も5分を超えない。乱数源はprocessごとに初期化されたsystem sourceを使い、複数repositoryの再試行集中を避ける。clockとrandom sourceはテスト時に差し替え可能とする。
+
+Issue retryのsnapshotには `failure_kind`、`last_error`、`retry_after` を保存し、`retry_scheduled` eventにも分類、理由、予定時刻、delayを記録する。supervisorの一時障害も同じ情報と連続失敗数をsnapshotおよび `supervisor_retry_scheduled` eventへ保存する。連続失敗数と予定時刻はlaunchdによるprocess再起動後も引き継ぐ。連続失敗数は、GitHub取得から永続状態更新までを含む1回のsupervisor cycleが成功した場合にのみresetし、`supervisor_recovered` eventを記録する。event通知やretry状態自身の書き込みによる早期起床ではbackoffを解除せず、counterもresetしない。
+
+`supervisor` 分類は継続による状態破壊を避けるため直ちにblockedへ移す。`transient` 分類は最大5回まで再試行し、5回連続で失敗した場合にblockedへ移す。`issue` 分類は対象Issueをblockedまたはfailedへ移し、GitHub同期後に別のIssueを処理できる状態を維持する。
 
 ## 15. 再起動時のreconciliation
 

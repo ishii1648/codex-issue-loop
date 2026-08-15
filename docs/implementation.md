@@ -21,7 +21,7 @@
 - Issue別branchとGit worktree
 - schema付き`codex exec`、session ID保存、`codex exec resume`
 - `standard` / `extended` preflight policy
-- retry、extended continuation、再起動時のactive Issue復旧
+- typed failure分類、±20% jitter付き上限5分のretry/polling backoff、extended continuation
 - 完了、入力待ち、失敗のGitHub反映と未反映状態の再試行
 - credential形式をマスクしたworker log
 - fake GitHub/Codex統合テスト、実Git worktreeテスト、race test
@@ -57,4 +57,4 @@ go test -race ./...
 go vet ./...
 ```
 
-テストでは、eventを配送しない状態からreconciliationだけでattentionを検出するケース、回答eventによるsupervisor起床、claim途中停止、GitHub同期失敗、Codex JSONL/session解析に加え、fake GitHubでのPR・label競合と実Git repositoryでのworktree・branch検査を検証する。
+テストでは、eventを配送しない状態からreconciliationだけでattentionを検出するケース、回答eventによるsupervisor起床、claim途中停止、GitHub同期失敗、Codex JSONL/session解析、deterministicなclock/random sourceを用いたbackoffと失敗counterのresetに加え、fake GitHubでのPR・label競合と実Git repositoryでのworktree・branch検査を検証する。

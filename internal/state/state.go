@@ -16,11 +16,14 @@ import (
 )
 
 type Supervisor struct {
-	State     string    `json:"state"`
-	PID       int       `json:"pid,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Message   string    `json:"message,omitempty"`
+	State               string     `json:"state"`
+	PID                 int        `json:"pid,omitempty"`
+	StartedAt           time.Time  `json:"started_at,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	Message             string     `json:"message,omitempty"`
+	FailureKind         string     `json:"failure_kind,omitempty"`
+	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
+	RetryAfter          *time.Time `json:"retry_after,omitempty"`
 }
 
 type AnswerRecord struct {
@@ -44,6 +47,7 @@ type Issue struct {
 	WorkerPID        int            `json:"worker_pid,omitempty"`
 	PullRequestURL   string         `json:"pull_request_url,omitempty"`
 	GitHubSync       string         `json:"github_sync,omitempty"`
+	FailureKind      string         `json:"failure_kind,omitempty"`
 	LastError        string         `json:"last_error,omitempty"`
 	RetryAfter       *time.Time     `json:"retry_after,omitempty"`
 	Answers          []AnswerRecord `json:"answers,omitempty"`
