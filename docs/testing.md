@@ -48,6 +48,7 @@ make test-race
 | SPDX SBOMの決定性 | `TestGenerateProducesDeterministicSPDXDocument` |
 | v1→v2 migration・backup restore・途中停止再開 | `TestApplyMigratesV1FixturesAndRestoreRecoversOriginalBytes`、`TestInterruptedApplyReusesJournalAndConvergesIdempotently`、`TestUnsupportedVersionIsRejectedWithoutBackup`、`TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback` |
 | worktree cleanup/purge・安全条件・監査 | `TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval`、`TestPurgeRequiresExactConfirmationAndCanRemoveDirtyWorktree` |
+| push通知のoutbox・重複抑止・再送・本体分離 | `TestDispatcherDeduplicatesRetriesAndRedactsFailures`、`TestDispatcherCancelsAnsweredRequestBeforeDelivery`、`TestNotificationFailureDoesNotStopSupervisor` |
 
 障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
 
@@ -60,5 +61,6 @@ make test-race
 | state・event・file mode | `TestStateAndEventsNeverPersistSecrets`、`TestWritePlistUsesAbsoluteCommandsAndEscapesPaths` |
 | GitHubコメント・CLI error | `TestGitHubCommentsAndErrorsRedactSecrets` |
 | path traversal・symbolic link | `TestWorktreeRejectsTraversalAndSymbolicLink`、`TestLoadRejectsUnsafePathsRefsAndSecretNames` |
+| 通知credential・本文最小化・外部error | `TestNotificationTokenCommandStoresPrivateCredentialWithoutOutputLeak`、`TestLoadNotificationTokenRejectsUnsafePermissions`、`TestNtfySendsAuthenticatedMinimalNotification`、`TestDispatcherDeduplicatesRetriesAndRedactsFailures` |
 
 既知の到達可能な依存脆弱性は`make vuln-check`で検査し、Pull Requestと`main`のCIで必須にする。

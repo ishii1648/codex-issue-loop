@@ -7,6 +7,7 @@
 3. `codex login status`で認証済みであることだけを確認する。CodexのtokenやAPI keyを`.agent-loop.yaml`、plist、Issue、回答、shell履歴へ書かない。
 4. `.agent-loop.yaml`の`worker.sandbox`を`workspace-write`（調査専用なら`read-only`）にする。`danger-full-access`は設定検証で拒否される。workerは承認を要求できないため、worktree外への追加書き込みやnetwork権限が必要なIssueは自動キューへ入れない。
 5. branch protectionでmainへの直接pushを禁止し、CIとレビューを必須にする。worker用資格情報にbranch protection bypass権限を与えない。
+6. 外部pushを有効にする場合はprivate topicとpublish専用tokenを用意し、`agent-loop notification-token --repo <path> --token-file -`で保存する。tokenを`.agent-loop.yaml`、plist、shell history、Issue、Codex taskへ貼らない。通知本文の詳細は既定の無効を維持する。
 
 ## 追加の秘密をマスクする
 
@@ -38,7 +39,7 @@ find "$HOME/Library/Application Support/codex-issue-loop/repos" -type d \
 stat -f '%Sp %N' "$HOME/Library/LaunchAgents"/com.codex-issue-loop.*.plist
 ```
 
-期待値は、管理対象ディレクトリ0700、registry/state/event/log/plist 0600である。`~/Library/LaunchAgents`ディレクトリ自体のmodeはmacOS標準に従い、plistだけを0600にする。
+期待値は、管理対象ディレクトリ0700、registry/state/event/log/plist/notification-token 0600である。`~/Library/LaunchAgents`ディレクトリ自体のmodeはmacOS標準に従い、plistだけを0600にする。
 
 ## backupとインシデント対応
 
@@ -55,7 +56,7 @@ stat -f '%Sp %N' "$HOME/Library/LaunchAgents"/com.codex-issue-loop.*.plist
 - GitHub認証方式、token所有者、対象リポジトリ、付与permission、有効期限、最終rotation日
 - Codex認証方式、利用組織、最終login確認日
 - `security.redact_env`の変数名、注入元、rotation責任者（値は台帳にも平文記載しない）
+- 外部push provider、account所有者、private topic、token権限、有効期限、rotation責任者、mobile appの購読端末（token値は記載しない）
 - branch protection、required check、bypass可能なactor
 
 本番導入前と認証・sandbox・外部連携を変更したときは、別担当者によるセキュリティレビューを実施する。
-

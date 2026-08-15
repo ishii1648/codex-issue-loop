@@ -144,7 +144,7 @@ func (s Store) emptySnapshot() Snapshot {
 	return Snapshot{
 		Version: CurrentVersion, RepoID: s.RepoID, RepoPath: s.RepoPath,
 		Supervisor: Supervisor{State: "stopped", UpdatedAt: now},
-		Issues:     map[string]*Issue{}, PendingRequests: map[string]*Request{},
+		Issues:     map[string]*Issue{}, PendingRequests: map[string]*Request{}, Notifications: map[string]*Notification{},
 	}
 }
 
@@ -166,13 +166,20 @@ func (s Store) loadSnapshotUnlocked() (Snapshot, bool, error) {
 	if snapshot.RepoID != s.RepoID {
 		return Snapshot{}, false, fmt.Errorf("state repo_id %q does not match %q", snapshot.RepoID, s.RepoID)
 	}
+	normalizeSnapshot(&snapshot)
+	return snapshot, true, nil
+}
+
+func normalizeSnapshot(snapshot *Snapshot) {
 	if snapshot.Issues == nil {
 		snapshot.Issues = map[string]*Issue{}
 	}
 	if snapshot.PendingRequests == nil {
 		snapshot.PendingRequests = map[string]*Request{}
 	}
-	return snapshot, true, nil
+	if snapshot.Notifications == nil {
+		snapshot.Notifications = map[string]*Notification{}
+	}
 }
 
 func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {
@@ -231,6 +238,7 @@ func (s Store) loadTransactionUnlocked() (transaction, bool, error) {
 	if err := json.Unmarshal(data, &txn); err != nil {
 		return transaction{}, false, fmt.Errorf("decode state transaction: %w", err)
 	}
+	normalizeSnapshot(&txn.Snapshot)
 	return txn, true, nil
 }
 

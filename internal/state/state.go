@@ -2,6 +2,7 @@ package state
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -97,15 +98,30 @@ type Recovery struct {
 	DetectedAt time.Time `json:"detected_at"`
 }
 
+type Notification struct {
+	ID          string     `json:"id"`
+	Kind        string     `json:"kind"`
+	IssueNumber int        `json:"issue_number,omitempty"`
+	RequestID   string     `json:"request_id,omitempty"`
+	RunID       string     `json:"run_id,omitempty"`
+	Status      string     `json:"status"`
+	Attempts    int        `json:"attempts"`
+	CreatedAt   time.Time  `json:"created_at"`
+	NextAttempt time.Time  `json:"next_attempt,omitempty"`
+	SentAt      *time.Time `json:"sent_at,omitempty"`
+	LastError   string     `json:"last_error,omitempty"`
+}
+
 type Snapshot struct {
-	Version         int                 `json:"version"`
-	RepoID          string              `json:"repo_id"`
-	RepoPath        string              `json:"repo_path"`
-	StateRevision   uint64              `json:"state_revision"`
-	Supervisor      Supervisor          `json:"supervisor"`
-	Issues          map[string]*Issue   `json:"issues"`
-	PendingRequests map[string]*Request `json:"pending_requests"`
-	Recovery        *Recovery           `json:"recovery,omitempty"`
+	Version         int                      `json:"version"`
+	RepoID          string                   `json:"repo_id"`
+	RepoPath        string                   `json:"repo_path"`
+	StateRevision   uint64                   `json:"state_revision"`
+	Supervisor      Supervisor               `json:"supervisor"`
+	Issues          map[string]*Issue        `json:"issues"`
+	PendingRequests map[string]*Request      `json:"pending_requests"`
+	Notifications   map[string]*Notification `json:"notifications,omitempty"`
+	Recovery        *Recovery                `json:"recovery,omitempty"`
 }
 
 type Event struct {
@@ -121,11 +137,12 @@ type Event struct {
 }
 
 type Store struct {
-	Dir            string
-	RepoID         string
-	RepoPath       string
-	Secrets        []string
-	EventRetention retention.Policy
+	Dir                  string
+	RepoID               string
+	RepoPath             string
+	Secrets              []string
+	EventRetention       retention.Policy
+	NotificationsEnabled bool
 }
 
 func (s Store) StatePath() string  { return filepath.Join(s.Dir, "state.json") }
@@ -179,6 +196,9 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	}
 	snapshot.StateRevision++
 	now := time.Now().UTC()
+	if s.NotificationsEnabled {
+		enqueueAttention(&snapshot, eventType, issueNumber, runID, now)
+	}
 	snapshot.Supervisor.UpdatedAt = now
 	snapshotJSON, err := redact.Marshal(snapshot, s.Secrets)
 	if err != nil {
@@ -210,6 +230,35 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func enqueueAttention(snapshot *Snapshot, eventType string, issueNumber int, runID string, now time.Time) {
+	if snapshot.Notifications == nil {
+		snapshot.Notifications = map[string]*Notification{}
+	}
+	add := func(id, kind, requestID string) {
+		if id == "" || snapshot.Notifications[id] != nil {
+			return
+		}
+		snapshot.Notifications[id] = &Notification{
+			ID: id, Kind: kind, IssueNumber: issueNumber, RequestID: requestID, RunID: runID,
+			Status: "pending", CreatedAt: now, NextAttempt: now,
+		}
+	}
+	switch eventType {
+	case "input_requested":
+		for _, request := range snapshot.PendingRequests {
+			if request != nil && request.IssueNumber == issueNumber && request.Status == "pending" {
+				add("needs_input:"+request.ID, "needs_input", request.ID)
+			}
+		}
+	case "issue_blocked":
+		id := fmt.Sprintf("issue_blocked:%d:%s", issueNumber, runID)
+		add(id, "issue_blocked", "")
+	case "supervisor_blocked":
+		digest := sha256.Sum256([]byte(snapshot.Supervisor.Message))
+		add(fmt.Sprintf("supervisor_blocked:%x", digest[:8]), "supervisor_blocked", "")
+	}
 }
 
 func (s Store) rotateEventsUnlocked(snapshot Snapshot) error {

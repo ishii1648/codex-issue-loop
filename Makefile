@@ -3,7 +3,8 @@
 GO ?= go
 GOFMT ?= gofmt
 GOVULNCHECK_VERSION ?= v1.6.0
-VULN_GO_TOOLCHAIN ?= go1.25.8
+GO_TOOLCHAIN ?= go1.25.13
+export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 
 build:
 	$(GO) build -trimpath -o bin/agent-loop ./cmd/agent-loop
@@ -21,7 +22,7 @@ vet:
 	$(GO) vet ./...
 
 vuln-check:
-	env GOTOOLCHAIN=$(VULN_GO_TOOLCHAIN) $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 fmt-check:
 	@files="$$($(GOFMT) -l .)"; \
