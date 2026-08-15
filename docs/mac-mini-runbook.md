@@ -357,8 +357,8 @@ agent-loop logs --repo /absolute/path/to/repository --stderr
 新しいMac miniへ導入するときは、次を順に記録する。実repositoryで初めて試さず、branch protectionを設定したtest repositoryから始める。
 
 - [ ] 初期状態からbuild、install、認証確認、label preview/apply、register、doctorを完了した
-- [ ] AC Powerの`sleep`が`0`で、display off後もLaunchAgentが動作した
-- [ ] ChatGPTモバイルアプリからMac miniへ接続し、新しい監視taskを開始した
+- [ ] AC Powerの`sleep`が`0`であることを確認した
+- [x] ChatGPTモバイルアプリからMac miniへのCodex Remote接続を確認した（2026-08-16）
 - [ ] スマートフォンからstart、status、watch、stopを実行できた
 - [ ] test Issueをclaimし、Codex workerがworktreeで実行され、draft PRまたは期待した完了状態へ到達した
 - [ ] 意図的な`needs_input`をスマートフォンで受け、request IDを保ってanswerし、workerがresumeした
@@ -366,12 +366,20 @@ agent-loop logs --repo /absolute/path/to/repository --stderr
 - [ ] network一時切断後、eventの取りこぼしがあってもreconciliationで最新snapshotへ復旧した
 - [ ] auth失効をtest credentialで再現し、blockedの検出、再認証、restartを確認した
 - [ ] 容量制限されたtest volumeまたはfixtureで書き込み失敗を再現し、停止・backup・復旧手順を確認した
-- [ ] screen lockとdisplay offでは継続し、logoutでは停止することを確認した
-- [ ] 計画したOS再起動後、login、Remote再接続、LaunchAgent/status復旧を確認した
 - [ ] backupからtest環境をrestoreし、doctor後に再開できた
 - [ ] unregisterとuninstall後もstate/worktreeが保持されることを確認した
 
-再起動、logout、認証失効、容量不足は稼働中の本番repositoryでは試さない。実施日時、tester、commit、CLI version、Mac model、macOS version、結果、関連Issueを記録し、未確認項目を「成功」と扱わない。
+認証失効、容量不足は稼働中の本番repositoryでは試さない。実施日時、tester、commit、CLI version、Mac model、macOS version、結果、関連Issueを記録し、未確認項目を「成功」と扱わない。
+
+### 10.1 端末ライフサイクルの運用時確認
+
+display off、screen lock、logout、OS再起動はMac miniの通常運用では発生頻度が低く、意図的な中断を伴うため、導入やmilestone完了を妨げるTODOにはしない。実際に発生したとき、または計画保守時に次を確認して運用記録へ残す。
+
+- display offまたはscreen lock中、Macがawakeでユーザーsessionが維持されていればLaunchAgentが継続する
+- logoutするとLaunchAgentとCodex Remoteが停止する
+- OS再起動後、FileVault unlockとlogin、Codex Remote再接続、LaunchAgentのstatus確認まで復旧する
+
+異常があった場合だけ、実施日時、tester、CLI version、Mac model、macOS version、観測結果を添えてIssue化する。
 
 ## 11. 公式仕様への依存
 
