@@ -4,7 +4,7 @@
 
 本書は、GitHub Issue を継続的に取得し、Codex CLI で実装する汎用的な Issue ループの要件を定義する。
 
-対象は、常時稼働させる Mac mini をホストとし、ユーザーが ChatGPT モバイルアプリの Codex Remote から操作・監視する構成である。Claude Code および Claude Remote Control には依存しない。
+対象は、常時稼働させる Mac mini を実行ホストとし、ユーザーが ChatGPT モバイルアプリの Codex Remote から操作・監視できる構成である。仕事の投入元はMac mini上のCodexに限定せず、GitHub Issueを共通のキュー境界とする。Claude Code および Claude Remote Control には依存しない。
 
 ## 2. 背景
 
@@ -73,19 +73,21 @@ Codex の単一 task や goal は、一つの具体的な目的を継続的に�
 
 - Mac mini を常時稼働ホストとして管理する開発者
 - ChatGPT モバイルアプリから Codex Remote を利用する同一ユーザー
+- GitHub UI、CLI/API、automation、別ホストのCodex等からIssueを作成するproducer
 
-### 5.2 Codex アプリ上の主な入口
+### 5.2 主な操作入口と投入経路
 
-同じローカルプロジェクト配下に、次の2 task を作成してピン留めする。
+同じローカルプロジェクト配下には、監視taskを作成してピン留めする。Issue作成用taskは会話で要望を整理したい場合の任意の入口であり、常設の必須コンポーネントではない。
 
-| task | 役割 | 通常時の見え方 |
+| 入口 | 役割 | 通常時の見え方 |
 | --- | --- | --- |
 | `[LOOP] <repo> — monitor` | ループの起動、再接続、状態監視、質問への回答 | `Running`、入力が必要なら `Needs input` |
-| `[INTAKE] <repo> — new issue` | 要望の整理、コード調査、Issue 本文作成、GitHub Issue 登録 | 会話待ち |
+| `[INTAKE] <repo> — new issue`（任意） | 要望の整理、コード調査、Issue 本文作成、GitHub Issue 登録 | 会話待ち |
+| GitHub UI、CLI/API、automation等 | GitHub Issue作成と着手可能ラベル付与 | Codex taskを必要としない |
 
 Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task として作成することは要件としない。Issue 単位の進捗は監視用 task、GitHub Issue、Pull Request、ローカルログで確認する。
 
-複雑な Issue の検討では一時的な draft task を作成してよいが、常設の入口は上記2つとする。
+複雑な Issue の検討では一時的なdraft taskを作成してよい。どのproducerを使っても、Issueの作成主体・作成場所・作成手段は着手可能性の判定条件にしない。
 
 ### 5.3 主要フロー
 
@@ -99,9 +101,9 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 
 #### UC-2: 新しい仕事を投入する
 
-1. ユーザーが Issue 作成用 task で要望を伝える
-2. Codex が対象リポジトリと既存 Issue を調査する
-3. 必要最小限の確認後、着手可能ラベルを付けて GitHub Issue を作成する
+1. 任意のproducerがGitHub Issueを作成する
+2. producerがIssue本文へ要望と完了条件を記載し、着手可能ラベルを付ける
+3. CodexのIssue作成用taskを使う場合は、必要に応じて対象リポジトリと既存Issueを事前に調査する
 4. ループが Issue を取得して実装を開始する
 
 #### UC-3: ユーザーの回答を待つ
@@ -148,6 +150,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-022**: 選択した Issue を GitHub ラベルとローカル状態の両方で claim し、重複実行を防ぐこと。
 - **FR-023**: キューが空の間は低負荷で待機し、定期的に再取得すること。
 - **FR-024**: Issue が入力待ちまたは恒久的失敗になっても、設定に応じて他の着手可能な Issue へ進めること。
+- **FR-025**: Issueの作成主体、作成場所、作成手段を着手可能性の条件にせず、GitHub上の状態、ラベル、設定されたassignee・milestone、ローカル処理状態だけで選択すること。
 
 ### 6.4 Codexワーカー
 
@@ -274,6 +277,10 @@ Mac mini に物理アクセスせず、Codex Remote から起動、状態確認�
 ### AC-8: preflightで停止しない
 
 実行profileを一意に判定できないIssueでもユーザー確認を要求せず `extended` を選び、初回worker内で実装へ進む。
+
+### AC-9: 外部producerからの投入
+
+GitHub UI、CLI/API、automation、または別ホストのCodexから作成したIssueでも、同じ着手可能条件を満たせばMac mini上のsupervisorが取得して処理を開始する。
 
 ## 10. 実装フェーズ
 

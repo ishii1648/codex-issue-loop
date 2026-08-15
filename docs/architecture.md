@@ -2,18 +2,17 @@
 
 ## 1. この仕組みが解決すること
 
-`codex-issue-loop` は、常時稼働する Mac mini 上で GitHub Issue を順番に取得し、Issue が存在する限り Codex CLI のワーカーを繰り返し実行する仕組みである。
+`codex-issue-loop` は、常時稼働する Mac mini 上で GitHub Issue を順番に取得し、Issue が存在する限り Codex CLI のワーカーを繰り返し実行する仕組みである。Mac miniは実行ホストであり、Issueの作成主体ではない。
 
-ユーザーはスマートフォンから次の2つの Codex taskを主な入口として利用する。
+ユーザーはスマートフォンから監視taskを主な操作入口として利用できる。
 
 - **監視task**: ループの起動・停止・状態確認・質問への回答
-- **Issue作成task**: 要望の整理と新しいGitHub Issueの作成
 
-Codex taskは操作画面であり、ループの実行主体ではない。監視taskが終了しても、`launchd` 配下のsupervisorは処理を継続する。
+仕事の投入元はCodexのIssue作成task、GitHub UI、`gh`やGitHub API、GitHub Actions等のautomationのいずれでもよい。作成元にかかわらず、着手可能条件を満たすGitHub Issueが共通のキュー境界になる。Codex taskは操作画面または任意のproducerであり、ループの実行主体ではない。監視taskが終了しても、`launchd` 配下のsupervisorは処理を継続する。
 
 ## 2. 全体像
 
-![スマートフォン、Codex task、supervisor、GitHub、Codex workerの関係](images/architecture-overview.png)
+![任意のIssue producer、GitHub、Mac mini上のsupervisorとCodex workerの関係](images/architecture-overview-v2.png)
 
 図中の `DURABLE STATE` がループ状態の正本である。socket等のevent通知は即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしを修復する。
 
@@ -22,7 +21,7 @@ Codex taskは操作画面であり、ループの実行主体ではない。監�
 | コンポーネント | 実行主体 | 主な責務 |
 | --- | --- | --- |
 | 監視task | Codex app | CLI操作、状態の要約、ユーザーへの質問、回答登録 |
-| Issue作成task | Codex app | 要望整理、リポジトリ調査、Issue作成 |
+| Issue producer | Codex app、GitHub UI、CLI/API、automation等 | 要望整理、Issue作成、着手可能ラベル付与 |
 | agent-loop Skill | Codexが読む手順 | 自然言語を安全なCLI操作へ対応づける |
 | agent-loop CLI | Goの短命プロセス | start、stop、status、watch、answer |
 | launchd | macOS | supervisorの起動と異常終了時の再起動 |
@@ -35,22 +34,24 @@ Codex taskは操作画面であり、ループの実行主体ではない。監�
 責務の中心は次のように分かれる。
 
 ```text
-Codex app     = 人との対話
-agent-loop    = 決定論的な制御と継続実行
-Codex worker  = 1 Issue内の非決定的な開発作業
-GitHub        = 人とループが共有する仕事のキュー
+Issue producer = 作成場所を問わない仕事の投入
+Codex app      = 人との対話、任意のproducer、監視
+agent-loop     = 決定論的な制御と継続実行
+Codex worker   = 1 Issue内の非決定的な開発作業
+GitHub         = producerとループが共有する仕事のキュー
 ```
 
 ## 4. 通常の実行フロー
 
-1. supervisorがGitHubから着手可能なIssueを取得する。
-2. 決定論的な順序で1件を選び、ラベルとローカル状態でclaimする。
-3. Issue専用のbranchとworktreeを用意する。
-4. `codex exec`ワーカーがpreflightを行い、そのまま実装を開始する。
-5. ワーカーはworktree内で実装とテストを行い、構造化結果を返す。Git metadata、remote、GitHubは変更しない。
-6. supervisorのpublisherが差分を検査し、署名なしで非対話commit、push、draft PR作成を冪等に行う。
-7. supervisorが公開結果を永続化し、GitHubへ反映する。
-8. 次のIssueを選ぶ。キューが空なら低負荷で待機する。
+1. 任意のproducerが着手可能ラベル付きのGitHub Issueを作成する。
+2. supervisorがGitHubから着手可能なIssueを取得する。
+3. 決定論的な順序で1件を選び、ラベルとローカル状態でclaimする。
+4. Issue専用のbranchとworktreeを用意する。
+5. `codex exec`ワーカーがpreflightを行い、そのまま実装を開始する。
+6. ワーカーはworktree内で実装とテストを行い、構造化結果を返す。Git metadata、remote、GitHubは変更しない。
+7. supervisorのpublisherが差分を検査し、署名なしで非対話commit、push、draft PR作成を冪等に行う。
+8. supervisorが公開結果を永続化し、GitHubへ反映する。
+9. 次のIssueを選ぶ。キューが空なら低負荷で待機する。
 
 IssueごとのCodex workerは外側のループを所有しない。次のIssueを選ぶのは常にsupervisorである。
 
@@ -164,9 +165,9 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 
 ## 11. 日常運用のイメージ
 
-通常、ユーザーが触るのは次の2つだけである。
+通常、ユーザーが直接操作する必要があるのは監視taskだけである。
 
-1. `[INTAKE] <repo> — new issue` で新しい仕事を登録する。
+1. GitHub UI、CLI/API、automation、または任意の `[INTAKE] <repo> — new issue` taskから新しい仕事を登録する。
 2. `[LOOP] <repo> — monitor` で状態確認と必要な回答を行う。
 
 ループに着手可能なIssueがあればsupervisorが自動的に処理する。質問が必要になれば監視taskのwatchが戻り、Codexがユーザーへ質問する。回答後は同じworktreeと保存済みコンテキストを使って処理を再開する。
