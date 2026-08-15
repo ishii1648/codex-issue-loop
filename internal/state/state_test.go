@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
 
 func TestStateAndEventsNeverPersistSecrets(t *testing.T) {
@@ -251,4 +252,34 @@ func TestFaultSecondSupervisorCannotAcquireLock(t *testing.T) {
 		t.Fatalf("lock was not reusable after release: %v", err)
 	}
 	ReleaseSupervisorLock(third)
+}
+
+func TestFaultEventRotationKeepsCheckpointAndRecoverySequence(t *testing.T) {
+	store := Store{
+		Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo",
+		EventRetention: retention.Policy{MaxBytes: 1, MaxAge: time.Hour, Keep: 2},
+	}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4; index++ {
+		if _, err := store.Update("tick", 0, "", map[string]int{"index": index}, func(*Snapshot) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.StateRevision != 4 {
+		t.Fatalf("revision=%d", snapshot.StateRevision)
+	}
+	events, _, partial, err := store.readEventsUnlocked()
+	if err != nil || partial || len(events) == 0 || events[0].Type != "event_log_checkpoint" {
+		t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
+	}
+	archives, err := filepath.Glob(store.EventsPath() + ".*.gz")
+	if err != nil || len(archives) == 0 || len(archives) > 2 {
+		t.Fatalf("archives=%v err=%v", archives, err)
+	}
 }

@@ -43,6 +43,24 @@ watch:
 	if cfg.Worker.TimeoutGrace.Duration != 30*time.Second {
 		t.Fatalf("timeout grace = %s", cfg.Worker.TimeoutGrace.Duration)
 	}
+	if cfg.Logs.RotateBytes != 16*1024*1024 || cfg.Logs.Generations != 7 || cfg.Logs.WorkerRunMaxCount != 100 {
+		t.Fatalf("unexpected log defaults: %+v", cfg.Logs)
+	}
+}
+
+func TestLoadRejectsInvalidLogRetention(t *testing.T) {
+	for _, fragment := range []string{
+		"logs:\n  rotate_bytes: 100\n",
+		"logs:\n  rotate_interval: 0s\n",
+		"logs:\n  generations: 0\n",
+		"logs:\n  worker_run_max_age: 0s\n",
+		"logs:\n  worker_run_max_count: 0\n",
+	} {
+		dir := writeConfig(t, "version: 1\ngithub:\n  repo: owner/repo\n"+fragment)
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "logs") {
+			t.Fatalf("invalid log config accepted: %s: %v", fragment, err)
+		}
+	}
 }
 
 func TestLoadRejectsInvalidTimeoutGrace(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -430,5 +431,55 @@ func TestFaultSupervisorStopsBeforeRecoveryBlockedWork(t *testing.T) {
 	snapshot, loadErr := loop.Store.Load()
 	if loadErr != nil || snapshot.Supervisor.State != "blocked" || snapshot.Recovery == nil {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, loadErr)
+	}
+}
+
+func TestWorkerRunLogPruningPreservesActiveAndAuditsDeletion(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Config.Logs.WorkerRunMaxAge = config.Duration{Duration: 24 * time.Hour}
+	loop.Config.Logs.WorkerRunMaxCount = 1
+	runs := filepath.Join(loop.Store.Dir, "runs")
+	for _, name := range []string{"run_old", "run_recent", "run_active"} {
+		if err := os.MkdirAll(filepath.Join(runs, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(runs, "run_old"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Update("active", 1, "run_active", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{Number: 1, RunID: "run_active", Status: "needs_input"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.pruneRunLogs(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(runs, "run_old")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old run was not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runs, "run_active")); err != nil {
+		t.Fatalf("active run removed: %v", err)
+	}
+	data, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || !strings.Contains(string(data), "worker_logs_pruned") {
+		t.Fatalf("missing audit event: %s err=%v", data, err)
+	}
+}
+
+func TestFaultDiskSafetyReserveBlocksSupervisor(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.DiskAvailable = func(string) (uint64, error) { return 0, nil }
+	err := loop.Run(context.Background())
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected BlockedError, got %v", err)
+	}
+	snapshot, loadErr := loop.Store.Load()
+	if loadErr != nil || snapshot.Supervisor.State != "blocked" || !strings.Contains(snapshot.Supervisor.Message, "safety reserve") {
+		t.Fatalf("snapshot=%+v err=%v", snapshot.Supervisor, loadErr)
 	}
 }

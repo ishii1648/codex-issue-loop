@@ -35,6 +35,7 @@ type Config struct {
 	Watch      Watch      `yaml:"watch" json:"watch"`
 	Git        Git        `yaml:"git" json:"git"`
 	Completion Completion `yaml:"completion" json:"completion"`
+	Logs       Logs       `yaml:"logs" json:"logs"`
 	Security   Security   `yaml:"security" json:"security"`
 	RepoPath   string     `yaml:"-" json:"repo_path"`
 }
@@ -128,6 +129,14 @@ type Completion struct {
 	CloseIssue    bool `yaml:"close_issue" json:"close_issue"`
 }
 
+type Logs struct {
+	RotateBytes       int64    `yaml:"rotate_bytes" json:"rotate_bytes"`
+	RotateInterval    Duration `yaml:"rotate_interval" json:"rotate_interval"`
+	Generations       int      `yaml:"generations" json:"generations"`
+	WorkerRunMaxAge   Duration `yaml:"worker_run_max_age" json:"worker_run_max_age"`
+	WorkerRunMaxCount int      `yaml:"worker_run_max_count" json:"worker_run_max_count"`
+}
+
 type Security struct {
 	// RedactEnv contains environment-variable names, never secret values.
 	RedactEnv []string `yaml:"redact_env" json:"redact_env,omitempty"`
@@ -175,6 +184,13 @@ func Defaults() Config {
 			BaseBranch:   "main",
 		},
 		Completion: Completion{CreateDraftPR: true},
+		Logs: Logs{
+			RotateBytes:       16 * 1024 * 1024,
+			RotateInterval:    Duration{24 * time.Hour},
+			Generations:       7,
+			WorkerRunMaxAge:   Duration{30 * 24 * time.Hour},
+			WorkerRunMaxCount: 100,
+		},
 	}
 }
 
@@ -250,6 +266,12 @@ func (c Config) Validate() error {
 	}
 	if c.Worker.TimeoutGrace.Duration > c.Worker.Timeout.Duration {
 		return fmt.Errorf("worker.timeout_grace must not exceed worker.timeout")
+	}
+	if c.Logs.RotateBytes < 1024 || c.Logs.RotateInterval.Duration <= 0 || c.Logs.Generations < 1 {
+		return fmt.Errorf("logs rotation requires rotate_bytes >= 1024, positive rotate_interval, and generations >= 1")
+	}
+	if c.Logs.WorkerRunMaxAge.Duration <= 0 || c.Logs.WorkerRunMaxCount < 1 {
+		return fmt.Errorf("logs worker run retention requires positive worker_run_max_age and worker_run_max_count >= 1")
 	}
 	if c.Queue.MaxAttempts < 1 {
 		return fmt.Errorf("queue.max_attempts must be at least 1")

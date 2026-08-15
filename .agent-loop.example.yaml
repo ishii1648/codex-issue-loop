@@ -43,6 +43,13 @@ completion:
   create_draft_pr: true
   close_issue: false
 
+logs:
+  rotate_bytes: 16777216
+  rotate_interval: 24h
+  generations: 7
+  worker_run_max_age: 720h
+  worker_run_max_count: 100
+
 # Values are read from these environment variables at runtime. Never put the
 # secret values themselves in this file.
 security:

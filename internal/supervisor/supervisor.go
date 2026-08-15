@@ -14,6 +14,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
@@ -33,16 +34,17 @@ type ProcessInspector interface {
 }
 
 type Loop struct {
-	Config    config.Config
-	Store     state.Store
-	GitHub    gh.Client
-	Worktrees WorktreeManager
-	Worker    worker.Runner
-	Publisher Publisher
-	Processes ProcessInspector
-	Clock     Clock
-	Random    RandomSource
-	Logger    *log.Logger
+	Config        config.Config
+	Store         state.Store
+	GitHub        gh.Client
+	Worktrees     WorktreeManager
+	Worker        worker.Runner
+	Publisher     Publisher
+	Processes     ProcessInspector
+	Clock         Clock
+	Random        RandomSource
+	Logger        *log.Logger
+	DiskAvailable func(string) (uint64, error)
 }
 
 type BlockedError struct{ Err error }
@@ -197,6 +199,21 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, failure.Wrap(failure.Supervisor, "load durable state", err)
 	}
+	diskAvailable := l.DiskAvailable
+	if diskAvailable == nil {
+		diskAvailable = retention.AvailableBytes
+	}
+	available, err := diskAvailable(l.Store.Dir)
+	if err != nil {
+		return false, failure.Wrap(failure.Supervisor, "inspect log storage capacity", err)
+	}
+	reserve := uint64(l.Config.Logs.RotateBytes * 2)
+	if available < reserve {
+		return false, failure.Wrap(failure.Supervisor, "log storage safety reserve exhausted", fmt.Errorf("available=%d required=%d", available, reserve))
+	}
+	if err := l.pruneRunLogs(snapshot); err != nil {
+		return false, failure.Wrap(failure.Supervisor, "prune worker run logs", err)
+	}
 	if issueState := nextPending(snapshot, l.now()); issueState != nil {
 		return true, l.processExisting(ctx, *issueState)
 	}
@@ -218,6 +235,27 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 		return false, l.markPolling("")
 	}
 	return true, l.startIssue(ctx, selected)
+}
+
+func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
+	exclude := map[string]bool{}
+	for _, issue := range snapshot.Issues {
+		switch issue.Status {
+		case "claiming", "claimed", "running", "resume_pending", "retry_wait", "needs_input":
+			if issue.RunID != "" {
+				exclude[issue.RunID] = true
+			}
+		}
+	}
+	removed, err := retention.PruneRunDirs(
+		filepath.Join(l.Store.Dir, "runs"), exclude,
+		l.Config.Logs.WorkerRunMaxAge.Duration, l.Config.Logs.WorkerRunMaxCount, l.now(),
+	)
+	if err != nil || len(removed) == 0 {
+		return err
+	}
+	_, err = l.Store.Update("worker_logs_pruned", 0, "", map[string]any{"run_ids": removed}, func(*state.Snapshot) error { return nil })
+	return err
 }
 
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {

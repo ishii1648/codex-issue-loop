@@ -26,6 +26,8 @@ make test-race
 | attention状態と`state_revision`の永続化 | `TestFaultAttentionRevisionPersistsSnapshotAndEvent`、`TestFaultAttentionRemainsStickyUntilAnswered` |
 | standard workerが追加runなしで完了 | `TestFaultStandardWorkerCompletesWithoutAdditionalRun` |
 | extended workerだけが設定上限内でresume | `TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit` |
+| event rotation後のsequence復旧 | `TestFaultEventRotationKeepsCheckpointAndRecoverySequence` |
+| disk容量reserveでのblocked化 | `TestFaultDiskSafetyReserveBlocksSupervisor` |
 
 ## 追加の部分障害と境界
 
@@ -41,6 +43,7 @@ make test-race
 | GitHubラベルのpreview・冪等作成・部分成功 | `TestBootstrapLabelsPreviewsCreatesAndPreservesExistingMetadata`、`TestBootstrapLabelsIsIdempotentWhenEveryLabelExists`、`TestFaultBootstrapLabelsReportsPartialSuccessAndCanBeRerun` |
 | doctorの安定code・認証・sleep・state・停止理由 | `TestDoctorOutputHasStableSchemaCodesAndSafeRemediations`、`TestFaultDoctorHostAuthAndSleepFixturesHaveUniqueCodes`、`TestFaultDoctorDetectsCorruptStateWithoutModifyingIt`、`TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog` |
 | 回復不能なsnapshot/event不整合 | `TestFaultRevisionMismatchIsQuarantined`、`TestFaultCorruptSnapshotIsQuarantined` |
+| log世代上限とworker run保持 | `TestLongRunningWriterKeepsBoundedGenerations`、`TestWorkerRunLogPruningPreservesActiveAndAuditsDeletion` |
 
 障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
 

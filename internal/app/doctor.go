@@ -285,7 +285,7 @@ func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Conf
 	if event.Type != "" {
 		contextDetail += fmt.Sprintf(" latest_event=%s@%s", event.Type, event.Timestamp.Format(time.RFC3339))
 	}
-	line, logErr := tailFile(filepath.Join(store.Dir, "supervisor.err.log"), 4096)
+	line, logErr := tailFile(filepath.Join(store.Dir, "launchd.stderr.log"), 4096)
 	if line != "" {
 		contextDetail += " latest_log=" + truncate(line, 500)
 	} else if logErr == nil {

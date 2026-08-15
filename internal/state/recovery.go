@@ -238,6 +238,13 @@ func (s Store) validateTransaction(txn transaction) error {
 func (s Store) validateConsistency(snapshot Snapshot, events []Event) error {
 	last := uint64(0)
 	for index, event := range events {
+		if index == 0 && event.Type == "event_log_checkpoint" {
+			if event.Sequence == 0 {
+				return fmt.Errorf("event log checkpoint sequence must be positive")
+			}
+			last = event.Sequence
+			continue
+		}
 		expected := last + 1
 		if event.Sequence != expected {
 			return fmt.Errorf("event sequence at index %d is %d, expected %d", index, event.Sequence, expected)
