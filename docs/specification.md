@@ -313,7 +313,7 @@ agent-loop watch --repo /path/to/repo --until-attention [--json]
 
 未回答質問が既に存在する場合、待機せず即時返却する。watchはsnapshotとevent logを読み取るだけで、supervisorの親プロセスにはならない。
 
-watchは永続snapshotを正本とし、socket、ファイル通知、プロセス内channel等のeventを低遅延化のヒントとして扱う。event payloadだけで終了条件を判定せず、起床のたびにsnapshotを読み直す。
+watchは永続snapshotを正本とし、fsnotify/kqueueによるstate directory eventを低遅延化のヒントとして扱う。event payloadだけで終了条件を判定せず、起床のたびにsnapshotを読み直す。個別fileではなくdirectoryを監視するため、`state.json`のatomic rename後も新しいfileを検出できる。watcher作成・登録失敗またはchannel終了時はpolling-onlyへ降格する。[ADR-0003](adr/0003-event-notification.md)を正本とする。
 
 raceを避けるため、watchは次の順序で待機する。
 
@@ -857,6 +857,8 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - worker kill後のreconciliation
 - watchの接続、切断、複数接続
 - event通知を破棄した場合の60秒reconciliation
+- watcher生成・購読失敗とevent channel終了時のpolling-only fallback
+- 実fsnotifyを使う複数watchと終了後の再接続
 - read-subscribe-read間に状態が変わるrace
 - attention状態と`state_revision`の永続化
 - standard workerが追加runなしで完了すること
@@ -887,7 +889,6 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - `gh` JSON fieldとlabel更新の具体コマンド
 - worker timeout時のgrace period
 - desktop app更新によるRemote/通知表示差異のE2E手順
-- event通知方式（Unix domain socket、ファイル通知、プロセス内IPC）の最終選定
 - Codex CLI session resumeのversion別capabilityとfallback
 - Codexの保留中tool callに関する公式token計測仕様
 - distributed coordinatorとpublication gatewayのbackend、認証、backup、障害環境

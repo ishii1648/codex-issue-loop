@@ -16,11 +16,23 @@ type Result struct {
 	Snapshot state.Snapshot `json:"snapshot"`
 }
 
+type eventSubscription struct {
+	wake   <-chan struct{}
+	errors <-chan error
+	close  func() error
+}
+
+type subscribeFunc func(context.Context, string) (eventSubscription, error)
+
 func Wait(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool) (Result, error) {
-	return waitWithSubscribeHook(ctx, store, interval, jitter, untilIdle, nil)
+	return waitWithSubscription(ctx, store, interval, jitter, untilIdle, subscribeFSNotify, nil)
 }
 
 func waitWithSubscribeHook(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool, subscribed func()) (Result, error) {
+	return waitWithSubscription(ctx, store, interval, jitter, untilIdle, subscribeFSNotify, subscribed)
+}
+
+func waitWithSubscription(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool, subscribe subscribeFunc, subscribed func()) (Result, error) {
 	if interval <= 0 {
 		return Result{}, fmt.Errorf("reconcile interval must be positive")
 	}
@@ -28,13 +40,15 @@ func waitWithSubscribeHook(ctx context.Context, store state.Store, interval time
 		return Result{Reason: result, Snapshot: snapshot}, err
 	}
 
-	w, err := fsnotify.NewWatcher()
+	subscription, err := subscribe(ctx, filepath.Clean(store.Dir))
 	if err != nil {
-		return Result{}, fmt.Errorf("create event watcher: %w", err)
+		// Event delivery is only a latency optimization. Descriptor exhaustion,
+		// backend errors, or a temporarily unavailable directory must not disable
+		// durable reconciliation.
+		return wait(ctx, store, interval, jitter, untilIdle, nil, nil)
 	}
-	defer w.Close()
-	if err := w.Add(filepath.Clean(store.Dir)); err != nil {
-		return Result{}, fmt.Errorf("watch state directory: %w", err)
+	if subscription.close != nil {
+		defer subscription.close()
 	}
 	if subscribed != nil {
 		subscribed()
@@ -46,9 +60,23 @@ func waitWithSubscribeHook(ctx context.Context, store state.Store, interval time
 		return Result{Reason: result, Snapshot: snapshot}, err
 	}
 
+	return wait(ctx, store, interval, jitter, untilIdle, subscription.wake, subscription.errors)
+}
+
+func subscribeFSNotify(ctx context.Context, directory string) (eventSubscription, error) {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return eventSubscription{}, fmt.Errorf("create event watcher: %w", err)
+	}
+	if err := w.Add(directory); err != nil {
+		_ = w.Close()
+		return eventSubscription{}, fmt.Errorf("watch state directory: %w", err)
+	}
 	wake := make(chan struct{}, 1)
 	errors := make(chan error, 1)
 	go func() {
+		defer close(wake)
+		defer close(errors)
 		for {
 			select {
 			case <-ctx.Done():
@@ -75,7 +103,7 @@ func waitWithSubscribeHook(ctx context.Context, store state.Store, interval time
 			}
 		}
 	}()
-	return wait(ctx, store, interval, jitter, untilIdle, wake, errors)
+	return eventSubscription{wake: wake, errors: errors, close: w.Close}, nil
 }
 
 func wait(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool, wake <-chan struct{}, eventErrors <-chan error) (Result, error) {

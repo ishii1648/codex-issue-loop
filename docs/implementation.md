@@ -15,7 +15,7 @@
 - 原子的な`state.json`とappend-only `events.jsonl`
 - write-ahead state transaction、partial event修復、破損時の隔離とrecovery blocked
 - `state_revision`、stickyな未回答request、回答の冪等性
-- fsnotifyによるmacOS event起床と低頻度reconciliation
+- fsnotify/kqueueによるstate directory event起床、購読失敗時のpolling-only fallback、低頻度reconciliation
 - 回答保存時のsupervisor即時起床
 - GitHub Issueのfilter、再取得、決定論的sort、write-ahead claim
 - Issue番号、作成日時、priority labelを使うconfigurableなqueue orderingと安定tie-break

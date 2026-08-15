@@ -14,7 +14,7 @@
 
 ![任意のIssue producer、GitHub、Mac mini上のsupervisorとCodex workerの関係](images/architecture-overview-v2.png)
 
-図中の `DURABLE STATE` がループ状態の正本である。socket等のevent通知は即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしを修復する。
+図中の `DURABLE STATE` がループ状態の正本である。fsnotify/kqueueによるstate directory eventは即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしやbackend停止を修復する。[ADR-0003](adr/0003-event-notification.md)を正本とする。
 
 スマートフォンから監視taskへの紺色の矢印はCodex Remoteによる操作経路、`WATCH`から監視taskを経てスマートフォンへ戻るオレンジ色の破線はCodexの通知経路を表す。これに加えて、監視task未接続時はopt-inの外部push adapterが永続outboxからスマートフォンへ直接通知できる。いずれの通知も正本ではなく、永続snapshotへ戻るための補助経路である。
 
@@ -117,7 +117,7 @@ Codex Goalは、一つの具体的な目的と検証可能な完了条件を追�
 2. **event通知は低遅延化のヒント**
 3. **低頻度pollingは取りこぼし修復**
 
-socket、ファイル通知、プロセス内channel等のeventだけに依存しない。eventを受信した場合も、そのpayloadを正本とはせず永続状態を読み直す。
+fsnotify/kqueueでstate directoryを監視するが、そのeventだけに依存しない。eventを受信した場合も、そのpayloadを正本とはせず永続状態を読み直す。watcherを作成・登録できない場合はpolling-onlyへ降格する。
 
 ### 8.2 watchアルゴリズム
 

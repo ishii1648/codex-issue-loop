@@ -2,6 +2,7 @@ package observe
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -116,6 +117,76 @@ func TestFaultDisconnectedEventChannelsFallBackToTimer(t *testing.T) {
 	if outcome.err != nil || outcome.result.Reason != "needs_input" {
 		t.Fatalf("outcome=%+v", outcome)
 	}
+}
+
+func TestFaultWatcherSubscriptionFailureFallsBackToReconciliation(t *testing.T) {
+	store := newWatchStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resultCh := make(chan outcomeForTest, 1)
+	go func() {
+		result, err := waitWithSubscription(ctx, store, 20*time.Millisecond, 0, false, func(context.Context, string) (eventSubscription, error) {
+			return eventSubscription{}, errors.New("too many open files")
+		}, nil)
+		resultCh <- outcomeForTest{result: result, err: err}
+	}()
+	_, err := store.Update("input_requested", 7, "run", nil, func(snapshot *state.Snapshot) error {
+		snapshot.PendingRequests["req_no_watcher"] = &state.Request{ID: "req_no_watcher", IssueNumber: 7, Status: "pending"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome := <-resultCh
+	if outcome.err != nil || outcome.result.Reason != "needs_input" {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
+func TestFSNotifyMultipleWatchersWakeAndCanReconnect(t *testing.T) {
+	store := newWatchStore(t)
+	waitForAttention := func(issueNumber int, requestID string, watchers int) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		type outcome struct {
+			result Result
+			err    error
+		}
+		results := make(chan outcome, watchers)
+		subscribed := make(chan struct{}, watchers)
+		for index := 0; index < watchers; index++ {
+			go func() {
+				result, err := waitWithSubscribeHook(ctx, store, time.Hour, 0, false, func() { subscribed <- struct{}{} })
+				results <- outcome{result: result, err: err}
+			}()
+		}
+		for index := 0; index < watchers; index++ {
+			<-subscribed
+		}
+		snapshot, err := store.Update("input_requested", issueNumber, "run", nil, func(snapshot *state.Snapshot) error {
+			snapshot.PendingRequests[requestID] = &state.Request{ID: requestID, IssueNumber: issueNumber, Status: "pending"}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index := 0; index < watchers; index++ {
+			outcome := <-results
+			if outcome.err != nil || outcome.result.Reason != "needs_input" || outcome.result.Snapshot.StateRevision != snapshot.StateRevision {
+				t.Fatalf("outcome=%+v revision=%d", outcome, snapshot.StateRevision)
+			}
+		}
+	}
+
+	waitForAttention(8, "req_first", 2)
+	if _, err := store.Update("answer_recorded", 8, "run", nil, func(snapshot *state.Snapshot) error {
+		snapshot.PendingRequests["req_first"].Status = "answered"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForAttention(9, "req_after_reconnect", 1)
 }
 
 type outcomeForTest struct {
