@@ -28,6 +28,9 @@ func TestPublishCommitsPushesAndCreatesDraftPullRequestIdempotently(t *testing.T
 	runGit(t, repo, "branch", "-M", "main")
 	runGit(t, repo, "remote", "add", "origin", remote)
 	runGit(t, repo, "push", "-u", "origin", "main")
+	runGit(t, repo, "config", "commit.gpgsign", "true")
+	runGit(t, repo, "config", "gpg.format", "ssh")
+	runGit(t, repo, "config", "user.signingkey", filepath.Join(root, "missing-signing-key"))
 	branch := "codex/issue-1-publish"
 	runGit(t, repo, "switch", "-c", branch)
 	if err := os.MkdirAll(filepath.Join(repo, "results"), 0o700); err != nil {

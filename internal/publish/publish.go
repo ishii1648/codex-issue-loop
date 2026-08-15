@@ -39,7 +39,7 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 		if _, err := m.run(ctx, git, "-C", worktreePath, "diff", "--cached", "--check"); err != nil {
 			return worker.GitResult{}, fmt.Errorf("validate staged changes: %w", err)
 		}
-		if _, err := m.run(ctx, git, "-C", worktreePath, "commit", "-m", commitTitle(issue)); err != nil {
+		if _, err := m.run(ctx, git, "-c", "commit.gpgsign=false", "-C", worktreePath, "commit", "-m", commitTitle(issue)); err != nil {
 			return worker.GitResult{}, fmt.Errorf("commit publish changes: %w", err)
 		}
 	}
