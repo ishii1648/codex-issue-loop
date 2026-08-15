@@ -18,6 +18,15 @@ import (
 func testEnvironment(t *testing.T) (string, layout.Layout) {
 	t.Helper()
 	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeCodex := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AGENT_LOOP_HOME", filepath.Join(root, "home"))
 	t.Setenv("AGENT_LOOP_SKILLS_DIR", filepath.Join(root, "skills"))
 	t.Setenv("AGENT_LOOP_LAUNCH_AGENTS_DIR", filepath.Join(root, "launchagents"))
