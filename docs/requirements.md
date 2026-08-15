@@ -354,15 +354,16 @@ GitHub UI、CLI/API、automation、または別ホストのCodexから作成し�
 
 ## 11. OpenAI公式仕様への依存
 
-本要件は、2026-08-15時点の以下の公式OpenAIドキュメントを前提とする。
+本要件は、2026-08-16時点の以下の公式OpenAIドキュメントを前提とする。利用可否の詳細とlocal schema確認は[Codex公式仕様確認](codex-capability-review.md)を正本とする。
 
-- [Codex Remote](https://learn.chatgpt.com/docs/remote): 接続済みコンピューター上の task をスマートフォンから開始・監視・指示・承認できる
+- [Remote connections](https://learn.chatgpt.com/docs/remote-connections): 接続済みコンピューター上のchatをスマートフォンから開始・監視・指示・承認できる
 - [Projects and chats](https://learn.chatgpt.com/docs/projects): 同一ローカルプロジェクトで複数taskを整理し、頻繁に使うtaskをピン留めできる
 - [Notifications](https://learn.chatgpt.com/docs/notifications): task の `Running`、`Needs input`、`Ready`、`Blocked` 状態を確認できる
-- [Long-running work](https://learn.chatgpt.com/docs/long-running-work): Goalは明確な成果、制約、完了条件を持つ長時間作業に使い、desktop app、対話的CLI、IDE extensionから操作する
+- [Long-running work](https://learn.chatgpt.com/docs/long-running-work): Goalは明確な成果、制約、完了条件を持つ長時間作業に使う
+- [Codex App Server](https://learn.chatgpt.com/docs/app-server): thread Goal、resume、turn start、token usageのprogrammatic interface
 - [Integrated terminal](https://learn.chatgpt.com/docs/integrated-terminal): Codex taskから実行中のterminal出力を確認できる
 - [Developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli): `codex exec`、session resume、`--json`、`--output-schema`、sandbox指定
 
 外部製品の未公開APIや、外部プロセスからCodex taskの表示状態を直接変更する機能には依存しない。Codex taskが `watch` を実行し、そのコマンドが入力待ちイベントを返すことで、Codexがユーザーへ質問する。
 
-Goalは外側のIssueキューsupervisorの代替には使わない。公式仕様でheadless Goalの利用方法が確立するまでは、非対話workerの長時間継続をsupervisor管理のexecution profileと `codex exec resume` で実現する。また、待機中のtool callに対する製品全体の厳密なゼロトークン保証は要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。
+Goalは外側のIssueキューsupervisorの代替には使わない。App Serverのheadless Goal interfaceは利用可能になったため、Issue #53で`extended` profileのoptional adapterを検証する。導入までは非対話workerの長時間継続をsupervisor管理のexecution profileと`codex exec resume`で実現する。待機中のtool callに対する製品全体の厳密なゼロトークン保証は公式文書にないため要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。

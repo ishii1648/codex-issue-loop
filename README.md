@@ -18,6 +18,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [doctor診断・復旧runbook](docs/doctor.md)
 - [Mac mini常駐運用runbook](docs/mac-mini-runbook.md)
 - [スマートフォン直接push通知](docs/notifications.md)
+- [Codex Goal・task wake・token計測の公式仕様確認](docs/codex-capability-review.md)
 - [ADR-0001: macOS実行モデル](docs/adr/0001-macos-execution-model.md)
 - [ADR-0002: 単一ホスト並列化と複数ホスト冗長化](docs/adr/0002-concurrency-and-multi-host.md)
 - [ADR-0003: event通知方式](docs/adr/0003-event-notification.md)
@@ -34,7 +35,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - スマートフォンでは監視用taskを主な操作入口とし、Issue作成用taskは任意のproducerの一例とする
 - ユーザーへの質問が必要になった場合は状態を永続化し、監視用 task を通して回答できるようにする
 - `watch` は永続状態を正本とし、イベント通知と60秒間隔のreconciliationを併用する
-- Codex Goalは外側のIssueループには使わず、単一目的の長時間作業に限定して活用する
+- Codex Goalは外側のIssueループには使わず、単一目的の長時間作業に限定する。App Server Goal adapterは別Issueで検証する
 - 現行は1 host・1 workerを維持し、将来の単一host並列化と複数host冗長化は別機能として扱う
 - Issueの選択順は番号、作成日時、priority labelから明示設定でき、GitHub APIの返却順には依存しない
 
