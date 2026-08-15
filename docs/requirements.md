@@ -194,6 +194,13 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-063**: stop、reset、claim解除など影響の大きい操作では、対象と影響を明示すること。
 - **FR-064**: 既存の未回答質問がある場合は、新規 watch より先にその質問を表示すること。
 
+### 6.8 Worktreeライフサイクル
+
+- **FR-070**: completed、failed、blocked、needs-inputごとにworktree保持期間を設定でき、既定値を文書化すること。
+- **FR-071**: cleanupは既定でread-only planを返し、dirty、未push commit、open PR、未回答requestを自動削除しないこと。
+- **FR-072**: cleanup/purge適用時はloop停止を要求し、`git worktree prune`と整合させ、削除前後を監査eventへ記録すること。
+- **FR-073**: purgeは通常cleanupと分離し、Issue単位の完全一致確認tokenと復元可能性の表示を必須にすること。
+
 ## 7. 非機能要件
 
 ### 7.1 信頼性

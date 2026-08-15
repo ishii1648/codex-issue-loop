@@ -36,6 +36,7 @@
 - tag由来version、再現build、SPDX SBOM、checksum、artifact attestationを含むGitHub Release workflow
 - binary/Skill manifest、稼働LaunchAgentを保ったupdate、自動rollback、明示backup rollback
 - config・registry・state・active event・transactionのv1→v2 migration、checksum backup、journal再開、paired rollback
+- status別保持期間、dirty・未push・open PR・未回答request検査、dry-run cleanup、確認token付きpurge、削除監査event
 
 ## 運用前に必要なもの
 

@@ -119,6 +119,9 @@ printf '%s\n' '選択した方針' | agent-loop answer \
 
 # 状態を残して停止
 agent-loop stop --repo /path/to/repository
+
+# 期限切れworktreeのread-only preview
+agent-loop cleanup --repo /path/to/repository --json
 ```
 
 Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部のmacOS event通知とreconciliation pollingが永続状態を確認します。
@@ -126,7 +129,7 @@ Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部
 ## State and safety
 
 - 通常のworking treeは変更せず、Issueごとのworktreeを使用します。
-- force push、sandbox bypass、状態やworktreeの自動削除は行いません。
+- force push、sandbox bypass、supervisorによる状態やworktreeの自動削除は行いません。worktree整理は既定dry-runの`cleanup`と確認token必須の`purge`へ分離しています。
 - `stop`、`unregister`、`uninstall`後もIssueの状態とworktreeを保持します。
 - worker timeout時はprocess groupへSIGTERMを送り、`worker.timeout_grace`を超えた場合だけSIGKILLします。途中のworktreeは保持して再試行時に検査します。
 - 未回答requestは回答されるまでstickyに保持されます。
@@ -134,4 +137,5 @@ Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部
 - Issue入力はサイズと制御文字を制限し、prompt内では命令ではないJSONデータとして分離します。
 - state、event、worker log/result、GitHub通知では既知token形式と`security.redact_env`の値をマスクします。秘密を回答として渡さないでください。
 - event、supervisor、launchd、worker logは既定16 MiBまたは24時間でgzip rotationし、7世代を保持します。terminal worker runは既定30日・100件の範囲に整理され、削除は監査eventへ記録されます。
+- completed worktreeは既定7日、failedは30日、blockedとneeds-inputは無期限保持します。期限切れでもdirty、未push、open PR、未回答requestがあれば`cleanup --apply`は削除しません。[Worktree保持・cleanup・purge runbook](docs/worktree-lifecycle.md)を参照してください。
 - 権限、認証、backupの本番チェックは[セキュリティ運用runbook](docs/security-runbook.md)に従ってください。

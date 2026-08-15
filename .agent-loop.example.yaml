@@ -43,6 +43,13 @@ completion:
   create_draft_pr: true
   close_issue: false
 
+# 0s means that worktrees in the status are retained indefinitely.
+worktrees:
+  completed_max_age: 168h
+  failed_max_age: 720h
+  blocked_max_age: 0s
+  needs_input_max_age: 0s
+
 logs:
   rotate_bytes: 16777216
   rotate_interval: 24h

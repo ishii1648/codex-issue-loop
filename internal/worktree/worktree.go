@@ -29,6 +29,7 @@ type Inspection struct {
 	Branch             string
 	Head               string
 	Dirty              bool
+	UnpushedCommits    bool
 	LocalBranchExists  bool
 	RemoteBranchExists bool
 }
@@ -181,9 +182,70 @@ func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch st
 		if err != nil {
 			return inspection, fmt.Errorf("inspect remote branch: %w: %s", err, strings.TrimSpace(string(out)))
 		}
-		inspection.RemoteBranchExists = strings.TrimSpace(string(out)) != ""
+		remoteLine := strings.TrimSpace(string(out))
+		inspection.RemoteBranchExists = remoteLine != ""
+		if inspection.RemoteBranchExists {
+			remoteFields := strings.Fields(remoteLine)
+			inspection.UnpushedCommits = len(remoteFields) == 0 || remoteFields[0] != inspection.Head
+		} else {
+			base := "origin/" + cfg.Git.BaseBranch
+			count, countErr := exec.CommandContext(ctx, git, "-C", path, "rev-list", "--count", base+"..HEAD").CombinedOutput()
+			if countErr != nil {
+				return inspection, fmt.Errorf("inspect unpushed commits: %w: %s", countErr, strings.TrimSpace(string(count)))
+			}
+			inspection.UnpushedCommits = strings.TrimSpace(string(count)) != "0"
+		}
 	}
 	return inspection, nil
+}
+
+// Remove removes only the linked worktree. It deliberately keeps the local
+// branch so committed work remains recoverable. Force is reserved for the
+// explicitly confirmed purge command.
+func (m Manager) Remove(ctx context.Context, cfg config.Config, path string, force bool) error {
+	root := cfg.Git.WorktreeRoot
+	if root == "" {
+		root = filepath.Join(m.StateRoot, "worktrees")
+	}
+	secureRoot, err := canonicalPrivateRoot(root)
+	if err != nil {
+		return err
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil || !within(secureRoot, absPath) {
+		return fmt.Errorf("worktree path is outside configured root: %s", path)
+	}
+	if info, statErr := os.Lstat(absPath); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("worktree path must not be a symbolic link: %s", path)
+	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	git := m.GitPath
+	if git == "" {
+		git = "git"
+	}
+	if _, statErr := os.Stat(absPath); statErr == nil {
+		args := []string{"-C", cfg.RepoPath, "worktree", "remove"}
+		if force {
+			args = append(args, "--force")
+		}
+		args = append(args, absPath)
+		if out, removeErr := exec.CommandContext(ctx, git, args...).CombinedOutput(); removeErr != nil {
+			return fmt.Errorf("remove worktree: %w: %s", removeErr, strings.TrimSpace(string(out)))
+		}
+	}
+	return m.Prune(ctx, cfg)
+}
+
+func (m Manager) Prune(ctx context.Context, cfg config.Config) error {
+	git := m.GitPath
+	if git == "" {
+		git = "git"
+	}
+	if out, err := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "worktree", "prune").CombinedOutput(); err != nil {
+		return fmt.Errorf("prune worktree metadata: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func canonicalPrivateRoot(root string) (string, error) {
