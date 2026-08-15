@@ -21,6 +21,10 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | code | 意味 | 最初の確認・復旧 |
 | --- | --- | --- |
 | `DEPENDENCY_<NAME>_MISSING` | 必須commandがPATHにない | commandをinstallまたはPATHへ追加 |
+| `INSTALL_NOT_PRESENT` | source treeから実行中でinstallなし | 必要なら検証済みreleaseをinstall |
+| `INSTALL_MANIFEST_MISSING` / `INSTALL_MANIFEST_INVALID` | install metadataがない・破損 | install directoryをbackupして再install |
+| `INSTALL_VERSION_MISMATCH` | binary、Skill、manifestのversion/checksum不一致 | 検証済みreleaseからupdateまたはrollback |
+| `INSTALL_VERSION_CONSISTENT` | binary、Skill、manifestが一致 | 対応不要 |
 | `GITHUB_AUTH_INVALID` | `gh auth status`が失敗 | `gh auth login`後に対象repository権限を確認 |
 | `CODEX_AUTH_INVALID` | `codex login status`が失敗 | `codex login`、headless時は`codex login --device-auth` |
 | `GH_CLI_INCOMPATIBLE` / `CODEX_CLI_INCOMPATIBLE` | versionまたはcapability不足 | 対応versionへ更新しdoctorを再実行 |

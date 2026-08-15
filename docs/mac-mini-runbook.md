@@ -269,16 +269,15 @@ path、ユーザー、CLI version、state schemaが異なるMacへ移す場合�
 
 ## 7. 更新とrollback
 
-自動update/rollback機能が導入されるまでは、停止とbackupを伴う手動手順とする。
+release artifactの検証と更新方針は[Release・install・update方針](release.md)を正本とする。
 
 1. 全loopを停止し、[backup](#backup)を取る。
-2. 現在のinstalled binaryとsource commitを記録し、binaryのversion付きcopyをbackup領域へ保全する。
-3. 更新先commitで`make ci`を実行する。
-4. 新しいbinaryから`install`を実行する。
-5. 全対象repositoryを再度`register`し、plistのbinary pathを更新する。
-6. `doctor`後、1 repositoryずつstartする。
+2. `gh release download`、checksum、attestation、`version --json`でartifactを検証する。
+3. 新しいbinaryから`update --json`を実行し、返されたbackup pathを記録する。
+4. `update`が元々稼働していたLaunchAgentを再開し、全登録repositoryのplistを再生成したことを出力で確認する。
+5. `doctor`と各repositoryの`status`を確認する。
 
-更新後に失敗した場合はloopを停止し、保存した旧binaryと互換性のあるstate/config backupへ組で戻す。binaryだけを戻して新schemaのstateを読み込ませない。旧binaryをinstallして再registerし、doctor、start、statusの順で確認する。復旧にstateの削除やschema変換が必要なら自動実行せずescalationする。
+更新後に失敗した場合は`update`が返したbackupを`rollback --backup`へ指定する。binaryだけを戻して新schemaのstateを読み込ませない。旧binaryと互換性のあるstate/config backupへ組で戻し、doctor、start、statusの順で確認する。復旧にstateの削除や未定義のschema変換が必要なら自動実行せずescalationする。
 
 ## 8. 登録解除とuninstall
 
