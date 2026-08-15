@@ -17,6 +17,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [doctor診断・復旧runbook](docs/doctor.md)
 - [Mac mini常駐運用runbook](docs/mac-mini-runbook.md)
 - [スマートフォン直接push通知](docs/notifications.md)
+- [ADR-0001: macOS実行モデル](docs/adr/0001-macos-execution-model.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview-v2.png)
 

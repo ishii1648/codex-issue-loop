@@ -1,6 +1,6 @@
 # Mac mini常駐運用runbook
 
-最終確認日: 2026-08-15
+最終確認日: 2026-08-16
 
 このrunbookは、Apple Silicon Mac mini上で`agent-loop`を常駐させ、ChatGPTモバイルアプリのCodex Remoteから起動、監視、質問への回答、停止を行うための標準手順である。ループ本体はLaunchAgentとして動作し、Codex taskやCodex desktop appの生存には依存しない。一方、スマートフォンからMacを操作する経路には、ログイン中のmacOSユーザーセッション、起動中のCodex desktop app、同一アカウントのRemote接続が必要である。
 
@@ -17,7 +17,7 @@ Mac miniには、日常利用や管理者作業と分離した標準macOSユー�
 - `git`、互換範囲内の`gh`、`codex`、ソースからbuildする場合はGoがインストール済みである。対応versionは[CLI互換性マトリクス](compatibility.md)を参照する。
 - 対象repositoryのdefault branchにbranch protectionとrequired checksが設定され、workerの資格情報にbypass権限がない。
 
-FileVaultを利用するMacでは、OS再起動後に利用者がdiskをunlockしてmacOSへログインするまでLaunchAgentとRemoteは復旧しない。自動ログインは物理アクセス時の保護を弱めるため既定では使用しない。無人再起動まで必要な環境では、組織の端末管理・物理セキュリティ・FileVault方針を先に決める。
+FileVaultを利用するMacでは、OS再起動後に利用者がdiskをunlockしてmacOSへログインするまでLaunchAgentとRemoteは復旧しない。自動ログイン、LaunchDaemon、root/system-wide credentialは採用しない。比較、security boundary、再検討条件は[ADR-0001](adr/0001-macos-execution-model.md)を正本とする。
 
 ## 2. 初回セットアップ
 
@@ -390,6 +390,8 @@ display off、screen lock、logout、OS再起動はMac miniの通常運用では
 
 - [OpenAI: Remote connections](https://learn.chatgpt.com/docs/remote-connections.md)
 - [OpenAI: Codex authentication](https://learn.chatgpt.com/docs/auth.md)
+- [Apple: Service Management](https://developer.apple.com/documentation/servicemanagement)
+- [Apple: Automatic login and FileVault](https://support.apple.com/en-gb/102316)
 - [GitHub CLI: gh auth status](https://cli.github.com/manual/gh_auth_status)
 - [GitHub CLI: gh auth login](https://cli.github.com/manual/gh_auth_login)
 - [Apple: Set sleep and wake settings for your Mac](https://support.apple.com/en-gb/guide/mac-help/mchle41a6ccd/mac)

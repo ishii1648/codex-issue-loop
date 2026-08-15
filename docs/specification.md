@@ -371,7 +371,7 @@ agent-loop answer --request-id req_... --message-file -
 - `StandardOutPath` / `StandardErrorPath`: repo別状態ディレクトリ
 - `EnvironmentVariables`: 必要最小限のPATHとHOME。tokenは含めない
 
-LaunchAgentなので、ユーザーがログアウトしている間は動作保証しない。システムwideなLaunchDaemonは、ユーザーcredential、HOME、Codex認証との境界が複雑になるためMVPでは採用しない。
+LaunchAgentなので、ユーザーがログアウトしている間は動作保証しない。system-wideなLaunchDaemon、自動ログイン、daemon/helper分割は、ユーザーcredential、HOME、Keychain、Codex認証、worktree ownershipの境界を変え、現在の可用性要件に対して過剰なため採用しない。正式な比較と再検討条件は[ADR-0001](adr/0001-macos-execution-model.md)を正本とする。
 
 ## 8. supervisor状態機械
 

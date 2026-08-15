@@ -248,6 +248,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - macOS の「ディスプレイがオフのときに自動でスリープさせない」設定を有効にすることを推奨する。これは Codex ではなく macOS の設定である。
 - LaunchAgent はユーザーのログインセッションで動く。再起動直後から使うには、少なくとも対象ユーザーがログインしている必要がある。
 - ディスプレイを常時点灯させる必要はない。
+- LaunchDaemonと自動ログインは採用しない。FileVault unlockとlogin前の無人復旧は要件外とし、logout・再起動は発生時または計画保守時の運用確認とする。判断根拠は[ADR-0001](adr/0001-macos-execution-model.md)を正本とする。
 
 ### 8.2 認証
 

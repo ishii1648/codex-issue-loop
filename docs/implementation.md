@@ -57,6 +57,7 @@
 ## MVPの制限
 
 - 対象はmacOSのユーザーLaunchAgentのみである。
+- LaunchDaemonと自動ログインは採用せず、logout・再起動は運用時確認とする。[ADR-0001](adr/0001-macos-execution-model.md)を参照する。
 - 1 repositoryにつきconcurrencyは1である。
 - 同じrepositoryを複数hostから処理しない。
 - GitHub labelは自動作成しない。
