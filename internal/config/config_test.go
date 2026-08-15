@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ func writeConfig(t *testing.T, body string) string {
 }
 
 func TestLoadDefaultsAndPercentJitter(t *testing.T) {
-	dir := writeConfig(t, `version: 1
+	dir := writeConfig(t, `version: 2
 github:
   repo: owner/repo
 watch:
@@ -56,7 +57,7 @@ func TestLoadRejectsInvalidLogRetention(t *testing.T) {
 		"logs:\n  worker_run_max_age: 0s\n",
 		"logs:\n  worker_run_max_count: 0\n",
 	} {
-		dir := writeConfig(t, "version: 1\ngithub:\n  repo: owner/repo\n"+fragment)
+		dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\n"+fragment)
 		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "logs") {
 			t.Fatalf("invalid log config accepted: %s: %v", fragment, err)
 		}
@@ -65,7 +66,7 @@ func TestLoadRejectsInvalidLogRetention(t *testing.T) {
 
 func TestLoadRejectsInvalidTimeoutGrace(t *testing.T) {
 	for _, value := range []string{"0s", "3h"} {
-		dir := writeConfig(t, "version: 1\ngithub:\n  repo: owner/repo\nworker:\n  timeout: 2h\n  timeout_grace: "+value+"\n")
+		dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nworker:\n  timeout: 2h\n  timeout_grace: "+value+"\n")
 		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "timeout") {
 			t.Fatalf("invalid timeout grace %s accepted: %v", value, err)
 		}
@@ -73,7 +74,7 @@ func TestLoadRejectsInvalidTimeoutGrace(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownNestedKey(t *testing.T) {
-	dir := writeConfig(t, `version: 1
+	dir := writeConfig(t, `version: 2
 github:
   repo: owner/repo
 watch:
@@ -87,7 +88,7 @@ watch:
 }
 
 func TestLoadRejectsUnsafeSandbox(t *testing.T) {
-	dir := writeConfig(t, `version: 1
+	dir := writeConfig(t, `version: 2
 github:
   repo: owner/repo
 worker:
@@ -106,7 +107,7 @@ func TestLoadRejectsUnsafePathsRefsAndSecretNames(t *testing.T) {
 		"security:\n  redact_env: [\"BAD=NAME\"]\n",
 	}
 	for _, fragment := range tests {
-		dir := writeConfig(t, "version: 1\ngithub:\n  repo: owner/repo\n"+fragment)
+		dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\n"+fragment)
 		if _, err := Load(dir); err == nil {
 			t.Fatalf("unsafe config accepted: %s", fragment)
 		}
@@ -120,5 +121,20 @@ func TestRedactionValuesReadsNamedEnvironmentOnly(t *testing.T) {
 	values := cfg.RedactionValues()
 	if len(values) != 1 || values[0] != "configured-value" {
 		t.Fatalf("values=%q", values)
+	}
+}
+
+func TestLoadRejectsLegacyAndFutureSchemaWithActionableErrors(t *testing.T) {
+	for _, test := range []struct {
+		version int
+		want    string
+	}{
+		{version: 1, want: "migration required"},
+		{version: CurrentVersion + 1, want: "unsupported config version"},
+	} {
+		dir := writeConfig(t, fmt.Sprintf("version: %d\ngithub:\n  repo: owner/repo\n", test.version))
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("version %d: %v", test.version, err)
+		}
 	}
 }

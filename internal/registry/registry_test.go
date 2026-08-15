@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,7 @@ func TestFaultRegistryAddResolveRemoveAndAmbiguity(t *testing.T) {
 func TestRegistryRejectsSymbolicLink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target.json")
-	if err := os.WriteFile(target, []byte(`{"version":1,"repos":{}}`), 0o600); err != nil {
+	if err := os.WriteFile(target, []byte(`{"version":2,"repos":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "registry.json")
@@ -74,6 +75,24 @@ func TestRegistryRejectsSymbolicLink(t *testing.T) {
 	}
 	if _, err := (Store{Path: path}).Load(); err == nil {
 		t.Fatal("symbolic-link registry was accepted")
+	}
+}
+
+func TestRegistryRejectsLegacyAndFutureSchemaWithActionableErrors(t *testing.T) {
+	for _, test := range []struct {
+		version int
+		want    string
+	}{
+		{version: 1, want: "migration required"},
+		{version: CurrentVersion + 1, want: "unsupported registry version"},
+	} {
+		path := filepath.Join(t.TempDir(), "registry.json")
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("{\"version\":%d,\"repos\":{}}\n", test.version)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (Store{Path: path}).Load(); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("version %d: %v", test.version, err)
+		}
 	}
 }
 

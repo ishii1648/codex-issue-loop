@@ -19,6 +19,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
+	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 )
@@ -61,6 +62,15 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 	}
 
 	diagnostics := diagnoseHost(ctx, l)
+	schemaDiagnostics, schemaReady := diagnoseSchemas(l)
+	diagnostics = append(diagnostics, schemaDiagnostics...)
+	if !schemaReady {
+		result := doctorResult{SchemaVersion: doctorSchemaVersion, OK: false, GeneratedAt: time.Now().UTC(), Diagnostics: diagnostics}
+		if err := a.writeDoctorResult(*jsonOut, result); err != nil {
+			return err
+		}
+		return exitError{1, fmt.Errorf("doctor found failing diagnostics")}
+	}
 	registryStore := registry.Store{Path: l.RegistryPath}
 	registered, registryErr := registryStore.Load()
 	if registryErr != nil {
@@ -96,6 +106,24 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 		return exitError{1, fmt.Errorf("doctor found failing diagnostics")}
 	}
 	return nil
+}
+
+func diagnoseSchemas(l layout.Layout) ([]diagnostic, bool) {
+	report, err := schema.Inspect(l)
+	if err != nil {
+		return []diagnostic{failedDiagnostic("SCHEMA_INSPECTION_FAILED", "host", "", "永続schemaを検査できません", err.Error(), instruction("fileを削除せずbackupし、agent-loop migrate --jsonで再確認してください"))}, false
+	}
+	if len(report.Unsupported) > 0 {
+		parts := make([]string, 0, len(report.Unsupported))
+		for _, artifact := range report.Unsupported {
+			parts = append(parts, fmt.Sprintf("%s=%d", artifact.Path, artifact.Version))
+		}
+		return []diagnostic{failedDiagnostic("SCHEMA_VERSION_UNSUPPORTED", "host", "", "このbinaryで扱えない永続schemaがあります", strings.Join(parts, ", "), instruction("対応binaryへ戻すか、対応するmigration手順を確認してください"))}, false
+	}
+	if report.NeedsMigration {
+		return []diagnostic{failedDiagnostic("SCHEMA_MIGRATION_REQUIRED", "host", "", "永続schemaをv2へmigrationする必要があります", "agent-loop migrate --jsonで対象を確認してください", command("全loop停止後にforward migrationを実行します", "agent-loop migrate --apply --json"))}, false
+	}
+	return []diagnostic{passedDiagnostic("SCHEMA_VERSION_SUPPORTED", "host", "", "永続schemaはこのbinaryと互換です", fmt.Sprintf("version=%d artifacts=%d", report.TargetVersion, len(report.Artifacts)))}, true
 }
 
 func diagnoseHost(ctx context.Context, l layout.Layout) []diagnostic {
@@ -176,6 +204,13 @@ func diagnoseInstallation(l layout.Layout) []diagnostic {
 	}
 	if err != nil {
 		return []diagnostic{failedDiagnostic("INSTALL_MANIFEST_INVALID", "host", "", "install manifestを読み取れません", err.Error(), instruction("install directoryをbackupし、検証済みreleaseから再installしてください"))}
+	}
+	manifestSchema := manifest.SchemaVersion
+	if manifestSchema == 0 {
+		manifestSchema = 1
+	}
+	if manifestSchema != schema.CurrentVersion {
+		return []diagnostic{failedDiagnostic("INSTALL_SCHEMA_INCOMPATIBLE", "host", "", "installed binaryと永続schemaの対応versionが一致しません", fmt.Sprintf("install_schema=%d binary_schema=%d", manifestSchema, schema.CurrentVersion), instruction("全loopを停止し、release手順に従ってbinary updateとschema migrationを組で実行してください"))}
 	}
 	binaryHash, binaryErr := fileSHA256(filepath.Join(l.BinDir, "agent-loop"))
 	skillHash, skillErr := fileSHA256(filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"))
@@ -288,7 +323,7 @@ func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Conf
 		return []diagnostic{failedDiagnostic("STATE_UNREADABLE", "repository", entry.RepoID, "durable stateを読み取れません", err.Error(), instruction("state directoryの所有者とpermissionを確認してください"))}
 	}
 	var snapshot state.Snapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Version != 1 || snapshot.RepoID != entry.RepoID || snapshot.RepoPath != entry.RepoPath {
+	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Version != state.CurrentVersion || snapshot.RepoID != entry.RepoID || snapshot.RepoPath != entry.RepoPath {
 		detail := errorText(err)
 		if err == nil {
 			detail = fmt.Sprintf("version=%d repo_id=%q repo_path=%q", snapshot.Version, snapshot.RepoID, snapshot.RepoPath)

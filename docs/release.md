@@ -72,7 +72,7 @@ agent-loop doctor --json
 5. 元々稼働中だったLaunchAgentだけを再開する。
 6. 途中で失敗した場合は旧install一式を自動復元し、元のLaunchAgentを再開する。
 
-state、event、worker log、worktree、registryは更新対象ではなく保持される。schema migrationを伴うversionでは、先にmigration compatibilityとbackupを確認する。
+state、event、worker log、worktree、registryは通常updateの対象ではなく保持される。schema migrationを伴うversionでは全loopを先に停止する。新artifactの`update`はbinary/Skillだけを配置して自動再開せず、`schema_migration_required: true`を返す。その後、installed binaryで`migrate --apply`を実行してからdoctorとstartへ進む。詳細は[永続schema migration runbook](migration.md)を正本とする。
 
 ## rollback
 
@@ -85,7 +85,7 @@ agent-loop rollback \
 agent-loop doctor --json
 ```
 
-CLIは管理対象backups配下だけを受け付け、manifestとbinary/Skill checksumを検証する。rollbackも元々稼働していたLaunchAgentだけを停止・再開し、state/worktreeを変更しない。旧binaryが現在のconfig/state versionを読めない場合はrollbackせず、対応するmigration backupとの組を復元する。
+CLIは管理対象backups配下だけを受け付け、manifestとbinary/Skill checksumを検証する。rollbackも元々稼働していたLaunchAgentだけを停止・再開し、state/worktreeを変更しない。旧binaryが現在のconfig/state versionを読めない場合は、先に対応するmigration backupを`migrate --rollback`で復元し、その後にinstall backupを`rollback`する。逆順はCLIが拒否する。
 
 ## Homebrew・Apple署名・notarization
 

@@ -15,7 +15,22 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
 )
+
+const CurrentVersion = schemaversion.Current
+
+type SchemaVersionError struct {
+	Kind    string
+	Version int
+}
+
+func (e SchemaVersionError) Error() string {
+	if e.Version == schemaversion.Previous {
+		return fmt.Sprintf("%s schema migration required from version 1 to %d; stop loops and run agent-loop migrate --apply", e.Kind, CurrentVersion)
+	}
+	return fmt.Sprintf("unsupported %s version %d; this binary supports version %d", e.Kind, e.Version, CurrentVersion)
+}
 
 type Supervisor struct {
 	State               string     `json:"state"`
@@ -177,11 +192,11 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, fmt.Errorf("marshal event payload: %w", err)
 	}
 	event := Event{
-		Version: 1, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
 		Timestamp: now, RepoID: s.RepoID, IssueNumber: issueNumber,
 		RunID: runID, Type: eventType, Payload: payloadJSON,
 	}
-	txn := transaction{Version: 1, Snapshot: snapshot, Event: event}
+	txn := transaction{Version: CurrentVersion, Snapshot: snapshot, Event: event}
 	if err := fsutil.WriteJSON(s.TransactionPath(), txn, 0o600); err != nil {
 		return Snapshot{}, fmt.Errorf("prepare state transaction: %w", err)
 	}
@@ -217,7 +232,7 @@ func (s Store) rotateEventsUnlocked(snapshot Snapshot) error {
 		return err
 	}
 	checkpoint := Event{
-		Version: 1, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
 		Timestamp: time.Now().UTC(), RepoID: s.RepoID, Type: "event_log_checkpoint", Payload: payload,
 	}
 	line, err := json.Marshal(checkpoint)

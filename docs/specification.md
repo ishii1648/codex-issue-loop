@@ -119,6 +119,8 @@ target-repository/
 ├─ bin/agent-loop
 ├─ install.json
 ├─ backups/<timestamp>-<version>/
+├─ migration.json
+├─ migrations/<timestamp>-v1-to-v2/
 ├─ registry.json
 ├─ worktrees/<repo-id>/issue-<number>/
 └─ repos/<repo-id>/
@@ -142,14 +144,14 @@ target-repository/
 
 `repo-id` は GitHub の `owner/repo` とcanonicalなローカルパスから生成した、人間が識別可能なprefix付きstable hashとする。リポジトリ移動時は再登録を必要とする。
 
-`install.json`はrelease version、Git commit、binaryとSkillのSHA-256を保持する。`update`はinstall一式を`backups`へ保存してから、稼働中だったLaunchAgentだけを停止し、binary・Skill・plistを置換して再開する。途中失敗時は自動rollbackする。state、event、registry、worktreeはinstall/update/uninstallの対象外とする。
+`install.json`はrelease version、Git commit、binaryとSkillのSHA-256、そのbinaryが要求する永続schema versionを保持する。`update`はinstall一式を`backups`へ保存してから、稼働中だったLaunchAgentだけを停止し、binary・Skill・plistを置換して再開する。途中失敗時は自動rollbackする。state、event、registry、worktreeはinstall/update/uninstallの対象外とする。
 
 ## 5. 設定仕様
 
 設定ファイル名は対象リポジトリ直下の `.agent-loop.yaml` とする。
 
 ```yaml
-version: 1
+version: 2
 
 github:
   repo: ishii1648/example
@@ -207,7 +209,7 @@ security:
 
 ### 5.1 設定規則
 
-- `version` は必須。未知のmajor versionはエラーとする。
+- `version` は必須。現行は`2`とし、v1は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
 - `queue.concurrency` はMVPでは `1` のみ許可する。
 - `worker.model: null` はユーザーのCodex既定値を使う。
@@ -583,7 +585,7 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "repo_id": "example-a1b2c3d4",
   "state_revision": 42,
   "supervisor": {
@@ -649,6 +651,22 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 改行前で停止したevent log末尾は、最後の完全なeventとsnapshot revisionが一致する場合に限り切り詰め、`event_log_tail_truncated` を記録する。prepared transactionが残っている場合は、そのtransactionを正本としてeventとsnapshotのcommitを完了する。
 
 transactionなしでsnapshotとevent logが食い違う場合、途中に壊れたeventがある場合、またはsnapshotを復元できない場合は自動推測しない。既存の `state.json`、`events.jsonl`、`state.txn.json` をrepository state directory配下の `recovery/` へ隔離し、元の理由とbackup pathを含む `recovery_blocked` 状態を新しいsnapshotへ保存する。blocked状態では通常の状態更新とIssue処理を拒否し、backupを保持したまま手動復旧を待つ。
+
+### 12.4 永続schema migration
+
+config、registry、state、active event log、prepared transactionの現行schemaはv2とする。v1を検出したbinaryはsupervisor開始、status、通常update後の自動再開を拒否し、`migrate --json`と`doctor`で`SCHEMA_MIGRATION_REQUIRED`を返す。v3以上やversion欠落は自動変換しない。
+
+v1からv2へのforward migrationは次の順序で行う。
+
+1. 全登録LaunchAgentが停止中であることを確認する
+2. config、registry、state、active event、transactionをchecksum付きmigration backupへcopyする
+3. `migration.json`へ`prepared` journalを原子的に保存する
+4. 各fileを個別に原子的置換する
+5. 全対象がv2へ収束したことを再検査し、journalを`completed`にする
+
+process停止でv1/v2が混在しても、再実行は同じjournalとbackupを使い、v1のfileだけを変換する。active event logはfile全体を一度に置換し、同一log内のversion混在を許可しない。rotation済みgzip archiveはruntime復旧入力ではないためimmutableな監査履歴として保持する。
+
+rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。schema v1対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。
 
 ## 13. 監視とCodex task連携
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,34 @@ func TestDoctorOutputHasStableSchemaCodesAndSafeRemediations(t *testing.T) {
 		if !strings.Contains(human.String(), expected) {
 			t.Fatalf("human output missing %q: %s", expected, human.String())
 		}
+	}
+}
+
+func TestDiagnoseSchemasDistinguishesSupportedRequiredAndUnsupported(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos")}
+	if err := os.MkdirAll(l.ReposRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		version int
+		code    string
+		ready   bool
+	}{
+		{name: "supported", version: 2, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
+		{name: "migration-required", version: 1, code: "SCHEMA_MIGRATION_REQUIRED"},
+		{name: "unsupported", version: 3, code: "SCHEMA_VERSION_UNSUPPORTED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(l.RegistryPath, []byte(fmt.Sprintf("{\"version\":%d,\"repos\":{}}\n", test.version)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			diagnostics, ready := diagnoseSchemas(l)
+			if ready != test.ready || len(diagnostics) != 1 || diagnostics[0].Code != test.code || diagnostics[0].OK != test.ready {
+				t.Fatalf("diagnostics=%+v ready=%v", diagnostics, ready)
+			}
+		})
 	}
 }
 

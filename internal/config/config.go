@@ -11,10 +11,14 @@ import (
 	"time"
 	"unicode"
 
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
 	"gopkg.in/yaml.v3"
 )
 
-const FileName = ".agent-loop.yaml"
+const (
+	FileName       = ".agent-loop.yaml"
+	CurrentVersion = schemaversion.Current
+)
 
 type Duration struct{ time.Duration }
 
@@ -147,7 +151,7 @@ var githubRepository = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/
 
 func Defaults() Config {
 	return Config{
-		Version: 1,
+		Version: CurrentVersion,
 		GitHub: GitHub{
 			ReadyLabels:     []string{"codex-loop:ready"},
 			ExcludeLabels:   []string{"blocked", "do-not-automate"},
@@ -243,8 +247,11 @@ func CanonicalRepoPath(path string) (string, error) {
 }
 
 func (c Config) Validate() error {
-	if c.Version != 1 {
-		return fmt.Errorf("unsupported config version %d", c.Version)
+	if c.Version != CurrentVersion {
+		if c.Version == schemaversion.Previous {
+			return fmt.Errorf("config schema migration required from version 1 to %d; stop loops and run agent-loop migrate --apply", CurrentVersion)
+		}
+		return fmt.Errorf("unsupported config version %d; this binary supports version %d", c.Version, CurrentVersion)
 	}
 	if !githubRepository.MatchString(c.GitHub.Repo) {
 		return fmt.Errorf("github.repo must use owner/name format")
@@ -253,10 +260,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("github.ready_labels must not be empty")
 	}
 	if c.Queue.Concurrency != 1 {
-		return fmt.Errorf("queue.concurrency must be 1 in version 1")
+		return fmt.Errorf("queue.concurrency must be 1 in version %d", CurrentVersion)
 	}
 	if c.Queue.Order != "issue_number_asc" {
-		return fmt.Errorf("queue.order must be issue_number_asc in version 1")
+		return fmt.Errorf("queue.order must be issue_number_asc in version %d", CurrentVersion)
 	}
 	if c.Queue.PollInterval.Duration <= 0 || c.Watch.ReconcileInterval.Duration <= 0 || c.Worker.Timeout.Duration <= 0 {
 		return fmt.Errorf("durations must be positive")
