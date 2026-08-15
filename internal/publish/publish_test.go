@@ -53,6 +53,7 @@ case "$1 $2" in
     ;;
   "pr create")
     : > "$PUBLISH_TEST_MARKER"
+	printf '%s\n' 'Warning: 1 uncommitted change'
     printf '%s\n' 'https://github.example/owner/repo/pull/1'
     ;;
   *) exit 2 ;;
@@ -87,6 +88,13 @@ esac
 	}
 	if second != first {
 		t.Fatalf("idempotent publish result=%+v, want %+v", second, first)
+	}
+}
+
+func TestExtractPullRequestURLRejectsAmbiguousOutput(t *testing.T) {
+	_, err := extractPullRequestURL("https://github.example/owner/repo/pull/1\nhttps://github.example/owner/repo/pull/2\n")
+	if err == nil || !strings.Contains(err.Error(), "multiple Pull Request URLs") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

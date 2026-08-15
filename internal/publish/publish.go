@@ -98,7 +98,7 @@ func (m Manager) openPullRequest(ctx context.Context, cfg config.Config, issue g
 	if err != nil {
 		return "", fmt.Errorf("create publish Pull Request: %w", err)
 	}
-	return validatePullRequestURL(strings.TrimSpace(out))
+	return extractPullRequestURL(out)
 }
 
 func (m Manager) run(ctx context.Context, path string, args ...string) (string, error) {
@@ -123,4 +123,22 @@ func validatePullRequestURL(value string) (string, error) {
 		return "", fmt.Errorf("invalid Pull Request URL %q", value)
 	}
 	return parsed.String(), nil
+}
+
+func extractPullRequestURL(output string) (string, error) {
+	var found string
+	for _, field := range strings.Fields(output) {
+		candidate, err := validatePullRequestURL(field)
+		if err != nil {
+			continue
+		}
+		if found != "" && found != candidate {
+			return "", fmt.Errorf("multiple Pull Request URLs in command output")
+		}
+		found = candidate
+	}
+	if found == "" {
+		return "", fmt.Errorf("Pull Request URL not found in command output %q", strings.TrimSpace(output))
+	}
+	return found, nil
 }
