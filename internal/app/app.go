@@ -303,19 +303,35 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		return err
 	}
 	lm := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 	switch command {
 	case "start":
-		err = lm.Start(ctx, entry)
+		var launchStatus launchd.Status
+		launchStatus, err = lm.Status(ctx, entry)
+		if err == nil && !launchStatus.Loaded {
+			err = recordSupervisorControl(store, "starting", "start requested")
+		}
+		if err == nil {
+			err = lm.Start(ctx, entry)
+		}
 	case "stop":
 		err = lm.Stop(ctx, entry)
 	case "restart":
-		err = lm.Restart(ctx, entry)
+		err = lm.Stop(ctx, entry)
+		if err == nil {
+			err = recordSupervisorControl(store, "starting", "restart requested")
+		}
+		if err == nil {
+			err = lm.Start(ctx, entry)
+		}
 	}
 	if err != nil {
+		if command == "start" || command == "restart" {
+			_ = recordSupervisorControl(store, "stopped", "start failed: "+err.Error())
+		}
 		return err
 	}
 	if command == "stop" {
-		store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 		_, _ = store.Update("supervisor_stopped", 0, "", map[string]string{"reason": "explicit stop"}, func(s *state.Snapshot) error {
 			s.Supervisor.State, s.Supervisor.PID, s.Supervisor.Message = "stopped", 0, "explicit stop"
 			return nil
@@ -323,6 +339,19 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 	}
 	status, _ := lm.Status(ctx, entry)
 	return a.output(jsonOut, map[string]any{"repo_id": entry.RepoID, "command": command, "launchd": status})
+}
+
+func recordSupervisorControl(store state.Store, supervisorState, message string) error {
+	_, err := store.Update("supervisor_"+supervisorState, 0, "", map[string]string{"reason": message}, func(s *state.Snapshot) error {
+		s.Supervisor.State = supervisorState
+		s.Supervisor.PID = 0
+		s.Supervisor.Message = message
+		s.Supervisor.FailureKind = ""
+		s.Supervisor.ConsecutiveFailures = 0
+		s.Supervisor.RetryAfter = nil
+		return nil
+	})
+	return err
 }
 
 func (a App) status(ctx context.Context, l layout.Layout, args []string) error {

@@ -198,3 +198,32 @@ func TestBootstrapLabelsCommandRequiresApplyToMutate(t *testing.T) {
 		t.Fatalf("calls=%s", calls)
 	}
 }
+
+func TestRecordSupervisorControlReplacesStaleStoppedState(t *testing.T) {
+	store := state.Store{Dir: t.TempDir(), RepoID: "repo-id", RepoPath: "/tmp/repo"}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.Update("failed", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "stopped"
+		snapshot.Supervisor.PID = 42
+		snapshot.Supervisor.Message = "old failure"
+		snapshot.Supervisor.FailureKind = "transient"
+		snapshot.Supervisor.ConsecutiveFailures = 3
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordSupervisorControl(store, "starting", "restart requested"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := snapshot.Supervisor
+	if got.State != "starting" || got.PID != 0 || got.Message != "restart requested" || got.FailureKind != "" || got.ConsecutiveFailures != 0 {
+		t.Fatalf("unexpected supervisor state: %+v", got)
+	}
+}

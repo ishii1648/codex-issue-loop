@@ -27,7 +27,8 @@ Codex taskは操作画面であり、ループの実行主体ではない。監�
 | agent-loop CLI | Goの短命プロセス | start、stop、status、watch、answer |
 | launchd | macOS | supervisorの起動と異常終了時の再起動 |
 | supervisor | Goの常駐プロセス | Issue選択、claim、worker起動、状態遷移、復旧 |
-| Codex worker | `codex exec` | 1件のIssueの調査、実装、検証、PR作成 |
+| Codex worker | `codex exec` | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
+| publisher | supervisor内の決定論的処理 | 差分検査、commit、push、draft PR作成・既存PR再利用 |
 | GitHub | 外部共有状態 | Issueキュー、ラベル、コメント、Pull Request |
 | 永続状態 | ローカルファイル | snapshot、event log、未回答request、世代番号 |
 
@@ -46,9 +47,10 @@ GitHub        = 人とループが共有する仕事のキュー
 2. 決定論的な順序で1件を選び、ラベルとローカル状態でclaimする。
 3. Issue専用のbranchとworktreeを用意する。
 4. `codex exec`ワーカーがpreflightを行い、そのまま実装を開始する。
-5. ワーカーがテスト、commit、push、draft PR作成まで進める。
-6. supervisorが構造化された結果を永続化し、GitHubへ反映する。
-7. 次のIssueを選ぶ。キューが空なら低負荷で待機する。
+5. ワーカーはworktree内で実装とテストを行い、構造化結果を返す。Git metadata、remote、GitHubは変更しない。
+6. supervisorのpublisherが差分を検査し、署名なしで非対話commit、push、draft PR作成を冪等に行う。
+7. supervisorが公開結果を永続化し、GitHubへ反映する。
+8. 次のIssueを選ぶ。キューが空なら低負荷で待機する。
 
 IssueごとのCodex workerは外側のループを所有しない。次のIssueを選ぶのは常にsupervisorである。
 
