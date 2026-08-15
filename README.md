@@ -15,6 +15,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [CLI互換性マトリクス](docs/compatibility.md)
 - [GitHubラベルbootstrap runbook](docs/github-labels.md)
 - [doctor診断・復旧runbook](docs/doctor.md)
+- [Mac mini常駐運用runbook](docs/mac-mini-runbook.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
 
@@ -38,7 +39,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - `codex` 0.136.0以降と有効なCodex認証
 - ログイン中のmacOSユーザーセッション（LaunchAgentを使用）
 
-Mac miniでは、macOSの「ディスプレイがオフのときに自動でスリープさせない」を有効にすることを推奨します。
+Mac miniでは、macOSの「ディスプレイがオフのときに自動でスリープさせない」を有効にすることを推奨します。初回導入、Codex Remote接続、スマートフォン操作、障害復旧、backup、更新、撤去は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)に従ってください。
 
 ## Build and test
 

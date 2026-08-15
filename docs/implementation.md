@@ -30,6 +30,7 @@
 - 脅威モデル、最小権限runbook、CIの`govulncheck`
 - fake GitHub/Codex統合テスト、実Git worktreeテスト、race test
 - `TestFault` prefixで独立実行できる障害注入・復旧suiteと仕様17.2の対応表
+- Mac miniへの初回導入、Codex Remoteからの日常操作、障害復旧、backup・restore、手動update・rollback、撤去、実機受け入れを一連で扱う常駐運用runbook
 
 ## 運用前に必要なもの
 
