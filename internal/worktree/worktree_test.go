@@ -50,4 +50,18 @@ func TestEnsureCreatesIsolatedWorktree(t *testing.T) {
 	if err != nil || second != result {
 		t.Fatalf("second=%+v err=%v", second, err)
 	}
+	inspection, err := (Manager{StateRoot: root}).Inspect(context.Background(), cfg, result.Path, result.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inspection.Exists || !inspection.Valid || !inspection.LocalBranchExists || inspection.RemoteBranchExists || inspection.Branch != result.Branch || inspection.Dirty {
+		t.Fatalf("inspection=%+v", inspection)
+	}
+	if err := os.WriteFile(filepath.Join(result.Path, "dirty.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err = (Manager{StateRoot: root}).Inspect(context.Background(), cfg, result.Path, result.Branch)
+	if err != nil || !inspection.Dirty {
+		t.Fatalf("dirty inspection=%+v err=%v", inspection, err)
+	}
 }

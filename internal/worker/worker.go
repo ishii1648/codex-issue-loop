@@ -57,27 +57,29 @@ type Result struct {
 }
 
 type Runner interface {
-	Run(context.Context, config.Config, gh.Issue, state.Issue, string) (Result, error)
-	Resume(context.Context, config.Config, gh.Issue, state.Issue, string) (Result, error)
+	Run(context.Context, config.Config, gh.Issue, state.Issue, string, Started) (Result, error)
+	Resume(context.Context, config.Config, gh.Issue, state.Issue, string, Started) (Result, error)
 }
+
+type Started func(pid int) error
 
 type Codex struct {
 	StateDir string
 }
 
-func (c Codex) Run(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, promptSuffix string) (Result, error) {
+func (c Codex) Run(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, promptSuffix string, started Started) (Result, error) {
 	prompt := BuildPrompt(cfg, issue, current, promptSuffix)
-	return c.execute(ctx, cfg, issue.Number, current.RunID, "", prompt)
+	return c.execute(ctx, cfg, issue.Number, current.RunID, "", prompt, started)
 }
 
-func (c Codex) Resume(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, prompt string) (Result, error) {
+func (c Codex) Resume(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, prompt string, started Started) (Result, error) {
 	if current.SessionID == "" {
 		return Result{}, fmt.Errorf("cannot resume Issue #%d without a session ID", issue.Number)
 	}
-	return c.execute(ctx, cfg, issue.Number, current.RunID, current.SessionID, prompt)
+	return c.execute(ctx, cfg, issue.Number, current.RunID, current.SessionID, prompt, started)
 }
 
-func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber int, runID, sessionID, prompt string) (Result, error) {
+func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber int, runID, sessionID, prompt string, started Started) (Result, error) {
 	runDir := filepath.Join(c.StateDir, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return Result{}, err
@@ -128,7 +130,17 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	safeStderr := redact.NewLineWriter(stderr)
 	cmd.Stdout = safeStdout
 	cmd.Stderr = safeStderr
-	runErr := cmd.Run()
+	runErr := cmd.Start()
+	if runErr == nil && started != nil {
+		if err := started(cmd.Process.Pid); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return Result{}, fmt.Errorf("record worker process: %w", err)
+		}
+	}
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
 	if err := safeStdout.Flush(); err != nil && runErr == nil {
 		runErr = err
 	}

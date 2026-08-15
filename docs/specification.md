@@ -683,6 +683,30 @@ supervisor起動時に次を行う。
 8. 未回答requestはneeds_inputのまま保持する
 9. reconciliationイベントを記録してpollingを開始する
 
+reconciliationでは、永続状態を処理履歴の正本、GitHubとGit worktreeを外部事実の正本として扱う。次の不一致は、重複実行や人手変更の上書きを生じない範囲で自動収束させる。
+
+| 検出した状態 | 起動時の処理 |
+|---|---|
+| 保存済みworker PIDが存在するがprocessは消失 | PIDを破棄し、active Issueを即時retryへ移す |
+| write-ahead claim後に停止し、GitHubはrunningへ遷移済み | claim済みとして即時retryへ移す |
+| 保存前にpush・PR作成まで完了 | branchに紐づく単一のopen PRを保存して処理を継続する |
+| PRがmerge済み | Issueをcompletedへ移し、未反映のdone label/commentを再同期する |
+| needs-input、done、failedのlabel/comment同期が途中 | marker付きcommentを照合し、不足しているGitHub更新だけを再実行する |
+| running labelだけが欠落し、worktreeが整合 | running labelを修復する |
+
+次の不一致は自動で上書きせず、Issueを `blocked` にして理由を保存する。
+
+- 保存済みworker PIDが現在も生存している
+- readyとrunning/needs-inputが同時に付与されている
+- exclusion labelが人手で付与された
+- PRがmergeされずcloseされた、または同じbranchに複数のopen PRがある
+- Issueがdoneを伴わずcloseされた
+- 保存済みworktree、local branch、open PRのremote branchが消失した
+- worktreeのbranchが保存値から変更された
+- claim中のready/running labelが両方とも除去された
+
+完了・失敗・除外を示すGitHub labelとmerge済みPRは、古いactive snapshotより優先する。一方、branch名、worktree、open PR、Issue stateの競合は、どちらかを推測して削除・再作成しない。各照合結果は `startup_reconciled` eventへ、変更前後の状態、理由、worktree inspection、検出したPRとともに記録する。
+
 ## 16. セキュリティ仕様
 
 - subprocess引数はshell文字列として連結せず、argv配列で起動する

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 )
@@ -20,11 +21,27 @@ type Issue struct {
 	Assignees []string
 	Milestone string
 	Comments  []string
+	State     string
+}
+
+type PullRequest struct {
+	Number      int
+	URL         string
+	State       string
+	IsDraft     bool
+	MergedAt    *time.Time
+	HeadRefName string
+}
+
+type RemoteState struct {
+	Issue        Issue
+	PullRequests []PullRequest
 }
 
 type Client interface {
 	ListReady(context.Context, config.Config) ([]Issue, error)
 	Get(context.Context, config.Config, int) (Issue, error)
+	Inspect(context.Context, config.Config, int, string) (RemoteState, error)
 	Claim(context.Context, config.Config, Issue, string) error
 	MarkNeedsInput(context.Context, config.Config, int, string, string) error
 	MarkDone(context.Context, config.Config, int, string) error
@@ -41,6 +58,7 @@ type rawIssue struct {
 	Title  string `json:"title"`
 	Body   string `json:"body"`
 	URL    string `json:"url"`
+	State  string `json:"state"`
 	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
@@ -106,7 +124,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,labels,assignees,milestone,comments").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,state,labels,assignees,milestone,comments").CombinedOutput()
 	if err != nil {
 		return Issue{}, fmt.Errorf("get GitHub Issue #%d: %w: %s", number, err, strings.TrimSpace(string(out)))
 	}
@@ -130,7 +148,45 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	for _, comment := range item.Comments {
 		comments = append(comments, comment.Body)
 	}
-	return Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments}, nil
+	return Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State}, nil
+}
+
+func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (RemoteState, error) {
+	issue, err := c.Get(ctx, cfg, number)
+	if err != nil {
+		return RemoteState{}, err
+	}
+	state := RemoteState{Issue: issue}
+	if branch == "" {
+		return state, nil
+	}
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName").CombinedOutput()
+	if err != nil {
+		return RemoteState{}, fmt.Errorf("inspect Pull Requests for branch %s: %w: %s", branch, err, strings.TrimSpace(string(out)))
+	}
+	var raw []struct {
+		Number      int        `json:"number"`
+		URL         string     `json:"url"`
+		State       string     `json:"state"`
+		IsDraft     bool       `json:"isDraft"`
+		MergedAt    *time.Time `json:"mergedAt"`
+		HeadRefName string     `json:"headRefName"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return RemoteState{}, fmt.Errorf("decode Pull Requests for branch %s: %w", branch, err)
+	}
+	for _, item := range raw {
+		state.PullRequests = append(state.PullRequests, PullRequest{
+			Number: item.Number, URL: item.URL, State: item.State, IsDraft: item.IsDraft,
+			MergedAt: item.MergedAt, HeadRefName: item.HeadRefName,
+		})
+	}
+	sort.Slice(state.PullRequests, func(i, j int) bool { return state.PullRequests[i].Number > state.PullRequests[j].Number })
+	return state, nil
 }
 
 func Eligible(labels []string, cfg config.GitHub) bool {

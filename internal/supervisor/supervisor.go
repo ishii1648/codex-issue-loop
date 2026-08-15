@@ -20,6 +20,11 @@ import (
 
 type WorktreeManager interface {
 	Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error)
+	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
+}
+
+type ProcessInspector interface {
+	Alive(pid int) bool
 }
 
 type Loop struct {
@@ -28,6 +33,7 @@ type Loop struct {
 	GitHub    gh.Client
 	Worktrees WorktreeManager
 	Worker    worker.Runner
+	Processes ProcessInspector
 	Logger    *log.Logger
 }
 
@@ -52,6 +58,9 @@ func (l *Loop) Run(ctx context.Context) error {
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
 		return BlockedError{Err: fmt.Errorf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)}
 	}
+	if err := l.reconcileStartup(ctx, snapshot); err != nil {
+		return err
+	}
 	watcher, watchErr := fsnotify.NewWatcher()
 	if watchErr == nil {
 		watchErr = watcher.Add(l.Store.Dir)
@@ -71,14 +80,6 @@ func (l *Loop) Run(ctx context.Context) error {
 		s.Supervisor.PID = os.Getpid()
 		s.Supervisor.StartedAt = now
 		s.Supervisor.Message = ""
-		for _, issue := range s.Issues {
-			if issue.Status == "running" || issue.Status == "claimed" {
-				issue.Status = "retry_wait"
-				issue.LastError = "supervisor restarted while Issue was active"
-				retryAt := now
-				issue.RetryAfter = &retryAt
-			}
-		}
 		return nil
 	})
 	if err != nil {
@@ -267,7 +268,7 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 	}
 	workerCfg := l.Config
 	workerCfg.RepoPath = wt.Path
-	result, runErr := l.Worker.Run(ctx, workerCfg, issue, current, "")
+	result, runErr := l.Worker.Run(ctx, workerCfg, issue, current, "", l.recordWorkerPID(issue.Number, current.RunID))
 	return l.handleResult(ctx, issue, current, result, runErr)
 }
 
@@ -303,9 +304,9 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		instruction := "Continue after the user's recorded answer. Implement the decision, verify the work, and return the schema-conforming result."
 		var result worker.Result
 		if current.SessionID != "" {
-			result, err = l.Worker.Resume(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction))
+			result, err = l.Worker.Resume(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current.Number, current.RunID))
 		} else {
-			result, err = l.Worker.Run(ctx, workerCfg, issue, current, instruction)
+			result, err = l.Worker.Run(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
@@ -327,7 +328,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if err != nil {
 			return err
 		}
-		result, err = l.Worker.Resume(ctx, workerCfg, issue, current, "Continue the implementation from the previous run. Resolve the retry reason, run verification, and return the schema-conforming final result.")
+		result, err = l.Worker.Resume(ctx, workerCfg, issue, current, "Continue the implementation from the previous run. Resolve the retry reason, run verification, and return the schema-conforming final result.", l.recordWorkerPID(current.Number, current.RunID))
 	} else {
 		current.Attempts++
 		current.RunID = state.NewID("run")
@@ -341,7 +342,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if err != nil {
 			return err
 		}
-		result, err = l.Worker.Run(ctx, workerCfg, issue, current, "Retry the Issue after the previous recoverable failure. Inspect the existing worktree first and preserve valid work.")
+		result, err = l.Worker.Run(ctx, workerCfg, issue, current, "Retry the Issue after the previous recoverable failure. Inspect the existing worktree first and preserve valid work.", l.recordWorkerPID(current.Number, current.RunID))
 	}
 	return l.handleResult(ctx, issue, current, result, err)
 }
@@ -357,6 +358,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	_, err := l.Store.Update("worker_preflight_completed", issue.Number, current.RunID, map[string]string{"execution_profile": profile}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
 		item.ExecutionProfile = profile
+		item.WorkerPID = 0
 		if result.SessionID != "" {
 			item.SessionID = result.SessionID
 		}
@@ -426,6 +428,21 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		return l.failIssue(ctx, issue.Number, errors.New(result.Summary), true)
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
+	}
+}
+
+func (l *Loop) recordWorkerPID(number int, runID string) worker.Started {
+	return func(pid int) error {
+		_, err := l.Store.Update("worker_process_started", number, runID, map[string]int{"pid": pid}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(number)]
+			if item == nil || item.RunID != runID {
+				return fmt.Errorf("Issue #%d run %s is no longer active", number, runID)
+			}
+			item.WorkerPID = pid
+			item.UpdatedAt = time.Now().UTC()
+			return nil
+		})
+		return err
 	}
 }
 
