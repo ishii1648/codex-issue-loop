@@ -190,6 +190,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-059-A**: opt-inの外部push adapterは、監視taskが0件でも`needs_input`とsupervisor blockedを永続outboxからスマートフォンへ通知できること。
 - **FR-059-B**: 外部pushはrequest/event単位で重複を抑止し、上限付きbackoffとrate limitを持ち、adapter障害でsupervisor本体を停止しないこと。
 - **FR-059-C**: 通知credentialは設定file・plist・repository・logへ保存せず、repository別のprivate管理fileから読み込むこと。通知本文の詳細は明示opt-inとすること。
+- **FR-059-D**: macOSのevent wakeはfsnotify/kqueueでstate directoryを監視し、watcher作成・登録失敗またはchannel終了時はpolling-onlyへ降格すること。
 
 ### 6.7 Codex Skill
 

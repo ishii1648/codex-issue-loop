@@ -20,6 +20,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [スマートフォン直接push通知](docs/notifications.md)
 - [ADR-0001: macOS実行モデル](docs/adr/0001-macos-execution-model.md)
 - [ADR-0002: 単一ホスト並列化と複数ホスト冗長化](docs/adr/0002-concurrency-and-multi-host.md)
+- [ADR-0003: event通知方式](docs/adr/0003-event-notification.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview-v2.png)
 
@@ -137,7 +138,7 @@ agent-loop stop --repo /path/to/repository
 agent-loop cleanup --repo /path/to/repository --json
 ```
 
-Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部のmacOS event通知とreconciliation pollingが永続状態を確認します。
+Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部のfsnotify/kqueueによるdirectory eventとreconciliation pollingが永続状態を確認します。event backendを利用できない場合もpolling-onlyで継続します。
 
 ## State and safety
 
