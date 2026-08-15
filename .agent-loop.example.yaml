@@ -22,6 +22,7 @@ worker:
   sandbox: workspace-write
   session_mode: resumable
   timeout: 2h
+  timeout_grace: 30s
   ambiguous_profile: extended
   profiles:
     standard:

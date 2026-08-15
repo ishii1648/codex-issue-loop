@@ -40,6 +40,18 @@ watch:
 	if cfg.Worker.Profiles["extended"].MaxContinuations != 3 {
 		t.Fatalf("extended profile not defaulted")
 	}
+	if cfg.Worker.TimeoutGrace.Duration != 30*time.Second {
+		t.Fatalf("timeout grace = %s", cfg.Worker.TimeoutGrace.Duration)
+	}
+}
+
+func TestLoadRejectsInvalidTimeoutGrace(t *testing.T) {
+	for _, value := range []string{"0s", "3h"} {
+		dir := writeConfig(t, "version: 1\ngithub:\n  repo: owner/repo\nworker:\n  timeout: 2h\n  timeout_grace: "+value+"\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("invalid timeout grace %s accepted: %v", value, err)
+		}
+	}
 }
 
 func TestLoadRejectsUnknownNestedKey(t *testing.T) {

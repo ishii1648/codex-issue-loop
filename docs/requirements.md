@@ -160,6 +160,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-037**: 各Issueの初回workerは、実装前にpreflightを行い、`standard` または `extended` execution profileを構造化結果として記録すること。
 - **FR-038**: preflightは初回worker内の論理フェーズとして実行し、そのまま実装へ進めること。profile判定だけを目的とする別workerを必須にしないこと。
 - **FR-039**: profile判定が曖昧な場合は、ユーザーへ質問せず `extended` を選択すること。`extended` は必要に応じてsupervisor管理のcontinuationを許可すること。
+- **FR-039-A**: worker timeout時はprocess groupへ穏当な終了要求を送り、設定可能なgrace periodを超えた場合だけ強制終了すること。子processを残さず、既存worktreeと有効な作業を保持すること。
 
 ### 6.5 GitHubへの反映
 

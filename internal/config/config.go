@@ -65,6 +65,7 @@ type Worker struct {
 	Sandbox          string             `yaml:"sandbox" json:"sandbox"`
 	SessionMode      string             `yaml:"session_mode" json:"session_mode"`
 	Timeout          Duration           `yaml:"timeout" json:"timeout"`
+	TimeoutGrace     Duration           `yaml:"timeout_grace" json:"timeout_grace"`
 	AmbiguousProfile string             `yaml:"ambiguous_profile" json:"ambiguous_profile"`
 	Profiles         map[string]Profile `yaml:"profiles" json:"profiles"`
 }
@@ -158,6 +159,7 @@ func Defaults() Config {
 			Sandbox:          "workspace-write",
 			SessionMode:      "resumable",
 			Timeout:          Duration{2 * time.Hour},
+			TimeoutGrace:     Duration{30 * time.Second},
 			AmbiguousProfile: "extended",
 			Profiles: map[string]Profile{
 				"standard": {MaxContinuations: 0},
@@ -242,6 +244,12 @@ func (c Config) Validate() error {
 	}
 	if c.Queue.PollInterval.Duration <= 0 || c.Watch.ReconcileInterval.Duration <= 0 || c.Worker.Timeout.Duration <= 0 {
 		return fmt.Errorf("durations must be positive")
+	}
+	if c.Worker.TimeoutGrace.Duration <= 0 {
+		return fmt.Errorf("worker.timeout_grace must be positive")
+	}
+	if c.Worker.TimeoutGrace.Duration > c.Worker.Timeout.Duration {
+		return fmt.Errorf("worker.timeout_grace must not exceed worker.timeout")
 	}
 	if c.Queue.MaxAttempts < 1 {
 		return fmt.Errorf("queue.max_attempts must be at least 1")

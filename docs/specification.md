@@ -165,6 +165,7 @@ worker:
   sandbox: workspace-write
   session_mode: resumable
   timeout: 2h
+  timeout_grace: 30s
   ambiguous_profile: extended
   profiles:
     standard:
@@ -673,6 +674,7 @@ CodexにはClaude Codeのmonitor toolと同じ公開契約を持つ汎用的なt
 - 倍率: 2
 - 上限: 5分
 - jitter: ±20%
+
 - Issueワーカーの既定上限: 3回
 - polling失敗はsupervisorを終了させず、連続失敗閾値でblockedにする
 
@@ -681,6 +683,12 @@ worker retry、GitHub queue polling、GitHub同期retryの待機時間に独立�
 Issue retryのsnapshotには `failure_kind`、`last_error`、`retry_after` を保存し、`retry_scheduled` eventにも分類、理由、予定時刻、delayを記録する。supervisorの一時障害も同じ情報と連続失敗数をsnapshotおよび `supervisor_retry_scheduled` eventへ保存する。連続失敗数と予定時刻はlaunchdによるprocess再起動後も引き継ぐ。連続失敗数は、GitHub取得から永続状態更新までを含む1回のsupervisor cycleが成功した場合にのみresetし、`supervisor_recovered` eventを記録する。event通知やretry状態自身の書き込みによる早期起床ではbackoffを解除せず、counterもresetしない。
 
 `supervisor` 分類は継続による状態破壊を避けるため直ちにblockedへ移す。`transient` 分類は最大5回まで再試行し、5回連続で失敗した場合にblockedへ移す。`issue` 分類は対象Issueをblockedまたはfailedへ移し、GitHub同期後に別のIssueを処理できる状態を維持する。
+
+### 14.3 worker timeoutとprocess終了
+
+`worker.timeout`に達した場合、workerのPIDをprocess group IDとしてgroup全体へ`SIGTERM`を送る。親processが先に終了しても子processが残っている間は終了完了とみなさない。`worker.timeout_grace`の間にprocess group全体が終了しなければ、同じgroupへ`SIGKILL`を送り、親processを必ずwaitして回収する。既定値はtimeout 2時間、grace period 30秒とし、grace periodは正数かつtimeout以下でなければならない。
+
+timeout理由には、設定timeout、grace period内に終了したか、強制終了まで進んだかを含める。supervisorはworker PIDを0へ戻し、`retry_wait`と一時障害理由を永続化する。Issue worktree、dirty file、commit、session IDは削除しない。次回試行またはLaunchAgent再起動時は通常のstartup reconciliationを実行し、既存branch、worktree、push済みbranch、open/merged/closed PRを調べてから継続する。
 
 ## 15. 再起動時のreconciliation
 

@@ -221,6 +221,21 @@ func TestRunOnceDefaultsAmbiguousFailureToExtended(t *testing.T) {
 	}
 }
 
+func TestWorkerTimeoutStageIsPersistedForRetry(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{SessionID: "session"})
+	loop.Worker = fakeWorker{result: worker.Result{SessionID: "session"}, err: &worker.TerminationError{
+		Timeout: time.Hour, GracePeriod: 30 * time.Second, Forced: true, Cause: context.DeadlineExceeded,
+	}}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	issue := snapshot.Issues["1"]
+	if issue.Status != "retry_wait" || !strings.Contains(issue.LastError, "SIGKILL") || issue.WorkerPID != 0 {
+		t.Fatalf("issue=%+v", issue)
+	}
+}
+
 func TestFaultGitHubSyncPartialFailureIsRetried(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
 	loop, github := testLoop(t, result)

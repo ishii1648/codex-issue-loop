@@ -2,12 +2,16 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
@@ -84,6 +88,149 @@ func TestFaultWorkerKillReturnsRecoverableProcessError(t *testing.T) {
 	if processErr := syscall.Kill(pid, 0); processErr == nil || processErr == syscall.EPERM {
 		t.Fatalf("worker process %d is still alive", pid)
 	}
+}
+
+func TestFaultWorkerTimeoutUsesGracefulProcessGroupTermination(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-codex")
+	marker := filepath.Join(dir, "term-received")
+	ready := filepath.Join(dir, "ready")
+	dirty := filepath.Join(dir, "valuable-work.txt")
+	script := fmt.Sprintf(`#!/bin/sh
+trap 'printf terminated > %q; exit 0' TERM
+printf valuable > %q
+printf ready > %q
+while :; do :; done
+`, marker, dirty, ready)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	cfg := config.Defaults()
+	cfg.GitHub.Repo, cfg.RepoPath, cfg.Worker.Command = "owner/repo", dir, fake
+	cfg.Worker.Timeout.Duration = 100 * time.Millisecond
+	cfg.Worker.TimeoutGrace.Duration = time.Second
+	workerPID, workerPGID := 0, 0
+	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_grace", Attempts: 1}, "", func(pid int) error {
+		workerPID = pid
+		workerPGID, _ = syscall.Getpgid(pid)
+		return waitForTestFile(ready, time.Second)
+	})
+	if workerPGID != workerPID {
+		t.Fatalf("worker pid=%d pgid=%d", workerPID, workerPGID)
+	}
+	var termination *TerminationError
+	if !errors.As(err, &termination) || termination.Forced || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unexpected termination: %#v err=%v", termination, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		stderr, _ := os.ReadFile(filepath.Join(dir, "runs", "run_grace", "codex.stderr.log"))
+		t.Fatalf("SIGTERM trap did not run: %v stderr=%s", err, stderr)
+	}
+	if data, err := os.ReadFile(dirty); err != nil || string(data) != "valuable" {
+		t.Fatalf("dirty work was not preserved: data=%q err=%v", data, err)
+	}
+}
+
+func TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-codex")
+	childPath := filepath.Join(dir, "child.pid")
+	childReady := filepath.Join(dir, "child.ready")
+	script := "#!/bin/sh\nexec \"$AGENT_LOOP_TEST_HELPER\" -test.run=TestWorkerProcessHelper --\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_LOOP_TEST_HELPER", helper)
+	t.Setenv("AGENT_LOOP_TEST_HELPER_MODE", "forced")
+	t.Setenv("AGENT_LOOP_TEST_CHILD_PID", childPath)
+	t.Setenv("AGENT_LOOP_TEST_CHILD_READY", childReady)
+	cfg := config.Defaults()
+	cfg.GitHub.Repo, cfg.RepoPath, cfg.Worker.Command = "owner/repo", dir, fake
+	cfg.Worker.Timeout.Duration = 100 * time.Millisecond
+	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
+	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_force", Attempts: 1}, "", func(int) error {
+		return waitForTestFile(childPath, time.Second)
+	})
+	var termination *TerminationError
+	if !errors.As(err, &termination) || !termination.Forced || !strings.Contains(err.Error(), "SIGKILL") {
+		t.Fatalf("unexpected termination: %#v err=%v", termination, err)
+	}
+	childData, readErr := os.ReadFile(childPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var childPID int
+	if _, scanErr := fmt.Sscan(string(childData), &childPID); scanErr != nil {
+		t.Fatal(scanErr)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if processErr := syscall.Kill(childPID, 0); processErr != nil && processErr != syscall.EPERM {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child process %d survived process-group SIGKILL", childPID)
+}
+
+func TestWorkerProcessHelper(t *testing.T) {
+	mode := os.Getenv("AGENT_LOOP_TEST_HELPER_MODE")
+	if os.Getenv("AGENT_LOOP_TEST_HELPER") == "" || mode == "" {
+		return
+	}
+	switch mode {
+	case "forced":
+		signal.Ignore(syscall.SIGTERM)
+		child := exec.Command(os.Args[0], "-test.run=TestWorkerProcessHelper", "--")
+		child.Env = testEnvironmentWith("AGENT_LOOP_TEST_HELPER_MODE", "child")
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		if err := waitForTestFile(os.Getenv("AGENT_LOOP_TEST_CHILD_READY"), time.Second); err != nil {
+			os.Exit(2)
+		}
+		if err := os.WriteFile(os.Getenv("AGENT_LOOP_TEST_CHILD_PID"), []byte(fmt.Sprint(child.Process.Pid)), 0o600); err != nil {
+			os.Exit(2)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "child":
+		signal.Ignore(syscall.SIGTERM)
+		if err := os.WriteFile(os.Getenv("AGENT_LOOP_TEST_CHILD_READY"), []byte("ready"), 0o600); err != nil {
+			os.Exit(2)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+}
+
+func waitForTestFile(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for %s", path)
+}
+
+func testEnvironmentWith(name, value string) []string {
+	prefix := name + "="
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, prefix) {
+			environment = append(environment, item)
+		}
+	}
+	return append(environment, prefix+value)
 }
 
 func TestWorkerArtifactsNeverPersistSecrets(t *testing.T) {

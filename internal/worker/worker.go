@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
@@ -63,6 +64,26 @@ type Runner interface {
 }
 
 type Started func(pid int) error
+
+type TerminationError struct {
+	Timeout     time.Duration
+	GracePeriod time.Duration
+	Forced      bool
+	Cause       error
+}
+
+func (e *TerminationError) Error() string {
+	reason := "worker canceled"
+	if e.Cause == context.DeadlineExceeded {
+		reason = fmt.Sprintf("worker timeout after %s", e.Timeout)
+	}
+	if e.Forced {
+		return fmt.Sprintf("%s; SIGTERM grace period %s exhausted; sent SIGKILL to process group", reason, e.GracePeriod)
+	}
+	return fmt.Sprintf("%s; process group exited during SIGTERM grace period %s", reason, e.GracePeriod)
+}
+
+func (e *TerminationError) Unwrap() error { return e.Cause }
 
 type Codex struct {
 	StateDir        string
@@ -133,7 +154,8 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	if command == "" {
 		command = "codex"
 	}
-	cmd := exec.CommandContext(ctx, command, args...)
+	cmd := exec.Command(command, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(prompt)
 	safeStdout := redact.NewLineWriterWithSecrets(stdout, c.Secrets)
 	safeStderr := redact.NewLineWriterWithSecrets(stderr, c.Secrets)
@@ -142,13 +164,13 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	runErr := cmd.Start()
 	if runErr == nil && started != nil {
 		if err := started(cmd.Process.Pid); err != nil {
-			_ = cmd.Process.Kill()
+			_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 			return Result{}, fmt.Errorf("record worker process: %w", err)
 		}
 	}
 	if runErr == nil {
-		runErr = cmd.Wait()
+		runErr = waitForProcess(ctx, cmd, cfg.Worker.Timeout.Duration, cfg.Worker.TimeoutGrace.Duration)
 	}
 	if err := safeStdout.Flush(); err != nil && runErr == nil {
 		runErr = err
@@ -190,6 +212,74 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 		return result, fmt.Errorf("codex worker exited unsuccessfully: %w", runErr)
 	}
 	return result, nil
+}
+
+func waitForProcess(ctx context.Context, cmd *exec.Cmd, timeout, grace time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+
+	pid := cmd.Process.Pid
+	if err := signalProcessGroup(pid, syscall.SIGTERM); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+	}
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	parentExited := false
+	for {
+		if !processGroupAlive(pid) && (parentExited || !processAlive(pid)) {
+			if !parentExited {
+				<-done
+			}
+			return &TerminationError{Timeout: timeout, GracePeriod: grace, Cause: ctx.Err()}
+		}
+		select {
+		case <-done:
+			parentExited = true
+		case <-ticker.C:
+		case <-deadline.C:
+			if err := signalProcessGroup(pid, syscall.SIGKILL); err != nil || processAlive(pid) {
+				_ = cmd.Process.Kill()
+			}
+			if !parentExited {
+				<-done
+			}
+			return &TerminationError{Timeout: timeout, GracePeriod: grace, Forced: true, Cause: ctx.Err()}
+		}
+	}
+}
+
+func signalProcessGroup(pid int, signal syscall.Signal) error {
+	if pid <= 0 {
+		return nil
+	}
+	err := syscall.Kill(-pid, signal)
+	if err == syscall.ESRCH {
+		return nil
+	}
+	return err
+}
+
+func processGroupAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(-pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
 }
 
 func findSessionID(path string) string {
