@@ -282,7 +282,7 @@ func TestPromptDoesNotAskForProfileAndIncludesCompletion(t *testing.T) {
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Completion.CreateDraftPR = true
 	prompt := BuildPrompt(cfg, gh.Issue{Number: 1, Title: "Test", Body: "Body"}, state.Issue{RunID: "run", Attempts: 1}, "")
-	for _, expected := range []string{"Do not ask the user to choose the execution profile", "Create or update a draft pull request", "continue directly into implementation"} {
+	for _, expected := range []string{"Do not ask the user to choose the execution profile", "supervisor will create or update a draft pull request", "Do not stage, commit, push", "continue directly into implementation"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("prompt missing %q", expected)
 		}

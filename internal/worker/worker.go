@@ -341,9 +341,6 @@ func (r Result) Validate() error {
 	}
 	switch r.Status {
 	case "completed":
-		if r.Git == nil {
-			return fmt.Errorf("completed result requires git details")
-		}
 	case "needs_input":
 		if r.Question == nil || strings.TrimSpace(r.Question.Text) == "" {
 			return fmt.Errorf("needs_input result requires a question")
@@ -368,9 +365,9 @@ func BuildPrompt(cfg config.Config, issue gh.Issue, current state.Issue, suffix 
 		URL      string   `json:"url"`
 		Comments []string `json:"comments"`
 	}{issue.Number, issue.Title, issue.Body, issue.URL, issue.Comments})
-	completion := "Commit and push the implementation."
+	completion := "Leave the verified changes in the worktree for the deterministic supervisor publisher. Do not stage, commit, push, create a pull request, invoke agent-loop, or invoke a publishing skill. Return git as null when completed."
 	if cfg.Completion.CreateDraftPR {
-		completion += " Create or update a draft pull request."
+		completion += " The supervisor will create or update a draft pull request after your completed result."
 	}
 	if cfg.Completion.CloseIssue {
 		completion += " Close the Issue only after the configured completion criteria are satisfied."

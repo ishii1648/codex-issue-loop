@@ -22,6 +22,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
+	"github.com/ishii1648/codex-issue-loop/internal/publish"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
@@ -524,6 +525,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
 		Worktrees: worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
 		Worker:    worker.Codex{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets, ResumeSupported: boolPointer(codexCompatibility.Has("session_resume"))},
+		Publisher: publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
 		Logger:    log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
 	}
 	err = loop.Run(ctx)
