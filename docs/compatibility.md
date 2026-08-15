@@ -37,7 +37,7 @@ gh issue comment --help
 agent-loop doctor --repo /absolute/path/to/repository --json
 ```
 
-`doctor`の`codex_compat`と`gh_compat`が`ok`で、表示versionとminimumが意図どおりであることを確認する。`fresh-session fallback`が表示された場合はresumeのみ非対応である。開始後はテスト用Issueで初回実行と回答後の継続を1回ずつ確認する。
+`doctor`の`CODEX_CLI_COMPATIBLE`と`GH_CLI_COMPATIBLE` diagnosticが`ok`で、detailのversionとminimumが意図どおりであることを確認する。`session_resume=fresh-session-fallback`が表示された場合はresumeのみ非対応である。開始後はテスト用Issueで初回実行と回答後の継続を1回ずつ確認する。
 
 互換性範囲を更新するときは、次を同じPull Requestへ含める。
 

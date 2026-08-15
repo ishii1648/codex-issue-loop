@@ -42,6 +42,8 @@
 - `codex exec`と`codex exec resume`の必須option
 - `.agent-loop.yaml`と登録状態
 - macOS AC電源時のsleep設定
+- `codex login status`、登録済みcommandの絶対path、LaunchAgent plist
+- raw state/event/logの整合性とblocked/stopped状態。`schema_version: 1`と安定したdiagnostic codeで結果を返し、修復案は自動実行しない
 
 ## MVPの制限
 

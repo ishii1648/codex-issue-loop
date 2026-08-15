@@ -10,6 +10,10 @@ Use the `agent-loop` CLI as the only control interface. The Skill does not own t
 ## Safe workflow
 
 1. Run `agent-loop doctor --repo <path> --json` before the first start or after configuration changes.
+   - Require `schema_version: 1`. If the version is unknown, stop and report that the installed CLI and Skill are incompatible.
+   - Branch on failed `diagnostics[].code`, not localized `summary` or `detail` text.
+   - Present each failed diagnostic with its concrete `remediations`. Do not execute a remediation merely because doctor returned it; every remediation is advisory and has explicit `automatic` and `destructive` fields.
+   - Never delete, reset, overwrite state, or change macOS/GitHub/Codex settings as an automatic repair. For `GITHUB_LABELS_MISSING`, preview `bootstrap-labels` first and apply only within the user's authorized repository scope.
 2. Run `agent-loop status --repo <path> --json` before mutating loop state.
 3. Use `start`, `stop`, or `restart` only for the repository the user named.
 4. If status contains a pending request, present that request before starting a new watch.
