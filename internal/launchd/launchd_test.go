@@ -27,4 +27,10 @@ func TestWritePlistUsesAbsoluteCommandsAndEscapesPaths(t *testing.T) {
 			t.Fatalf("plist missing %q:\n%s", expected, text)
 		}
 	}
+	for _, path := range []string{l.PlistPath(entry.RepoID), filepath.Join(l.RepoDir(entry.RepoID), "supervisor.log"), filepath.Join(l.RepoDir(entry.RepoID), "supervisor.err.log")} {
+		info, statErr := os.Stat(path)
+		if statErr != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("unsafe mode for %s: info=%v err=%v", path, info, statErr)
+		}
+	}
 }

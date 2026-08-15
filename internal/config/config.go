@@ -6,8 +6,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,6 +35,7 @@ type Config struct {
 	Watch      Watch      `yaml:"watch" json:"watch"`
 	Git        Git        `yaml:"git" json:"git"`
 	Completion Completion `yaml:"completion" json:"completion"`
+	Security   Security   `yaml:"security" json:"security"`
 	RepoPath   string     `yaml:"-" json:"repo_path"`
 }
 
@@ -123,6 +126,14 @@ type Completion struct {
 	CreateDraftPR bool `yaml:"create_draft_pr" json:"create_draft_pr"`
 	CloseIssue    bool `yaml:"close_issue" json:"close_issue"`
 }
+
+type Security struct {
+	// RedactEnv contains environment-variable names, never secret values.
+	RedactEnv []string `yaml:"redact_env" json:"redact_env,omitempty"`
+}
+
+var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var githubRepository = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/[A-Za-z0-9_.-]{1,100}$`)
 
 func Defaults() Config {
 	return Config{
@@ -217,8 +228,7 @@ func (c Config) Validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported config version %d", c.Version)
 	}
-	parts := strings.Split(c.GitHub.Repo, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if !githubRepository.MatchString(c.GitHub.Repo) {
 		return fmt.Errorf("github.repo must use owner/name format")
 	}
 	if len(c.GitHub.ReadyLabels) == 0 {
@@ -254,5 +264,34 @@ func (c Config) Validate() error {
 	if c.Worker.Sandbox != "read-only" && c.Worker.Sandbox != "workspace-write" {
 		return fmt.Errorf("worker.sandbox must be read-only or workspace-write")
 	}
+	if c.Git.WorktreeRoot != "" && !filepath.IsAbs(c.Git.WorktreeRoot) {
+		return fmt.Errorf("git.worktree_root must be an absolute path")
+	}
+	if !safeRefFragment(c.Git.BranchPrefix) || !safeRefFragment(c.Git.BaseBranch) {
+		return fmt.Errorf("git.branch_prefix and git.base_branch must be safe Git ref fragments")
+	}
+	for _, name := range c.Security.RedactEnv {
+		if !environmentName.MatchString(name) {
+			return fmt.Errorf("security.redact_env contains invalid environment variable name %q", name)
+		}
+	}
 	return nil
+}
+
+func safeRefFragment(value string) bool {
+	return value != "" && !strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "/") &&
+		!strings.HasSuffix(value, "/") && !strings.Contains(value, "..") &&
+		!strings.Contains(value, "//") && !strings.Contains(value, "@{") &&
+		!strings.ContainsAny(value, " ~^:?*[\\") && !strings.HasSuffix(value, ".") && !strings.HasSuffix(value, ".lock") &&
+		strings.IndexFunc(value, unicode.IsControl) < 0
+}
+
+func (c Config) RedactionValues() []string {
+	values := make([]string, 0, len(c.Security.RedactEnv))
+	for _, name := range c.Security.RedactEnv {
+		if value := os.Getenv(name); len(value) >= 4 {
+			values = append(values, value)
+		}
+	}
+	return values
 }

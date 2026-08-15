@@ -56,6 +56,9 @@ jobs:
       - name: Run go vet
         run: make vet
 
+      - name: Scan reachable Go vulnerabilities
+        run: make vuln-check
+
       - name: Build CLI
         run: make build
 

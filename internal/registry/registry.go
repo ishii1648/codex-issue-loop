@@ -35,10 +35,20 @@ type Store struct{ Path string }
 
 func (s Store) Load() (Registry, error) {
 	r := Registry{Version: 1, Repos: map[string]Entry{}}
-	data, err := os.ReadFile(s.Path)
+	info, err := os.Lstat(s.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return r, nil
 	}
+	if err != nil {
+		return Registry{}, fmt.Errorf("inspect registry: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return Registry{}, fmt.Errorf("registry is not a regular file: %s", s.Path)
+	}
+	if err := os.Chmod(s.Path, 0o600); err != nil {
+		return Registry{}, fmt.Errorf("secure registry: %w", err)
+	}
+	data, err := os.ReadFile(s.Path)
 	if err != nil {
 		return Registry{}, fmt.Errorf("read registry: %w", err)
 	}

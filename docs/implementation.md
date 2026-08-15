@@ -23,7 +23,11 @@
 - `standard` / `extended` preflight policy
 - typed failure分類、±20% jitter付き上限5分のretry/polling backoff、extended continuation
 - 完了、入力待ち、失敗のGitHub反映と未反映状態の再試行
-- credential形式をマスクしたworker log
+- Issue/commentのprompt injection境界、入力上限、制御文字除去
+- worktree root逸脱・symbolic link・unsafe refの拒否
+- 既知credential形式と設定secretをworker log/result、state/event、GitHub通知でmask
+- state、log、plistのprivate permission強制
+- 脅威モデル、最小権限runbook、CIの`govulncheck`
 - fake GitHub/Codex統合テスト、実Git worktreeテスト、race test
 - `TestFault` prefixで独立実行できる障害注入・復旧suiteと仕様17.2の対応表
 

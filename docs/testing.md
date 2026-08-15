@@ -40,3 +40,15 @@ make test-race
 | 回復不能なsnapshot/event不整合 | `TestFaultRevisionMismatchIsQuarantined`、`TestFaultCorruptSnapshotIsQuarantined` |
 
 障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
+
+## セキュリティ負テスト
+
+| 境界 | 主なテスト |
+|---|---|
+| Prompt injection・巨大入力・制御文字 | `TestPromptTreatsIssueInjectionAsBoundedData`、`TestIssueInputIsBoundedAndControlCharactersAreRemoved` |
+| 既知token・設定secret・private key | `TestConfiguredSecretIsRedactedFromTextAndJSON`、`TestLineWriterRedactsPrivateKeyBlock`、`TestWorkerArtifactsNeverPersistSecrets` |
+| state・event・file mode | `TestStateAndEventsNeverPersistSecrets`、`TestWritePlistUsesAbsoluteCommandsAndEscapesPaths` |
+| GitHubコメント・CLI error | `TestGitHubCommentsAndErrorsRedactSecrets` |
+| path traversal・symbolic link | `TestWorktreeRejectsTraversalAndSymbolicLink`、`TestLoadRejectsUnsafePathsRefsAndSecretNames` |
+
+既知の到達可能な依存脆弱性は`make vuln-check`で検査し、Pull Requestと`main`のCIで必須にする。

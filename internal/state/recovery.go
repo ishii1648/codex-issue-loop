@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/redact"
 )
 
 type transaction struct {
@@ -289,7 +290,7 @@ func (s Store) recordRepairUnlocked(snapshot Snapshot, eventType string, payload
 	snapshot.StateRevision++
 	now := time.Now().UTC()
 	snapshot.Supervisor.UpdatedAt = now
-	payloadJSON, err := json.Marshal(payload)
+	payloadJSON, err := redact.Marshal(payload, s.Secrets)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -335,12 +336,13 @@ func (s Store) quarantineUnlocked(cause error) (Snapshot, error) {
 	now := time.Now().UTC()
 	snapshot := s.emptySnapshot()
 	snapshot.StateRevision = 1
+	safeCause := redact.StringWithSecrets(cause.Error(), s.Secrets)
 	snapshot.Supervisor = Supervisor{
 		State: "blocked", UpdatedAt: now,
-		Message: fmt.Sprintf("durable state recovery blocked: %v (backup: %s)", cause, backupDir),
+		Message: fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", safeCause, backupDir),
 	}
-	snapshot.Recovery = &Recovery{Status: "blocked", Reason: cause.Error(), BackupDir: backupDir, DetectedAt: now}
-	payload, _ := json.Marshal(map[string]string{"reason": cause.Error(), "backup_dir": backupDir})
+	snapshot.Recovery = &Recovery{Status: "blocked", Reason: safeCause, BackupDir: backupDir, DetectedAt: now}
+	payload, _ := redact.Marshal(map[string]string{"reason": safeCause, "backup_dir": backupDir}, s.Secrets)
 	event := Event{
 		Version: 1, EventID: NewID("evt"), Sequence: 1, Timestamp: now,
 		RepoID: s.RepoID, Type: "recovery_blocked", Payload: payload,

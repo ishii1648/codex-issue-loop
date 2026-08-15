@@ -11,6 +11,39 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 )
 
+func TestStateAndEventsNeverPersistSecrets(t *testing.T) {
+	secret := "configured-secret-value"
+	store := Store{Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo", Secrets: []string{secret}}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Update("unsafe_result", 1, "run_1", map[string]string{"stderr": "Bearer abcdefghijklmnopqrstuvwxyz", "custom": secret}, func(value *Snapshot) error {
+		value.Issues["1"] = &Issue{Number: 1, Title: "contains " + secret, LastError: "ghp_abcdefghijklmnopqrstuvwxyz123456"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(snapshot.Issues["1"].Title, secret) || strings.Contains(snapshot.Issues["1"].LastError, "ghp_") {
+		t.Fatalf("returned snapshot contains secret: %+v", snapshot.Issues["1"])
+	}
+	for _, path := range []string{store.StatePath(), store.EventsPath()} {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(data), secret) || strings.Contains(string(data), "ghp_") || strings.Contains(string(data), "Bearer abc") {
+			t.Fatalf("secret persisted in %s: %s", path, data)
+		}
+		if info, statErr := os.Stat(path); statErr != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("unsafe mode for %s: info=%v err=%v", path, info, statErr)
+		}
+	}
+	if info, err := os.Stat(store.Dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("unsafe state directory mode: info=%v err=%v", info, err)
+	}
+}
+
 func newStore(t *testing.T) Store {
 	t.Helper()
 	store := Store{Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo"}

@@ -62,6 +62,21 @@ func TestFaultRegistryAddResolveRemoveAndAmbiguity(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsSymbolicLink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.json")
+	if err := os.WriteFile(target, []byte(`{"version":1,"repos":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "registry.json")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Store{Path: path}).Load(); err == nil {
+		t.Fatal("symbolic-link registry was accepted")
+	}
+}
+
 func testRegistryConfig(t *testing.T, repoPath, githubRepo string) config.Config {
 	t.Helper()
 	canonical, err := config.CanonicalRepoPath(repoPath)
