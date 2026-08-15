@@ -50,6 +50,13 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 	branch := fmt.Sprintf("%s%d-%s", cfg.Git.BranchPrefix, issueNumber, slug)
 	path := filepath.Join(root, repoID, fmt.Sprintf("issue-%d", issueNumber))
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		inspection, inspectErr := m.Inspect(ctx, cfg, path, branch)
+		if inspectErr != nil {
+			return Result{}, fmt.Errorf("inspect existing worktree: %w", inspectErr)
+		}
+		if !inspection.Valid || inspection.Branch != branch || !inspection.LocalBranchExists {
+			return Result{}, fmt.Errorf("existing worktree path is incomplete or belongs to another branch: %s", path)
+		}
 		return Result{Path: path, Branch: branch}, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

@@ -17,7 +17,7 @@ func gitRun(t *testing.T, args ...string) {
 	}
 }
 
-func TestEnsureCreatesIsolatedWorktree(t *testing.T) {
+func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
 	repo := filepath.Join(root, "repo")
@@ -63,5 +63,13 @@ func TestEnsureCreatesIsolatedWorktree(t *testing.T) {
 	inspection, err = (Manager{StateRoot: root}).Inspect(context.Background(), cfg, result.Path, result.Branch)
 	if err != nil || !inspection.Dirty {
 		t.Fatalf("dirty inspection=%+v err=%v", inspection, err)
+	}
+
+	partialPath := filepath.Join(cfg.Git.WorktreeRoot, "repo-id", "issue-13")
+	if err := os.MkdirAll(partialPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 13, "Interrupted creation"); err == nil {
+		t.Fatal("partially created directory was treated as a reusable worktree")
 	}
 }

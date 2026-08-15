@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
@@ -24,7 +25,7 @@ func TestResultValidation(t *testing.T) {
 	}
 }
 
-func TestCodexRunParsesStructuredResultAndSession(t *testing.T) {
+func TestFaultFakeCodexProcessProducesStructuredResult(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-codex")
 	script := `#!/bin/sh
@@ -57,6 +58,31 @@ printf '%s\n' '{"version":1,"status":"completed","execution_profile":"standard",
 	}
 	if result.SessionID != "session-123" || result.Status != "completed" || startedPID <= 0 {
 		t.Fatalf("result=%+v startedPID=%d", result, startedPID)
+	}
+}
+
+func TestFaultWorkerKillReturnsRecoverableProcessError(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-codex")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.RepoPath = dir
+	cfg.Worker.Command = fake
+	ctx, cancel := context.WithCancel(context.Background())
+	pid := 0
+	_, err := (Codex{StateDir: dir}).Run(ctx, cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_kill", Attempts: 1}, "", func(startedPID int) error {
+		pid = startedPID
+		cancel()
+		return nil
+	})
+	if err == nil || pid <= 0 {
+		t.Fatalf("pid=%d err=%v", pid, err)
+	}
+	if processErr := syscall.Kill(pid, 0); processErr == nil || processErr == syscall.EPERM {
+		t.Fatalf("worker process %d is still alive", pid)
 	}
 }
 

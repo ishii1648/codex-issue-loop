@@ -94,6 +94,38 @@ type recordingWorker struct {
 	resumePrompts []string
 }
 
+type scriptedWorker struct {
+	results []worker.Result
+	errors  []error
+	runs    int
+	resumes int
+	cursor  int
+}
+
+func (s *scriptedWorker) next() (worker.Result, error) {
+	index := s.cursor
+	s.cursor++
+	var result worker.Result
+	var err error
+	if index < len(s.results) {
+		result = s.results[index]
+	}
+	if index < len(s.errors) {
+		err = s.errors[index]
+	}
+	return result, err
+}
+
+func (s *scriptedWorker) Run(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
+	s.runs++
+	return s.next()
+}
+
+func (s *scriptedWorker) Resume(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
+	s.resumes++
+	return s.next()
+}
+
 func (f *recordingWorker) Run(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
 	f.runPrompts = append(f.runPrompts, prompt)
 	return f.result, nil
@@ -129,9 +161,11 @@ func testLoop(t *testing.T, result worker.Result) (*Loop, *fakeGitHub) {
 	return &Loop{Config: cfg, Store: store, GitHub: github, Worktrees: fakeWorktree{path: repo}, Worker: fakeWorker{result: result}}, github
 }
 
-func TestRunOnceCompletesIssue(t *testing.T) {
+func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
 	loop, github := testLoop(t, result)
+	scripted := &scriptedWorker{results: []worker.Result{result}}
+	loop.Worker = scripted
 	worked, err := loop.RunOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +177,9 @@ func TestRunOnceCompletesIssue(t *testing.T) {
 	issue := snapshot.Issues["1"]
 	if issue.Status != "completed" || issue.PullRequestURL == "" || issue.SessionID != "" {
 		t.Fatalf("unexpected Issue: %+v", issue)
+	}
+	if scripted.runs != 1 || scripted.resumes != 0 {
+		t.Fatalf("runs=%d resumes=%d", scripted.runs, scripted.resumes)
 	}
 }
 
@@ -184,7 +221,7 @@ func TestRunOnceDefaultsAmbiguousFailureToExtended(t *testing.T) {
 	}
 }
 
-func TestRunOnceRetriesPendingGitHubSync(t *testing.T) {
+func TestFaultGitHubSyncPartialFailureIsRetried(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
 	loop, github := testLoop(t, result)
 	github.doneErr = fmt.Errorf("temporary GitHub error")
@@ -204,7 +241,7 @@ func TestRunOnceRetriesPendingGitHubSync(t *testing.T) {
 	}
 }
 
-func TestRunOnceRecoversInterruptedClaim(t *testing.T) {
+func TestFaultInterruptedClaimIsRecovered(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", Git: &worker.GitResult{}}
 	loop, github := testLoop(t, result)
 	github.claimErr = fmt.Errorf("temporary claim error")
@@ -224,7 +261,7 @@ func TestRunOnceRecoversInterruptedClaim(t *testing.T) {
 	}
 }
 
-func TestWaitForWorkWakesOnRecordedAnswer(t *testing.T) {
+func TestFaultSupervisorWakesOnRecordedAnswer(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -236,7 +273,6 @@ func TestWaitForWorkWakesOnRecordedAnswer(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() { loop.waitForWork(context.Background(), time.Second, watcher); close(done) }()
-	time.Sleep(20 * time.Millisecond)
 	_, err = loop.Store.Update("answer_recorded", 1, "run", nil, func(s *state.Snapshot) error {
 		s.Issues["1"] = &state.Issue{Number: 1, Status: "resume_pending"}
 		return nil
@@ -251,7 +287,41 @@ func TestWaitForWorkWakesOnRecordedAnswer(t *testing.T) {
 	}
 }
 
-func TestRunOnceResumesWithRecordedAnswersAfterRestart(t *testing.T) {
+func TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit(t *testing.T) {
+	retry := worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "continue",
+		SessionID: "session-extended", Retry: &worker.Retry{Reason: "continue"},
+	}
+	completed := worker.Result{
+		Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done",
+		Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"},
+	}
+	loop, _ := testLoop(t, retry)
+	loop.Config.Worker.Profiles["extended"] = config.Profile{MaxContinuations: 2}
+	loop.Config.Queue.MaxAttempts = 2
+	scripted := &scriptedWorker{results: []worker.Result{retry, retry, retry, completed}}
+	loop.Worker = scripted
+	for cycle := 0; cycle < 4; cycle++ {
+		if _, err := loop.RunOnce(context.Background()); err != nil {
+			t.Fatalf("cycle %d: %v", cycle, err)
+		}
+		if cycle < 3 {
+			_, err := loop.Store.Update("fault_retry_due", 1, "", nil, func(snapshot *state.Snapshot) error {
+				snapshot.Issues["1"].RetryAfter = nil
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	snapshot, _ := loop.Store.Load()
+	if scripted.runs != 2 || scripted.resumes != 2 || snapshot.Issues["1"].Status != "completed" {
+		t.Fatalf("runs=%d resumes=%d issue=%+v", scripted.runs, scripted.resumes, snapshot.Issues["1"])
+	}
+}
+
+func TestFaultSupervisorRestartResumesWithDurableAnswers(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done", Git: &worker.GitResult{}}
 	loop, _ := testLoop(t, result)
 	now := time.Now().UTC()
@@ -291,7 +361,7 @@ func TestRunOnceResumesWithRecordedAnswersAfterRestart(t *testing.T) {
 	}
 }
 
-func TestRunStopsBeforeWorkWhenDurableStateIsRecoveryBlocked(t *testing.T) {
+func TestFaultSupervisorStopsBeforeRecoveryBlockedWork(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	f, err := os.OpenFile(loop.Store.EventsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

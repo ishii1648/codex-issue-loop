@@ -47,6 +47,9 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Run fault injection suite
+        run: make fault-test
+
       - name: Run race detector
         run: make test-race
 

@@ -20,7 +20,7 @@ func newStore(t *testing.T) Store {
 	return store
 }
 
-func TestUpdatePersistsSnapshotAndEvent(t *testing.T) {
+func TestFaultAttentionRevisionPersistsSnapshotAndEvent(t *testing.T) {
 	store := newStore(t)
 	snapshot, err := store.Update("supervisor_started", 0, "", map[string]string{"ok": "yes"}, func(s *Snapshot) error {
 		s.Supervisor.State = "polling"
@@ -48,7 +48,7 @@ func TestUpdatePersistsSnapshotAndEvent(t *testing.T) {
 	}
 }
 
-func TestAttentionIsStickyUntilRequestAnswered(t *testing.T) {
+func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 	store := newStore(t)
 	_, err := store.Update("input_requested", 7, "run", nil, func(s *Snapshot) error {
 		s.Supervisor.State = "running"
@@ -72,7 +72,7 @@ func TestAttentionIsStickyUntilRequestAnswered(t *testing.T) {
 	}
 }
 
-func TestLoadCompletesPreparedTransactionAtEveryCrashPoint(t *testing.T) {
+func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 	for _, crashPoint := range []string{"prepared", "event_appended", "snapshot_written"} {
 		t.Run(crashPoint, func(t *testing.T) {
 			store := newStore(t)
@@ -123,7 +123,7 @@ func TestLoadCompletesPreparedTransactionAtEveryCrashPoint(t *testing.T) {
 	}
 }
 
-func TestLoadTruncatesPartialEventTailAndRecordsRepair(t *testing.T) {
+func TestFaultPartialEventTailIsTruncatedAndRecorded(t *testing.T) {
 	store := newStore(t)
 	if _, err := store.Update("first", 0, "", nil, func(s *Snapshot) error { return nil }); err != nil {
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func TestLoadTruncatesPartialEventTailAndRecordsRepair(t *testing.T) {
 	}
 }
 
-func TestLoadQuarantinesUnrecoverableRevisionMismatch(t *testing.T) {
+func TestFaultRevisionMismatchIsQuarantined(t *testing.T) {
 	store := newStore(t)
 	if _, err := store.Update("first", 0, "", nil, func(s *Snapshot) error { return nil }); err != nil {
 		t.Fatal(err)
@@ -186,7 +186,7 @@ func TestLoadQuarantinesUnrecoverableRevisionMismatch(t *testing.T) {
 	}
 }
 
-func TestLoadQuarantinesCorruptSnapshot(t *testing.T) {
+func TestFaultCorruptSnapshotIsQuarantined(t *testing.T) {
 	store := newStore(t)
 	if err := os.WriteFile(store.StatePath(), []byte("{broken"), 0o600); err != nil {
 		t.Fatal(err)
@@ -198,4 +198,24 @@ func TestLoadQuarantinesCorruptSnapshot(t *testing.T) {
 	if loaded.Recovery == nil || !strings.Contains(loaded.Recovery.Reason, "decode state") {
 		t.Fatalf("loaded=%+v", loaded)
 	}
+}
+
+func TestFaultSecondSupervisorCannotAcquireLock(t *testing.T) {
+	store := newStore(t)
+	first, err := store.AcquireSupervisorLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ReleaseSupervisorLock(first)
+	if second, err := store.AcquireSupervisorLock(); err == nil {
+		ReleaseSupervisorLock(second)
+		t.Fatal("second supervisor acquired the repository lock")
+	}
+	ReleaseSupervisorLock(first)
+	first = nil
+	third, err := store.AcquireSupervisorLock()
+	if err != nil {
+		t.Fatalf("lock was not reusable after release: %v", err)
+	}
+	ReleaseSupervisorLock(third)
 }

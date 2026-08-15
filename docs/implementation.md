@@ -25,6 +25,7 @@
 - 完了、入力待ち、失敗のGitHub反映と未反映状態の再試行
 - credential形式をマスクしたworker log
 - fake GitHub/Codex統合テスト、実Git worktreeテスト、race test
+- `TestFault` prefixで独立実行できる障害注入・復旧suiteと仕様17.2の対応表
 
 ## 運用前に必要なもの
 
@@ -57,4 +58,4 @@ go test -race ./...
 go vet ./...
 ```
 
-テストでは、eventを配送しない状態からreconciliationだけでattentionを検出するケース、回答eventによるsupervisor起床、claim途中停止、GitHub同期失敗、Codex JSONL/session解析、deterministicなclock/random sourceを用いたbackoffと失敗counterのresetに加え、fake GitHubでのPR・label競合と実Git repositoryでのworktree・branch検査を検証する。
+テストでは、eventを配送しない状態からreconciliationだけでattentionを検出するケース、read-subscribe-read race、複数watchと切断、worker/supervisor停止、claim・worktree作成・GitHub同期の途中停止、Codex JSONL/session解析、deterministicなclock/random sourceを用いたbackoffと失敗counterのresetに加え、fake GitHubでのPR・label競合と実Git repositoryでのworktree・branch検査を検証する。詳細は `docs/testing.md` の対応表を正本とする。
