@@ -293,12 +293,12 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		workerCfg := l.Config
 		workerCfg.RepoPath = current.Worktree
-		prompt := "Continue after the user's recorded answer. Re-read the saved answer context, implement the decision, verify the work, and return the schema-conforming result."
+		instruction := "Continue after the user's recorded answer. Implement the decision, verify the work, and return the schema-conforming result."
 		var result worker.Result
 		if current.SessionID != "" {
-			result, err = l.Worker.Resume(ctx, workerCfg, issue, current, prompt)
+			result, err = l.Worker.Resume(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction))
 		} else {
-			result, err = l.Worker.Run(ctx, workerCfg, issue, current, prompt)
+			result, err = l.Worker.Run(ctx, workerCfg, issue, current, instruction)
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
