@@ -1,6 +1,6 @@
 # doctor診断・復旧runbook
 
-最終確認日: 2026-08-15
+最終確認日: 2026-08-16
 
 `agent-loop doctor --repo PATH`はhostと指定repositoryを診断する。`--repo`を省略するとhostとregistry内の全repositoryを診断する。診断はread-onlyであり、state、設定、label、認証、macOS設定を自動修復しない。
 
@@ -36,6 +36,9 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | `MACOS_SLEEP_ENABLED` / `MACOS_SLEEP_STATUS_UNKNOWN` | AC電源時のsleepが有効または判定不能 | System Settings > Energyで「Prevent automatic sleeping when the display is off」を有効化 |
 | `REGISTRY_CORRUPT` | registryを解釈不能 | 元fileを削除せず退避・確認し、repositoryを再登録 |
 | `CONFIG_INVALID` | `.agent-loop.yaml`が無効 | 表示されたpathとvalidation errorを修正 |
+| `NOTIFICATION_CREDENTIAL_MISSING` | 外部pushが有効だが管理tokenがない | `notification-token --token-file -`で標準入力から保存 |
+| `NOTIFICATION_CREDENTIAL_UNSAFE` | token fileがregular fileでない、0600でない、または内容が無効 | symlinkやpermissionを確認し専用commandで保存し直す |
+| `NOTIFICATION_CREDENTIAL_VALID` / `NOTIFICATIONS_DISABLED` | tokenを安全に読める、または外部pushが無効 | 対応不要 |
 | `REGISTRATION_MISSING` | repositoryが未登録 | `agent-loop register --repo PATH` |
 | `REGISTERED_BINARY_MISSING` | 登録時の絶対command pathが移動 | install/update後に同じrepositoryを再register |
 | `LAUNCH_AGENT_MISSING` / `LAUNCH_AGENT_UNREADABLE` | plistがない、または読めない | 再register、所有者・permission確認 |

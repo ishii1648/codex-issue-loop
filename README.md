@@ -16,6 +16,7 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 - [GitHubラベルbootstrap runbook](docs/github-labels.md)
 - [doctor診断・復旧runbook](docs/doctor.md)
 - [Mac mini常駐運用runbook](docs/mac-mini-runbook.md)
+- [スマートフォン直接push通知](docs/notifications.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview-v2.png)
 
@@ -64,7 +65,7 @@ make ci
 
 個別に実行する場合は、`make fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build release-check`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。障害注入ケースと仕様17.2の対応は[テストマトリクス](docs/testing.md)に記載しています。
 
-`vuln-check`は再現可能な検査のため`govulncheck v1.6.0`と脆弱性修正済みのGo 1.25.8 toolchainを固定し、Goのtoolchain機能で初回にdownloadします。アプリ本体の最小Go versionは1.22のままです。
+build、test、release、`vuln-check`は、到達可能な標準library脆弱性を含まないGo 1.25.13 toolchainへ固定し、Goのtoolchain機能で初回にdownloadします。`govulncheck`はv1.6.0へ固定しています。sourceのlanguage互換下限はGo 1.22のままです。
 
 ## Setup
 
@@ -95,6 +96,8 @@ tag付きreleaseの検証、新規install、安全なupdateとrollbackは[Releas
 
 `register`はリポジトリ別の永続状態ディレクトリと`~/Library/LaunchAgents/com.codex-issue-loop.<repo-id>.plist`を作成します。認証tokenはコピーしません。
 
+監視taskが接続していない間も`needs_input`やsupervisor blockedを知らせる必要がある場合は、opt-inのntfy adapterを利用できます。tokenは専用の`notification-token`コマンドでmode `0600`の管理fileへ保存し、設定fileやplistには置きません。provider比較、スマートフォン側の準備、機密性、到達時間の確認は[スマートフォン直接push通知](docs/notifications.md)を参照してください。
+
 `bootstrap-labels`は既定ではpreviewだけを表示し、`--apply`を指定した場合だけ不足ラベルを作成します。既存ラベルの色・説明は一致しない場合も保持し、ラベルの更新・削除は行いません。詳細は[GitHubラベルbootstrap runbook](docs/github-labels.md)を参照してください。
 
 `doctor`はversion文字列だけでなく、実行に必要なCLI optionとGitHub Issue操作を検査します。必須capabilityがない場合は開始を拒否します。Codexのsession resumeだけが利用できない場合は、既存worktreeと永続状態を引き継いだ新規sessionへ安全にfallbackします。対応範囲と更新確認の手順は[CLI互換性マトリクス](docs/compatibility.md)を参照してください。
@@ -116,6 +119,11 @@ printf '%s\n' '選択した方針' | agent-loop answer \
   --request-id req_... \
   --message-file - \
   --json
+
+# opt-in通知credentialを標準入力から保存
+agent-loop notification-token \
+  --repo /path/to/repository \
+  --token-file -
 
 # 状態を残して停止
 agent-loop stop --repo /path/to/repository

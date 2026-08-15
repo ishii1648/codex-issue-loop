@@ -714,9 +714,17 @@ watch呼び出し後、Codexは独自のtimerや定期status確認を開始し�
 
 外部supervisorからCodexアプリ内taskへ直接メッセージを挿入したり、task状態を変更したりする非公開機能には依存しない。
 
-`Needs input` の表示とpush通知は、監視task内で実行中のwatchが戻り、Codex自身がユーザーへ質問することで成立する。監視taskが接続されていない間も質問は永続状態に残るが、Codex由来の即時push通知は保証しない。再接続時には未回答質問を即時表示する。
+`Needs input` のCodex内表示は、監視task内で実行中のwatchが戻り、Codex自身がユーザーへ質問することで成立する。監視taskが接続されていない間も質問は永続状態に残り、opt-inの外部push adapterは永続outboxからスマートフォンへ直接通知できる。再接続時には通知の成否に関係なく未回答質問をsnapshotから即時表示する。
 
 将来、公式に利用可能なtask wakeupまたは通知APIが提供された場合は、optional adapterとして追加できる。
+
+### 13.2.1 外部push adapter
+
+初期providerはntfyとする。attentionの永続更新と同じtransactionで通知outboxへenqueueし、`pending`、`sent`、`failed`、`canceled`、試行回数、次回試行時刻をsnapshotへ保持する。notification IDはrequestまたはblocked原因から決定し、再起動やreconciliationで同じattentionを重複enqueueしない。
+
+送信はsupervisor cycleの前後で行う。失敗は上限付きexponential backoffで再試行し、event/logへ記録するが、Issue選択・worker・publisherを停止しない。回答済みrequestに対する未送信通知は送信前に取消す。既定本文はrepository、Issue番号、request ID、状態だけとし、質問文と失敗理由は`include_details`が明示された場合だけ含める。
+
+credentialはrepository別管理directoryのmode `0600` fileへ専用CLIで保存し、設定file、LaunchAgent plist、repository、command引数へ置かない。endpointはHTTPS、topicは推測困難かつaccess control済みとする。通知tapはGitHub Issueを開き、安定した公式deep linkが提供されるまではCodex taskを直接起動しない。詳細は[スマートフォン直接push通知](notifications.md)を正本とする。
 
 CodexにはClaude Codeのmonitor toolと同じ公開契約を持つ汎用的なtoken-free monitorがあるとは仮定しない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。保留中のtool callを含むCodex製品全体のtoken計測や課金については、公式に保証された範囲を超えて断定しない。
 
@@ -812,6 +820,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - 管理directoryは0700、plist、registry、状態、event、transaction、worker/supervisor logは0600で作成する
 - credentialをpromptへ明示的に埋め込まない
 - 既知credential形式と`security.redact_env`の値をstdout/stderr、worker result、state、event、GitHub通知の境界でmaskする
+- 外部push tokenは専用のprivate管理fileへmode `0600`で保存し、設定、plist、repository、log、state、eventへ値を残さない
 - Codex sandboxは既定で `workspace-write`とし、worker起動時に`approval_policy="never"`を上書きする
 - dangerous bypassは設定schemaでもMVPでは許可しない
 - GitHub Issueは信頼済み入力とはみなさず、prompt injectionの可能性をworkerへ明示する
@@ -847,6 +856,8 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - attention状態と`state_revision`の永続化
 - standard workerが追加runなしで完了すること
 - extended workerだけが設定上限内でresumeされること
+- 外部pushのoutbox永続化、重複抑止、再送、rate limit、回答後取消、adapter障害からのsupervisor分離
+- 外部push credentialの0600保存、無出力、redaction、通知本文の詳細opt-in
 
 ### 17.3 macOS E2E
 
@@ -855,6 +866,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - Macの画面off中の継続
 - Codex Remoteからの監視開始
 - `needs_input`のスマートフォン通知、回答、再開
+- 監視task未接続時の外部push到達、再起動後の非重複、provider障害中のloop継続
 - ChatGPT desktop taskを閉じた後のsupervisor継続
 - Codexによる定期status確認なしでwatchがattentionまで待機すること
 

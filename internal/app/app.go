@@ -24,6 +24,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
+	"github.com/ishii1648/codex-issue-loop/internal/notify"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
@@ -135,6 +136,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.watch(ctx, l, args)
 	case "answer":
 		return a.answer(l, args)
+	case "notification-token":
+		return a.notificationToken(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -172,6 +175,7 @@ Commands:
   status        Show durable and launchd state
   watch         Wait for needs_input, blocked, stopped, or optional idle
   answer        Record an answer for a pending request
+  notification-token  Configure or clear a managed notification credential
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree
@@ -958,6 +962,14 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		return fmt.Errorf("unsupported gh CLI: %s", compatibilityDetail(ghCompatibility))
 	}
 	secrets := cfg.RedactionValues()
+	notificationToken := ""
+	if cfg.Notifications.Enabled {
+		notificationToken, err = loadNotificationToken(l, entry)
+		if err != nil {
+			return fmt.Errorf("load notification credential: %w", err)
+		}
+		secrets = append(secrets, notificationToken)
+	}
 	logPolicy := retention.Policy{MaxBytes: cfg.Logs.RotateBytes, MaxAge: cfg.Logs.RotateInterval.Duration, Keep: cfg.Logs.Generations}
 	for _, name := range []string{"launchd.stdout.log", "launchd.stderr.log"} {
 		if err := retention.RotateExisting(filepath.Join(l.RepoDir(entry.RepoID), name), logPolicy); err != nil {
@@ -969,16 +981,20 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		return fmt.Errorf("open supervisor log: %w", err)
 	}
 	defer supervisorLog.Close()
-	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: secrets, EventRetention: logPolicy}
+	store := state.Store{
+		Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath,
+		Secrets: secrets, EventRetention: logPolicy, NotificationsEnabled: cfg.Notifications.Enabled,
+	}
 	cfg.Worker.Command = entry.Commands["codex"]
 	safeLog := redact.NewLineWriterWithSecrets(supervisorLog, secrets)
 	defer safeLog.Flush()
 	loop := &supervisor.Loop{
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
-		Worktrees: worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
-		Worker:    worker.Codex{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets, ResumeSupported: boolPointer(codexCompatibility.Has("session_resume"))},
-		Publisher: publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
-		Logger:    log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
+		Worktrees:     worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
+		Worker:        worker.Codex{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets, ResumeSupported: boolPointer(codexCompatibility.Has("session_resume"))},
+		Publisher:     publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
+		Logger:        log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
+		Notifications: notify.NewDispatcher(cfg, store, notificationToken),
 	}
 	err = loop.Run(ctx)
 	var blocked supervisor.BlockedError

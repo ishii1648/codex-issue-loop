@@ -16,7 +16,7 @@
 
 図中の `DURABLE STATE` がループ状態の正本である。socket等のevent通知は即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしを修復する。
 
-スマートフォンから監視taskへの紺色の矢印はCodex Remoteによる操作経路、`WATCH`から監視taskを経てスマートフォンへ戻るオレンジ色の破線はCodexの通知経路を表す。後者は`watch`が`needs_input`等のattention状態を返したときに監視taskから届く通知であり、supervisorからスマートフォンへの直接pushではない。
+スマートフォンから監視taskへの紺色の矢印はCodex Remoteによる操作経路、`WATCH`から監視taskを経てスマートフォンへ戻るオレンジ色の破線はCodexの通知経路を表す。これに加えて、監視task未接続時はopt-inの外部push adapterが永続outboxからスマートフォンへ直接通知できる。いずれの通知も正本ではなく、永続snapshotへ戻るための補助経路である。
 
 ## 3. コンポーネントと責務
 
@@ -152,7 +152,7 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 | supervisorが異常終了 | snapshot、event log、GitHub状態 | launchd再起動後にreconciliation |
 | Macがスリープ | 実行は停止し得る | macOSの「ディスプレイoff時もスリープさせない」を有効化 |
 
-外部supervisorからCodex taskを直接wakeする公開APIには依存しない。監視taskが接続されていない期間の即時pushが必要になった場合は、スマートフォンへの直接通知adapterを別機能として追加する。
+外部supervisorからCodex taskを直接wakeする公開APIには依存しない。監視taskが接続されていない期間は、opt-inのntfy adapterが`needs_input`とsupervisor blockedを永続outboxから通知する。詳細は[スマートフォン直接push通知](notifications.md)を参照する。
 
 ## 10. 設計上の不変条件
 

@@ -185,6 +185,9 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-057**: 未回答質問は監視 task が切断しても失われないこと。
 - **FR-058**: `watch` は永続snapshotを正本とし、event通知を状態変化のヒントとして扱うこと。event payloadだけでattention状態を確定しないこと。
 - **FR-059**: `watch` はeventを取りこぼしても検出できるよう、既定60秒間隔の内部reconciliationを行うこと。reconciliation中はCodexへheartbeatや途中結果を返さないこと。
+- **FR-059-A**: opt-inの外部push adapterは、監視taskが0件でも`needs_input`とsupervisor blockedを永続outboxからスマートフォンへ通知できること。
+- **FR-059-B**: 外部pushはrequest/event単位で重複を抑止し、上限付きbackoffとrate limitを持ち、adapter障害でsupervisor本体を停止しないこと。
+- **FR-059-C**: 通知credentialは設定file・plist・repository・logへ保存せず、repository別のprivate管理fileから読み込むこと。通知本文の詳細は明示opt-inとすること。
 
 ### 6.7 Codex Skill
 
@@ -219,6 +222,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **NFR-012**: `--dangerously-bypass-approvals-and-sandbox` 相当を既定で使用しないこと。
 - **NFR-013**: ログ出力時に既知のcredential形式と設定されたsecretをマスクすること。
 - **NFR-014**: force push、履歴破壊、Issue削除、リポジトリ削除を通常フローに含めないこと。
+- **NFR-015**: 外部push providerへ送る既定本文をrepository名、Issue番号、request ID、状態の最小情報に限定すること。
 
 ### 7.3 可観測性
 
@@ -288,6 +292,10 @@ Mac mini に物理アクセスせず、Codex Remote から起動、状態確認�
 ### AC-9: 外部producerからの投入
 
 GitHub UI、CLI/API、automation、または別ホストのCodexから作成したIssueでも、同じ着手可能条件を満たせばMac mini上のsupervisorが取得して処理を開始する。
+
+### AC-10: 監視task未接続時の直接push
+
+監視taskを閉じた状態で`needs_input`へ遷移すると、正常なprovider/network環境では90秒以内を目標にスマートフォンへ通知される。同じrequestの再読込やsupervisor再起動では送信を重複せず、provider障害中もIssue loopは継続する。
 
 ## 10. 実装フェーズ
 

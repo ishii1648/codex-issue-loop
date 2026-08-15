@@ -33,4 +33,7 @@ func TestFaultLayoutUsesIsolatedRootsAndPrivateDirectories(t *testing.T) {
 	if got := layout.PlistPath("repo-id"); got != filepath.Join(launchAgents, "com.codex-issue-loop.repo-id.plist") {
 		t.Fatalf("plist=%s", got)
 	}
+	if got := layout.NotificationTokenPath("repo-id"); got != filepath.Join(layout.RepoDir("repo-id"), "notification-token") {
+		t.Fatalf("notification token=%s", got)
+	}
 }

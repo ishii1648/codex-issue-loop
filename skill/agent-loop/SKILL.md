@@ -16,6 +16,7 @@ Use the `agent-loop` CLI as the only control interface. The Skill does not own t
    - Branch on failed `diagnostics[].code`, not localized `summary` or `detail` text.
    - Present each failed diagnostic with its concrete `remediations`. Do not execute a remediation merely because doctor returned it; every remediation is advisory and has explicit `automatic` and `destructive` fields.
    - Never delete, reset, overwrite state, or change macOS/GitHub/Codex settings as an automatic repair. For `GITHUB_LABELS_MISSING`, preview `bootstrap-labels` first and apply only within the user's authorized repository scope.
+   - For `NOTIFICATION_CREDENTIAL_MISSING` or `NOTIFICATION_CREDENTIAL_UNSAFE`, explain that external push is opt-in. Configure it only when the user requests it, and read the token only with `agent-loop notification-token --repo <path> --token-file -`. Never put the token in chat, command arguments, repository files, config, or plist.
 2. Run `agent-loop status --repo <path> --json` before mutating loop state.
 3. Use `start`, `stop`, or `restart` only for the repository the user named.
 4. If status contains a pending request, present that request before starting a new watch.
@@ -27,3 +28,5 @@ Use the `agent-loop` CLI as the only control interface. The Skill does not own t
 For worktree retention, run `agent-loop cleanup --repo <path> --json` first and present every candidate, reason, safety flag, recovery source, and purge confirmation token. `cleanup --apply` requires the named repository loop to be stopped and explicit user authorization. Never use `cleanup --apply` for an entry marked dirty, unpushed, open-PR, or unanswered-request; the CLI must also reject it. Use `purge` only for the single Issue the user explicitly authorized, copy the exact confirmation token from the current cleanup preview, and explain that dirty changes are not recoverable. Never infer or synthesize approval for purge.
 
 Confirm the exact repository and impact before `stop`, `restart`, `unregister`, `update`, `migrate --apply`, either rollback, or `uninstall`. Use only a checksum- and attestation-verified release artifact for update. Use only the exact managed backup paths returned by update and migrate for rollback. When rolling back across schema versions, restore the schema backup before the installation backup. None of these commands should delete state, worktrees, or uncommitted changes.
+
+External push is an attention hint, not durable state. After a notification, always read `status` and present the current pending request. Clearing a managed notification token requires explicit user authorization and notifications must be disabled or the loop stopped first.

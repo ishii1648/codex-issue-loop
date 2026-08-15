@@ -60,6 +60,31 @@ func TestLoadRejectsNegativeWorktreeRetention(t *testing.T) {
 	}
 }
 
+func TestLoadNotificationOptInAndRejectsUnsafeSettings(t *testing.T) {
+	dir := writeConfig(t, `version: 2
+github:
+  repo: owner/repo
+notifications:
+  enabled: true
+  endpoint: http://127.0.0.1:8080
+  topic: opaque-topic
+`)
+	cfg, err := Load(dir)
+	if err != nil || !cfg.Notifications.Enabled || cfg.Notifications.MaxAttempts != 8 {
+		t.Fatalf("cfg=%+v err=%v", cfg.Notifications, err)
+	}
+	for _, fragment := range []string{
+		"endpoint: http://example.com\n  topic: opaque-topic",
+		"endpoint: https://ntfy.sh\n  topic: short",
+		"endpoint: https://ntfy.sh\n  topic: opaque-topic\n  retry_initial: 20s\n  retry_max: 10s",
+	} {
+		dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nnotifications:\n  enabled: true\n  "+fragment+"\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "notifications") {
+			t.Fatalf("unsafe notification config accepted: %s: %v", fragment, err)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidLogRetention(t *testing.T) {
 	for _, fragment := range []string{
 		"logs:\n  rotate_bytes: 100\n",
