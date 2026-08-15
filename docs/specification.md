@@ -8,6 +8,8 @@
 
 ## 2. 全体構成
 
+![codex-issue-loopの全体構成](images/architecture-overview.png)
+
 ```text
 ChatGPT mobile app
         │ Codex Remote
@@ -15,28 +17,21 @@ ChatGPT mobile app
 ChatGPT desktop app on Mac mini
         │
         ├─ [LOOP] monitor task
-        │      │ Skill
-        │      ▼
-        │   agent-loop start/status/watch/answer
-        │      │
-        │      ▼
-        │   launchctl ──► launchd LaunchAgent
-        │                         │
-        │                         ▼
-        │                  agent-loop run
-        │                    supervisor
-        │                    │        │
-        │                    │        └─ persistent state/events
-        │                    ▼
-        │                 GitHub Issues
-        │                    │ pick/claim
-        │                    ▼
-        │              git worktree + codex exec
-        │                    │
-        │                    ▼
-        │              branch / draft PR
+        │      └─ Skill ──► agent-loop CLI
+        │                       ├─ start ──► launchctl ──► launchd
+        │                       │                         └─ supervisor
+        │                       ├─ status / answer ───────────┤
+        │                       └─ watch ── event + 60s ──────┤
+        │                                      reconcile     ▼
+        │                                             durable state/events
         │
         └─ [INTAKE] new issue task ──► GitHub Issue
+
+supervisor ──► GitHub Issues ── pick/claim ──► worktree + codex exec
+     ▲                                                   │
+     └────────────── durable state/events ◄──────────────┘
+                                                         ▼
+                                                branch / draft PR
 ```
 
 ### 2.1 責務境界
@@ -45,11 +40,12 @@ ChatGPT desktop app on Mac mini
 | --- | --- | --- |
 | Codex監視task | ユーザーとの会話、CLI操作、質問表示 | ループの正本状態 |
 | agent-loop Skill | 自然言語からCLIへの安全な操作手順 | 常駐プロセス、Issue選択ロジック |
-| agent-loop CLI | 設定、プロセス制御、監視、回答登録 | 実装判断 |
+| agent-loop CLI | 設定、プロセス制御、監視、回答登録 | 実装判断、監視状態の正本 |
 | launchd | supervisorの起動と再起動 | Issue状態機械 |
 | supervisor | Issue選択、状態遷移、Codex起動、復旧 | プロダクト判断 |
 | Codex worker | 1 Issueの調査、実装、検証、結果報告 | 次Issueの選択、無限ループ |
 | GitHub | Issue/PRの共有状態 | ローカル実行詳細 |
+| 永続snapshot/event log | supervisor状態、attention request、revision | ユーザーとの会話 |
 
 Codex Skill の実行主体はCodex taskである。Skillは実行可能プロセスではなく、Codexが読む操作手順である。長時間動き続ける実行主体は `agent-loop run` supervisor である。
 
@@ -163,8 +159,18 @@ worker:
   command: codex
   model: null
   sandbox: workspace-write
-  ephemeral: true
+  session_mode: resumable
   timeout: 2h
+  ambiguous_profile: extended
+  profiles:
+    standard:
+      max_continuations: 0
+    extended:
+      max_continuations: 3
+
+watch:
+  reconcile_interval: 60s
+  reconcile_jitter: 10%
 
 git:
   branch_prefix: codex/issue-
@@ -183,6 +189,10 @@ completion:
 - `queue.concurrency` はMVPでは `1` のみ許可する。
 - `worker.model: null` はユーザーのCodex既定値を使う。
 - `worker.sandbox` の既定値は `workspace-write` とする。
+- `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。terminal状態へ到達したIssueのsession IDはactive stateから外す。
+- `worker.ambiguous_profile` は `extended` 固定とし、MVPではユーザー確認へ切り替える設定を設けない。
+- `queue.poll_interval` はGitHub Issueキューの再取得間隔、`watch.reconcile_interval` はattention監視の取りこぼし修復間隔であり、別の設定として扱う。
+- `watch.reconcile_jitter` は複数watchの同時起床を避けるため、各待機期限へ加える。
 - worktree root未指定時はユーザー状態領域配下を使う。
 - durationはGo duration形式とする。
 - 未知キーは設定ミスを検出するため既定でエラーとする。
@@ -249,6 +259,19 @@ agent-loop watch --repo /path/to/repo --until-attention [--json]
 - `--until-idle` も指定された場合のキュー空
 
 未回答質問が既に存在する場合、待機せず即時返却する。watchはsnapshotとevent logを読み取るだけで、supervisorの親プロセスにはならない。
+
+watchは永続snapshotを正本とし、socket、ファイル通知、プロセス内channel等のeventを低遅延化のヒントとして扱う。event payloadだけで終了条件を判定せず、起床のたびにsnapshotを読み直す。
+
+raceを避けるため、watchは次の順序で待機する。
+
+1. snapshotを読み、attention状態なら返す
+2. event通知を購読する
+3. snapshotを再読し、購読開始前後の状態変化を確認する
+4. eventまたはreconciliation期限までOSレベルで待機する
+5. 起床後にsnapshotを再読する
+6. 終了条件を満たさなければ待機へ戻る
+
+reconciliationの既定間隔は60秒とする。内部polling中はheartbeatや途中結果をstdoutへ出さず、Codexへ制御を戻さない。したがって待機中にモデルを定期実行しない。
 
 ### 6.5 answer
 
@@ -389,15 +412,33 @@ GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リ
 codex exec \
   --cd <issue-worktree> \
   --sandbox workspace-write \
-  --ephemeral \
   --json \
   --output-schema <worker-result.schema.json> \
   <generated-prompt>
 ```
 
-実際の引数は起動前に `codex exec --help` とversion capabilityを検査する。非対応versionでは推測で継続せず `blocked` とする。
+初回runはpreflight後に `extended` と判定された場合にresumeできるよう、resumable sessionとして起動する。supervisorは出力からsession IDを取得してIssue状態へ保存する。`standard` が完了した場合はsession IDをactive stateから外し、以降のloop状態をCodex sessionへ依存させない。
 
-### 11.2 ワーカープロンプト
+実際の引数は起動前に `codex exec --help` とversion capabilityを検査する。非対応versionでは推測で継続せず `blocked` とする。session IDを安全に取得・resumeできないCodex CLI versionでは、`extended` continuationを無効化してIssueをblockedにする。
+
+### 11.2 preflightとexecution profile
+
+preflightは別プロセスではなく、初回worker promptに含める論理フェーズとする。workerは最初に受け入れ条件、変更範囲、依存関係、検証方法、リスク、反復回数の見込みを整理し、`standard` または `extended` を選択した後、そのまま実装へ進む。
+
+分類規則:
+
+| profile | 選択条件 | 実行方針 |
+| --- | --- | --- |
+| `standard` | 変更範囲と完了条件が明確で、単一run内で実装と検証を完了できる見込み | 初回runで完了を目指し、continuationを既定では許可しない |
+| `extended` | 広範な調査、migration、複数コンポーネント、長時間テスト、段階的検証が必要 | supervisorがcontinuation budgetと同一sessionのresumeを管理する |
+
+分類が難しい場合は `extended` を選ぶ。profile選択は内部の実行戦略であり、ユーザーへ質問しない。ユーザー質問は11.4の質問ポリシーに該当する実質的な判断だけに限定する。
+
+初回workerはpreflight結果を実行ログへ構造化eventとして出力するが、preflightだけで終了しない。したがって `extended` の判定だけを理由に2つのworkerが必ず動くわけではない。初回runで完了しなかった場合に限り、supervisorが保存されたsession ID、worktree、検証結果を使って `codex exec resume` を起動する。ユーザー回答後の再開は自動continuation budgetとは別に扱う。
+
+MVPではnative Goalをheadless workerの実行機構にしない。Goalは監視task内の単一目的の復旧作業等に利用できるが、Issueキュー、process lifetime、永続状態を所有しない。公式に利用可能なheadless Goal interfaceが提供された場合のみ、`extended` profileのoptional adapterとして追加を検討する。
+
+### 11.3 ワーカープロンプト
 
 次を含む。
 
@@ -410,8 +451,9 @@ codex exec \
 - 実装、テスト、commit、push、draft PRに関する完了条件
 - 構造化結果の意味
 - 質問すべき条件と、推測して進めてよい条件
+- preflightの分類規則と、曖昧な場合は質問せず`extended`を選ぶ指示
 
-### 11.3 質問ポリシー
+### 11.4 質問ポリシー
 
 質問する:
 
@@ -426,15 +468,17 @@ codex exec \
 - 既存規約から一意に推測できる事項
 - 容易に戻せる内部構造
 - テスト追加やformatなど通常の実装作業
+- `standard` / `extended` のprofile選択
 
 質問時は、調査済み事実、判断が必要な理由、推奨案、2〜3個までの選択肢を返す。単なる進捗報告を質問にしない。
 
-### 11.4 構造化結果
+### 11.5 構造化結果
 
 ```json
 {
   "version": 1,
   "status": "completed",
+  "execution_profile": "standard",
   "summary": "Implemented ...",
   "question": null,
   "tests": [
@@ -455,6 +499,7 @@ codex exec \
 {
   "version": 1,
   "status": "needs_input",
+  "execution_profile": "extended",
   "summary": "Both APIs are compatible with the current code.",
   "question": {
     "text": "Which compatibility policy should be used?",
@@ -484,6 +529,7 @@ codex exec \
 {
   "version": 1,
   "repo_id": "example-a1b2c3d4",
+  "state_revision": 42,
   "supervisor": {
     "state": "polling",
     "pid": 12345,
@@ -496,6 +542,8 @@ codex exec \
 ```
 
 一時ファイルへのwrite、fsync、renameにより原子的に更新する。ファイルpermissionはユーザーのみ読み書き可能とする。
+
+`state_revision` は有効な状態更新ごとに単調増加させる。event通知を取りこぼしたwatchも、最後に確認したrevisionとの差分から状態変化を検出できる。
 
 ### 12.2 events.jsonl
 
@@ -518,6 +566,8 @@ codex exec \
 - `supervisor_started`
 - `issue_claimed`
 - `worker_started`
+- `worker_preflight_completed`
+- `worker_continuation_started`
 - `worker_completed`
 - `input_requested`
 - `answer_recorded`
@@ -537,6 +587,8 @@ codex exec \
 2. `agent-loop start --json`
 3. `agent-loop status --json`
 4. 未回答質問がなければ `agent-loop watch --until-attention --json`
+
+watch呼び出し後、Codexは独自のtimerや定期status確認を開始しない。event受信とreconciliation pollingはGoのwatchプロセスが担当し、attention条件を満たすまでCodexへ途中結果を返さない。
 
 入力待ち:
 
@@ -560,6 +612,18 @@ codex exec \
 `Needs input` の表示とpush通知は、監視task内で実行中のwatchが戻り、Codex自身がユーザーへ質問することで成立する。監視taskが接続されていない間も質問は永続状態に残るが、Codex由来の即時push通知は保証しない。再接続時には未回答質問を即時表示する。
 
 将来、公式に利用可能なtask wakeupまたは通知APIが提供された場合は、optional adapterとして追加できる。
+
+CodexにはClaude Codeのmonitor toolと同じ公開契約を持つ汎用的なtoken-free monitorがあるとは仮定しない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。保留中のtool callを含むCodex製品全体のtoken計測や課金については、公式に保証された範囲を超えて断定しない。
+
+### 13.3 eventとreconciliationの役割
+
+| 機構 | 役割 | 信頼性上の扱い |
+| --- | --- | --- |
+| event通知 | 状態変化を低遅延でwatchへ知らせる | 取りこぼし得るhint |
+| 永続snapshot | 現在状態、未回答request、revisionを保持する | 唯一の正本 |
+| 60秒reconciliation | event欠落、watch再接続、raceを修復する | 最終的な検出経路 |
+
+`needs_input`、`blocked`、`stopped`等のattention状態はstickyとし、event送信後に自動解除しない。requestへの回答、明示的な復旧操作、または状態機械で定義された遷移だけが解除できる。
 
 ## 14. エラー処理と再試行
 
@@ -617,6 +681,7 @@ supervisor起動時に次を行う。
 - 全状態遷移
 - answerの冪等性とconflict
 - structured result validation
+- preflight profile分類と曖昧時の`extended` fallback
 - retry/backoff
 - secret masking
 - repo-id生成
@@ -629,6 +694,11 @@ supervisor起動時に次を行う。
 - snapshot途中書き込みからの復旧
 - worker kill後のreconciliation
 - watchの接続、切断、複数接続
+- event通知を破棄した場合の60秒reconciliation
+- read-subscribe-read間に状態が変わるrace
+- attention状態と`state_revision`の永続化
+- standard workerが追加runなしで完了すること
+- extended workerだけが設定上限内でresumeされること
 
 ### 17.3 macOS E2E
 
@@ -638,6 +708,7 @@ supervisor起動時に次を行う。
 - Codex Remoteからの監視開始
 - `needs_input`のスマートフォン通知、回答、再開
 - ChatGPT desktop taskを閉じた後のsupervisor継続
+- Codexによる定期status確認なしでwatchがattentionまで待機すること
 
 ## 18. 実装時に確定する項目
 
@@ -650,4 +721,6 @@ supervisor起動時に次を行う。
 - worker timeout時のgrace period
 - worktreeの既定保持期間
 - desktop app更新によるRemote/通知表示差異のE2E手順
-
+- event通知方式（Unix domain socket、ファイル通知、プロセス内IPC）の最終選定
+- Codex CLI session resumeのversion別capabilityとfallback
+- Codexの保留中tool callに関する公式token計測仕様
