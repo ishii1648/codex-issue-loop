@@ -96,16 +96,37 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 
 `register`はclone先の絶対pathを登録し、リポジトリ別の永続状態とユーザーLaunchAgentを作成します。リポジトリを別のpathへcloneし直した場合は再登録が必要です。
 
+LaunchAgentは対話shellの初期化fileを読みません。`gh`をaquaで管理している場合は、aqua proxyではなく実体binaryのdirectoryを先頭へ追加したPATHで登録します。aquaを使っていない環境では現在のPATHをそのまま使用します。
+
 ```sh
 agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loop"
+agent_loop_register_path="$PATH"
 
-"$agent_loop_bin" register --repo "$PWD" --json
-"$agent_loop_bin" doctor --repo "$PWD" --json
+if command -v aqua >/dev/null 2>&1; then
+  agent_loop_gh_binary="$(aqua which gh 2>/dev/null || true)"
+  if [ -n "$agent_loop_gh_binary" ]; then
+    agent_loop_register_path="$(dirname "$agent_loop_gh_binary"):$agent_loop_register_path"
+  fi
+fi
+
+env PATH="$agent_loop_register_path" \
+  "$agent_loop_bin" register --repo "$PWD" --json
 "$agent_loop_bin" start --repo "$PWD" --json
+sleep 3
+"$agent_loop_bin" doctor --repo "$PWD" --json
 "$agent_loop_bin" status --repo "$PWD" --json
 ```
 
-`doctor`が`ok: true`、`status`が起動状態を返すことを確認します。同じリポジトリを複数hostから同時に処理しないでください。
+repository単位の`doctor`は停止中のsupervisorを異常として扱うため、初回は`start`の後に実行します。`doctor`が`ok: true`、`status`のLaunchAgentが`running`、supervisorが`polling`またはworker実行中の状態を返すことを確認します。同じリポジトリを複数hostから同時に処理しないでください。
+
+すでにaqua proxyのpathで登録して起動に失敗している場合は、状態を保持したまま停止し、同じ手順で再登録します。
+
+```sh
+"$agent_loop_bin" stop --repo "$PWD" --json
+env PATH="$agent_loop_register_path" \
+  "$agent_loop_bin" register --repo "$PWD" --json
+"$agent_loop_bin" start --repo "$PWD" --json
+```
 
 ### 5. Issueをキューへ投入する
 
