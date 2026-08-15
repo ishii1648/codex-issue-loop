@@ -85,7 +85,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			item.GitHubSync = decision.githubSync
 			item.RetryAfter = decision.retryAt
 			item.WorkerPID = decision.workerPID
-			item.UpdatedAt = time.Now().UTC()
+			item.UpdatedAt = l.now()
 			return nil
 		})
 		if err != nil {
@@ -226,7 +226,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 	switch current.Status {
 	case "claiming":
 		if running && !ready {
-			now := time.Now().UTC()
+			now := l.now()
 			decision.status, decision.retryAt = "retry_wait", &now
 			decision.lastError, decision.reason = "claim completed before supervisor restart", "write-ahead claim converged from GitHub"
 		} else if ready && !running {
@@ -235,7 +235,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 			return blockDecision(decision, "claim labels were removed manually")
 		}
 	case "running", "claimed":
-		now := time.Now().UTC()
+		now := l.now()
 		decision.status, decision.retryAt = "retry_wait", &now
 		decision.lastError, decision.reason = "worker disappeared before supervisor restart", "dead worker scheduled for retry"
 		if !running && inspection.Valid {
