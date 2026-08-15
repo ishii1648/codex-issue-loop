@@ -107,6 +107,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.logs(l, args)
 	case "doctor":
 		return a.doctor(ctx, l, args)
+	case "bootstrap-labels":
+		return a.bootstrapLabels(ctx, args)
 	case "run":
 		return a.supervise(ctx, l, args)
 	case "help", "--help", "-h":
@@ -133,7 +135,31 @@ Commands:
   answer        Record an answer for a pending request
   logs          Print supervisor logs
   doctor        Validate dependencies, auth, config, and registration
+  bootstrap-labels  Preview or create required GitHub labels
   run           Run the supervisor (used by launchd)`)
+}
+
+func (a App) bootstrapLabels(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("bootstrap-labels", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	repo := fs.String("repo", "", "repository path")
+	apply := fs.Bool("apply", false, "create missing labels")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if *repo == "" {
+		return exitError{2, fmt.Errorf("--repo is required")}
+	}
+	cfg, err := config.Load(*repo)
+	if err != nil {
+		return exitError{2, err}
+	}
+	result, bootstrapErr := (gh.CLI{Secrets: cfg.RedactionValues()}).BootstrapLabels(ctx, cfg, *apply)
+	if outputErr := a.output(*jsonOut, result); outputErr != nil {
+		return outputErr
+	}
+	return bootstrapErr
 }
 
 func (a App) install(l layout.Layout, args []string) error {
@@ -524,15 +550,15 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 				} else {
 					available := map[string]bool{}
 					for _, label := range labels {
-						available[label.Name] = true
+						available[strings.ToLower(label.Name)] = true
 					}
 					for _, label := range requiredLabels(cfg) {
-						if label != "" && !available[label] {
+						if label != "" && !available[strings.ToLower(label)] {
 							missing = append(missing, label)
 						}
 					}
 					if len(missing) > 0 {
-						labelErr = fmt.Errorf("missing labels: %s", strings.Join(missing, ", "))
+						labelErr = fmt.Errorf("missing labels: %s; repair: agent-loop bootstrap-labels --repo %q --apply", strings.Join(missing, ", "), cfg.RepoPath)
 					}
 				}
 			}
@@ -668,21 +694,9 @@ func truncate(value string, max int) string {
 }
 
 func requiredLabels(cfg config.Config) []string {
-	seen := map[string]bool{}
 	labels := []string{}
-	configured := append([]string{}, cfg.GitHub.ReadyLabels...)
-	configured = append(configured, cfg.GitHub.RunningLabel, cfg.GitHub.NeedsInputLabel, cfg.GitHub.FailedLabel, cfg.GitHub.DoneLabel)
-	for _, candidate := range cfg.GitHub.ExcludeLabels {
-		if strings.EqualFold(candidate, "blocked") {
-			configured = append(configured, candidate)
-			break
-		}
-	}
-	for _, label := range configured {
-		if label != "" && !seen[label] {
-			labels = append(labels, label)
-			seen[label] = true
-		}
+	for _, spec := range gh.RequiredLabelSpecs(cfg) {
+		labels = append(labels, spec.Name)
 	}
 	return labels
 }
