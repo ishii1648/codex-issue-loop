@@ -1,0 +1,258 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+const FileName = ".agent-loop.yaml"
+
+type Duration struct{ time.Duration }
+
+func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
+	v, err := time.ParseDuration(node.Value)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", node.Value, err)
+	}
+	d.Duration = v
+	return nil
+}
+
+type Config struct {
+	Version    int        `yaml:"version" json:"version"`
+	GitHub     GitHub     `yaml:"github" json:"github"`
+	Queue      Queue      `yaml:"queue" json:"queue"`
+	Worker     Worker     `yaml:"worker" json:"worker"`
+	Watch      Watch      `yaml:"watch" json:"watch"`
+	Git        Git        `yaml:"git" json:"git"`
+	Completion Completion `yaml:"completion" json:"completion"`
+	RepoPath   string     `yaml:"-" json:"repo_path"`
+}
+
+type GitHub struct {
+	Repo            string   `yaml:"repo" json:"repo"`
+	ReadyLabels     []string `yaml:"ready_labels" json:"ready_labels"`
+	ExcludeLabels   []string `yaml:"exclude_labels" json:"exclude_labels"`
+	RunningLabel    string   `yaml:"running_label" json:"running_label"`
+	NeedsInputLabel string   `yaml:"needs_input_label" json:"needs_input_label"`
+	FailedLabel     string   `yaml:"failed_label" json:"failed_label"`
+	DoneLabel       string   `yaml:"done_label" json:"done_label"`
+	Assignee        string   `yaml:"assignee" json:"assignee,omitempty"`
+	Milestone       string   `yaml:"milestone" json:"milestone,omitempty"`
+}
+
+type Queue struct {
+	PollInterval            Duration `yaml:"poll_interval" json:"poll_interval"`
+	Concurrency             int      `yaml:"concurrency" json:"concurrency"`
+	Order                   string   `yaml:"order" json:"order"`
+	MaxAttempts             int      `yaml:"max_attempts" json:"max_attempts"`
+	ContinueAfterNeedsInput bool     `yaml:"continue_after_needs_input" json:"continue_after_needs_input"`
+}
+
+type Worker struct {
+	Command          string             `yaml:"command" json:"command"`
+	Model            string             `yaml:"model" json:"model,omitempty"`
+	Sandbox          string             `yaml:"sandbox" json:"sandbox"`
+	SessionMode      string             `yaml:"session_mode" json:"session_mode"`
+	Timeout          Duration           `yaml:"timeout" json:"timeout"`
+	AmbiguousProfile string             `yaml:"ambiguous_profile" json:"ambiguous_profile"`
+	Profiles         map[string]Profile `yaml:"profiles" json:"profiles"`
+}
+
+type Profile struct {
+	MaxContinuations int `yaml:"max_continuations" json:"max_continuations"`
+}
+
+type Watch struct {
+	ReconcileInterval Duration `yaml:"reconcile_interval" json:"reconcile_interval"`
+	ReconcileJitter   float64  `yaml:"reconcile_jitter" json:"reconcile_jitter"`
+}
+
+func (w *Watch) UnmarshalYAML(node *yaml.Node) error {
+	type rawWatch struct {
+		ReconcileInterval Duration `yaml:"reconcile_interval"`
+		ReconcileJitter   any      `yaml:"reconcile_jitter"`
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		switch node.Content[i].Value {
+		case "reconcile_interval", "reconcile_jitter":
+		default:
+			return fmt.Errorf("field %s not found in type config.Watch", node.Content[i].Value)
+		}
+	}
+	raw := rawWatch{ReconcileInterval: w.ReconcileInterval, ReconcileJitter: w.ReconcileJitter}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	w.ReconcileInterval = raw.ReconcileInterval
+	switch value := raw.ReconcileJitter.(type) {
+	case nil:
+	case float64:
+		w.ReconcileJitter = value
+	case int:
+		w.ReconcileJitter = float64(value)
+	case string:
+		if !strings.HasSuffix(value, "%") {
+			return fmt.Errorf("reconcile_jitter must be a percentage")
+		}
+		var percent float64
+		if _, err := fmt.Sscanf(strings.TrimSuffix(value, "%"), "%f", &percent); err != nil {
+			return fmt.Errorf("invalid reconcile_jitter %q", value)
+		}
+		w.ReconcileJitter = percent / 100
+	default:
+		return fmt.Errorf("invalid reconcile_jitter type")
+	}
+	return nil
+}
+
+type Git struct {
+	BranchPrefix string `yaml:"branch_prefix" json:"branch_prefix"`
+	WorktreeRoot string `yaml:"worktree_root" json:"worktree_root,omitempty"`
+	BaseBranch   string `yaml:"base_branch" json:"base_branch"`
+}
+
+type Completion struct {
+	CreateDraftPR bool `yaml:"create_draft_pr" json:"create_draft_pr"`
+	CloseIssue    bool `yaml:"close_issue" json:"close_issue"`
+}
+
+func Defaults() Config {
+	return Config{
+		Version: 1,
+		GitHub: GitHub{
+			ReadyLabels:     []string{"codex-loop:ready"},
+			ExcludeLabels:   []string{"blocked", "do-not-automate"},
+			RunningLabel:    "codex-loop:running",
+			NeedsInputLabel: "codex-loop:needs-input",
+			FailedLabel:     "codex-loop:failed",
+			DoneLabel:       "codex-loop:done",
+		},
+		Queue: Queue{
+			PollInterval:            Duration{60 * time.Second},
+			Concurrency:             1,
+			Order:                   "issue_number_asc",
+			MaxAttempts:             3,
+			ContinueAfterNeedsInput: true,
+		},
+		Worker: Worker{
+			Command:          "codex",
+			Sandbox:          "workspace-write",
+			SessionMode:      "resumable",
+			Timeout:          Duration{2 * time.Hour},
+			AmbiguousProfile: "extended",
+			Profiles: map[string]Profile{
+				"standard": {MaxContinuations: 0},
+				"extended": {MaxContinuations: 3},
+			},
+		},
+		Watch: Watch{
+			ReconcileInterval: Duration{60 * time.Second},
+			ReconcileJitter:   0.10,
+		},
+		Git: Git{
+			BranchPrefix: "codex/issue-",
+			BaseBranch:   "main",
+		},
+		Completion: Completion{CreateDraftPR: true},
+	}
+}
+
+func Load(repoPath string) (Config, error) {
+	canonical, err := CanonicalRepoPath(repoPath)
+	if err != nil {
+		return Config{}, err
+	}
+	f, err := os.Open(filepath.Join(canonical, FileName))
+	if err != nil {
+		return Config{}, fmt.Errorf("open %s: %w", FileName, err)
+	}
+	defer f.Close()
+	cfg := Defaults()
+	decoder := yaml.NewDecoder(f)
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
+		return Config{}, fmt.Errorf("decode %s: %w", FileName, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != nil && !errors.Is(err, io.EOF) {
+		return Config{}, fmt.Errorf("decode trailing YAML: %w", err)
+	} else if err == nil {
+		return Config{}, fmt.Errorf("%s must contain one YAML document", FileName)
+	}
+	cfg.RepoPath = canonical
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func CanonicalRepoPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository symlinks: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat repository: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("repository path is not a directory: %s", resolved)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func (c Config) Validate() error {
+	if c.Version != 1 {
+		return fmt.Errorf("unsupported config version %d", c.Version)
+	}
+	parts := strings.Split(c.GitHub.Repo, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("github.repo must use owner/name format")
+	}
+	if len(c.GitHub.ReadyLabels) == 0 {
+		return fmt.Errorf("github.ready_labels must not be empty")
+	}
+	if c.Queue.Concurrency != 1 {
+		return fmt.Errorf("queue.concurrency must be 1 in version 1")
+	}
+	if c.Queue.Order != "issue_number_asc" {
+		return fmt.Errorf("queue.order must be issue_number_asc in version 1")
+	}
+	if c.Queue.PollInterval.Duration <= 0 || c.Watch.ReconcileInterval.Duration <= 0 || c.Worker.Timeout.Duration <= 0 {
+		return fmt.Errorf("durations must be positive")
+	}
+	if c.Queue.MaxAttempts < 1 {
+		return fmt.Errorf("queue.max_attempts must be at least 1")
+	}
+	if c.Worker.AmbiguousProfile != "extended" {
+		return fmt.Errorf("worker.ambiguous_profile must be extended")
+	}
+	if c.Worker.SessionMode != "resumable" {
+		return fmt.Errorf("worker.session_mode must be resumable")
+	}
+	if _, ok := c.Worker.Profiles["standard"]; !ok {
+		return fmt.Errorf("worker.profiles.standard is required")
+	}
+	if _, ok := c.Worker.Profiles["extended"]; !ok {
+		return fmt.Errorf("worker.profiles.extended is required")
+	}
+	if c.Watch.ReconcileJitter < 0 || c.Watch.ReconcileJitter > 1 {
+		return fmt.Errorf("watch.reconcile_jitter must be between 0%% and 100%%")
+	}
+	if c.Worker.Sandbox != "read-only" && c.Worker.Sandbox != "workspace-write" {
+		return fmt.Errorf("worker.sandbox must be read-only or workspace-write")
+	}
+	return nil
+}

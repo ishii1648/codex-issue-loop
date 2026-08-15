@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "status", "execution_profile", "summary", "question", "tests", "git", "retry"],
+  "properties": {
+    "version": {"const": 1},
+    "status": {"enum": ["completed", "needs_input", "retryable_failure", "blocked"]},
+    "execution_profile": {"enum": ["standard", "extended"]},
+    "summary": {"type": "string"},
+    "question": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text", "reason", "recommended_option", "options", "allow_free_text"],
+          "properties": {
+            "text": {"type": "string"},
+            "reason": {"type": "string"},
+            "recommended_option": {"type": "string"},
+            "options": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "label"],
+                "properties": {"id": {"type": "string"}, "label": {"type": "string"}}
+              }
+            },
+            "allow_free_text": {"type": "boolean"}
+          }
+        }
+      ]
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "result"],
+        "properties": {"command": {"type": "string"}, "result": {"type": "string"}}
+      }
+    },
+    "git": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["branch", "commit", "pull_request_url"],
+          "properties": {
+            "branch": {"type": "string"},
+            "commit": {"type": "string"},
+            "pull_request_url": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "retry": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason"],
+          "properties": {"reason": {"type": "string"}}
+        }
+      ]
+    }
+  }
+}

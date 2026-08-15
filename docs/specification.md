@@ -73,6 +73,8 @@ Goを採用する。
 
 各コマンドは絶対パスを登録時に解決し、LaunchAgentの限定されたPATHに依存しない。
 
+登録時には`git`、`gh`、`codex`、`launchctl`の絶対パスと実行時PATHをregistryへ保存する。LaunchAgentはこのPATHを引き継ぐが、credential値は環境へ追加しない。
+
 ## 4. ディレクトリ構成
 
 ### 4.1 配布リポジトリ
@@ -115,13 +117,15 @@ target-repository/
 ```text
 ~/Library/Application Support/codex-issue-loop/
 ├─ registry.json
+├─ worktrees/<repo-id>/issue-<number>/
 └─ repos/<repo-id>/
    ├─ state.json
    ├─ events.jsonl
    ├─ supervisor.log
    ├─ supervisor.err.log
    ├─ lock
-   └─ prompts/
+   ├─ prompts/
+   └─ runs/<run-id>/
 
 ~/Library/LaunchAgents/
 └─ com.codex-issue-loop.<repo-id>.plist
@@ -385,9 +389,12 @@ MVPの既定はIssue番号昇順とする。将来、priorityラベルと作成�
 
 1. 候補一覧を取得してローカルでsortする
 2. 先頭Issueの最新状態を再取得する
-3. runningラベルを追加し、readyラベルを外す
-4. run IDを含む開始コメントを冪等キー付きで作成する
-5. ローカル状態を `claimed` にする
+3. ローカル状態へwrite-aheadの`claiming`を保存する
+4. runningラベルを追加し、readyラベルを外す
+5. run IDを含む開始コメントを冪等キー付きで作成する
+6. ローカル状態を `claimed` にする
+
+`claiming`で停止した場合は、再起動後に最新Issueを再取得し、同じrun IDと冪等markerでclaimを再実行する。
 
 GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リポジトリを処理するsupervisorは1つ」という運用制約を置く。複数ホスト対応時はGitHub外の分散lockが必要になる。
 
@@ -564,6 +571,7 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 主要イベント:
 
 - `supervisor_started`
+- `claim_started`
 - `issue_claimed`
 - `worker_started`
 - `worker_preflight_completed`
@@ -574,6 +582,7 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 - `retry_scheduled`
 - `issue_completed`
 - `issue_failed`
+- `github_state_synced`
 - `supervisor_blocked`
 - `supervisor_stopped`
 

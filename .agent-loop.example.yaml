@@ -1,0 +1,43 @@
+version: 1
+
+github:
+  repo: owner/repository
+  ready_labels: [codex-loop:ready]
+  exclude_labels: [blocked, do-not-automate]
+  running_label: codex-loop:running
+  needs_input_label: codex-loop:needs-input
+  failed_label: codex-loop:failed
+  done_label: codex-loop:done
+
+queue:
+  poll_interval: 60s
+  concurrency: 1
+  order: issue_number_asc
+  max_attempts: 3
+  continue_after_needs_input: true
+
+worker:
+  command: codex
+  model: null
+  sandbox: workspace-write
+  session_mode: resumable
+  timeout: 2h
+  ambiguous_profile: extended
+  profiles:
+    standard:
+      max_continuations: 0
+    extended:
+      max_continuations: 3
+
+watch:
+  reconcile_interval: 60s
+  reconcile_jitter: 10%
+
+git:
+  branch_prefix: codex/issue-
+  worktree_root: null
+  base_branch: main
+
+completion:
+  create_draft_pr: true
+  close_issue: false
