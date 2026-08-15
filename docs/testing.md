@@ -19,6 +19,7 @@ make test-race
 | supervisor二重起動防止 | `TestFaultSecondSupervisorCannotAcquireLock` |
 | snapshot途中書き込みからの復旧 | `TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint`、`TestFaultPartialEventTailIsTruncatedAndRecorded` |
 | worker kill後のreconciliation | `TestFaultWorkerKillReturnsRecoverableProcessError`、`TestFaultWorkerAndGitHubStateReconciliationDecisions` |
+| timeoutの段階的終了とprocess group回収 | `TestFaultWorkerTimeoutUsesGracefulProcessGroupTermination`、`TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace`、`TestWorkerTimeoutStageIsPersistedForRetry` |
 | watchの接続、切断、複数接続 | `TestFaultDisconnectedEventChannelsFallBackToTimer`、`TestFaultMultipleWatchConnectionsObserveSameRevision` |
 | event通知を破棄した場合のreconciliation | `TestFaultDroppedEventReconcilesAttention` |
 | read-subscribe-read間に状態が変わるrace | `TestFaultReadSubscribeReadRace` |

@@ -54,6 +54,7 @@
 - Codex taskが接続されていない場合のスマートフォンへの直接push adapterは未実装である。
 - 実GitHub repositoryと実Codex workerを使うend-to-end testは、利用者のtest repositoryで実施する必要がある。
 - Codex CLI 0.136.0以降とGitHub CLI 2.69.0以降を対応下限とし、起動時に必須capabilityを検査する。resume非対応時は既存worktreeと永続状態を使う新規sessionへfallbackする。詳細は`docs/compatibility.md`を正本とする。
+- worker timeout時は独立process groupへSIGTERMを送り、既定30秒のgrace period後も親子processが残る場合だけSIGKILLへ進む。終了段階をretry理由へ残し、worktreeと途中成果は削除しない。
 
 ## テスト
 

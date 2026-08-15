@@ -110,6 +110,7 @@ Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部
 - 通常のworking treeは変更せず、Issueごとのworktreeを使用します。
 - force push、sandbox bypass、状態やworktreeの自動削除は行いません。
 - `stop`、`unregister`、`uninstall`後もIssueの状態とworktreeを保持します。
+- worker timeout時はprocess groupへSIGTERMを送り、`worker.timeout_grace`を超えた場合だけSIGKILLします。途中のworktreeは保持して再試行時に検査します。
 - 未回答requestは回答されるまでstickyに保持されます。
 - GitHub Issue本文は信頼済みのshell入力として扱いません。
 - Issue入力はサイズと制御文字を制限し、prompt内では命令ではないJSONデータとして分離します。
