@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +21,16 @@ type Manager struct {
 type Result struct {
 	Path   string
 	Branch string
+}
+
+type Inspection struct {
+	Exists             bool
+	Valid              bool
+	Branch             string
+	Head               string
+	Dirty              bool
+	LocalBranchExists  bool
+	RemoteBranchExists bool
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -62,4 +73,49 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 		return Result{}, fmt.Errorf("create worktree: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return Result{Path: path, Branch: branch}, nil
+}
+
+func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch string) (Inspection, error) {
+	inspection := Inspection{}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return inspection, nil
+	}
+	if err != nil {
+		return inspection, err
+	}
+	inspection.Exists = info.IsDir()
+	if !inspection.Exists {
+		return inspection, nil
+	}
+	git := m.GitPath
+	if git == "" {
+		git = "git"
+	}
+	if out, err := exec.CommandContext(ctx, git, "-C", path, "rev-parse", "--is-inside-work-tree").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		return inspection, nil
+	}
+	inspection.Valid = true
+	if out, err := exec.CommandContext(ctx, git, "-C", path, "symbolic-ref", "--quiet", "--short", "HEAD").CombinedOutput(); err == nil {
+		inspection.Branch = strings.TrimSpace(string(out))
+	}
+	if out, err := exec.CommandContext(ctx, git, "-C", path, "rev-parse", "HEAD").CombinedOutput(); err == nil {
+		inspection.Head = strings.TrimSpace(string(out))
+	} else {
+		return inspection, fmt.Errorf("inspect worktree HEAD: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.CommandContext(ctx, git, "-C", path, "status", "--porcelain").CombinedOutput(); err == nil {
+		inspection.Dirty = strings.TrimSpace(string(out)) != ""
+	} else {
+		return inspection, fmt.Errorf("inspect worktree status: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if branch != "" {
+		inspection.LocalBranchExists = exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run() == nil
+		out, err := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "ls-remote", "--heads", "origin", "refs/heads/"+branch).CombinedOutput()
+		if err != nil {
+			return inspection, fmt.Errorf("inspect remote branch: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		inspection.RemoteBranchExists = strings.TrimSpace(string(out)) != ""
+	}
+	return inspection, nil
 }

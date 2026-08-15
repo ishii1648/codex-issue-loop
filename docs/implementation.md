@@ -45,7 +45,7 @@
 - 同じrepositoryを複数hostから処理しない。
 - GitHub labelは自動作成しない。
 - event logとsupervisor logのrotationは未実装である。
-- 起動時reconciliationはactive run、write-ahead claim、未反映GitHub状態を復旧する。既に人手で変更されたbranch/PRを完全に探索して収束させる処理は今後の拡張である。
+- 起動時reconciliationはactive run、write-ahead claim、未反映GitHub状態、未記録のpush/PR、merge/close済みPRを復旧する。branch・worktree・labelの人手変更と二重workerの可能性は自動上書きせず、理由を残してblockedへ移す。
 - Codex taskが接続されていない場合のスマートフォンへの直接push adapterは未実装である。
 - 実GitHub repositoryと実Codex workerを使うend-to-end testは、利用者のtest repositoryで実施する必要がある。
 
@@ -57,4 +57,4 @@ go test -race ./...
 go vet ./...
 ```
 
-テストでは、eventを配送しない状態からreconciliationだけでattentionを検出するケース、回答eventによるsupervisor起床、claim途中停止、GitHub同期失敗、Codex JSONL/session解析を検証する。
+テストでは、eventを配送しない状態からreconciliationだけでattentionを検出するケース、回答eventによるsupervisor起床、claim途中停止、GitHub同期失敗、Codex JSONL/session解析に加え、fake GitHubでのPR・label競合と実Git repositoryでのworktree・branch検査を検証する。

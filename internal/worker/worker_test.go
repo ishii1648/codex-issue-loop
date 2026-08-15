@@ -47,12 +47,16 @@ printf '%s\n' '{"version":1,"status":"completed","execution_profile":"standard",
 	cfg.RepoPath = dir
 	cfg.Worker.Command = fake
 	current := state.Issue{RunID: "run_1", Attempts: 1}
-	result, err := (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1, Title: "Test"}, current, "")
+	startedPID := 0
+	result, err := (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1, Title: "Test"}, current, "", func(pid int) error {
+		startedPID = pid
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SessionID != "session-123" || result.Status != "completed" {
-		t.Fatalf("result=%+v", result)
+	if result.SessionID != "session-123" || result.Status != "completed" || startedPID <= 0 {
+		t.Fatalf("result=%+v startedPID=%d", result, startedPID)
 	}
 }
 
@@ -112,7 +116,7 @@ printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"standard"
 		},
 	}
 	prompt := BuildContinuationPrompt(current, "Continue implementation.")
-	if _, err := (Codex{StateDir: dir}).Resume(context.Background(), cfg, gh.Issue{Number: 1}, current, prompt); err != nil {
+	if _, err := (Codex{StateDir: dir}).Resume(context.Background(), cfg, gh.Issue{Number: 1}, current, prompt, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(captured)

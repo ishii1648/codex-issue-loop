@@ -41,6 +41,7 @@ type Issue struct {
 	Continuations    int            `json:"continuations"`
 	ExecutionProfile string         `json:"execution_profile,omitempty"`
 	SessionID        string         `json:"session_id,omitempty"`
+	WorkerPID        int            `json:"worker_pid,omitempty"`
 	PullRequestURL   string         `json:"pull_request_url,omitempty"`
 	GitHubSync       string         `json:"github_sync,omitempty"`
 	LastError        string         `json:"last_error,omitempty"`

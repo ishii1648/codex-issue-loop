@@ -19,7 +19,9 @@ import (
 
 type fakeGitHub struct {
 	issue                     gh.Issue
+	remote                    *gh.RemoteState
 	claimed, done, needsInput bool
+	markedRunning             bool
 	claimErr                  error
 	doneErr                   error
 }
@@ -28,6 +30,12 @@ func (f *fakeGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, erro
 	return []gh.Issue{f.issue}, nil
 }
 func (f *fakeGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) { return f.issue, nil }
+func (f *fakeGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
+	if f.remote != nil {
+		return *f.remote, nil
+	}
+	return gh.RemoteState{Issue: f.issue}, nil
+}
 func (f *fakeGitHub) Claim(context.Context, config.Config, gh.Issue, string) error {
 	if f.claimErr != nil {
 		err := f.claimErr
@@ -51,12 +59,24 @@ func (f *fakeGitHub) MarkDone(context.Context, config.Config, int, string) error
 	return nil
 }
 func (f *fakeGitHub) MarkFailed(context.Context, config.Config, int, string, bool) error { return nil }
-func (f *fakeGitHub) MarkRunning(context.Context, config.Config, int) error              { return nil }
+func (f *fakeGitHub) MarkRunning(context.Context, config.Config, int) error {
+	f.markedRunning = true
+	return nil
+}
 
-type fakeWorktree struct{ path string }
+type fakeWorktree struct {
+	path       string
+	inspection *worktree.Inspection
+}
 
 func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error) {
 	return worktree.Result{Path: f.path, Branch: "codex/issue-1-test"}, nil
+}
+func (f fakeWorktree) Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error) {
+	if f.inspection != nil {
+		return *f.inspection, nil
+	}
+	return worktree.Inspection{Exists: true, Valid: true, Branch: "codex/issue-1-test", LocalBranchExists: true}, nil
 }
 
 type fakeWorker struct {
@@ -70,20 +90,20 @@ type recordingWorker struct {
 	resumePrompts []string
 }
 
-func (f *recordingWorker) Run(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string) (worker.Result, error) {
+func (f *recordingWorker) Run(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
 	f.runPrompts = append(f.runPrompts, prompt)
 	return f.result, nil
 }
 
-func (f *recordingWorker) Resume(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string) (worker.Result, error) {
+func (f *recordingWorker) Resume(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
 	f.resumePrompts = append(f.resumePrompts, prompt)
 	return f.result, nil
 }
 
-func (f fakeWorker) Run(context.Context, config.Config, gh.Issue, state.Issue, string) (worker.Result, error) {
+func (f fakeWorker) Run(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
 	return f.result, f.err
 }
-func (f fakeWorker) Resume(context.Context, config.Config, gh.Issue, state.Issue, string) (worker.Result, error) {
+func (f fakeWorker) Resume(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
 	return f.result, f.err
 }
 
