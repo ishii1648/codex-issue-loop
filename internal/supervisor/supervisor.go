@@ -45,6 +45,13 @@ func (l *Loop) Run(ctx context.Context) error {
 	if l.Logger == nil {
 		l.Logger = log.New(os.Stderr, "agent-loop: ", log.LstdFlags|log.LUTC)
 	}
+	snapshot, err := l.Store.Load()
+	if err != nil {
+		return BlockedError{Err: fmt.Errorf("validate durable state: %w", err)}
+	}
+	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
+		return BlockedError{Err: fmt.Errorf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)}
+	}
 	watcher, watchErr := fsnotify.NewWatcher()
 	if watchErr == nil {
 		watchErr = watcher.Add(l.Store.Dir)

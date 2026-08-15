@@ -586,6 +586,21 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 - `supervisor_blocked`
 - `supervisor_stopped`
 
+### 12.3 transactionと破損復旧
+
+各状態更新は、更新後snapshotと対応eventを `state.txn.json` へ先に原子的に保存してから、event logへのappend、snapshotの置換、transaction削除の順でcommitする。各段階でprocessが停止しても、次回のreadまたはsupervisor起動時にtransactionから不足分を補完する。
+
+起動時とread時には次を検証する。
+
+- `state_revision` と最後のevent `sequence` が一致する
+- event `sequence` が1から単調に連続する
+- snapshot、event、transactionのversionと `repo_id` が一致する
+- prepared transaction内のsnapshot revisionとevent sequenceが一致する
+
+改行前で停止したevent log末尾は、最後の完全なeventとsnapshot revisionが一致する場合に限り切り詰め、`event_log_tail_truncated` を記録する。prepared transactionが残っている場合は、そのtransactionを正本としてeventとsnapshotのcommitを完了する。
+
+transactionなしでsnapshotとevent logが食い違う場合、途中に壊れたeventがある場合、またはsnapshotを復元できない場合は自動推測しない。既存の `state.json`、`events.jsonl`、`state.txn.json` をrepository state directory配下の `recovery/` へ隔離し、元の理由とbackup pathを含む `recovery_blocked` 状態を新しいsnapshotへ保存する。blocked状態では通常の状態更新とIssue処理を拒否し、backupを保持したまま手動復旧を待つ。
+
 ## 13. 監視とCodex task連携
 
 ### 13.1 Skillの標準フロー

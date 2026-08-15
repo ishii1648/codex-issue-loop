@@ -2,7 +2,9 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +264,29 @@ func TestRunOnceResumesWithRecordedAnswersAfterRestart(t *testing.T) {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("resume prompt missing %q: %s", expected, prompt)
 		}
+	}
+}
+
+func TestRunStopsBeforeWorkWhenDurableStateIsRecoveryBlocked(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	f, err := os.OpenFile(loop.Store.EventsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{\"version\":1,\"event_id\":\"evt_gap\",\"sequence\":99,\"repo_id\":\"repo-deadbeef\",\"type\":\"gap\"}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = loop.Run(context.Background())
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected BlockedError, got %v", err)
+	}
+	snapshot, loadErr := loop.Store.Load()
+	if loadErr != nil || snapshot.Supervisor.State != "blocked" || snapshot.Recovery == nil {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, loadErr)
 	}
 }

@@ -68,6 +68,13 @@ type Request struct {
 	AnsweredAt    *time.Time `json:"answered_at,omitempty"`
 }
 
+type Recovery struct {
+	Status     string    `json:"status"`
+	Reason     string    `json:"reason"`
+	BackupDir  string    `json:"backup_dir"`
+	DetectedAt time.Time `json:"detected_at"`
+}
+
 type Snapshot struct {
 	Version         int                 `json:"version"`
 	RepoID          string              `json:"repo_id"`
@@ -76,6 +83,7 @@ type Snapshot struct {
 	Supervisor      Supervisor          `json:"supervisor"`
 	Issues          map[string]*Issue   `json:"issues"`
 	PendingRequests map[string]*Request `json:"pending_requests"`
+	Recovery        *Recovery           `json:"recovery,omitempty"`
 }
 
 type Event struct {
@@ -98,7 +106,9 @@ type Store struct {
 
 func (s Store) StatePath() string  { return filepath.Join(s.Dir, "state.json") }
 func (s Store) EventsPath() string { return filepath.Join(s.Dir, "events.jsonl") }
-func (s Store) lockPath() string   { return filepath.Join(s.Dir, "state.lock") }
+
+func (s Store) TransactionPath() string { return filepath.Join(s.Dir, "state.txn.json") }
+func (s Store) lockPath() string        { return filepath.Join(s.Dir, "state.lock") }
 
 func (s Store) Ensure() error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
@@ -112,44 +122,13 @@ func (s Store) Load() (Snapshot, error) {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return Snapshot{}, err
 	}
-	lock, err := s.lock(false)
+	// Loading may complete a prepared transaction or repair a partial log tail.
+	lock, err := s.lock(true)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	defer unlock(lock)
-	return s.loadUnlocked()
-}
-
-func (s Store) loadUnlocked() (Snapshot, error) {
-	data, err := os.ReadFile(s.StatePath())
-	if errors.Is(err, os.ErrNotExist) {
-		now := time.Now().UTC()
-		return Snapshot{
-			Version: 1, RepoID: s.RepoID, RepoPath: s.RepoPath,
-			Supervisor: Supervisor{State: "stopped", UpdatedAt: now},
-			Issues:     map[string]*Issue{}, PendingRequests: map[string]*Request{},
-		}, nil
-	}
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("read state: %w", err)
-	}
-	var snapshot Snapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return Snapshot{}, fmt.Errorf("decode state: %w", err)
-	}
-	if snapshot.Version != 1 {
-		return Snapshot{}, fmt.Errorf("unsupported state version %d", snapshot.Version)
-	}
-	if snapshot.RepoID != s.RepoID {
-		return Snapshot{}, fmt.Errorf("state repo_id %q does not match %q", snapshot.RepoID, s.RepoID)
-	}
-	if snapshot.Issues == nil {
-		snapshot.Issues = map[string]*Issue{}
-	}
-	if snapshot.PendingRequests == nil {
-		snapshot.PendingRequests = map[string]*Request{}
-	}
-	return snapshot, nil
+	return s.recoverUnlocked()
 }
 
 func (s Store) Update(eventType string, issueNumber int, runID string, payload any, mutate func(*Snapshot) error) (Snapshot, error) {
@@ -161,9 +140,12 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	defer unlock(lock)
-	snapshot, err := s.loadUnlocked()
+	snapshot, err := s.recoverUnlocked()
 	if err != nil {
 		return Snapshot{}, err
+	}
+	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
+		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
 	}
 	if err := mutate(&snapshot); err != nil {
 		return Snapshot{}, err
@@ -180,26 +162,17 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		Timestamp: now, RepoID: s.RepoID, IssueNumber: issueNumber,
 		RunID: runID, Type: eventType, Payload: payloadJSON,
 	}
-	line, err := json.Marshal(event)
-	if err != nil {
-		return Snapshot{}, err
+	txn := transaction{Version: 1, Snapshot: snapshot, Event: event}
+	if err := fsutil.WriteJSON(s.TransactionPath(), txn, 0o600); err != nil {
+		return Snapshot{}, fmt.Errorf("prepare state transaction: %w", err)
 	}
-	events, err := os.OpenFile(s.EventsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("open event log: %w", err)
-	}
-	if _, err := events.Write(append(line, '\n')); err != nil {
-		events.Close()
-		return Snapshot{}, fmt.Errorf("append event: %w", err)
-	}
-	if err := events.Sync(); err != nil {
-		events.Close()
-		return Snapshot{}, fmt.Errorf("sync event log: %w", err)
-	}
-	if err := events.Close(); err != nil {
+	if err := s.appendEventUnlocked(event); err != nil {
 		return Snapshot{}, err
 	}
 	if err := fsutil.WriteJSON(s.StatePath(), snapshot, 0o600); err != nil {
+		return Snapshot{}, err
+	}
+	if err := s.removeTransactionUnlocked(); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
@@ -209,13 +182,18 @@ func (s Store) Initialize() error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return err
+	}
+	defer unlock(lock)
+	snapshot, err := s.recoverUnlocked()
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(s.StatePath()); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	snapshot, err := s.loadUnlocked()
-	if err != nil {
 		return err
 	}
 	return fsutil.WriteJSON(s.StatePath(), snapshot, 0o600)
