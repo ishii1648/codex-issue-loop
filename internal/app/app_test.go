@@ -1,0 +1,140 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/ishii1648/codex-issue-loop/internal/config"
+	"github.com/ishii1648/codex-issue-loop/internal/layout"
+	"github.com/ishii1648/codex-issue-loop/internal/registry"
+	"github.com/ishii1648/codex-issue-loop/internal/state"
+)
+
+func testEnvironment(t *testing.T) (string, layout.Layout) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("AGENT_LOOP_HOME", filepath.Join(root, "home"))
+	t.Setenv("AGENT_LOOP_SKILLS_DIR", filepath.Join(root, "skills"))
+	t.Setenv("AGENT_LOOP_LAUNCH_AGENTS_DIR", filepath.Join(root, "launchagents"))
+	l, err := layout.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	config := `version: 1
+github:
+  repo: owner/repo
+watch:
+  reconcile_interval: 20ms
+`
+	if err := os.WriteFile(filepath.Join(repo, ".agent-loop.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return repo, l
+}
+
+func TestInstallAndRegister(t *testing.T) {
+	repo, l := testEnvironment(t)
+	var out, stderr bytes.Buffer
+	a := App{In: bytes.NewBuffer(nil), Out: &out, Err: &stderr}
+	if code := a.Run(context.Background(), []string{"install", "--json"}); code != 0 {
+		t.Fatalf("install code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(l.BinDir, "agent-loop")); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), []string{"register", "--repo", repo, "--json"}); code != 0 {
+		t.Fatalf("register code=%d stderr=%s", code, stderr.String())
+	}
+	r, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil || len(r.Repos) != 1 {
+		t.Fatalf("registry=%+v err=%v", r, err)
+	}
+	for _, entry := range r.Repos {
+		if _, err := os.Stat(l.PlistPath(entry.RepoID)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(l.RepoDir(entry.RepoID), "state.json")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func mustConfig(t *testing.T, repo string) config.Config {
+	t.Helper()
+	cfg, err := config.Load(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("input_requested", 4, "run", nil, func(s *state.Snapshot) error {
+		s.Supervisor.State = "running"
+		s.Issues["4"] = &state.Issue{Number: 4, Status: "needs_input"}
+		s.PendingRequests["req_1"] = &state.Request{ID: "req_1", IssueNumber: 4, Question: "Choose", Status: "pending"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		var out, stderr bytes.Buffer
+		a := App{In: bytes.NewBuffer(nil), Out: &out, Err: &stderr}
+		code := a.Run(context.Background(), []string{"answer", "--repo", repo, "--request-id", "req_1", "--message", "A", "--json"})
+		if code != 0 {
+			t.Fatalf("answer %d code=%d stderr=%s", i, code, stderr.String())
+		}
+		var result map[string]any
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, _ := store.Load()
+	if snapshot.Issues["4"].Status != "resume_pending" || len(snapshot.Issues["4"].Answers) != 1 {
+		t.Fatalf("issue=%+v", snapshot.Issues["4"])
+	}
+}
+
+func TestEvaluateSleepSettings(t *testing.T) {
+	output := `Battery Power:
+ sleep 1
+AC Power:
+ sleep 0
+ displaysleep 10
+`
+	ok, detail := evaluateSleepSettings(output, nil)
+	if !ok || detail == "" {
+		t.Fatalf("ok=%v detail=%q", ok, detail)
+	}
+	ok, _ = evaluateSleepSettings("AC Power:\n sleep 1\n", nil)
+	if ok {
+		t.Fatal("enabled sleep was accepted")
+	}
+}
