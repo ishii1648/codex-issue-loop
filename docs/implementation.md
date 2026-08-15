@@ -13,6 +13,7 @@
 - repository registryと登録時の外部command絶対パス固定
 - repository別LaunchAgent生成
 - 原子的な`state.json`とappend-only `events.jsonl`
+- write-ahead state transaction、partial event修復、破損時の隔離とrecovery blocked
 - `state_revision`、stickyな未回答request、回答の冪等性
 - fsnotifyによるmacOS event起床と低頻度reconciliation
 - 回答保存時のsupervisor即時起床
