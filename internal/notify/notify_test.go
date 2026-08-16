@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,16 +19,22 @@ import (
 
 func TestNtfySendsAuthenticatedMinimalNotification(t *testing.T) {
 	var gotPath, gotAuth, gotTitle, gotClick, gotBody string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("loopback listeners are unavailable in this test environment: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		gotPath, gotAuth = request.URL.Path, request.Header.Get("Authorization")
 		gotTitle, gotClick = request.Header.Get("Title"), request.Header.Get("Click")
 		body, _ := io.ReadAll(request.Body)
 		gotBody = string(body)
 		w.WriteHeader(http.StatusOK)
 	}))
+	server.Listener = listener
+	server.Start()
 	defer server.Close()
 	adapter := Ntfy{Endpoint: server.URL, Topic: "opaque-topic", Token: "secret-token", Client: server.Client()}
-	err := adapter.Send(context.Background(), Message{
+	err = adapter.Send(context.Background(), Message{
 		Title: "attention", Body: "owner/repo Issue #3 needs input", ClickURL: "https://github.com/owner/repo/issues/3",
 	})
 	if err != nil {

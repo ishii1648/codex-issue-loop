@@ -51,6 +51,20 @@ type AnswerRecord struct {
 	AnsweredAt time.Time `json:"answered_at"`
 }
 
+type WorkerSession struct {
+	Backend string `json:"backend"`
+	ID      string `json:"id"`
+}
+
+type WorkerIdentity struct {
+	Backend        string `json:"backend"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	RequestedModel string `json:"requested_model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
+	Variant        string `json:"variant,omitempty"`
+}
+
 type Issue struct {
 	Number            int            `json:"number"`
 	Title             string         `json:"title"`
@@ -62,6 +76,8 @@ type Issue struct {
 	Continuations     int            `json:"continuations"`
 	ExecutionProfile  string         `json:"execution_profile,omitempty"`
 	SessionID         string         `json:"session_id,omitempty"`
+	Session           *WorkerSession `json:"session,omitempty"`
+	WorkerIdentity    WorkerIdentity `json:"worker_identity,omitempty"`
 	WorkerPID         int            `json:"worker_pid,omitempty"`
 	PullRequestURL    string         `json:"pull_request_url,omitempty"`
 	PullRequestMerged bool           `json:"pull_request_merged,omitempty"`

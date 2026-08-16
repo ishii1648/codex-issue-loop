@@ -10,9 +10,24 @@ import (
 )
 
 const (
-	MinimumCodexVersion = "0.136.0"
-	MinimumGHVersion    = "2.69.0"
+	MinimumCodexVersion      = "0.136.0"
+	MinimumClaudeCodeVersion = "2.1.119"
+	MinimumOpenCodeVersion   = "1.1.1"
+	MinimumGHVersion         = "2.69.0"
 )
+
+func ProbeBackend(ctx context.Context, backend, path string) Report {
+	switch backend {
+	case "", "codex":
+		return ProbeCodex(ctx, path)
+	case "claude-code":
+		return ProbeClaudeCode(ctx, path)
+	case "opencode":
+		return ProbeOpenCode(ctx, path)
+	default:
+		return Report{Tool: backend, Capabilities: map[string]bool{}, Missing: []string{"known_backend"}, Detail: "unknown backend"}
+	}
+}
 
 type Report struct {
 	Tool         string          `json:"tool"`
@@ -57,6 +72,77 @@ func ProbeCodex(ctx context.Context, path string) Report {
 	}
 	if execErr != nil || resumeErr != nil {
 		report.Detail = safeDetail(append(execHelp, resumeHelp...), firstError(execErr, resumeErr))
+	}
+	return report
+}
+
+func ProbeClaudeCode(ctx context.Context, path string) Report {
+	if path == "" {
+		path = "claude"
+	}
+	report := Report{Tool: "claude-code", Minimum: MinimumClaudeCodeVersion, Capabilities: map[string]bool{}}
+	versionOutput, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	if err != nil {
+		report.Detail = safeDetail(versionOutput, err)
+		report.Missing = []string{"version"}
+		return report
+	}
+	report.Version = parseVersion(string(versionOutput))
+	report.VersionOK = AtLeast(report.Version, report.Minimum)
+	help, helpErr := exec.CommandContext(ctx, path, "--help").CombinedOutput()
+	value := string(help)
+	report.Capabilities["structured_output"] = helpErr == nil && containsAll(value, "--output-format", "--json-schema")
+	report.Capabilities["session_resume"] = helpErr == nil && strings.Contains(value, "--resume")
+	report.Capabilities["model_selection"] = helpErr == nil && strings.Contains(value, "--model")
+	report.Capabilities["variant_selection"] = helpErr == nil && strings.Contains(value, "--effort")
+	report.Capabilities["non_interactive_policy"] = helpErr == nil && containsAll(value, "--permission-mode", "--settings", "--disallowedTools", "--strict-mcp-config", "--mcp-config")
+	report.Capabilities["workspace_isolation"] = report.VersionOK // sandbox.failIfUnavailable is passed by the adapter.
+	for _, name := range []string{"structured_output", "model_selection", "non_interactive_policy", "workspace_isolation"} {
+		if !report.Capabilities[name] {
+			report.Missing = append(report.Missing, name)
+		}
+	}
+	if !report.VersionOK {
+		report.Missing = append(report.Missing, "minimum_version")
+	}
+	if helpErr != nil {
+		report.Detail = safeDetail(help, helpErr)
+	}
+	return report
+}
+
+func ProbeOpenCode(ctx context.Context, path string) Report {
+	if path == "" {
+		path = "opencode"
+	}
+	report := Report{Tool: "opencode", Minimum: MinimumOpenCodeVersion, Capabilities: map[string]bool{}}
+	versionOutput, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	if err != nil {
+		report.Detail = safeDetail(versionOutput, err)
+		report.Missing = []string{"version"}
+		return report
+	}
+	report.Version = parseVersion(string(versionOutput))
+	report.VersionOK = AtLeast(report.Version, report.Minimum)
+	serveHelp, serveErr := exec.CommandContext(ctx, path, "serve", "--help").CombinedOutput()
+	modelsHelp, modelsErr := exec.CommandContext(ctx, path, "models", "--help").CombinedOutput()
+	globalHelp, globalErr := exec.CommandContext(ctx, path, "--help").CombinedOutput()
+	report.Capabilities["structured_output"] = serveErr == nil // Adapter requests JSON Schema through the server message API.
+	report.Capabilities["session_resume"] = serveErr == nil
+	report.Capabilities["model_selection"] = modelsErr == nil
+	report.Capabilities["variant_selection"] = serveErr == nil
+	report.Capabilities["non_interactive_policy"] = report.VersionOK && globalErr == nil && strings.Contains(string(globalHelp), "--pure") // OPENCODE_CONFIG_CONTENT deny policy.
+	report.Capabilities["workspace_isolation"] = report.VersionOK                                                                          // Application-enforced external_directory deny.
+	for _, name := range []string{"structured_output", "session_resume", "model_selection", "variant_selection", "non_interactive_policy", "workspace_isolation"} {
+		if !report.Capabilities[name] {
+			report.Missing = append(report.Missing, name)
+		}
+	}
+	if !report.VersionOK {
+		report.Missing = append(report.Missing, "minimum_version")
+	}
+	if serveErr != nil || modelsErr != nil || globalErr != nil {
+		report.Detail = safeDetail(append(append(serveHelp, modelsHelp...), globalHelp...), firstError(serveErr, modelsErr, globalErr))
 	}
 	return report
 }

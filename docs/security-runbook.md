@@ -5,7 +5,9 @@
 1. Mac miniには日常利用や管理者作業と分離した標準macOSユーザーを推奨する。FileVaultを有効化し、このユーザーにRemote Login、Full Disk Access、管理者権限を不要に付与しない。
 2. `gh auth status`で利用中のアカウントとhostを確認する。token値は表示・記録しない。対象リポジトリに限定できるfine-grained tokenまたはGitHub Appを優先し、Metadata read、Contents read/write、Issues read/write、Pull requests read/writeだけを付与する。Administration、Actions、Packages、組織管理権限は通常不要である。
 3. `codex login status`で認証済みであることだけを確認する。CodexのtokenやAPI keyを`.agent-loop.yaml`、plist、Issue、回答、shell履歴へ書かない。
+   Claude Codeでは`claude auth status`、OpenCodeでは`opencode models`を使う。いずれもcredential値を出力・転記せず、runtimeの既存ユーザー認証領域を使う。
 4. `.agent-loop.yaml`の`worker.sandbox`を`workspace-write`（調査専用なら`read-only`）にする。`danger-full-access`は設定検証で拒否される。workerは承認を要求できないため、worktree外への追加書き込みやnetwork権限が必要なIssueは自動キューへ入れない。
+   Claude Code adapterはnative OS sandboxを有効化し、利用不能時をhard failureにし、unsandboxed escapeを拒否する。OpenCode adapterは`OPENCODE_CONFIG_CONTENT`で`external_directory`、質問待ち、`git commit`、`git push`、PR publishをdenyする。ただしOpenCodeの境界はapplication-levelでOS sandboxと同等ではないため、専用標準ユーザー、最小権限credential、branch protectionを併用する。
 5. branch protectionでmainへの直接pushを禁止し、CIとレビューを必須にする。worker用資格情報にbranch protection bypass権限を与えない。
 6. 外部pushを有効にする場合はprivate topicとpublish専用tokenを用意し、`agent-loop notification-token --repo <path> --token-file -`で保存する。tokenを`.agent-loop.yaml`、plist、shell history、Issue、Codex taskへ貼らない。通知本文の詳細は既定の無効を維持する。
 
@@ -46,6 +48,7 @@ stat -f '%Sp %N' "$HOME/Library/LaunchAgents"/com.codex-issue-loop.*.plist
 - stateとログはTime Machine等のユーザーbackup対象になり得る。backupの暗号化とアクセス制御を確認する。サポートbundleやIssueへraw log/stateを添付しない。
 - M2導入前の既存state、event、recovery backup、ログは自動で遡及マスクされない。漏えいが疑われる場合はループを停止し、該当credentialを先に失効・再発行してから、保持要件に従って旧ファイルを隔離または削除する。
 - tokenらしい文字列を検出したら、`agent-loop stop`、token失効、GitHub audit log/PR/Issueの確認、Codexセッションの無効化、原因修正、再登録の順で復旧する。
+- backend、command path、runtime version、modelを変更した場合はloopを停止して`register`と`doctor`を再実行する。異なるbackendの保存sessionは再利用されずfresh sessionになることを`status --json`の`session.backend`と`worker_identity`で確認する。
 - `govulncheck`の検出は到達可能性と影響を確認し、修正版へ更新する。例外を恒久的に黙殺せず、期限付きIssueとして記録する。
 
 ## リポジトリ外で管理する棚卸し

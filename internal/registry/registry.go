@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
@@ -25,6 +27,8 @@ type Entry struct {
 	RegisteredAt    time.Time         `json:"registered_at"`
 	Commands        map[string]string `json:"commands,omitempty"`
 	EnvironmentPath string            `json:"environment_path,omitempty"`
+	WorkerBackend   string            `json:"worker_backend,omitempty"`
+	WorkerVersion   string            `json:"worker_version,omitempty"`
 }
 
 type Registry struct {
@@ -82,8 +86,12 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		RegisteredAt:    time.Now().UTC(),
 		Commands:        map[string]string{},
 		EnvironmentPath: os.Getenv("PATH"),
+		WorkerBackend:   cfg.Worker.Backend,
 	}
-	commands := map[string]string{"git": "git", "gh": "gh", "codex": cfg.Worker.Command, "launchctl": "launchctl"}
+	if entry.WorkerBackend == "" {
+		entry.WorkerBackend = "codex"
+	}
+	commands := map[string]string{"git": "git", "gh": "gh", entry.WorkerBackend: cfg.Worker.EffectiveCommand(), "launchctl": "launchctl"}
 	for name, command := range commands {
 		path, resolveErr := exec.LookPath(command)
 		if resolveErr != nil {
@@ -95,6 +103,9 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		}
 		entry.Commands[name] = absolute
 	}
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
+	entry.WorkerVersion = compat.ProbeBackend(probeCtx, entry.WorkerBackend, entry.Commands[entry.WorkerBackend]).Version
+	cancelProbe()
 	if old, ok := r.Repos[entry.RepoID]; ok {
 		entry.RegisteredAt = old.RegisteredAt
 	}

@@ -69,8 +69,10 @@ type Queue struct {
 }
 
 type Worker struct {
+	Backend          string             `yaml:"backend" json:"backend"`
 	Command          string             `yaml:"command" json:"command"`
 	Model            string             `yaml:"model" json:"model,omitempty"`
+	Variant          string             `yaml:"variant" json:"variant,omitempty"`
 	Sandbox          string             `yaml:"sandbox" json:"sandbox"`
 	SessionMode      string             `yaml:"session_mode" json:"session_mode"`
 	Timeout          Duration           `yaml:"timeout" json:"timeout"`
@@ -193,7 +195,7 @@ func Defaults() Config {
 			ContinueAfterNeedsInput: true,
 		},
 		Worker: Worker{
-			Command:          "codex",
+			Backend:          "codex",
 			Sandbox:          "workspace-write",
 			SessionMode:      "resumable",
 			Timeout:          Duration{2 * time.Hour},
@@ -331,6 +333,23 @@ func (c Config) Validate() error {
 	if c.Worker.TimeoutGrace.Duration > c.Worker.Timeout.Duration {
 		return fmt.Errorf("worker.timeout_grace must not exceed worker.timeout")
 	}
+	switch c.Worker.Backend {
+	case "codex", "claude-code", "opencode":
+	default:
+		return fmt.Errorf("worker.backend must be codex, claude-code, or opencode")
+	}
+	if strings.TrimSpace(c.Worker.Command) != c.Worker.Command || strings.ContainsRune(c.Worker.Command, '\x00') {
+		return fmt.Errorf("worker.command must be a command name or path without surrounding whitespace")
+	}
+	if c.Worker.Backend == "opencode" {
+		provider, model, ok := strings.Cut(c.Worker.Model, "/")
+		if !ok || provider == "" || model == "" || strings.Contains(provider, "#") || strings.Contains(model, "#") {
+			return fmt.Errorf("worker.model for opencode must use provider/model format")
+		}
+	}
+	if c.Worker.Backend != "opencode" && c.Worker.Variant != "" && c.Worker.Backend != "claude-code" {
+		return fmt.Errorf("worker.variant is supported by claude-code and opencode only")
+	}
 	if c.Logs.RotateBytes < 1024 || c.Logs.RotateInterval.Duration <= 0 || c.Logs.Generations < 1 {
 		return fmt.Errorf("logs rotation requires rotate_bytes >= 1024, positive rotate_interval, and generations >= 1")
 	}
@@ -380,6 +399,22 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// EffectiveCommand returns the fixed executable selected by the built-in
+// backend. The manifest never expands this value through a shell.
+func (w Worker) EffectiveCommand() string {
+	if w.Command != "" {
+		return w.Command
+	}
+	switch w.Backend {
+	case "claude-code":
+		return "claude"
+	case "opencode":
+		return "opencode"
+	default:
+		return "codex"
+	}
 }
 
 func safeRefFragment(value string) bool {

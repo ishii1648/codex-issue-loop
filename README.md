@@ -1,6 +1,6 @@
 # codex-issue-loop
 
-GitHub Issueをキューとして、着手可能なIssueが存在する限りCodex CLI workerを繰り返し実行する、Apple Silicon macOS向けの常駐ループです。
+GitHub Issueをキューとして、着手可能なIssueが存在する限りCodex CLI、Claude Code、またはOpenCode workerを繰り返し実行する、Apple Silicon macOS向けの常駐ループです。
 
 ## セットアップ
 
@@ -8,12 +8,30 @@ Macへのinstallと、対象リポジトリごとの設定・登録・起動を�
 
 ### 1. Macへインストールする
 
-Macへ`git`、`gh` 2.69.0以降、`codex` 0.136.0以降を用意し、LaunchAgentを動かすmacOSユーザーでGitHubとCodexへログインします。
+Macへ`git`、`gh` 2.69.0以降と、選択するworker runtimeを用意し、LaunchAgentを動かすmacOSユーザーでGitHubとruntimeへログインします。backend未指定時は後方互換な`codex`です。
 
 ```sh
 gh auth status
 codex login status
 ```
+
+workerは次のように選択します。`command`を省略するとbackendごとの既定commandを使います。設定変更後は`register`を再実行し、絶対pathとruntime versionを記録してください。
+
+```yaml
+worker:
+  backend: claude-code
+  model: claude-sonnet-4-5
+  variant: high
+```
+
+```yaml
+worker:
+  backend: opencode
+  model: opencode-go/kimi-k2.7-code
+  variant: high
+```
+
+OpenCodeのmodelは最初の`/`でprovider IDとmodel IDへ分割されます。OpenCode Goも専用backendではなく`opencode-go/<model-id>`としてそのまま扱います。credentialはmanifest、argv、plist、stateへ保存せず、各runtimeの既存ユーザー認証領域を利用します。
 
 最新のGitHub ReleaseからApple Silicon用artifactを取得し、checksum、provenance、versionを確認してインストールします。
 
