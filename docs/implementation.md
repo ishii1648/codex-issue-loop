@@ -40,9 +40,8 @@
 - tag由来version、再現build、SPDX SBOM、checksum、artifact attestationを含むGitHub Release workflow
 - binary/Skill manifest、稼働LaunchAgentを保ったupdate、自動rollback、明示backup rollback
 - config・registry・state・active event・transactionのv1→v2 migration、checksum backup、journal再開、paired rollback
+- config・registry・state・active event・transactionのv3→v4 migration、旧外部配送data除去、旧credential非破壊保持、paired rollback
 - status別保持期間、dirty・未push・open PR・未回答request検査、dry-run cleanup、確認token付きpurge、削除監査event
-- provider-neutral interface、永続outbox、重複抑止、上限付き再送を備えたopt-inのntfyスマートフォン直接push
-- mode `0600`のrepository別通知credential管理とdoctor診断
 
 ## 運用前に必要なもの
 
@@ -69,7 +68,6 @@
 - GitHub labelは自動作成しない。
 - 起動時reconciliationは全active/open-PR Issue、write-ahead claim、残存worker process group、未反映GitHub状態、未記録のpush/PR、merge/close済みPRをIssue単位で復旧する。所有確認済みのorphan groupは全group共通grace periodで終了し、PID再利用、branch・worktree・labelの人手変更は推測で上書きせずblockedへ移す。
 - PR conflictの検出自体はblocked理由にしない。`resolving_conflict`にbase SHA・競合file・試行履歴を保存し、budget超過またはworktree破損、scope違反等の非回復障害だけを最終blockedとして同期する。
-- スマートフォン直接pushは初期adapterとしてntfyだけに対応する。外部account、private topic、credential、mobile appの準備と実機到達確認は運用者が行う。
 - 実GitHub repositoryと実Codex workerを使うMac mini E2Eの結果は[`docs/e2e/2026-08-15-mac-mini.md`](e2e/2026-08-15-mac-mini.md)に記録している。スマートフォンからのCodex Remote接続は確認済みである。display off、logout、OS再起動はM3の受け入れTODOとせず、発生時または計画保守時の運用確認としてrunbookで扱う。
 - Codex CLI 0.136.0以降とGitHub CLI 2.69.0以降を対応下限とし、起動時に必須capabilityを検査する。resume非対応時は既存worktreeと永続状態を使う新規sessionへfallbackする。詳細は`docs/compatibility.md`を正本とする。
 - worker timeout、stop、restart時はIssue別の独立process groupへSIGTERMを送り、既定30秒のgrace period後も親子processが残る場合だけSIGKILLへ進む。複数workerのstopは全groupを先にcancelし、終了段階をIssue別eventへ残す。worktreeと途中成果は削除しない。

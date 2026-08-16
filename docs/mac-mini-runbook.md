@@ -151,7 +151,7 @@ Codex taskが終了または切断してもループ本体は継続する。同�
 agent-loop watch --repo /absolute/path/to/repository --until-attention --json
 ```
 
-監視task未接続時もスマートフォンへattentionを知らせる場合は、opt-inの外部pushを設定する。tokenを会話やcommand引数へ貼らず、[スマートフォン直接push通知](notifications.md)のprovider準備、`notification-token --token-file -`、実機到達確認に従う。通知は正本ではないため、tap後は必ず`status`から現在のrequestを読み直す。
+監視task未接続時のattentionは永続snapshotに保持される。再接続時は`status`から現在のrequestを読み直し、未回答requestをwatchより先に表示する。
 
 ### 質問へ回答
 

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,7 +43,6 @@ type Config struct {
 	Completion       Completion       `yaml:"completion" json:"completion"`
 	ConflictRecovery ConflictRecovery `yaml:"conflict_recovery" json:"conflict_recovery"`
 	Worktrees        Worktrees        `yaml:"worktrees" json:"worktrees"`
-	Notifications    Notifications    `yaml:"notifications" json:"notifications"`
 	Logs             Logs             `yaml:"logs" json:"logs"`
 	Security         Security         `yaml:"security" json:"security"`
 	RepoPath         string           `yaml:"-" json:"repo_path"`
@@ -175,19 +173,6 @@ type Worktrees struct {
 	NeedsInputMaxAge Duration `yaml:"needs_input_max_age" json:"needs_input_max_age"`
 }
 
-type Notifications struct {
-	Enabled        bool     `yaml:"enabled" json:"enabled"`
-	Provider       string   `yaml:"provider" json:"provider"`
-	Endpoint       string   `yaml:"endpoint" json:"endpoint"`
-	Topic          string   `yaml:"topic" json:"topic,omitempty"`
-	IncludeDetails bool     `yaml:"include_details" json:"include_details"`
-	Timeout        Duration `yaml:"timeout" json:"timeout"`
-	MinInterval    Duration `yaml:"min_interval" json:"min_interval"`
-	RetryInitial   Duration `yaml:"retry_initial" json:"retry_initial"`
-	RetryMax       Duration `yaml:"retry_max" json:"retry_max"`
-	MaxAttempts    int      `yaml:"max_attempts" json:"max_attempts"`
-}
-
 type Logs struct {
 	RotateBytes       int64    `yaml:"rotate_bytes" json:"rotate_bytes"`
 	RotateInterval    Duration `yaml:"rotate_interval" json:"rotate_interval"`
@@ -254,11 +239,6 @@ func Defaults() Config {
 			FailedMaxAge:     Duration{30 * 24 * time.Hour},
 			BlockedMaxAge:    Duration{0},
 			NeedsInputMaxAge: Duration{0},
-		},
-		Notifications: Notifications{
-			Provider: "ntfy", Endpoint: "https://ntfy.sh",
-			Timeout: Duration{10 * time.Second}, MinInterval: Duration{5 * time.Second},
-			RetryInitial: Duration{10 * time.Second}, RetryMax: Duration{10 * time.Minute}, MaxAttempts: 8,
 		},
 		Logs: Logs{
 			RotateBytes:       16 * 1024 * 1024,
@@ -409,9 +389,6 @@ func (c Config) Validate() error {
 		c.Worktrees.BlockedMaxAge.Duration < 0 || c.Worktrees.NeedsInputMaxAge.Duration < 0 {
 		return fmt.Errorf("worktree retention durations must not be negative; 0 keeps a status indefinitely")
 	}
-	if err := c.Notifications.validate(); err != nil {
-		return err
-	}
 	if c.Queue.MaxAttempts < 1 {
 		return fmt.Errorf("queue.max_attempts must be at least 1")
 	}
@@ -501,31 +478,4 @@ func (c Config) RedactionValues() []string {
 		}
 	}
 	return values
-}
-
-var notificationTopic = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
-
-func (n Notifications) validate() error {
-	if n.Provider != "ntfy" {
-		return fmt.Errorf("notifications.provider must be ntfy")
-	}
-	if n.Timeout.Duration <= 0 || n.MinInterval.Duration < 0 || n.RetryInitial.Duration <= 0 ||
-		n.RetryMax.Duration < n.RetryInitial.Duration || n.MaxAttempts < 1 {
-		return fmt.Errorf("notifications retry, timeout, and rate-limit settings are invalid")
-	}
-	if !n.Enabled {
-		return nil
-	}
-	endpoint, err := url.Parse(n.Endpoint)
-	if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return fmt.Errorf("notifications.endpoint must be an absolute URL without credentials, query, or fragment")
-	}
-	loopback := endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1" || endpoint.Hostname() == "::1"
-	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && loopback) {
-		return fmt.Errorf("notifications.endpoint must use https except for loopback tests")
-	}
-	if !notificationTopic.MatchString(n.Topic) {
-		return fmt.Errorf("notifications.topic must be an 8-128 character opaque identifier")
-	}
-	return nil
 }

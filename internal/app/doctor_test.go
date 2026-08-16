@@ -103,9 +103,9 @@ func TestDiagnoseSchemasDistinguishesSupportedRequiredAndUnsupported(t *testing.
 		code    string
 		ready   bool
 	}{
-		{name: "supported", version: 3, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
-		{name: "migration-required", version: 2, code: "SCHEMA_MIGRATION_REQUIRED"},
-		{name: "unsupported", version: 4, code: "SCHEMA_VERSION_UNSUPPORTED"},
+		{name: "supported", version: 4, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
+		{name: "migration-required", version: 3, code: "SCHEMA_MIGRATION_REQUIRED"},
+		{name: "unsupported", version: 5, code: "SCHEMA_VERSION_UNSUPPORTED"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := os.WriteFile(l.RegistryPath, []byte(fmt.Sprintf("{\"version\":%d,\"repos\":{}}\n", test.version)), 0o600); err != nil {
@@ -210,35 +210,6 @@ esac
 		if item := diagnosticByCode(t, diagnostics, code); item.OK || len(item.Remediations) == 0 {
 			t.Fatalf("diagnostic=%+v", item)
 		}
-	}
-}
-
-func TestDoctorDiagnosesNotificationCredentialLifecycle(t *testing.T) {
-	repo, l := testEnvironment(t)
-	if err := l.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	cfg := mustConfig(t, repo)
-	cfg.Notifications.Enabled = true
-	entry := registry.Entry{RepoID: registry.RepoID(cfg.GitHub.Repo, repo), RepoPath: repo}
-	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_MISSING"); item.OK || len(item.Remediations) != 1 {
-		t.Fatalf("diagnostic=%+v", item)
-	}
-	path := l.NotificationTokenPath(entry.RepoID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("token-value\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_VALID"); !item.OK {
-		t.Fatalf("diagnostic=%+v", item)
-	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_UNSAFE"); item.OK {
-		t.Fatalf("diagnostic=%+v", item)
 	}
 }
 

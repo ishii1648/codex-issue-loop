@@ -16,16 +16,33 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 )
 
-func TestApplyMigratesV2FixturesAndRestoreRecoversOriginalBytes(t *testing.T) {
-	l, repo, original := writeV2Fixture(t, false)
+func TestApplyMigratesV3FixturesAndRestoreRecoversOriginalBytes(t *testing.T) {
+	l, repo, original := writeV3Fixture(t, false)
+	legacyCredential := filepath.Join(l.RepoDir("repo-1"), "notification-token")
+	if err := os.WriteFile(legacyCredential, []byte("retained-legacy-credential\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	report, err := Inspect(l)
 	if err != nil || !report.NeedsMigration || len(report.Unsupported) != 0 {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
 	fixed := time.Date(2026, 8, 16, 1, 2, 3, 4, time.UTC)
 	result, err := (Migrator{Layout: l, Now: func() time.Time { return fixed }}).Apply()
-	if err != nil || !result.Changed || result.Backup == "" || result.From != 2 || result.To != CurrentVersion {
+	if err != nil || !result.Changed || result.Backup == "" || result.From != 3 || result.To != CurrentVersion {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	manifest, err := readManifest(filepath.Join(result.Backup, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range manifest.Entries {
+		if entry.Source == legacyCredential {
+			t.Fatalf("legacy credential was included in migration backup: %+v", entry)
+		}
+		data, readErr := os.ReadFile(filepath.Join(result.Backup, entry.Backup))
+		if readErr != nil || bytes.Contains(data, []byte("retained-legacy-credential")) {
+			t.Fatalf("migration backup contains legacy credential material: path=%s err=%v", entry.Backup, readErr)
+		}
 	}
 	report, err = Inspect(l)
 	if err != nil || report.NeedsMigration || len(report.Unsupported) != 0 {
@@ -42,9 +59,18 @@ func TestApplyMigratesV2FixturesAndRestoreRecoversOriginalBytes(t *testing.T) {
 	if err != nil || snapshot.Version != state.CurrentVersion || snapshot.StateRevision != 1 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
+	for _, path := range []string{filepath.Join(repo, config.FileName), filepath.Join(l.RepoDir("repo-1"), "state.json"), filepath.Join(l.RepoDir("repo-1"), "events.jsonl")} {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil || bytes.Contains(data, []byte(`"notifications"`)) || bytes.Contains(data, []byte(`notification_`)) {
+			t.Fatalf("legacy delivery data remains in %s: err=%v data=%s", path, readErr, data)
+		}
+	}
+	if data, readErr := os.ReadFile(legacyCredential); readErr != nil || string(data) != "retained-legacy-credential\n" {
+		t.Fatalf("legacy credential was modified: err=%v data=%q", readErr, data)
+	}
 
 	restored, err := (Migrator{Layout: l, Now: func() time.Time { return fixed.Add(time.Minute) }}).Restore(result.Backup)
-	if err != nil || !restored.Restored || restored.To != 2 {
+	if err != nil || !restored.Restored || restored.To != 3 {
 		t.Fatalf("restored=%+v err=%v", restored, err)
 	}
 	for path, want := range original {
@@ -53,10 +79,13 @@ func TestApplyMigratesV2FixturesAndRestoreRecoversOriginalBytes(t *testing.T) {
 			t.Fatalf("restore %s mismatch: err=%v\ngot=%s\nwant=%s", path, readErr, got, want)
 		}
 	}
+	if data, readErr := os.ReadFile(legacyCredential); readErr != nil || string(data) != "retained-legacy-credential\n" {
+		t.Fatalf("rollback modified legacy credential: err=%v data=%q", readErr, data)
+	}
 }
 
 func TestInterruptedApplyReusesJournalAndConvergesIdempotently(t *testing.T) {
-	l, repo, _ := writeV2Fixture(t, true)
+	l, repo, _ := writeV3Fixture(t, true)
 	fixed := time.Date(2026, 8, 16, 2, 0, 0, 0, time.UTC)
 	writes := 0
 	first := Migrator{Layout: l, Now: func() time.Time { return fixed }, AfterWrite: func(string) error {
@@ -107,8 +136,8 @@ func TestInterruptedApplyReusesJournalAndConvergesIdempotently(t *testing.T) {
 }
 
 func TestUnsupportedVersionIsRejectedWithoutBackup(t *testing.T) {
-	l, _, _ := writeV2Fixture(t, false)
-	if err := os.WriteFile(l.RegistryPath, []byte(`{"version":4,"repos":{}}`), 0o600); err != nil {
+	l, _, _ := writeV3Fixture(t, false)
+	if err := os.WriteFile(l.RegistryPath, []byte(`{"version":5,"repos":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	report, err := Inspect(l)
@@ -123,15 +152,15 @@ func TestUnsupportedVersionIsRejectedWithoutBackup(t *testing.T) {
 	}
 }
 
-func TestV2ActiveIssueMigratesToExclusiveFallbackAndBlocksRollback(t *testing.T) {
-	l, repo, _ := writeV2Fixture(t, false)
+func TestV4ActiveLeaseBlocksRollback(t *testing.T) {
+	l, repo, _ := writeV3Fixture(t, false)
 	statePath := filepath.Join(l.RepoDir("repo-1"), "state.json")
-	v2 := fmt.Sprintf(`{"version":2,"repo_id":"repo-1","repo_path":%q,"state_revision":1,"supervisor":{"state":"running","updated_at":"2026-08-16T00:00:00Z"},"issues":{"63":{"number":63,"title":"active","status":"needs_input","run_id":"run_63","attempts":1,"continuations":0,"updated_at":"2026-08-16T00:02:00Z"}},"pending_requests":{}}`+"\n", repo)
-	if err := os.WriteFile(statePath, []byte(v2), 0o600); err != nil {
+	v3 := fmt.Sprintf(`{"version":3,"repo_id":"repo-1","repo_path":%q,"state_revision":1,"supervisor":{"state":"running","updated_at":"2026-08-16T00:00:00Z"},"issues":{"63":{"number":63,"title":"active","status":"needs_input","run_id":"run_63","attempts":1,"continuations":0,"updated_at":"2026-08-16T00:02:00Z","lease_generation":1,"lease":{"owner":{"run_id":"run_63","generation":1},"slot":0,"declared_resources":[],"resolved_resources":["repo:*"],"reserved_at":"2026-08-16T00:02:00Z"}}},"pending_requests":{},"notifications":{"needs_input:req-1":{"id":"needs_input:req-1","status":"pending"}}}`+"\n", repo)
+	if err := os.WriteFile(statePath, []byte(v3), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	report, err := Inspect(l)
-	if err != nil || len(report.FallbackLeases) != 1 || report.FallbackLeases[0].IssueNumber != 63 || report.FallbackLeases[0].Resource != "repo:*" {
+	if err != nil || !report.NeedsMigration {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
 	result, err := (Migrator{Layout: l, Now: func() time.Time { return time.Date(2026, 8, 16, 3, 0, 0, 0, time.UTC) }}).Apply()
@@ -154,16 +183,16 @@ func TestV2ActiveIssueMigratesToExclusiveFallbackAndBlocksRollback(t *testing.T)
 		t.Fatal(err)
 	}
 	restored, err := (Migrator{Layout: l}).Restore(result.Backup)
-	if err != nil || !restored.Restored || restored.To != 2 {
+	if err != nil || !restored.Restored || restored.To != 3 {
 		t.Fatalf("restore=%+v err=%v", restored, err)
 	}
 	after, err := os.ReadFile(statePath)
-	if err != nil || !bytes.Equal(after, []byte(v2)) {
-		t.Fatalf("v2 active state was not restored: %s err=%v", after, err)
+	if err != nil || !bytes.Equal(after, []byte(v3)) {
+		t.Fatalf("v3 active state was not restored: %s err=%v", after, err)
 	}
 }
 
-func writeV2Fixture(t *testing.T, withTransaction bool) (layout.Layout, string, map[string][]byte) {
+func writeV3Fixture(t *testing.T, withTransaction bool) (layout.Layout, string, map[string][]byte) {
 	t.Helper()
 	root := t.TempDir()
 	repo := filepath.Join(root, "target")
@@ -177,18 +206,18 @@ func writeV2Fixture(t *testing.T, withTransaction bool) (layout.Layout, string, 
 		}
 	}
 	configPath := filepath.Join(repo, config.FileName)
-	registryJSON := fmt.Sprintf(`{"version":2,"repos":{"repo-1":{"repo_id":"repo-1","repo_path":%q,"github_repo":"owner/repo","registered_at":"2026-08-16T00:00:00Z","commands":{}}}}`, repo)
+	registryJSON := fmt.Sprintf(`{"version":3,"repos":{"repo-1":{"repo_id":"repo-1","repo_path":%q,"github_repo":"owner/repo","registered_at":"2026-08-16T00:00:00Z","commands":{}}}}`, repo)
 	statePath := filepath.Join(l.RepoDir("repo-1"), "state.json")
 	eventsPath := filepath.Join(l.RepoDir("repo-1"), "events.jsonl")
 	files := map[string][]byte{
-		configPath:     []byte("# retained comment\nversion: 2\ngithub:\n  repo: owner/repo\n"),
+		configPath:     []byte("# retained comment\nversion: 3\ngithub:\n  repo: owner/repo\nnotifications:\n  enabled: true\n  provider: legacy\n  endpoint: https://push.invalid\n  topic: opaque-topic\n"),
 		l.RegistryPath: []byte(registryJSON + "\n"),
-		statePath:      []byte(fmt.Sprintf(`{"version":2,"repo_id":"repo-1","repo_path":%q,"state_revision":1,"supervisor":{"state":"polling","updated_at":"2026-08-16T00:00:00Z"},"issues":{},"pending_requests":{}}`+"\n", repo)),
-		eventsPath:     []byte(`{"version":2,"event_id":"evt-1","sequence":1,"timestamp":"2026-08-16T00:00:00Z","repo_id":"repo-1","type":"initialized"}` + "\n"),
+		statePath:      []byte(fmt.Sprintf(`{"version":3,"repo_id":"repo-1","repo_path":%q,"state_revision":1,"supervisor":{"state":"polling","updated_at":"2026-08-16T00:00:00Z"},"issues":{},"pending_requests":{},"notifications":{"needs_input:req-1":{"id":"needs_input:req-1","status":"sent"}}}`+"\n", repo)),
+		eventsPath:     []byte(`{"version":3,"event_id":"evt-1","sequence":1,"timestamp":"2026-08-16T00:00:00Z","repo_id":"repo-1","type":"notification_sent","payload":{"notification_id":"needs_input:req-1"}}` + "\n"),
 	}
 	if withTransaction {
 		txnPath := filepath.Join(l.RepoDir("repo-1"), "state.txn.json")
-		files[txnPath] = []byte(fmt.Sprintf(`{"version":2,"snapshot":{"version":2,"repo_id":"repo-1","repo_path":%q,"state_revision":2,"supervisor":{"state":"polling","updated_at":"2026-08-16T00:01:00Z"},"issues":{},"pending_requests":{}},"event":{"version":2,"event_id":"evt-2","sequence":2,"timestamp":"2026-08-16T00:01:00Z","repo_id":"repo-1","type":"poll"}}`+"\n", repo))
+		files[txnPath] = []byte(fmt.Sprintf(`{"version":3,"snapshot":{"version":3,"repo_id":"repo-1","repo_path":%q,"state_revision":2,"supervisor":{"state":"polling","updated_at":"2026-08-16T00:01:00Z"},"issues":{},"pending_requests":{},"notifications":{"needs_input:req-2":{"id":"needs_input:req-2","status":"pending"}}},"event":{"version":3,"event_id":"evt-2","sequence":2,"timestamp":"2026-08-16T00:01:00Z","repo_id":"repo-1","type":"notification_retry_scheduled","payload":{"notification_id":"needs_input:req-2"}}}`+"\n", repo))
 	}
 	for path, data := range files {
 		if err := os.WriteFile(path, data, 0o600); err != nil {

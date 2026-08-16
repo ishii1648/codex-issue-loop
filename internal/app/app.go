@@ -26,7 +26,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
-	"github.com/ishii1648/codex-issue-loop/internal/notify"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
@@ -157,8 +156,6 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.answer(l, args)
 	case "retry":
 		return a.retryConflict(ctx, l, args)
-	case "notification-token":
-		return a.notificationToken(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -198,7 +195,6 @@ Commands:
   watch         Wait for needs_input, blocked, stopped, or optional idle
   answer        Record an answer for a pending request
   retry         Explicitly resume a blocked Pull Request conflict recovery
-  notification-token  Configure or clear a managed notification credential
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree
@@ -1195,14 +1191,6 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		return fmt.Errorf("unsupported gh CLI: %s", compatibilityDetail(ghCompatibility))
 	}
 	secrets := cfg.RedactionValues()
-	notificationToken := ""
-	if cfg.Notifications.Enabled {
-		notificationToken, err = loadNotificationToken(l, entry)
-		if err != nil {
-			return fmt.Errorf("load notification credential: %w", err)
-		}
-		secrets = append(secrets, notificationToken)
-	}
 	logPolicy := retention.Policy{MaxBytes: cfg.Logs.RotateBytes, MaxAge: cfg.Logs.RotateInterval.Duration, Keep: cfg.Logs.Generations}
 	for _, name := range []string{"launchd.stdout.log", "launchd.stderr.log"} {
 		if err := retention.RotateExisting(filepath.Join(l.RepoDir(entry.RepoID), name), logPolicy); err != nil {
@@ -1216,7 +1204,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	defer supervisorLog.Close()
 	store := state.Store{
 		Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath,
-		Secrets: secrets, EventRetention: logPolicy, NotificationsEnabled: cfg.Notifications.Enabled,
+		Secrets: secrets, EventRetention: logPolicy,
 	}
 	cfg.Worker.Command = workerPath
 	backend, err := worker.NewBackend(cfg, worker.FactoryOptions{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets,
@@ -1241,7 +1229,6 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		Publisher:      publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
 		Conflicts:      conflict.Manager{GitPath: entry.Commands["git"]},
 		Logger:         log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
-		Notifications:  notify.NewDispatcher(cfg, store, notificationToken),
 	}
 	err = loop.Run(ctx)
 	var blocked supervisor.BlockedError

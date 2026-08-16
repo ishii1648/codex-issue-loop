@@ -44,10 +44,6 @@ type ProcessInspector interface {
 	Alive(pid int) bool
 }
 
-type NotificationDispatcher interface {
-	Dispatch(context.Context) error
-}
-
 type Loop struct {
 	Config          config.Config
 	Store           state.Store
@@ -63,7 +59,6 @@ type Loop struct {
 	Random          RandomSource
 	Logger          *log.Logger
 	DiskAvailable   func(string) (uint64, error)
-	Notifications   NotificationDispatcher
 	publicationMu   sync.Mutex
 }
 
@@ -1425,17 +1420,7 @@ func (l *Loop) blockSupervisor(cause error, kind failure.Kind, consecutive int) 
 		s.Supervisor.RetryAfter = nil
 		return nil
 	})
-	l.dispatchNotifications(context.Background())
 	return BlockedError{Err: cause}
-}
-
-func (l *Loop) dispatchNotifications(ctx context.Context) {
-	if l.Notifications == nil {
-		return
-	}
-	if err := l.Notifications.Dispatch(ctx); err != nil {
-		l.Logger.Printf("notification delivery failed without stopping supervisor: %v", err)
-	}
 }
 
 func (l *Loop) maxContinuations() int {

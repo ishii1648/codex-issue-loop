@@ -119,7 +119,7 @@ target-repository/
 ├─ install.json
 ├─ backups/<timestamp>-<version>/
 ├─ migration.json
-├─ migrations/<timestamp>-v2-to-v3/
+├─ migrations/<timestamp>-v3-to-v4/
 ├─ registry.json
 ├─ worktrees/<repo-id>/issue-<number>/
 └─ repos/<repo-id>/
@@ -150,7 +150,7 @@ target-repository/
 設定ファイル名は対象リポジトリ直下の `.agent-loop.yaml` とする。
 
 ```yaml
-version: 3
+version: 4
 
 github:
   repo: ishii1648/example
@@ -247,7 +247,7 @@ security:
 - `worker.variant`はClaude Codeの`--effort`またはOpenCode messageのprovider variantとしてinitial runとresumeの両方へ渡す。
 - `worker.sandbox` の既定値は `workspace-write` とする。
 - `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。terminal状態へ到達したIssueのsession IDはactive stateから外す。
-- sessionは`{"backend":"<backend>","id":"<session-id>"}`としてnamespace付きで保存する。旧`session_id`だけのv2 stateはCodex sessionとして読み込む。backend変更時はsessionを渡さず、同じworktreeとdurable stateを使うfresh sessionへfallbackする。
+- sessionは`{"backend":"<backend>","id":"<session-id>"}`としてnamespace付きで保存する。v3以前に作成された`session_id`もv3 migration時にCodex sessionとして正規化済みであり、v4 migrationは両fieldを保持する。backend変更時はsessionを渡さず、同じworktreeとdurable stateを使うfresh sessionへfallbackする。
 - `worker.ambiguous_profile` は `extended` 固定とし、MVPではユーザー確認へ切り替える設定を設けない。
 - `queue.poll_interval` はGitHub Issueキューの再取得間隔、`watch.reconcile_interval` はattention監視の取りこぼし修復間隔であり、別の設定として扱う。
 - `watch.reconcile_jitter` は複数watchの同時起床を避けるため、各待機期限へ加える。
@@ -742,19 +742,19 @@ transactionなしでsnapshotとevent logが食い違う場合、途中に壊れ�
 
 ### 12.4 永続schema migration
 
-config、registry、state、active event log、prepared transactionの現行schemaはv3とする。v2を検出したbinaryはsupervisor開始、status、通常update後の自動再開を拒否し、`migrate --json`と`doctor`で`SCHEMA_MIGRATION_REQUIRED`を返す。v1、v4以上、version欠落は自動変換しない。
+config、registry、state、active event log、prepared transactionの現行schemaはv4とする。v3を検出したbinaryはsupervisor開始、status、通常update後の自動再開を拒否し、`migrate --json`と`doctor`で`SCHEMA_MIGRATION_REQUIRED`を返す。v2以下、v5以上、version欠落は自動変換しない。
 
-v2からv3へのforward migrationは次の順序で行う。
+v3からv4へのforward migrationは次の順序で行う。
 
 1. 全登録LaunchAgentが停止中であることを確認する
 2. config、registry、state、active event、transactionをchecksum付きmigration backupへcopyする
 3. `migration.json`へ`prepared` journalを原子的に保存する
 4. 各fileを個別に原子的置換する
-5. 全対象がv3へ収束したことを再検査し、journalを`completed`にする
+5. 全対象がv4へ収束したことを再検査し、journalを`completed`にする
 
-process停止でv2/v3が混在しても、再実行は同じjournalとbackupを使い、v2のfileだけを変換する。v2 active Issueはslot 0と`repo:*`のexclusive leaseへ変換し、concurrency 1 stateを保持する。active event logはfile全体を一度に置換し、同一log内のversion混在を許可しない。rotation済みgzip archiveはruntime復旧入力ではないためimmutableな監査履歴として保持する。
+process停止でv3/v4が混在しても、再実行は同じjournalとbackupを使い、v3のfileだけを変換する。外部配送設定とoutboxを削除し、旧配送eventはsequenceを保ったmarkerへ置換してpayloadを破棄する。Issue、pending request、resource lease、worker session、publication stateは保持する。active event logはfile全体を一度に置換し、同一log内のversion混在を許可しない。rotation済みgzip archiveはruntime復旧入力ではないためimmutableな監査履歴として保持する。
 
-rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active v3 leaseがある間はrollbackを拒否する。schema v2対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。
+rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active v4 leaseがある間はrollbackを拒否する。schema v3対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。旧credential fileはmigration対象・backup対象に含めず、rollback互換のため暗黙削除しない。明示的な整理手順は[migration runbook](migration.md)を正本とする。
 
 ## 13. 監視とCodex task連携
 
@@ -792,17 +792,9 @@ watch呼び出し後、Codexは独自のtimerや定期status確認を開始し�
 
 回答は同じ監視taskから、同じrequest IDと`--message-file -`を使って標準入力で渡す。成功後にstatusを1回確認してから同じtaskでblocking watchへ戻る。複数repositoryはtask、primary folder、`--repo`を分離し、1つのblocking監視taskへ多重化しない。詳細なセットアップ、命名、再接続、実機受け入れは[Codex Desktop監視task運用](codex-desktop-monitoring.md)を正本とする。
 
-監視taskが接続されていない間も質問は永続状態に残るが、新しい項目をActivityへ投入できるとは保証しない。再接続時には通知の成否に関係なくstatusでsnapshotを読み、未回答質問をwatchより先に即時表示する。opt-inの外部push adapterは、切断期間に永続outboxからスマートフォンへ直接通知する補助経路として利用できる。
+監視taskが接続されていない間も質問は永続状態に残るが、新しい項目をActivityへ投入できるとは保証しない。再接続時にはstatusでsnapshotを読み、未回答質問をwatchより先に即時表示する。切断期間のattentionは永続snapshotに保持され、外部serviceへの直接配送は行わない。
 
 App Server所有threadのprogrammatic continuationと、任意のDesktop taskを外部processからwakeしてmobile表示を変更する機能は別契約として扱う。後者の公式APIが提供された場合はoptional adapterとして追加できる。
-
-### 13.2.1 外部push adapter
-
-初期providerはntfyとする。attentionの永続更新と同じtransactionで通知outboxへenqueueし、`pending`、`sent`、`failed`、`canceled`、試行回数、次回試行時刻をsnapshotへ保持する。notification IDはrequestまたはblocked原因から決定し、再起動やreconciliationで同じattentionを重複enqueueしない。
-
-送信はsupervisor cycleの前後で行う。失敗は上限付きexponential backoffで再試行し、event/logへ記録するが、Issue選択・worker・publisherを停止しない。回答済みrequestに対する未送信通知は送信前に取消す。既定本文はrepository、Issue番号、request ID、状態だけとし、質問文と失敗理由は`include_details`が明示された場合だけ含める。
-
-credentialはrepository別管理directoryのmode `0600` fileへ専用CLIで保存し、設定file、LaunchAgent plist、repository、command引数へ置かない。endpointはHTTPS、topicは推測困難かつaccess control済みとする。通知tapはGitHub Issueを開き、安定した公式deep linkが提供されるまではCodex taskを直接起動しない。詳細は[スマートフォン直接push通知](notifications.md)を正本とする。
 
 Codex App Serverは`thread/tokenUsage/updated`とGoalの`tokensUsed`を提供し、`codex exec --json`もturn完了時のusageを返す。一方、Claude Codeのmonitor toolと同じ汎用的なtoken-free契約や、保留中tool call・long commandの厳密なzero-token/zero-costは公式に保証されていない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。[Codex公式仕様確認](codex-capability-review.md)を参照する。
 
@@ -900,7 +892,6 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - 管理directoryは0700、plist、registry、状態、event、transaction、worker/supervisor logは0600で作成する
 - credentialをpromptへ明示的に埋め込まない
 - 既知credential形式と`security.redact_env`の値をstdout/stderr、worker result、state、event、GitHub通知の境界でmaskする
-- 外部push tokenは専用のprivate管理fileへmode `0600`で保存し、設定、plist、repository、log、state、eventへ値を残さない
 - Codex sandboxは既定で `workspace-write`とし、worker起動時に`approval_policy="never"`を上書きする
 - dangerous bypassは設定schemaでもMVPでは許可しない
 - GitHub Issueは信頼済み入力とはみなさず、prompt injectionの可能性をworkerへ明示する
@@ -938,8 +929,6 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - attention状態と`state_revision`の永続化
 - standard workerが追加runなしで完了すること
 - extended workerだけが設定上限内でresumeされること
-- 外部pushのoutbox永続化、重複抑止、再送、rate limit、回答後取消、adapter障害からのsupervisor分離
-- 外部push credentialの0600保存、無出力、redaction、通知本文の詳細opt-in
 - 将来のsingle-host worker slotで同一Issueを二重割当しないこと、およびclaim/publishの直列化
 - coordinator adapterのCAS、epoch、lease expiry、partition、古いhost拒否、publication takeover conformance
 
@@ -950,7 +939,6 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - Macの画面off中の継続
 - Codex Remoteからの監視開始
 - `needs_input`のスマートフォン通知、回答、再開
-- 監視task未接続時の外部push到達、再起動後の非重複、provider障害中のloop継続
 - ChatGPT desktop taskを閉じた後のsupervisor継続
 - Codexによる定期status確認なしでwatchがattentionまで待機すること
 - multi-host障害環境でpartition中に片側だけが進行し、二重branch・Pull Requestを作らないこと
