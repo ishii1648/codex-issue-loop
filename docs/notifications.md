@@ -1,5 +1,7 @@
 # スマートフォン直接push通知
 
+> この文書の`.agent-loop.yaml` `notifications`は、Codex Desktopのquestion notificationsとは別のopt-in外部push adapterである。接続中の通常経路は[Codex Desktop監視task運用](codex-desktop-monitoring.md)を使う。
+
 ## 1. 目的と選定
 
 監視用Codex taskが`watch`へ接続していない間も、`needs_input`とsupervisorの`blocked`をスマートフォンへ通知する。通知はループの正本ではなく、永続snapshotへ戻るための補助経路である。

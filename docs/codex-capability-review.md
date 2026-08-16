@@ -1,6 +1,6 @@
-# Codex Goal・task wake・token計測の公式仕様確認
+# Codex Goal・Desktop通知・task wake・token計測の公式仕様確認
 
-- 確認日: 2026-08-16
+- 確認日: 2026-08-17
 - 確認したlocal CLI: `codex-cli 0.136.0`
 - OpenAI公式Codex manual SHA-256: `40f7ed6c2b2b08b0e45ef4f60acbaf258348b0633db9b4757b6fff83a57f6849`
 - 判定語: **利用可能**、**利用不可**、**未保証**を区別する
@@ -13,6 +13,9 @@
 | headless Goal | App Server経由で利用可能 | optional `extended` worker adapterをIssue #53で検証する。現行workerは変更しない |
 | `codex exec --goal`相当 | 利用不可 | 公式non-interactive interfaceにGoal optionはないため推測で呼ばない |
 | App Server所有threadのprogrammatic resume/start | 利用可能 | `thread/resume`と`turn/start`を将来adapterで利用できる |
+| Desktopのquestion notifications | 利用可能 | 接続中の監視taskが質問した際の通常OS通知に使う |
+| Desktop Activityの回答待ち | 利用可能 | OS通知dismiss後に回答待ちchatを再発見する |
+| project/chatのpin | 利用可能 | repositoryごとの監視chatを見つけやすくする。権限やcontextは増えない |
 | 任意のDesktop taskを外部processからwake | 利用不可 | 公開契約がない。App Server所有threadの制御とDesktop taskへの注入を同一視しない |
 | 外部processからモバイルUIを`Needs input`へ遷移 | 利用不可 | App Serverのserver requestはclientが表示・回答する契約であり、ChatGPT mobile通知連携は保証されない |
 | chat内scheduled taskによる定期再開 | 利用可能 | 時刻ベースで同じchatへ戻れるが、event-driven wakeやtoken-free monitorの代替にしない |
@@ -48,6 +51,12 @@ Goalを利用しても責務境界は変えない。
 実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)へ切り出した。
 
 ## External wakeとNeeds input
+
+[Notifications](https://learn.chatgpt.com/docs/notifications)は、Desktop Settingsでpermission notificationsとquestion notificationsを個別に設定でき、OSがChatGPT desktop appの通知権限を要求する場合があると記載する。ActivityはsidebarのbellまたはmacOSの`Cmd`+`Option`+`U`から開き、unread、running、回答待ちのchatを表示できる。利用可能なsurfaceのpetも`Running`、`Needs input`、`Ready`、`Blocked`を表示できる。
+
+[Projects and chats](https://learn.chatgpt.com/docs/projects)は、頻繁に戻るchatをpinでき、別の成果ごとにchatを分けることを推奨する。pinはsidebar内の位置だけを変え、contextやaccessを追加しない。これらを根拠に、接続中の通常経路は「repositoryごとのpin済み監視chatがblocking watchから戻る → Codexが質問する → question notificationとActivityの回答待ちへ残る」とする。
+
+ただし公式文書は、Desktop taskが切断中でも外部processからActivityへ新規項目を投入できるとは記載していない。ActivityとOS通知は発見経路であり正本ではない。切断中のrequestは永続snapshotへ保存し、再接続後のstatus-first手順で質問を再表示する。
 
 App Server clientは、自分が接続するApp Server上でpersisted threadを`thread/resume`し、`turn/start`で新しいturnを開始できる。これはdocumentedなprogrammatic continuationである。また、active turnには`turn/steer`で追加inputを送れる。
 

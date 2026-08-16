@@ -111,9 +111,11 @@ Codex desktop appを終了、sign out、またはRemote Controlを無効化す�
 
 通常運用ではrepositoryごとに監視taskを用意する。Issue作成taskを使う場合は監視taskと分けると、会話履歴や役割が混ざらず、監視taskがblocking watch中でも新しい仕事を投入できる。
 
+Desktopのquestion notifications、Activity、pin、複数repositoryのtask分離、Desktop/Mac再起動後の再接続を含む正式な運用契約は[Codex Desktop監視task運用](codex-desktop-monitoring.md)を参照する。
+
 ### 監視task
 
-名前の例は`[monitor] owner/repository`とする。最初に対象repositoryを明示し、次のように依頼する。
+名前は`[LOOP] owner/repository — monitor`とする。最初に対象repositoryを明示し、次のように依頼する。
 
 > `/absolute/path/to/repository`のagent-loopを監視して。doctorとstatusで状態を確認し、未回答質問がなければ`watch --until-attention --json`を1回実行して。needs_inputなら推奨案と選択肢を要約して私に質問し、回答後にrequest IDを維持してanswerへ渡してから監視を再開して。
 

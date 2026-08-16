@@ -977,6 +977,12 @@ func (a App) answer(l layout.Layout, args []string) error {
 	if currentRequest == nil {
 		return exitError{4, fmt.Errorf("unknown request ID %s", *requestID)}
 	}
+	if currentRequest.Status == "answered" {
+		if currentRequest.Answer != answer {
+			return exitError{4, fmt.Errorf("request %s already has a different answer", *requestID)}
+		}
+		return a.output(*jsonOut, map[string]any{"request_id": *requestID, "recorded": true})
+	}
 	_, err = store.Update("answer_recorded", currentRequest.IssueNumber, "", map[string]string{"request_id": *requestID}, func(s *state.Snapshot) error {
 		request := s.PendingRequests[*requestID]
 		if request == nil {

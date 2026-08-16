@@ -783,7 +783,11 @@ watch呼び出し後、Codexは独自のtimerや定期status確認を開始し�
 
 外部supervisorからCodexアプリ内taskへ直接メッセージを挿入したり、task状態を変更したりする非公開機能には依存しない。
 
-`Needs input` のCodex内表示は、監視task内で実行中のwatchが戻り、Codex自身がユーザーへ質問することで成立する。監視taskが接続されていない間も質問は永続状態に残り、opt-inの外部push adapterは永続outboxからスマートフォンへ直接通知できる。再接続時には通知の成否に関係なく未回答質問をsnapshotから即時表示する。
+`Needs input` のCodex内表示は、repositoryごとにpinした監視task内で実行中のwatchが戻り、Codex自身がユーザー回答待ちの質問を提示することで成立する。接続中はDesktopのquestion notificationをOS通知として使い、Activityの回答待ちを通知dismiss後の再発見経路とする。監視taskはrequest ID、Issue番号、質問、理由、推奨案、全選択肢ID/label、自由記述可否を保持する。
+
+回答は同じ監視taskから、同じrequest IDと`--message-file -`を使って標準入力で渡す。成功後にstatusを1回確認してから同じtaskでblocking watchへ戻る。複数repositoryはtask、primary folder、`--repo`を分離し、1つのblocking監視taskへ多重化しない。詳細なセットアップ、命名、再接続、実機受け入れは[Codex Desktop監視task運用](codex-desktop-monitoring.md)を正本とする。
+
+監視taskが接続されていない間も質問は永続状態に残るが、新しい項目をActivityへ投入できるとは保証しない。再接続時には通知の成否に関係なくstatusでsnapshotを読み、未回答質問をwatchより先に即時表示する。opt-inの外部push adapterは、切断期間に永続outboxからスマートフォンへ直接通知する補助経路として利用できる。
 
 App Server所有threadのprogrammatic continuationと、任意のDesktop taskを外部processからwakeしてmobile表示を変更する機能は別契約として扱う。後者の公式APIが提供された場合はoptional adapterとして追加できる。
 
