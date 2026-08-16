@@ -152,6 +152,8 @@ gh issue edit 123 --add-label codex-loop:ready
 
 PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
 
+将来の同一repository内並列実行で使う`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。現行schema v2は引き続き`queue.concurrency: 1`だけを受理します。
+
 ### 2. 状態を確認・監視する
 
 ```sh
@@ -203,5 +205,5 @@ schema migrationが必要な場合はloopを開始せず、[migration runbook](d
 ## 詳細ドキュメント
 
 - 運用: [Mac mini常駐運用](docs/mac-mini-runbook.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[通知](docs/notifications.md)、[worktree](docs/worktree-lifecycle.md)
-- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
+- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
 - 開発: [Build・test](Makefile)、[実装状況](docs/implementation.md)、[脅威モデル](docs/threat-model.md)、[セキュリティ運用](docs/security-runbook.md)、[CLI互換性](docs/compatibility.md)

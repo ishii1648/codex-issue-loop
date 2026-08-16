@@ -2,6 +2,8 @@
 
 `agent-loop`はGitHub APIの返却順を使わず、eligibleなIssueを全件取得してからlocalで決定論的に並べ替える。既定strategyは従来どおり`issue_number_asc`であり、既存の`.agent-loop.yaml`を変更する必要はない。
 
+将来の並列schedulerはこの全順序をresource競合のないIssueへ順番に適用する。dependency評価、競合Issueのskip、同じsnapshotから同じadmission結果を得る規則は[Resource admission契約](resource-admission.md)を正本とする。
+
 ## Strategies
 
 | `queue.order` | Primary key | Tie-break |

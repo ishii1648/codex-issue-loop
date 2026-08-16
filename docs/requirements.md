@@ -153,6 +153,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-025**: Issueの作成主体、作成場所、作成手段を着手可能性の条件にせず、GitHub上の状態、ラベル、設定されたassignee・milestone、ローカル処理状態だけで選択すること。
 - **FR-026**: queue orderingは全pageの候補取得後に適用し、作成日時とIssue番号で安定したtie-breakを行うこと。
 - **FR-027**: priority labelの順位は設定配列で定義し、labelなしを最低順位、複数該当を最上位一致として扱うこと。不正設定は起動前に拒否すること。
+- **FR-028**: 同一repository内並列化では、configに定義したresourceとGitHubの`area:` label、Issue本文のversion付き`depends_on` metadataだけからeffective claimと依存関係を決定すること。自然言語やLLMによる補完を行わないこと。
+- **FR-029**: resourceまたはmetadataが未指定・未知・不正なIssueは`repo:*`相当へ縮退し、同じrepositoryの他Issueと並列実行しないこと。
 
 ### 6.4 Codexワーカー
 
@@ -220,6 +222,9 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-083**: 複数hostのworkerはGitHubへ直接公開せず、durable publication intentを介してfenced publication gatewayだけがbranch、comment、Pull Requestを更新すること。
 - **FR-084**: status/watchは複数hostのownership、Issue状態、attentionをcoordinatorから集約し、event取りこぼしをreconciliationで修復すること。
 - **FR-085**: distributed modeの有効化前にbackend conformance、credential、backup、partition、publication takeoverをdoctorまたは運用検証で確認すること。
+- **FR-086**: 単一hostのresource leaseは`claiming`からPR merge確認まで永続化し、retry、`needs_input`、CI待ち、open PRの間も保持すること。
+- **FR-087**: admissionは固定snapshot、正規化済み集合、queueの全順序、Issue番号tie-breakから決定し、同じsnapshotとscheduler versionに対して同じ選択結果と待機理由を返すこと。
+- **FR-088**: resource/依存metadataの導入はconfig/state schema v3への停止・backup・preview・明示applyを伴うmigrationとし、v2 Issueを自動書換えまたは暗黙に並列化しないこと。
 
 ## 7. 非機能要件
 
