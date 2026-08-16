@@ -31,6 +31,31 @@ type blockingPoolWorker struct {
 	canceled chan int
 }
 
+type barrierPoolWorker struct {
+	started chan int
+	release <-chan struct{}
+	results map[int]worker.Result
+	errors  map[int]error
+}
+
+func (w *barrierPoolWorker) run(ctx context.Context, current state.Issue) (worker.Result, error) {
+	w.started <- current.Number
+	select {
+	case <-ctx.Done():
+		return worker.Result{}, ctx.Err()
+	case <-w.release:
+		return w.results[current.Number], w.errors[current.Number]
+	}
+}
+
+func (w *barrierPoolWorker) Run(ctx context.Context, _ config.Config, _ gh.Issue, current state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+	return w.run(ctx, current)
+}
+
+func (w *barrierPoolWorker) Resume(ctx context.Context, _ config.Config, _ gh.Issue, current state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+	return w.run(ctx, current)
+}
+
 func (w *blockingPoolWorker) Run(ctx context.Context, _ config.Config, _ gh.Issue, current state.Issue, _ string, _ worker.Started) (worker.Result, error) {
 	w.mu.Lock()
 	w.active++
@@ -198,6 +223,133 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	pool.mu.Unlock()
 	if maximum != 2 {
 		t.Fatalf("maximum active workers=%d, want 2", maximum)
+	}
+}
+
+func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
+	completed := func(summary string) worker.Result {
+		return worker.Result{
+			Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: summary,
+			Tests: []worker.Test{}, Git: &worker.GitResult{},
+		}
+	}
+	retryable := func(summary string) worker.Result {
+		return worker.Result{
+			Version: 1, Status: "retryable_failure", ExecutionProfile: "standard", Summary: summary,
+			Tests: []worker.Test{}, Retry: &worker.Retry{Reason: summary},
+		}
+	}
+	needsInput := worker.Result{
+		Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "input required",
+		Tests: []worker.Test{}, Question: &worker.Question{
+			Text: "Choose a safe option", Reason: "The behavior is ambiguous", RecommendedOption: "safe",
+			Options: []state.Option{{ID: "safe", Label: "Use safe option"}}, AllowFreeText: true,
+		},
+	}
+	tests := []struct {
+		name    string
+		results map[int]worker.Result
+		want    map[int]string
+		leases  map[int]bool
+		pending int
+	}{
+		{
+			name:    "two workers complete together",
+			results: map[int]worker.Result{1: completed("one done"), 2: completed("two done")},
+			want:    map[int]string{1: "completed", 2: "completed"}, leases: map[int]bool{1: false, 2: false},
+		},
+		{
+			name:    "two workers fail together",
+			results: map[int]worker.Result{1: retryable("one retry"), 2: retryable("two retry")},
+			want:    map[int]string{1: "retry_wait", 2: "retry_wait"}, leases: map[int]bool{1: true, 2: true},
+		},
+		{
+			name:    "one worker needs input while the other completes",
+			results: map[int]worker.Result{1: needsInput, 2: completed("two done")},
+			want:    map[int]string{1: "needs_input", 2: "completed"}, leases: map[int]bool{1: true, 2: false}, pending: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loop, github := testLoop(t, worker.Result{})
+			loop.Config.Queue.Concurrency = 2
+			loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
+			loop.Random = fixedRandom(0.5)
+			loop.Logger = log.New(io.Discard, "", 0)
+			loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
+			release := make(chan struct{})
+			barrier := &barrierPoolWorker{started: make(chan int, 2), release: release, results: test.results, errors: map[int]error{}}
+			loop.Worker = barrier
+			for number, resource := range map[int]string{1: "one", 2: "two"} {
+				runID := "run_" + resource
+				_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+					IssueNumber: number, Title: "Test", RunID: runID, Slot: number - 1,
+					ResolvedResources: []string{resource}, ReservedAt: loop.now(),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = loop.Store.Update("resume_pending", number, runID, nil, func(snapshot *state.Snapshot) error {
+					item := snapshot.Issues[strconv.Itoa(number)]
+					item.Status = "resume_pending"
+					item.Worktree = loop.Config.RepoPath
+					item.ExecutionProfile = "standard"
+					item.Lease.Owner = owner
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := &scheduler{
+				loop: loop, events: make(chan schedulerEvent, 3), active: map[int]activeJob{},
+				issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if dispatched, err := s.schedule(ctx, false); err != nil || !dispatched {
+				t.Fatalf("dispatched=%v err=%v", dispatched, err)
+			}
+			started := map[int]bool{}
+			for range 2 {
+				select {
+				case number := <-barrier.started:
+					started[number] = true
+				case <-time.After(5 * time.Second):
+					t.Fatal("timed out waiting for both workers to reach the barrier")
+				}
+			}
+			if len(started) != 2 || len(s.active) != 2 {
+				t.Fatalf("started=%v active=%v", started, s.active)
+			}
+			close(release)
+			for range 2 {
+				select {
+				case event := <-s.events:
+					if err := s.handleEvent(event); err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("timed out waiting for both scheduler results")
+				}
+			}
+			if len(s.active) != 0 {
+				t.Fatalf("active jobs remain: %v", s.active)
+			}
+			snapshot, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for number, want := range test.want {
+				item := snapshot.Issues[strconv.Itoa(number)]
+				if item.Status != want || (item.Lease != nil) != test.leases[number] {
+					t.Fatalf("Issue #%d=%+v want_status=%s want_lease=%v", number, item, want, test.leases[number])
+				}
+			}
+			if len(snapshot.PendingRequests) != test.pending {
+				t.Fatalf("pending requests=%d want=%d", len(snapshot.PendingRequests), test.pending)
+			}
+		})
 	}
 }
 
