@@ -68,7 +68,7 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 			if other == nil || other.Number == issue.Number || other.Lease == nil {
 				continue
 			}
-			if other.Lease.Slot == reservation.Slot {
+			if issueOccupiesWorkerSlot(other) && other.Lease.Slot == reservation.Slot {
 				return fmt.Errorf("worker slot %d is already leased by Issue #%d", reservation.Slot, other.Number)
 			}
 			if resourcesConflict(resolved, other.Lease.ResolvedResources) {
@@ -91,6 +91,31 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 		return nil
 	})
 	return snapshot, owner, err
+}
+
+// AssignLeaseSlot records the scheduler slot selected for the next worker
+// invocation. Retained leases in retry/attention/PR states protect resources,
+// but do not occupy a bounded worker slot.
+func (s Store) AssignLeaseSlot(issueNumber int, owner LeaseOwner, slot int) (Snapshot, error) {
+	if slot < 0 {
+		return Snapshot{}, fmt.Errorf("worker slot must not be negative")
+	}
+	return s.Update("lease_slot_assigned", issueNumber, owner.RunID, map[string]any{"owner": owner, "slot": slot}, func(snapshot *Snapshot) error {
+		issue, err := ownedIssue(snapshot, issueNumber, owner)
+		if err != nil {
+			return err
+		}
+		for _, other := range snapshot.Issues {
+			if other == nil || other.Number == issueNumber || other.Lease == nil || !issueOccupiesWorkerSlot(other) {
+				continue
+			}
+			if other.Lease.Slot == slot {
+				return fmt.Errorf("worker slot %d is already occupied by Issue #%d", slot, other.Number)
+			}
+		}
+		issue.Lease.Slot = slot
+		return nil
+	})
 }
 
 // ExpandLease adds resources without changing the owner generation. The
@@ -218,6 +243,18 @@ func resourcesConflict(left, right []string) bool {
 	return false
 }
 
+func issueOccupiesWorkerSlot(issue *Issue) bool {
+	if issue == nil {
+		return false
+	}
+	switch issue.Status {
+	case "claiming", "claimed", "running", "resolving_conflict":
+		return true
+	default:
+		return false
+	}
+}
+
 func validateResourceLeases(snapshot Snapshot) error {
 	active := []*Issue{}
 	for key, issue := range snapshot.Issues {
@@ -243,7 +280,7 @@ func validateResourceLeases(snapshot Snapshot) error {
 			return fmt.Errorf("Issue #%d resolved resources are not canonical", issue.Number)
 		}
 		for _, other := range active {
-			if lease.Slot == other.Lease.Slot {
+			if issueOccupiesWorkerSlot(issue) && issueOccupiesWorkerSlot(other) && lease.Slot == other.Lease.Slot {
 				return fmt.Errorf("worker slot %d is leased by Issues #%d and #%d", lease.Slot, other.Number, issue.Number)
 			}
 			if resourcesConflict(lease.ResolvedResources, other.Lease.ResolvedResources) {
