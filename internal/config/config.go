@@ -33,18 +33,19 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type Config struct {
-	Version       int           `yaml:"version" json:"version"`
-	GitHub        GitHub        `yaml:"github" json:"github"`
-	Queue         Queue         `yaml:"queue" json:"queue"`
-	Worker        Worker        `yaml:"worker" json:"worker"`
-	Watch         Watch         `yaml:"watch" json:"watch"`
-	Git           Git           `yaml:"git" json:"git"`
-	Completion    Completion    `yaml:"completion" json:"completion"`
-	Worktrees     Worktrees     `yaml:"worktrees" json:"worktrees"`
-	Notifications Notifications `yaml:"notifications" json:"notifications"`
-	Logs          Logs          `yaml:"logs" json:"logs"`
-	Security      Security      `yaml:"security" json:"security"`
-	RepoPath      string        `yaml:"-" json:"repo_path"`
+	Version          int              `yaml:"version" json:"version"`
+	GitHub           GitHub           `yaml:"github" json:"github"`
+	Queue            Queue            `yaml:"queue" json:"queue"`
+	Worker           Worker           `yaml:"worker" json:"worker"`
+	Watch            Watch            `yaml:"watch" json:"watch"`
+	Git              Git              `yaml:"git" json:"git"`
+	Completion       Completion       `yaml:"completion" json:"completion"`
+	ConflictRecovery ConflictRecovery `yaml:"conflict_recovery" json:"conflict_recovery"`
+	Worktrees        Worktrees        `yaml:"worktrees" json:"worktrees"`
+	Notifications    Notifications    `yaml:"notifications" json:"notifications"`
+	Logs             Logs             `yaml:"logs" json:"logs"`
+	Security         Security         `yaml:"security" json:"security"`
+	RepoPath         string           `yaml:"-" json:"repo_path"`
 }
 
 type GitHub struct {
@@ -140,6 +141,11 @@ type Completion struct {
 	CloseIssue    bool `yaml:"close_issue" json:"close_issue"`
 }
 
+type ConflictRecovery struct {
+	MaxAttemptsPerBase int `yaml:"max_attempts_per_base" json:"max_attempts_per_base"`
+	MaxBaseUpdates     int `yaml:"max_base_updates" json:"max_base_updates"`
+}
+
 type Worktrees struct {
 	CompletedMaxAge  Duration `yaml:"completed_max_age" json:"completed_max_age"`
 	FailedMaxAge     Duration `yaml:"failed_max_age" json:"failed_max_age"`
@@ -214,7 +220,8 @@ func Defaults() Config {
 			BranchPrefix: "codex/issue-",
 			BaseBranch:   "main",
 		},
-		Completion: Completion{CreateDraftPR: true, AutoMerge: false, CloseIssue: true},
+		Completion:       Completion{CreateDraftPR: true, AutoMerge: false, CloseIssue: true},
+		ConflictRecovery: ConflictRecovery{MaxAttemptsPerBase: 3, MaxBaseUpdates: 3},
 		Worktrees: Worktrees{
 			CompletedMaxAge:  Duration{7 * 24 * time.Hour},
 			FailedMaxAge:     Duration{30 * 24 * time.Hour},
@@ -365,6 +372,9 @@ func (c Config) Validate() error {
 	}
 	if c.Queue.MaxAttempts < 1 {
 		return fmt.Errorf("queue.max_attempts must be at least 1")
+	}
+	if c.ConflictRecovery.MaxAttemptsPerBase < 1 || c.ConflictRecovery.MaxBaseUpdates < 1 {
+		return fmt.Errorf("conflict_recovery.max_attempts_per_base and max_base_updates must be at least 1")
 	}
 	if c.Worker.AmbiguousProfile != "extended" {
 		return fmt.Errorf("worker.ambiguous_profile must be extended")

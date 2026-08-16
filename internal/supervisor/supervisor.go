@@ -13,6 +13,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
@@ -28,6 +29,11 @@ type WorktreeManager interface {
 
 type Publisher interface {
 	Publish(context.Context, config.Config, gh.Issue, string, string, string) (worker.GitResult, error)
+}
+
+type ConflictResolver interface {
+	Prepare(context.Context, config.Config, string, string, *state.ConflictRecovery) (conflict.Preparation, error)
+	Publish(context.Context, config.Config, gh.Issue, string, string, state.ConflictRecovery, []worker.Test) (worker.GitResult, error)
 }
 
 type ProcessInspector interface {
@@ -46,6 +52,7 @@ type Loop struct {
 	Worker         worker.Runner
 	WorkerIdentity worker.Identity
 	Publisher      Publisher
+	Conflicts      ConflictResolver
 	Processes      ProcessInspector
 	Clock          Clock
 	Random         RandomSource
@@ -253,7 +260,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
 		switch issue.Status {
-		case "claiming", "claimed", "running", "resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge":
+		case "claiming", "claimed", "running", "resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 			if issue.RunID != "" {
 				exclude[issue.RunID] = true
 			}
@@ -273,7 +280,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
-		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.GitHubSync == "" {
+		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 			continue
 		}
 		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
@@ -289,7 +296,7 @@ func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 
 func queueBlockedByPullRequest(snapshot state.Snapshot, autoMerge bool) bool {
 	for _, issue := range snapshot.Issues {
-		if issue.Status == "awaiting_checks" || (autoMerge && issue.Status == "awaiting_merge") {
+		if issue.Status == "awaiting_checks" || issue.Status == "resolving_conflict" || (autoMerge && issue.Status == "awaiting_merge") {
 			return true
 		}
 	}
@@ -369,6 +376,9 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	}
 	if current.Status == "awaiting_checks" || current.Status == "awaiting_merge" {
 		return l.processPullRequest(ctx, current)
+	}
+	if current.Status == "resolving_conflict" {
+		return l.processConflictRecovery(ctx, current)
 	}
 	issue, err := l.GitHub.Get(ctx, l.Config, current.Number)
 	if err != nil {
@@ -620,7 +630,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 			return l.schedulePullRequestPoll(current, "Pull Request branch updated; waiting for checks")
 		}
 		if l.Config.Completion.AutoMerge && strings.EqualFold(selected.MergeStateStatus, "dirty") {
-			return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "Pull Request lifecycle", errors.New("Pull Request has merge conflicts")), true)
+			return l.beginConflictRecovery(ctx, current, *selected)
 		}
 		if selected.IsDraft {
 			if err := l.GitHub.ReadyPullRequest(ctx, l.Config, selected.URL); err != nil {
@@ -648,6 +658,397 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	default:
 		return failure.Wrap(failure.Supervisor, "inspect Pull Request checks", fmt.Errorf("unknown check status %q", selected.ChecksStatus))
 	}
+}
+
+func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, pr gh.PullRequest) error {
+	if l.Conflicts == nil {
+		return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "Pull Request conflict recovery", errors.New("conflict recovery manager is unavailable")), true)
+	}
+	// A newly observed dirty PR starts by fetching the latest base even when a
+	// previous recovery record is retained for audit. Only resolving_conflict
+	// resumes the exact recorded MERGE_HEAD.
+	preparation, err := l.Conflicts.Prepare(ctx, l.Config, current.Worktree, current.Branch, nil)
+	if err != nil {
+		var fatal conflict.NonRecoverableError
+		if errors.As(err, &fatal) {
+			return l.failConflictRecovery(ctx, current, err.Error())
+		}
+		return failure.Wrap(failure.Transient, "prepare Pull Request conflict recovery", err)
+	}
+	baseUpdates := 1
+	attempts := 0
+	history := []state.ConflictAttempt(nil)
+	verification := []state.ConflictVerification(nil)
+	startedAt := l.now()
+	if previous := current.ConflictRecovery; previous != nil {
+		baseUpdates = previous.BaseUpdates
+		history = append(history, previous.History...)
+		startedAt = previous.StartedAt
+		if startedAt.IsZero() {
+			startedAt = l.now()
+		}
+		if previous.TargetBaseSHA == preparation.TargetBaseSHA {
+			attempts = previous.Attempts
+			verification = append(verification, previous.Verification...)
+		} else {
+			baseUpdates++
+		}
+	}
+	recovery := &state.ConflictRecovery{
+		PullRequestURL: pr.URL, PreviousBaseSHA: preparation.PreviousBaseSHA,
+		TargetBaseSHA: preparation.TargetBaseSHA, OriginalHeadSHA: preparation.OriginalHeadSHA,
+		ConflictFiles: append([]string(nil), preparation.ConflictFiles...), AllowedPaths: append([]string(nil), preparation.AllowedPaths...),
+		Attempts: attempts, BaseUpdates: baseUpdates, History: history,
+		OriginalDiff: preparation.OriginalDiff, BaseCommits: preparation.BaseCommits,
+		ConflictContent: preparation.ConflictContent, StartedAt: startedAt, UpdatedAt: l.now(),
+		Verification: verification,
+	}
+	if baseUpdates > l.Config.ConflictRecovery.MaxBaseUpdates {
+		_, persistErr := l.Store.Update("conflict_recovery_base_budget_exceeded", current.Number, current.RunID, map[string]any{
+			"target_base_sha": recovery.TargetBaseSHA, "base_updates": baseUpdates,
+			"conflict_files": recovery.ConflictFiles,
+		}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(current.Number)]
+			item.ConflictRecovery = recovery
+			item.UpdatedAt = l.now()
+			return nil
+		})
+		if persistErr != nil {
+			return failure.Wrap(failure.Supervisor, "persist conflict recovery base budget", persistErr)
+		}
+		current, _ = l.issueState(current.Number)
+		return l.failConflictRecovery(ctx, current, fmt.Sprintf("base update budget exceeded (%d > %d)", baseUpdates, l.Config.ConflictRecovery.MaxBaseUpdates))
+	}
+	_, err = l.Store.Update("conflict_recovery_prepared", current.Number, current.RunID, map[string]any{
+		"pull_request_url": pr.URL, "previous_base_sha": recovery.PreviousBaseSHA,
+		"target_base_sha": recovery.TargetBaseSHA, "conflict_files": recovery.ConflictFiles,
+		"attempts": recovery.Attempts, "base_updates": recovery.BaseUpdates,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.Status = "resolving_conflict"
+		item.ConflictRecovery = recovery
+		item.PullRequestURL = pr.URL
+		item.LastError = "Pull Request conflict recovery prepared"
+		item.FailureKind = ""
+		item.RetryAfter = nil
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist conflict recovery preparation", err)
+	}
+	current, err = l.issueState(current.Number)
+	if err != nil {
+		return err
+	}
+	if preparation.Published {
+		return l.finishConflictPublication(current, preparation.Commit)
+	}
+	if preparation.Resolved {
+		issue, getErr := l.GitHub.Get(ctx, l.Config, current.Number)
+		if getErr != nil {
+			return failure.Wrap(failure.Transient, "refresh Issue for mechanical conflict recovery", getErr)
+		}
+		return l.publishConflictRecovery(ctx, issue, current, nil)
+	}
+	return l.processConflictRecovery(ctx, current)
+}
+
+func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue) error {
+	if current.ConflictRecovery == nil {
+		return l.failConflictRecovery(ctx, current, "durable conflict recovery context is missing")
+	}
+	if l.Conflicts == nil {
+		return l.failConflictRecovery(ctx, current, "conflict recovery manager is unavailable")
+	}
+	preparation, prepareErr := l.Conflicts.Prepare(ctx, l.Config, current.Worktree, current.Branch, current.ConflictRecovery)
+	if prepareErr != nil {
+		var fatal conflict.NonRecoverableError
+		if errors.As(prepareErr, &fatal) {
+			return l.failConflictRecovery(ctx, current, prepareErr.Error())
+		}
+		return failure.Wrap(failure.Transient, "resume Pull Request conflict recovery", prepareErr)
+	}
+	if preparation.Published {
+		return l.finishConflictPublication(current, preparation.Commit)
+	}
+	if preparation.Resolved && (len(current.ConflictRecovery.ConflictFiles) == 0 || conflictVerificationGreen(current.ConflictRecovery.Verification)) {
+		issue, getErr := l.GitHub.Get(ctx, l.Config, current.Number)
+		if getErr != nil {
+			return failure.Wrap(failure.Transient, "refresh Issue for resolved conflict publication", getErr)
+		}
+		return l.publishConflictRecovery(ctx, issue, current, conflictTests(current.ConflictRecovery.Verification))
+	}
+	if current.ConflictRecovery.Attempts >= l.Config.ConflictRecovery.MaxAttemptsPerBase {
+		return l.failConflictRecovery(ctx, current, fmt.Sprintf("recovery budget exhausted for base %s after %d attempts", current.ConflictRecovery.TargetBaseSHA, current.ConflictRecovery.Attempts))
+	}
+	issue, err := l.GitHub.Get(ctx, l.Config, current.Number)
+	if err != nil {
+		return failure.Wrap(failure.Transient, "refresh Issue for conflict recovery", err)
+	}
+	runID := state.NewID("conflict")
+	attemptNumber := len(current.ConflictRecovery.History) + 1
+	_, err = l.Store.Update("conflict_recovery_attempt_started", current.Number, runID, map[string]any{
+		"attempt": current.ConflictRecovery.Attempts + 1, "base_sha": current.ConflictRecovery.TargetBaseSHA,
+		"conflict_files": current.ConflictRecovery.ConflictFiles,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.Status, item.RunID, item.WorkerPID = "resolving_conflict", runID, 0
+		item.SessionID, item.Session = "", nil
+		item.RetryAfter = nil
+		item.WorkerIdentity = stateIdentity(l.WorkerIdentity)
+		item.ConflictRecovery.Attempts++
+		item.ConflictRecovery.History = append(item.ConflictRecovery.History, state.ConflictAttempt{
+			Number: attemptNumber, BaseSHA: item.ConflictRecovery.TargetBaseSHA, Status: "running",
+			ConflictFiles: append([]string(nil), item.ConflictRecovery.ConflictFiles...), StartedAt: l.now(),
+		})
+		item.ConflictRecovery.UpdatedAt = l.now()
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist conflict recovery attempt", err)
+	}
+	current, err = l.issueState(current.Number)
+	if err != nil {
+		return err
+	}
+	workerCfg := l.Config
+	workerCfg.RepoPath = current.Worktree
+	result, runErr := l.Worker.Run(ctx, workerCfg, issue, current, worker.BuildConflictPrompt(current), l.recordWorkerPID(current.Number, runID))
+	return l.handleConflictResult(ctx, issue, current, result, runErr)
+}
+
+func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current state.Issue, result worker.Result, runErr error) error {
+	profile := result.ExecutionProfile
+	if profile == "" {
+		profile = "extended"
+	}
+	_, err := l.Store.Update("conflict_recovery_worker_completed", current.Number, current.RunID, map[string]any{
+		"status": result.Status, "summary": result.Summary, "execution_profile": profile, "tests": result.Tests,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.WorkerPID = 0
+		item.ExecutionProfile = profile
+		if result.Status == "completed" && item.ConflictRecovery != nil {
+			item.ConflictRecovery.Verification = make([]state.ConflictVerification, 0, len(result.Tests))
+			for _, test := range result.Tests {
+				item.ConflictRecovery.Verification = append(item.ConflictRecovery.Verification, state.ConflictVerification{Command: test.Command, Result: test.Result})
+			}
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist conflict worker result", err)
+	}
+	current, err = l.issueState(current.Number)
+	if err != nil {
+		return err
+	}
+	if runErr != nil {
+		return l.scheduleConflictRetry(ctx, current, runErr.Error())
+	}
+	switch result.Status {
+	case "completed":
+		if result.Git != nil {
+			return l.failConflictRecovery(ctx, current, "conflict worker crossed the publication boundary and returned Git publication data")
+		}
+		return l.publishConflictRecovery(ctx, issue, current, result.Tests)
+	case "needs_input":
+		requestID := state.NewID("req")
+		_, err := l.Store.Update("input_requested", current.Number, current.RunID, result.Question, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(current.Number)]
+			item.Status, item.GitHubSync, item.UpdatedAt = "needs_input", "needs_input", l.now()
+			finishConflictAttempt(item, "needs_input", result.Summary, l.now())
+			q := result.Question
+			s.PendingRequests[requestID] = &state.Request{
+				ID: requestID, IssueNumber: current.Number, Question: q.Text, Reason: q.Reason,
+				Recommended: q.RecommendedOption, Options: q.Options, AllowFreeText: q.AllowFreeText,
+				ResumeStatus: "resolving_conflict", Status: "pending", CreatedAt: l.now(),
+			}
+			return nil
+		})
+		if err != nil {
+			return failure.Wrap(failure.Supervisor, "persist conflict recovery input request", err)
+		}
+		updated, _ := l.issueState(current.Number)
+		return l.syncGitHub(ctx, updated)
+	case "retryable_failure":
+		reason := result.Summary
+		if result.Retry != nil && result.Retry.Reason != "" {
+			reason = result.Retry.Reason
+		}
+		return l.scheduleConflictRetry(ctx, current, reason)
+	case "blocked":
+		return l.failConflictRecovery(ctx, current, "worker reported a non-recoverable conflict: "+result.Summary)
+	default:
+		return l.scheduleConflictRetry(ctx, current, "conflict worker returned an unknown status")
+	}
+}
+
+func (l *Loop) publishConflictRecovery(ctx context.Context, issue gh.Issue, current state.Issue, tests []worker.Test) error {
+	if l.Conflicts == nil || current.ConflictRecovery == nil {
+		return l.failConflictRecovery(ctx, current, "conflict recovery publisher is unavailable")
+	}
+	published, err := l.Conflicts.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, *current.ConflictRecovery, tests)
+	if err != nil {
+		var fatal conflict.NonRecoverableError
+		if errors.As(err, &fatal) {
+			return l.failConflictRecovery(ctx, current, err.Error())
+		}
+		return l.scheduleConflictRetry(ctx, current, "publish resolved conflict: "+err.Error())
+	}
+	return l.finishConflictPublication(current, published.Commit)
+}
+
+func (l *Loop) finishConflictPublication(current state.Issue, commit string) error {
+	retryAt := l.now().Add(l.Config.Queue.PollInterval.Duration)
+	_, err := l.Store.Update("conflict_recovery_published", current.Number, current.RunID, map[string]any{
+		"pull_request_url": current.PullRequestURL, "commit": commit,
+		"target_base_sha": current.ConflictRecovery.TargetBaseSHA,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.Status = "awaiting_checks"
+		item.LastError = ""
+		item.FailureKind = ""
+		item.RetryAfter = &retryAt
+		item.ConflictRecovery.LastReason = "published; waiting for CI revalidation"
+		item.ConflictRecovery.UpdatedAt = l.now()
+		finishConflictAttempt(item, "completed", "published as "+commit, l.now())
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	return failure.Wrap(failure.Supervisor, "persist conflict recovery publication", err)
+}
+
+func (l *Loop) scheduleConflictRetry(ctx context.Context, current state.Issue, reason string) error {
+	if current.ConflictRecovery == nil {
+		return l.failConflictRecovery(ctx, current, reason)
+	}
+	hasRunningAttempt := len(current.ConflictRecovery.History) > 0 && current.ConflictRecovery.History[len(current.ConflictRecovery.History)-1].Status == "running"
+	effectiveAttempts := current.ConflictRecovery.Attempts
+	if !hasRunningAttempt {
+		effectiveAttempts++ // preparation/publication retry without a worker invocation
+	}
+	if effectiveAttempts >= l.Config.ConflictRecovery.MaxAttemptsPerBase {
+		if !hasRunningAttempt {
+			_, _ = l.Store.Update("conflict_recovery_budget_consumed", current.Number, current.RunID, map[string]any{"reason": reason, "attempts": effectiveAttempts}, func(s *state.Snapshot) error {
+				item := s.Issues[strconv.Itoa(current.Number)]
+				item.ConflictRecovery.Attempts = effectiveAttempts
+				item.ConflictRecovery.History = append(item.ConflictRecovery.History, state.ConflictAttempt{
+					Number: len(item.ConflictRecovery.History) + 1, BaseSHA: item.ConflictRecovery.TargetBaseSHA,
+					Status: "retryable_failure", Reason: reason, StartedAt: l.now(), FinishedAt: l.now(),
+					ConflictFiles: append([]string(nil), item.ConflictRecovery.ConflictFiles...),
+				})
+				return nil
+			})
+			current, _ = l.issueState(current.Number)
+		}
+		return l.failConflictRecovery(ctx, current, fmt.Sprintf("%s; recovery budget exhausted for base %s after %d attempts", reason, current.ConflictRecovery.TargetBaseSHA, effectiveAttempts))
+	}
+	delay := l.retryDelay(effectiveAttempts)
+	retryAt := l.now().Add(delay)
+	_, err := l.Store.Update("conflict_recovery_retry_scheduled", current.Number, current.RunID, map[string]any{
+		"reason": reason, "base_sha": current.ConflictRecovery.TargetBaseSHA,
+		"attempts": current.ConflictRecovery.Attempts, "retry_at": retryAt,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.Status, item.LastError, item.RetryAfter = "resolving_conflict", reason, &retryAt
+		item.FailureKind = string(failure.Transient)
+		if !hasRunningAttempt {
+			item.ConflictRecovery.Attempts = effectiveAttempts
+			item.ConflictRecovery.History = append(item.ConflictRecovery.History, state.ConflictAttempt{
+				Number: len(item.ConflictRecovery.History) + 1, BaseSHA: item.ConflictRecovery.TargetBaseSHA,
+				Status: "retryable_failure", Reason: reason, StartedAt: l.now(), FinishedAt: l.now(),
+				ConflictFiles: append([]string(nil), item.ConflictRecovery.ConflictFiles...),
+			})
+		}
+		item.ConflictRecovery.LastReason = reason
+		item.ConflictRecovery.UpdatedAt = l.now()
+		finishConflictAttempt(item, "retryable_failure", reason, l.now())
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	return failure.Wrap(failure.Supervisor, "persist conflict recovery retry", err)
+}
+
+func (l *Loop) failConflictRecovery(ctx context.Context, current state.Issue, reason string) error {
+	if current.ConflictRecovery != nil {
+		_, _ = l.Store.Update("conflict_recovery_exhausted", current.Number, current.RunID, map[string]any{
+			"reason": reason, "attempts": current.ConflictRecovery.Attempts,
+			"base_updates": current.ConflictRecovery.BaseUpdates, "conflict_files": current.ConflictRecovery.ConflictFiles,
+		}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(current.Number)]
+			item.ConflictRecovery.LastReason = reason
+			item.ConflictRecovery.UpdatedAt = l.now()
+			finishConflictAttempt(item, "blocked", reason, l.now())
+			return nil
+		})
+		current, _ = l.issueState(current.Number)
+	}
+	detail := conflictFailureDetail(l.Config.RepoPath, current, reason)
+	return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "Pull Request conflict recovery", errors.New(detail)), true)
+}
+
+func finishConflictAttempt(item *state.Issue, status, reason string, now time.Time) {
+	if item == nil || item.ConflictRecovery == nil || len(item.ConflictRecovery.History) == 0 {
+		return
+	}
+	attempt := &item.ConflictRecovery.History[len(item.ConflictRecovery.History)-1]
+	if attempt.Status == "running" {
+		attempt.Status, attempt.Reason, attempt.FinishedAt = status, reason, now
+	}
+}
+
+func conflictFailureDetail(repoPath string, current state.Issue, reason string) string {
+	recovery := current.ConflictRecovery
+	if recovery == nil {
+		return fmt.Sprintf("%s. Recommended recovery: inspect status and run agent-loop retry --repo %q --issue %d after repairing the worktree.", reason, repoPath, current.Number)
+	}
+	baseHistory := make([]string, 0, len(recovery.History))
+	for _, attempt := range recovery.History {
+		baseHistory = append(baseHistory, attempt.BaseSHA)
+	}
+	baseHistory = append(baseHistory, recovery.TargetBaseSHA)
+	return fmt.Sprintf("%s. Attempts: %d; base SHA history: %s; conflict files: %s; last reason: %s. Recommended recovery: inspect the saved worktree and run agent-loop retry --repo %q --issue %d.",
+		reason, recovery.Attempts, strings.Join(uniqueStrings(baseHistory), ", "), strings.Join(recovery.ConflictFiles, ", "), recovery.LastReason, repoPath, current.Number)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func conflictTests(values []state.ConflictVerification) []worker.Test {
+	result := make([]worker.Test, 0, len(values))
+	for _, value := range values {
+		result = append(result, worker.Test{Command: value.Command, Result: value.Result})
+	}
+	return result
+}
+
+func conflictVerificationGreen(values []state.ConflictVerification) bool {
+	if len(values) == 0 {
+		return false
+	}
+	for _, value := range values {
+		result := strings.ToLower(strings.TrimSpace(value.Result))
+		green := strings.TrimSpace(value.Command) != "" && (result == "ok" || strings.HasPrefix(result, "ok ") ||
+			strings.HasPrefix(result, "pass") || strings.HasPrefix(result, "success") ||
+			strings.HasPrefix(result, "green") || strings.Contains(result, "exit 0"))
+		if !green {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *Loop) schedulePullRequestPoll(current state.Issue, reason string) error {
@@ -773,6 +1174,16 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			return fmt.Errorf("Issue #%d has no pending request to sync", issue.Number)
 		}
 		err = l.GitHub.MarkNeedsInput(ctx, l.Config, issue.Number, pending.ID, pending.Question)
+	case "conflict_retry":
+		recoveryID := issue.RunID
+		if issue.ConflictRecovery != nil {
+			if issue.ConflictRecovery.RetryID != "" {
+				recoveryID = issue.ConflictRecovery.RetryID
+			} else if issue.ConflictRecovery.TargetBaseSHA != "" {
+				recoveryID = issue.ConflictRecovery.TargetBaseSHA
+			}
+		}
+		err = l.GitHub.MarkConflictRetry(ctx, l.Config, issue.Number, recoveryID)
 	case "failed", "blocked":
 		err = l.GitHub.MarkFailed(ctx, l.Config, issue.Number, issue.LastError, issue.GitHubSync == "blocked")
 	default:

@@ -21,6 +21,7 @@
 - Issue番号、作成日時、priority labelを使うconfigurableなqueue orderingと安定tie-break
 - Issue別branchとGit worktree
 - workerのworktree内実装と、supervisor publisherによるcommit・push・draft PR作成の分離
+- dirty PRのimmutable base merge準備、workerによる意味的競合解消、scope検証付き通常push、再起動時の冪等再開
 - draft PRのCI監視、成功後のReady化、manifestで選べるbase branch追随・squash merge、merge後のIssue完了
 - schema付き`codex exec`、session ID保存、`codex exec resume`
 - `standard` / `extended` preflight policy
@@ -66,6 +67,7 @@
 - local `flock`はhostをまたぐ排他ではない。複数hostを登録するだけでは安全にならず、[ADR-0002](adr/0002-concurrency-and-multi-host.md)のcoordinatorとpublication gatewayが実装されるまで禁止する。
 - GitHub labelは自動作成しない。
 - 起動時reconciliationはactive run、write-ahead claim、未反映GitHub状態、未記録のpush/PR、merge/close済みPRを復旧する。branch・worktree・labelの人手変更と二重workerの可能性は自動上書きせず、理由を残してblockedへ移す。
+- PR conflictの検出自体はblocked理由にしない。`resolving_conflict`にbase SHA・競合file・試行履歴を保存し、budget超過またはworktree破損、scope違反等の非回復障害だけを最終blockedとして同期する。
 - スマートフォン直接pushは初期adapterとしてntfyだけに対応する。外部account、private topic、credential、mobile appの準備と実機到達確認は運用者が行う。
 - 実GitHub repositoryと実Codex workerを使うMac mini E2Eの結果は[`docs/e2e/2026-08-15-mac-mini.md`](e2e/2026-08-15-mac-mini.md)に記録している。スマートフォンからのCodex Remote接続は確認済みである。display off、logout、OS再起動はM3の受け入れTODOとせず、発生時または計画保守時の運用確認としてrunbookで扱う。
 - Codex CLI 0.136.0以降とGitHub CLI 2.69.0以降を対応下限とし、起動時に必須capabilityを検査する。resume非対応時は既存worktreeと永続状態を使う新規sessionへfallbackする。詳細は`docs/compatibility.md`を正本とする。

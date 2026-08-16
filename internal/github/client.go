@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -58,6 +59,7 @@ type Client interface {
 	MarkDone(context.Context, config.Config, int, string) error
 	MarkFailed(context.Context, config.Config, int, string, bool) error
 	MarkRunning(context.Context, config.Config, int) error
+	MarkConflictRetry(context.Context, config.Config, int, string) error
 	ReadyPullRequest(context.Context, config.Config, string) error
 	UpdatePullRequest(context.Context, config.Config, string) error
 	MergePullRequest(context.Context, config.Config, string) error
@@ -347,12 +349,30 @@ func (c CLI) MarkFailed(ctx context.Context, cfg config.Config, number int, reas
 	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{label}, []string{cfg.GitHub.RunningLabel}); err != nil {
 		return err
 	}
-	marker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", number)
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, marker+"\nAutomation stopped: "+redact.StringWithSecrets(reason, c.Secrets))
+	baseMarker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", number)
+	digest := sha256.Sum256([]byte(reason))
+	idempotencyMarker := fmt.Sprintf("<!-- codex-issue-loop:failure:%x -->", digest[:8])
+	body := baseMarker + "\n" + idempotencyMarker + "\nAutomation stopped: " + redact.StringWithSecrets(reason, c.Secrets)
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, idempotencyMarker, body)
 }
 
 func (c CLI) MarkRunning(ctx context.Context, cfg config.Config, number int) error {
 	return c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel})
+}
+
+func (c CLI) MarkConflictRetry(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
+	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			remove = append(remove, label)
+		}
+	}
+	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
+		return err
+	}
+	marker := fmt.Sprintf("<!-- codex-issue-loop:conflict-retry:%s -->", recoveryID)
+	body := marker + "\nPull Request conflict recovery was explicitly resumed using durable state."
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
 }
 
 func (c CLI) ReadyPullRequest(ctx context.Context, cfg config.Config, prURL string) error {
@@ -507,7 +527,7 @@ func SelectReady(issues []Issue, snapshotIssues map[string]string, queue config.
 	OrderIssues(issues, queue)
 	for _, issue := range issues {
 		status := snapshotIssues[fmt.Sprint(issue.Number)]
-		if status == "running" || status == "claimed" || status == "needs_input" || status == "completed" || status == "blocked" {
+		if status == "running" || status == "claimed" || status == "needs_input" || status == "completed" || status == "blocked" || status == "resolving_conflict" {
 			continue
 		}
 		return issue, true

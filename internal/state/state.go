@@ -65,28 +65,70 @@ type WorkerIdentity struct {
 	Variant        string `json:"variant,omitempty"`
 }
 
+// ConflictAttempt is an append-only audit record for one autonomous conflict
+// recovery worker invocation. A new base SHA starts a new per-base budget while
+// preserving the earlier records.
+type ConflictAttempt struct {
+	Number        int       `json:"number"`
+	BaseSHA       string    `json:"base_sha"`
+	Status        string    `json:"status"`
+	Reason        string    `json:"reason,omitempty"`
+	ConflictFiles []string  `json:"conflict_files,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	FinishedAt    time.Time `json:"finished_at,omitempty"`
+}
+
+type ConflictVerification struct {
+	Command string `json:"command"`
+	Result  string `json:"result"`
+}
+
+// ConflictRecovery contains everything required to resume an in-place merge
+// after a supervisor restart. Prompt-only context is bounded by the preparer
+// before it is persisted.
+type ConflictRecovery struct {
+	PullRequestURL  string                 `json:"pull_request_url"`
+	RetryID         string                 `json:"retry_id,omitempty"`
+	PreviousBaseSHA string                 `json:"previous_base_sha,omitempty"`
+	TargetBaseSHA   string                 `json:"target_base_sha,omitempty"`
+	OriginalHeadSHA string                 `json:"original_head_sha,omitempty"`
+	ConflictFiles   []string               `json:"conflict_files,omitempty"`
+	AllowedPaths    []string               `json:"allowed_paths,omitempty"`
+	Attempts        int                    `json:"attempts"`
+	BaseUpdates     int                    `json:"base_updates"`
+	History         []ConflictAttempt      `json:"history,omitempty"`
+	OriginalDiff    string                 `json:"original_diff,omitempty"`
+	BaseCommits     string                 `json:"base_commits,omitempty"`
+	ConflictContent string                 `json:"conflict_content,omitempty"`
+	Verification    []ConflictVerification `json:"verification,omitempty"`
+	LastReason      string                 `json:"last_reason,omitempty"`
+	StartedAt       time.Time              `json:"started_at,omitempty"`
+	UpdatedAt       time.Time              `json:"updated_at,omitempty"`
+}
+
 type Issue struct {
-	Number            int            `json:"number"`
-	Title             string         `json:"title"`
-	Status            string         `json:"status"`
-	RunID             string         `json:"run_id,omitempty"`
-	Branch            string         `json:"branch,omitempty"`
-	Worktree          string         `json:"worktree,omitempty"`
-	Attempts          int            `json:"attempts"`
-	Continuations     int            `json:"continuations"`
-	ExecutionProfile  string         `json:"execution_profile,omitempty"`
-	SessionID         string         `json:"session_id,omitempty"`
-	Session           *WorkerSession `json:"session,omitempty"`
-	WorkerIdentity    WorkerIdentity `json:"worker_identity,omitempty"`
-	WorkerPID         int            `json:"worker_pid,omitempty"`
-	PullRequestURL    string         `json:"pull_request_url,omitempty"`
-	PullRequestMerged bool           `json:"pull_request_merged,omitempty"`
-	GitHubSync        string         `json:"github_sync,omitempty"`
-	FailureKind       string         `json:"failure_kind,omitempty"`
-	LastError         string         `json:"last_error,omitempty"`
-	RetryAfter        *time.Time     `json:"retry_after,omitempty"`
-	Answers           []AnswerRecord `json:"answers,omitempty"`
-	UpdatedAt         time.Time      `json:"updated_at"`
+	Number            int               `json:"number"`
+	Title             string            `json:"title"`
+	Status            string            `json:"status"`
+	RunID             string            `json:"run_id,omitempty"`
+	Branch            string            `json:"branch,omitempty"`
+	Worktree          string            `json:"worktree,omitempty"`
+	Attempts          int               `json:"attempts"`
+	Continuations     int               `json:"continuations"`
+	ExecutionProfile  string            `json:"execution_profile,omitempty"`
+	SessionID         string            `json:"session_id,omitempty"`
+	Session           *WorkerSession    `json:"session,omitempty"`
+	WorkerIdentity    WorkerIdentity    `json:"worker_identity,omitempty"`
+	WorkerPID         int               `json:"worker_pid,omitempty"`
+	PullRequestURL    string            `json:"pull_request_url,omitempty"`
+	PullRequestMerged bool              `json:"pull_request_merged,omitempty"`
+	GitHubSync        string            `json:"github_sync,omitempty"`
+	FailureKind       string            `json:"failure_kind,omitempty"`
+	LastError         string            `json:"last_error,omitempty"`
+	RetryAfter        *time.Time        `json:"retry_after,omitempty"`
+	Answers           []AnswerRecord    `json:"answers,omitempty"`
+	ConflictRecovery  *ConflictRecovery `json:"conflict_recovery,omitempty"`
+	UpdatedAt         time.Time         `json:"updated_at"`
 }
 
 type Option struct {
@@ -102,6 +144,7 @@ type Request struct {
 	Recommended   string     `json:"recommended_option,omitempty"`
 	Options       []Option   `json:"options,omitempty"`
 	AllowFreeText bool       `json:"allow_free_text"`
+	ResumeStatus  string     `json:"resume_status,omitempty"`
 	Status        string     `json:"status"`
 	Answer        string     `json:"answer,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -418,7 +461,7 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" {
+			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
 				return "", false
 			}
 		}
