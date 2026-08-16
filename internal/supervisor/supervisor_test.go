@@ -42,6 +42,10 @@ type fakeGitHub struct {
 	remote                    *gh.RemoteState
 	claimed, done, needsInput bool
 	markedRunning             bool
+	readyPullRequest          bool
+	updatedPullRequest        bool
+	mergedPullRequest         bool
+	inspectCalls              int
 	claimErr                  error
 	doneErr                   error
 	listErr                   error
@@ -55,6 +59,7 @@ func (f *fakeGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, erro
 }
 func (f *fakeGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) { return f.issue, nil }
 func (f *fakeGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
+	f.inspectCalls++
 	if f.remote != nil {
 		return *f.remote, nil
 	}
@@ -85,6 +90,18 @@ func (f *fakeGitHub) MarkDone(context.Context, config.Config, int, string) error
 func (f *fakeGitHub) MarkFailed(context.Context, config.Config, int, string, bool) error { return nil }
 func (f *fakeGitHub) MarkRunning(context.Context, config.Config, int) error {
 	f.markedRunning = true
+	return nil
+}
+func (f *fakeGitHub) ReadyPullRequest(context.Context, config.Config, string) error {
+	f.readyPullRequest = true
+	return nil
+}
+func (f *fakeGitHub) UpdatePullRequest(context.Context, config.Config, string) error {
+	f.updatedPullRequest = true
+	return nil
+}
+func (f *fakeGitHub) MergePullRequest(context.Context, config.Config, string) error {
+	f.mergedPullRequest = true
 	return nil
 }
 
@@ -201,12 +218,12 @@ func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !worked || !github.claimed || !github.done {
+	if !worked || !github.claimed || github.done {
 		t.Fatalf("worked=%v github=%+v", worked, github)
 	}
 	snapshot, _ := loop.Store.Load()
 	issue := snapshot.Issues["1"]
-	if issue.Status != "completed" || issue.PullRequestURL == "" || issue.SessionID != "" {
+	if issue.Status != "awaiting_checks" || issue.PullRequestURL == "" || issue.SessionID == "" {
 		t.Fatalf("unexpected Issue: %+v", issue)
 	}
 	if scripted.runs != 1 || scripted.resumes != 0 {
@@ -224,7 +241,7 @@ func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
 	if _, err := loop.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !publisher.called || !github.done {
+	if !publisher.called || github.done {
 		t.Fatalf("publisher called=%v github done=%v", publisher.called, github.done)
 	}
 	snapshot, err := loop.Store.Load()
@@ -233,6 +250,131 @@ func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
 	}
 	if got := snapshot.Issues["1"].PullRequestURL; got != publisher.result.PullRequestURL {
 		t.Fatalf("pull request=%q, want %q", got, publisher.result.PullRequestURL)
+	}
+}
+
+func TestPullRequestChecksGateReadyAndOptionalMerge(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", ChecksStatus: "success"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "awaiting_merge" || !github.readyPullRequest || github.mergedPullRequest || github.done {
+		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+
+	loop.Config.Completion.AutoMerge = true
+	_, err := loop.Store.Update("test_reset", 1, "", nil, func(s *state.Snapshot) error {
+		s.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.readyPullRequest = false
+	github.remote.PullRequests[0].IsDraft = false
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ = loop.Store.Load()
+	if snapshot.Issues["1"].Status != "awaiting_merge" || github.readyPullRequest || !github.mergedPullRequest {
+		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+}
+
+func TestFailedPullRequestChecksReturnWorkerToRetry(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", ChecksStatus: "failure"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "retry_wait" || !strings.Contains(snapshot.Issues["1"].LastError, "checks failed") {
+		t.Fatalf("issue=%+v", snapshot.Issues["1"])
+	}
+	recorder := &recordingWorker{result: worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", SessionID: "session", Summary: "retry later",
+	}}
+	loop.Worker = recorder
+	_, err := loop.Store.Update("test_retry_due", 1, "", nil, func(s *state.Snapshot) error {
+		s.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.resumePrompts) != 1 || !strings.Contains(recorder.resumePrompts[0], "https://example.test/pr/1") {
+		t.Fatalf("resume prompts=%q", recorder.resumePrompts)
+	}
+}
+
+func TestQueueOnlyWaitsForMergeWhenAutoMergeIsEnabled(t *testing.T) {
+	snapshot := state.Snapshot{Issues: map[string]*state.Issue{
+		"1": {Number: 1, Status: "awaiting_merge"},
+	}}
+	if queueBlockedByPullRequest(snapshot, false) {
+		t.Fatal("manual merge wait blocked the Issue queue")
+	}
+	if !queueBlockedByPullRequest(snapshot, true) {
+		t.Fatal("auto merge wait did not retain queue ownership")
+	}
+}
+
+func TestAutoMergeUpdatesBehindBranchBeforeMerging(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	loop.Config.Completion.AutoMerge = true
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", MergeStateStatus: "BEHIND", ChecksStatus: "success"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "awaiting_checks" || !github.updatedPullRequest || github.readyPullRequest || github.mergedPullRequest {
+		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+}
+
+func TestMergedPullRequestCompletesAndClosesIssue(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "CLOSED", MergedAt: &now, HeadRefName: "codex/issue-1-test", ChecksStatus: "success"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "completed" || !github.done {
+		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
 	}
 }
 
@@ -290,8 +432,14 @@ func TestWorkerTimeoutStageIsPersistedForRetry(t *testing.T) {
 }
 
 func TestFaultGitHubSyncPartialFailureIsRetried(t *testing.T) {
-	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
-	loop, github := testLoop(t, result)
+	loop, github := testLoop(t, worker.Result{})
+	_, err := loop.Store.Update("completion_pending_sync", 1, "run_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{Number: 1, Status: "completed", RunID: "run_1", PullRequestURL: "https://example.test/pr/1", GitHubSync: "done"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	github.doneErr = fmt.Errorf("temporary GitHub error")
 	if _, err := loop.RunOnce(context.Background()); err == nil {
 		t.Fatal("expected initial sync error")
@@ -384,7 +532,7 @@ func TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit(t *testing.T) {
 		}
 	}
 	snapshot, _ := loop.Store.Load()
-	if scripted.runs != 2 || scripted.resumes != 2 || snapshot.Issues["1"].Status != "completed" {
+	if scripted.runs != 2 || scripted.resumes != 2 || snapshot.Issues["1"].Status != "awaiting_checks" {
 		t.Fatalf("runs=%d resumes=%d issue=%+v", scripted.runs, scripted.resumes, snapshot.Issues["1"])
 	}
 }

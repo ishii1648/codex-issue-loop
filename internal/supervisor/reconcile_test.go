@@ -40,12 +40,13 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 		status     string
 		prURL      string
 		githubSync string
+		prMerged   bool
 		reason     string
 	}{
 		{
 			name: "merged PR completes local state", current: base, inspection: worktree.Inspection{},
 			remote: gh.RemoteState{Issue: runningIssue, PullRequests: []gh.PullRequest{{Number: 11, URL: "https://example.test/pull/11", State: "CLOSED", MergedAt: timePointer()}}},
-			status: "completed", prURL: "https://example.test/pull/11", githubSync: "done", reason: "merged Pull Request",
+			status: "completed", prURL: "https://example.test/pull/11", githubSync: "done", prMerged: true, reason: "merged Pull Request",
 		},
 		{
 			name: "closed PR blocks", current: base, inspection: valid,
@@ -87,16 +88,52 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.DoneLabel}}},
 			status: "completed", githubSync: "done", reason: "done label",
 		},
+		{
+			name: "legacy completed draft returns to check monitoring", current: func() state.Issue {
+				value := base
+				value.Status = "completed"
+				value.PullRequestURL = "https://example.test/pull/11"
+				return value
+			}(),
+			remote: gh.RemoteState{
+				Issue:        gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.DoneLabel}},
+				PullRequests: []gh.PullRequest{{Number: 11, URL: "https://example.test/pull/11", State: "OPEN", IsDraft: true, HeadRefName: base.Branch, ChecksStatus: "success"}},
+			},
+			inspection: valid, status: "awaiting_checks", prURL: "https://example.test/pull/11", reason: "legacy completed",
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			loop := &Loop{Config: cfg, Processes: fakeProcesses{123: test.alive}}
 			decision := loop.decideReconciliation(state.Snapshot{}, test.current, test.remote, test.inspection)
-			if decision.status != test.status || decision.pullRequest != test.prURL || decision.githubSync != test.githubSync || !strings.Contains(decision.reason, test.reason) {
+			if decision.status != test.status || decision.pullRequest != test.prURL || decision.githubSync != test.githubSync || decision.prMerged != test.prMerged || !strings.Contains(decision.reason, test.reason) {
 				t.Fatalf("decision=%+v", decision)
 			}
 		})
+	}
+}
+
+func TestStartupReconciliationSkipsMergeConfirmedHistory(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	_, err := loop.Store.Update("completed", 1, "run_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{
+			Number: 1, Status: "completed", PullRequestURL: "https://example.test/pull/1", PullRequestMerged: true,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileStartup(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if github.inspectCalls != 0 {
+		t.Fatalf("inspect calls=%d", github.inspectCalls)
 	}
 }
 

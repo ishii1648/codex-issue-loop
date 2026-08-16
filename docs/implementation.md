@@ -21,6 +21,7 @@
 - Issue番号、作成日時、priority labelを使うconfigurableなqueue orderingと安定tie-break
 - Issue別branchとGit worktree
 - workerのworktree内実装と、supervisor publisherによるcommit・push・draft PR作成の分離
+- draft PRのCI監視、成功後のReady化、manifestで選べるbase branch追随・squash merge、merge後のIssue完了
 - schema付き`codex exec`、session ID保存、`codex exec resume`
 - `standard` / `extended` preflight policy
 - typed failure分類、±20% jitter付き上限5分のretry/polling backoff、extended continuation

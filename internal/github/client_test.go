@@ -35,7 +35,7 @@ case "$1 $2" in
     printf '%s\n' '{"number":7,"title":"Test","body":"Body","url":"https://example.test/issues/7","state":"OPEN","labels":[{"name":"codex-loop:running"}],"assignees":[],"milestone":null,"comments":[{"body":"claim"}]}'
     ;;
   "pr list")
-    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test"}]'
+    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
     ;;
   *) exit 2 ;;
 esac
@@ -49,8 +49,66 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" {
+	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" || remote.PullRequests[0].ChecksStatus != "success" {
 		t.Fatalf("remote=%+v", remote)
+	}
+}
+
+func TestPullRequestLifecycleCommands(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	logPath := filepath.Join(dir, "calls.log")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\n", logPath)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.Completion.CloseIssue = false
+	client := CLI{Path: fake}
+	prURL := "https://github.example/owner/repo/pull/11"
+	if err := client.ReadyPullRequest(context.Background(), cfg, prURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdatePullRequest(context.Background(), cfg, prURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MergePullRequest(context.Background(), cfg, prURL); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(calls)
+	if !strings.Contains(text, "pr ready "+prURL+" --repo owner/repo") ||
+		!strings.Contains(text, "pr update-branch "+prURL+" --repo owner/repo") ||
+		!strings.Contains(text, "pr merge "+prURL+" --repo owner/repo --squash") {
+		t.Fatalf("unexpected calls:\n%s", text)
+	}
+}
+
+func TestPullRequestChecksStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		mergeState string
+		checks     []checkRollup
+		want       string
+	}{
+		{name: "no checks on clean Pull Request", mergeState: "CLEAN", want: "success"},
+		{name: "no checks before mergeability is known", mergeState: "UNKNOWN", want: "pending"},
+		{name: "successful check run", checks: []checkRollup{{Status: "COMPLETED", Conclusion: "SUCCESS"}}, want: "success"},
+		{name: "pending check run", checks: []checkRollup{{Status: "IN_PROGRESS"}}, want: "pending"},
+		{name: "failed check run", checks: []checkRollup{{Status: "COMPLETED", Conclusion: "FAILURE"}}, want: "failure"},
+		{name: "successful status context", checks: []checkRollup{{State: "SUCCESS"}}, want: "success"},
+		{name: "pending status context", checks: []checkRollup{{State: "PENDING"}}, want: "pending"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pullRequestChecksStatus(test.mergeState, test.checks); got != test.want {
+				t.Fatalf("status=%q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -79,6 +137,7 @@ esac
 	}
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
+	cfg.Completion.CloseIssue = false
 	client := CLI{Path: fake}
 	if err := client.MarkDone(context.Background(), cfg, 7, "https://example.test/pull/1"); err == nil {
 		t.Fatal("injected comment failure was not returned")

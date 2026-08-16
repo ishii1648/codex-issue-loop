@@ -30,6 +30,7 @@
 | supervisor | Goの常駐プロセス | Issue選択、claim、worker起動、状態遷移、復旧 |
 | Codex worker | `codex exec` | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
 | publisher | supervisor内の決定論的処理 | 差分検査、commit、push、draft PR作成・既存PR再利用 |
+| PR lifecycle controller | supervisor内の決定論的処理 | CI監視、Ready化、任意のbranch更新・squash merge、merge確認 |
 | GitHub | 外部共有状態 | Issueキュー、ラベル、コメント、Pull Request |
 | 永続状態 | ローカルファイル | snapshot、event log、未回答request、世代番号 |
 
@@ -54,8 +55,9 @@ GitHub         = producerとループが共有する仕事のキュー
 5. `codex exec`ワーカーがpreflightを行い、そのまま実装を開始する。
 6. ワーカーはworktree内で実装とテストを行い、構造化結果を返す。Git metadata、remote、GitHubは変更しない。
 7. supervisorのpublisherが差分を検査し、署名なしで非対話commit、push、draft PR作成を冪等に行う。
-8. supervisorが公開結果を永続化し、GitHubへ反映する。
-9. 次のIssueを選ぶ。キューが空なら低負荷で待機する。
+8. supervisorがCIを監視し、成功したdraft PRをReady for reviewへ移す。失敗時は同じworktreeでworkerを再試行する。
+9. `auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。`auto_merge: true`では必要ならbase branchへ追随してCIを再確認し、squash mergeまで同じIssueを所有する。
+10. mergeを確認した後でIssueを完了扱いにし、設定に応じてcloseする。キューが空なら低負荷で待機する。
 
 IssueごとのCodex workerは外側のループを所有しない。次のIssueを選ぶのは常にsupervisorである。
 

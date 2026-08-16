@@ -171,9 +171,12 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 ### 6.5 GitHubへの反映
 
 - **FR-040**: claim、入力待ち、完了、失敗を GitHub のラベルまたはコメントへ反映できること。
-- **FR-041**: 実装完了時にコミット、push、draft Pull Request の作成までを完了条件として設定できること。
+- **FR-041**: 実装完了時にコミット、push、draft Pull Request の作成を既定の公開経路とすること。
 - **FR-042**: Issue、ブランチ、Pull Request の対応関係を永続化すること。
 - **FR-043**: 同じ試行を再実行しても、Pull Request やコメントを不必要に重複作成しないこと。
+- **FR-044**: draft Pull RequestのCI結果をモデル呼び出しなしで監視し、すべて成功した場合だけReady for reviewへ移すこと。CI失敗時は同じworktreeと失敗理由をworkerへ渡して再試行すること。
+- **FR-045**: 対象リポジトリのmanifestでauto mergeを選択でき、既定は無効とすること。有効時はbase branchへの追随とCI再確認を行い、conflict時は安全側で停止すること。
+- **FR-046**: Issueを完了扱いにし、設定に応じてcloseするのは対応Pull Requestのmergeを確認した後とすること。
 
 ### 6.6 監視と質問
 

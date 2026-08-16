@@ -74,7 +74,7 @@ gh api \
 - queueの選択順
 - `git.base_branch`と`git.branch_prefix`
 - worker timeoutと継続回数
-- draft PR作成・Issue close方針
+- draft PR作成、CI成功後の自動merge、merge後のIssue close方針
 
 `ready_labels`は「依存関係を含め、今すぐ自動着手してよい」という明示的な境界です。Issue本文独自の依存記法は自動解釈しないため、依存関係を使うリポジトリでは、依存解決を確認するproducerまたはautomationだけがready labelを付けます。
 
@@ -136,7 +136,18 @@ open Issueへmanifestのready labelを付けるとキューへ入ります。既
 gh issue edit 123 --add-label codex-loop:ready
 ```
 
-supervisorはIssueをclaimし、専用worktreeでCodex workerを実行します。workerはcommit、push、PR作成を直接行わず、構造化結果を返します。supervisorが検証済みの変更をcommit・pushし、設定に従ってdraft PRを作成します。
+supervisorはIssueをclaimし、専用worktreeでCodex workerを実行します。workerはcommit、push、PR作成を直接行わず、構造化結果を返します。supervisorが検証済みの変更をcommit・pushしてdraft PRを作り、CIを監視します。
+
+CIがすべて成功するとPRをReady for reviewへ移します。既定の`completion.auto_merge: false`では、ここから人手によるmergeを待ちながら次のIssueへ進みます。`completion.auto_merge: true`にした対象リポジトリでは、base branchより遅れているPRを更新してCIを再確認し、squash mergeまで行ってから次のIssueへ進みます。いずれの場合もIssueの完了・`close_issue`の適用はPRのmerge確認後です。
+
+```yaml
+completion:
+  create_draft_pr: true
+  auto_merge: false
+  close_issue: true
+```
+
+CI失敗時はPRをdraftのまま維持し、同じworktreeと失敗理由をCodex workerへ渡して再試行します。merge conflictは自動解消せず、対象Issueをattentionが必要な状態にします。
 
 ### 6. 状態を確認・監視する
 

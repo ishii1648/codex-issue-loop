@@ -365,7 +365,7 @@ agent-loop logs --repo /absolute/path/to/repository --stderr
 - [ ] AC Powerの`sleep`が`0`であることを確認した
 - [x] ChatGPTモバイルアプリからMac miniへのCodex Remote接続を確認した（2026-08-16）
 - [ ] スマートフォンからstart、status、watch、stopを実行できた
-- [ ] test Issueをclaimし、Codex workerがworktreeで実行され、draft PRまたは期待した完了状態へ到達した
+- [ ] test Issueをclaimし、Codex workerがworktreeで実行され、draft PR作成、CI成功後のReady化、manifestどおりの手動または自動merge待ちへ到達した
 - [ ] 意図的な`needs_input`をスマートフォンで受け、request IDを保ってanswerし、workerがresumeした
 - [ ] desktop app/taskを終了してもloopが継続し、新しいtaskから監視へ再接続できた
 - [ ] network一時切断後、eventの取りこぼしがあってもreconciliationで最新snapshotへ復旧した

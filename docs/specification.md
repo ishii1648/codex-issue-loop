@@ -194,7 +194,8 @@ git:
 
 completion:
   create_draft_pr: true
-  close_issue: false
+  auto_merge: false
+  close_issue: true
 
 worktrees:
   completed_max_age: 168h
@@ -232,6 +233,9 @@ security:
 - secretsを設定ファイルに記述しない。
 - `security.redact_env`には追加でマスクする値そのものではなく、値を保持する環境変数名だけを記述する。
 - `git.worktree_root`を指定する場合は絶対pathとし、branch prefix、base branch、GitHub repository名はargv/refとして安全な形式だけを許可する。
+- `completion.create_draft_pr`の既定は`true`とする。`completion.auto_merge`の既定は`false`であり、`true`はdraft PR作成を前提とする。
+- `completion.auto_merge: false`ではCI成功後にPRをReady for reviewへ移し、人手のmergeを待つ。`true`ではbase branchへの追随とCI再確認後にsquash mergeする。
+- `completion.close_issue`はPRのmerge確認後にだけ適用し、既定は`true`とする。
 - worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、その他の非terminal状態は期間にかかわらず保持する。
 - event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
 
@@ -393,12 +397,14 @@ starting ──► polling ◄──────────────┐
               running               │
         ┌────────┼─────────┐        │
         ▼        ▼         ▼        │
-   completed needs_input retry_wait  │
+ awaiting_checks needs_input retry_wait
         │        │         │         │
-        │        │ answer  └─────────┘
-        │        ▼
-        │      running
-        └───────────────────────────► polling
+  CI成功│        │ answer  └─────────┘
+        ▼        ▼
+ awaiting_merge running
+        │ merge確認
+        ▼
+   completed ───────────────────────► polling
 
 running ──fatal/nonrecoverable──► blocked
 ```
@@ -411,6 +417,8 @@ running ──fatal/nonrecoverable──► blocked
 - `running`
 - `needs_input`
 - `retry_wait`
+- `awaiting_checks`
+- `awaiting_merge`
 - `completed`
 - `failed`
 - `blocked`
@@ -527,6 +535,9 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 3. 対象branchをpushする。
 4. 同じhead branchのopen PRを検索し、1件なら再利用、0件ならdraft PRを作成、複数なら安全側で停止する。
 5. `gh`が警告文を併記しても出力内の有効なPR URLを抽出し、異なるURLが複数なら拒否する。
+6. `statusCheckRollup`を定期的に確認し、未完了ならモデルを呼ばず待機、失敗なら同じworktreeと失敗理由をworkerへ返す。
+7. CI成功後にdraftをReady for reviewへ移す。`auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。
+8. `auto_merge: true`ではbase branchより遅れているPRを更新してCIを再確認し、conflictがなければsquash mergeする。merge確認後だけIssueを完了扱いにする。
 
 この境界により、モデルのsandboxをremote操作のために広げず、公開処理の引数、順序、冪等性をGo側で固定する。
 
@@ -622,6 +633,8 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 
 `state_revision` は有効な状態更新ごとに単調増加させる。event通知を取りこぼしたwatchも、最後に確認したrevisionとの差分から状態変化を検出できる。
 
+Issue状態にはbranch、worktree、session ID、PR URLに加えてmerge確認済みフラグを保持する。これにより起動時は未確認の旧`completed` PRだけを一度照合し、merge確認済みの履歴へ毎回GitHub APIを呼ばない。
+
 ### 12.2 events.jsonl
 
 各行を独立したJSONイベントとする。
@@ -647,6 +660,9 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 - `worker_preflight_completed`
 - `worker_continuation_started`
 - `worker_completed`
+- `pull_request_checks_pending`
+- `pull_request_poll_scheduled`
+- `pull_request_ready`
 - `input_requested`
 - `answer_recorded`
 - `retry_scheduled`
@@ -787,7 +803,7 @@ supervisor起動時に次を行う。
 3. GitHub Issue、branch、PRの現況を取得する
 4. 保存されたworker PIDが生存しているか確認する
 5. worktreeとGit状態を検証する
-6. completed PRがあれば完了へ収束させる
+6. merge済みPRがあれば完了へ収束させ、旧versionでcompletedにされたopen PRはCI/merge監視へ戻す
 7. 実行途中でworkerが消えていればretryへ移す
 8. 未回答requestはneeds_inputのまま保持する
 9. reconciliationイベントを記録してpollingを開始する
@@ -799,6 +815,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 | 保存済みworker PIDが存在するがprocessは消失 | PIDを破棄し、active Issueを即時retryへ移す |
 | write-ahead claim後に停止し、GitHubはrunningへ遷移済み | claim済みとして即時retryへ移す |
 | 保存前にpush・PR作成まで完了 | branchに紐づく単一のopen PRを保存して処理を継続する |
+| 旧versionでcompletedだがPRがopen | draftなら`awaiting_checks`、Readyなら`awaiting_merge`へ戻し、done labelを除いて監視を再開する |
 | PRがmerge済み | Issueをcompletedへ移し、未反映のdone label/commentを再同期する |
 | needs-input、done、failedのlabel/comment同期が途中 | marker付きcommentを照合し、不足しているGitHub更新だけを再実行する |
 | running labelだけが欠落し、worktreeが整合 | running labelを修復する |

@@ -109,6 +109,20 @@ func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 	}
 }
 
+func TestUntilIdleWaitsForPullRequestLifecycle(t *testing.T) {
+	for _, status := range []string{"awaiting_checks", "awaiting_merge"} {
+		t.Run(status, func(t *testing.T) {
+			snapshot := Snapshot{
+				Supervisor: Supervisor{State: "polling"},
+				Issues:     map[string]*Issue{"7": {Number: 7, Status: status}},
+			}
+			if reason, ok := snapshot.Attention(true); ok {
+				t.Fatalf("reason=%q ok=%v", reason, ok)
+			}
+		})
+	}
+}
+
 func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 	for _, crashPoint := range []string{"prepared", "event_appended", "snapshot_written"} {
 		t.Run(crashPoint, func(t *testing.T) {

@@ -28,12 +28,20 @@ type Issue struct {
 }
 
 type PullRequest struct {
-	Number      int
-	URL         string
-	State       string
-	IsDraft     bool
-	MergedAt    *time.Time
-	HeadRefName string
+	Number           int
+	URL              string
+	State            string
+	IsDraft          bool
+	MergedAt         *time.Time
+	HeadRefName      string
+	MergeStateStatus string
+	ChecksStatus     string
+}
+
+type checkRollup struct {
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	State      string `json:"state"`
 }
 
 type RemoteState struct {
@@ -50,6 +58,9 @@ type Client interface {
 	MarkDone(context.Context, config.Config, int, string) error
 	MarkFailed(context.Context, config.Config, int, string, bool) error
 	MarkRunning(context.Context, config.Config, int) error
+	ReadyPullRequest(context.Context, config.Config, string) error
+	UpdatePullRequest(context.Context, config.Config, string) error
+	MergePullRequest(context.Context, config.Config, string) error
 }
 
 type CLI struct {
@@ -178,17 +189,19 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName,mergeStateStatus,statusCheckRollup").CombinedOutput()
 	if err != nil {
 		return RemoteState{}, fmt.Errorf("inspect Pull Requests for branch %s: %w: %s", branch, err, c.safe(out))
 	}
 	var raw []struct {
-		Number      int        `json:"number"`
-		URL         string     `json:"url"`
-		State       string     `json:"state"`
-		IsDraft     bool       `json:"isDraft"`
-		MergedAt    *time.Time `json:"mergedAt"`
-		HeadRefName string     `json:"headRefName"`
+		Number            int           `json:"number"`
+		URL               string        `json:"url"`
+		State             string        `json:"state"`
+		IsDraft           bool          `json:"isDraft"`
+		MergedAt          *time.Time    `json:"mergedAt"`
+		HeadRefName       string        `json:"headRefName"`
+		MergeStateStatus  string        `json:"mergeStateStatus"`
+		StatusCheckRollup []checkRollup `json:"statusCheckRollup"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return RemoteState{}, fmt.Errorf("decode Pull Requests for branch %s: %w", branch, err)
@@ -197,10 +210,47 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		state.PullRequests = append(state.PullRequests, PullRequest{
 			Number: item.Number, URL: item.URL, State: item.State, IsDraft: item.IsDraft,
 			MergedAt: item.MergedAt, HeadRefName: item.HeadRefName,
+			MergeStateStatus: item.MergeStateStatus,
+			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
 		})
 	}
 	sort.Slice(state.PullRequests, func(i, j int) bool { return state.PullRequests[i].Number > state.PullRequests[j].Number })
 	return state, nil
+}
+
+func pullRequestChecksStatus(mergeState string, checks []checkRollup) string {
+	if len(checks) == 0 {
+		if strings.EqualFold(mergeState, "CLEAN") {
+			return "success"
+		}
+		return "pending"
+	}
+	result := "success"
+	for _, check := range checks {
+		status := strings.ToUpper(check.Status)
+		conclusion := strings.ToUpper(check.Conclusion)
+		state := strings.ToUpper(check.State)
+		if state != "" {
+			switch state {
+			case "SUCCESS", "EXPECTED":
+			case "PENDING":
+				result = "pending"
+			default:
+				return "failure"
+			}
+			continue
+		}
+		if status != "COMPLETED" {
+			result = "pending"
+			continue
+		}
+		switch conclusion {
+		case "SUCCESS", "NEUTRAL", "SKIPPED":
+		default:
+			return "failure"
+		}
+	}
+	return result
 }
 
 func Eligible(labels []string, cfg config.GitHub) bool {
@@ -302,7 +352,43 @@ func (c CLI) MarkFailed(ctx context.Context, cfg config.Config, number int, reas
 }
 
 func (c CLI) MarkRunning(ctx context.Context, cfg config.Config, number int) error {
-	return c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, []string{cfg.GitHub.NeedsInputLabel})
+	return c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel})
+}
+
+func (c CLI) ReadyPullRequest(ctx context.Context, cfg config.Config, prURL string) error {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "ready", prURL, "--repo", cfg.GitHub.Repo).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mark Pull Request ready: %w: %s", err, c.safe(out))
+	}
+	return nil
+}
+
+func (c CLI) UpdatePullRequest(ctx context.Context, cfg config.Config, prURL string) error {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "update-branch", prURL, "--repo", cfg.GitHub.Repo).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("update Pull Request branch: %w: %s", err, c.safe(out))
+	}
+	return nil
+}
+
+func (c CLI) MergePullRequest(ctx context.Context, cfg config.Config, prURL string) error {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "merge", prURL, "--repo", cfg.GitHub.Repo, "--squash").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("merge Pull Request: %w: %s", err, c.safe(out))
+	}
+	return nil
 }
 
 func (c CLI) editLabels(ctx context.Context, repo string, number int, add, remove []string) error {
