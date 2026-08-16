@@ -145,6 +145,9 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 	done := labels[l.Config.GitHub.DoneLabel]
 	failed := labels[l.Config.GitHub.FailedLabel]
 	excluded := hasAnyLabel(labels, l.Config.GitHub.ExcludeLabels)
+	if decision, ok := l.decideTerminalPullRequestReconciliation(current, remote); ok {
+		return decision
+	}
 	if current.Status == "completed" && strings.EqualFold(remote.Issue.State, "open") {
 		open := []gh.PullRequest{}
 		for _, pr := range remote.PullRequests {
@@ -342,6 +345,83 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		decision.reason = "open Pull Request discovered and dead worker scheduled for retry"
 	}
 	return decision
+}
+
+// decideTerminalPullRequestReconciliation is shared by startup and periodic
+// reconciliation. A terminal Issue only converges from an authoritative merge
+// when the single Pull Request returned for the saved branch is exactly the
+// Pull Request recorded in durable state. An exclusion label remains sticky
+// unless it is the automation-owned blocked label evidenced by our comment.
+func (l *Loop) decideTerminalPullRequestReconciliation(current state.Issue, remote gh.RemoteState) (reconciliationDecision, bool) {
+	decision := reconciliationDecision{
+		status: current.Status, lastError: current.LastError, branch: current.Branch,
+		pullRequest: current.PullRequestURL, githubSync: current.GitHubSync,
+		retryAt: current.RetryAfter, workerPID: current.WorkerPID, workerPGID: current.WorkerPGID,
+		prMerged: current.PullRequestMerged, reason: "terminal Issue remains sticky",
+	}
+	if !terminalPullRequestCandidate(current) {
+		return decision, false
+	}
+	if len(remote.PullRequests) != 1 {
+		if len(remote.PullRequests) > 1 {
+			decision.reason = "multiple Pull Requests target the saved branch"
+		} else {
+			decision.reason = "saved Pull Request was not found for the saved branch"
+		}
+		return decision, true
+	}
+	pr := remote.PullRequests[0]
+	if pr.URL != current.PullRequestURL {
+		decision.reason = "Pull Request for the saved branch does not match the saved Pull Request URL"
+		return decision, true
+	}
+	if current.Branch == "" || pr.HeadRefName == "" || pr.HeadRefName != current.Branch {
+		decision.reason = "Pull Request head does not match the saved branch"
+		return decision, true
+	}
+	if pr.MergedAt == nil {
+		if strings.EqualFold(pr.State, "open") {
+			decision.reason = "saved Pull Request is not merged"
+		} else {
+			decision.reason = "saved Pull Request was closed without merge"
+		}
+		return decision, true
+	}
+	if l.hasManualExclusion(remote.Issue, current) {
+		decision.reason = "GitHub exclusion label was applied manually"
+		return decision, true
+	}
+	decision.status = "completed"
+	decision.lastError = ""
+	decision.prMerged = true
+	decision.githubSync = "done"
+	decision.retryAt = nil
+	decision.workerPID = 0
+	decision.workerPGID = 0
+	decision.reason = "saved Pull Request merge discovered for terminal Issue"
+	return decision, true
+}
+
+func terminalPullRequestCandidate(issue state.Issue) bool {
+	if issue.Status != "blocked" && issue.Status != "failed" {
+		return false
+	}
+	return issue.PullRequestURL != "" && !issue.PullRequestMerged && issue.GitHubSync == ""
+}
+
+func (l *Loop) hasManualExclusion(issue gh.Issue, current state.Issue) bool {
+	labels := labelSet(issue.Labels)
+	automationBlocked := hasComment(issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number))
+	for _, excluded := range l.Config.GitHub.ExcludeLabels {
+		if !labels[excluded] {
+			continue
+		}
+		if strings.EqualFold(excluded, "blocked") && automationBlocked {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func blockDecision(decision reconciliationDecision, reason string) reconciliationDecision {

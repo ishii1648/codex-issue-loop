@@ -62,13 +62,14 @@ type activeJob struct {
 }
 
 type scheduler struct {
-	loop        *Loop
-	events      chan schedulerEvent
-	active      map[int]activeJob
-	issueRetry  map[int]time.Time
-	issueFails  map[int]int
-	pollAt      time.Time
-	lifecycleMu sync.Mutex
+	loop         *Loop
+	events       chan schedulerEvent
+	active       map[int]activeJob
+	issueRetry   map[int]time.Time
+	issueFails   map[int]int
+	terminalPoll map[int]time.Time
+	pollAt       time.Time
+	lifecycleMu  sync.Mutex
 }
 
 type lifecycleGateContextKey struct{}
@@ -84,7 +85,7 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 	}
 	s := &scheduler{
 		loop: l, events: make(chan schedulerEvent, concurrency+1), active: map[int]activeJob{},
-		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, pollAt: l.now(),
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, terminalPoll: map[int]time.Time{}, pollAt: l.now(),
 	}
 	consecutiveFailures := current.Supervisor.ConsecutiveFailures
 	if current.Supervisor.RetryAfter != nil && current.Supervisor.RetryAfter.After(s.pollAt) {
@@ -242,6 +243,9 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 	if !pollCandidates {
 		return dispatched, nil
 	}
+	if s.dispatchTerminalPullRequestReconciliation(ctx, snapshot) {
+		dispatched = true
+	}
 	if !s.hasFreeSlot() {
 		s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
 		return dispatched, nil
@@ -273,6 +277,56 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
 	})
 	return true, nil
+}
+
+// dispatchTerminalPullRequestReconciliation checks at most one terminal Issue
+// per queue poll. Per-Issue cooldowns keep sticky/manual blocks from consuming
+// GitHub API budget every cycle while still allowing all candidates to make
+// progress without restarting the repository supervisor.
+func (s *scheduler) dispatchTerminalPullRequestReconciliation(ctx context.Context, snapshot state.Snapshot) bool {
+	if s.hasMaintenanceJob() {
+		return false
+	}
+	if s.terminalPoll == nil {
+		s.terminalPoll = map[int]time.Time{}
+	}
+	now := s.loop.now()
+	candidates := make([]state.Issue, 0)
+	for _, issue := range snapshot.Issues {
+		if issue == nil || !terminalPullRequestCandidate(*issue) {
+			continue
+		}
+		if _, active := s.active[issue.Number]; active {
+			continue
+		}
+		if s.retryPending(issue.Number) {
+			continue
+		}
+		if next := s.terminalPoll[issue.Number]; next.After(now) {
+			continue
+		}
+		candidates = append(candidates, *issue)
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := s.terminalPoll[candidates[i].Number], s.terminalPoll[candidates[j].Number]
+		if !left.Equal(right) {
+			return left.Before(right)
+		}
+		return candidates[i].Number < candidates[j].Number
+	})
+	current := candidates[0]
+	delay := 5 * s.loop.Config.Queue.PollInterval.Duration
+	if delay < 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	s.terminalPoll[current.Number] = now.Add(delay)
+	s.dispatch(ctx, current.Number, current.RunID, -1, func(jobCtx context.Context) error {
+		return s.loop.reconcileTerminalPullRequest(jobCtx, current)
+	})
+	return true
 }
 
 func hasPendingRequests(snapshot state.Snapshot) bool {

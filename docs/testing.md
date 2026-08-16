@@ -22,6 +22,7 @@ make test-race
 | timeoutの段階的終了とprocess group回収 | `TestFaultWorkerTimeoutUsesGracefulProcessGroupTermination`、`TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace`、`TestWorkerTimeoutStageIsPersistedForRetry` |
 | 複数workerのstop・orphan回収 | `TestSchedulerCancellationStopsAllWorkers`、`TestStopWorkersTerminatesAndRecordsEveryIssueIndependently`、`TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue` |
 | concurrency 2の同時result barrier | `TestFaultSchedulerConcurrentResultBarrier` |
+| terminal Issueの通常reconciliationとworker継続 | `TestTerminalPullRequestReconciliationRequiresAuthoritativeSavedMerge`、`TestPeriodicTerminalReconciliationCompletesAndIsIdempotent`、`TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker` |
 | same-resourceの同時予約競合 | `TestFaultConcurrentLeaseReservationsNeverOverlapResources` |
 | 実processのstop・restart・orphan回収 | `TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases` |
 | watchの接続、切断、複数接続 | `TestFaultDisconnectedEventChannelsFallBackToTimer`、`TestFaultMultipleWatchConnectionsObserveSameRevision`、`TestFSNotifyMultipleWatchersWakeAndCanReconnect` |

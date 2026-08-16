@@ -183,6 +183,14 @@ esac
 	if strings.Count(string(calls), "issue edit") != 2 || strings.Count(string(calls), "issue comment") != 2 {
 		t.Fatalf("unexpected calls:\n%s", calls)
 	}
+	for _, label := range []string{cfg.GitHub.FailedLabel, "blocked"} {
+		if !strings.Contains(string(calls), "--remove-label "+label) {
+			t.Fatalf("completion did not remove %q label:\n%s", label, calls)
+		}
+	}
+	if strings.Contains(string(calls), "--remove-label do-not-automate") {
+		t.Fatalf("completion removed manual exclusion label:\n%s", calls)
+	}
 }
 
 func TestFaultGitHubAdapterRejectsMalformedResponse(t *testing.T) {
