@@ -1,0 +1,54 @@
+name: Required labels
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .agent-loop.yaml
+      - internal/config/**
+      - internal/github/labels.go
+      - cmd/agent-loop/**
+      - .github/workflows/required-labels.yml
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: required-labels-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile required labels
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Create missing labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: go run ./cmd/agent-loop bootstrap-labels --repo "$GITHUB_WORKSPACE" --apply --json
+
+      - name: Verify required labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan_file="$(mktemp)"
+          go run ./cmd/agent-loop bootstrap-labels --repo "$GITHUB_WORKSPACE" --json | tee "$plan_file"
+          jq -e 'all(.actions[]; .action == "preserve") and (.deletes_labels == false)' "$plan_file"

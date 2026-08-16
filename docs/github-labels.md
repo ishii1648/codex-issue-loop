@@ -27,6 +27,12 @@ agent-loop doctor --repo /absolute/path/to/repository --json
 
 同じコマンドは冪等である。既存ラベルに`--force`を使わず、色・説明・大文字小文字が異なる同名ラベルも保持する。ラベルの更新・削除が必要な場合は、repository管理者が別の明示的なGitHub操作として行う。
 
+## 継続的な不足検知と修復
+
+このrepository自身では[Required labels workflow](../.github/workflows/required-labels.yml)をmainの関連設定変更時、毎日、および手動実行時に起動する。workflowは`bootstrap-labels --apply`で不足ラベルだけを作成し、直後のpreviewで全必須ラベルが`preserve`になったことを検証する。既存ラベルのmetadataは変更せず、ラベルも削除しない。
+
+対象repositoryでも同じ対策を使う場合は、default branch上の信頼できる設定とbinaryを使い、workflow権限を`contents: read`と`issues: write`に限定する。Pull Request由来の未信頼codeへwrite tokenを渡さないため、write付きの自動修復は`pull_request` eventでは実行しない。
+
 ## 権限と部分成功
 
 適用前に`gh auth status`と対象リポジトリへのIssue metadata書き込み権限を確認する。権限不足やGitHubの一時障害が発生しても、作成に成功したラベルをrollbackまたは削除しない。全ラベルの作成を試み、`created`と`failures`を返して非0で終了する。権限を修正して同じコマンドを再実行すれば、不足分だけを再試行する。
