@@ -16,6 +16,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
@@ -140,7 +141,7 @@ func (f fakeWorktree) Inspect(context.Context, config.Config, string, string) (w
 	if f.inspection != nil {
 		return *f.inspection, nil
 	}
-	return worktree.Inspection{Exists: true, Valid: true, Branch: "codex/issue-1-test", LocalBranchExists: true}, nil
+	return worktree.Inspection{Exists: true, Valid: true, Branch: "codex/issue-1-test", LocalBranchExists: true, RemoteBranchExists: true}, nil
 }
 
 type fakeWorker struct {
@@ -151,6 +152,7 @@ type fakeWorker struct {
 type fakePublisher struct {
 	called bool
 	result worker.GitResult
+	audit  publication.Audit
 	err    error
 }
 
@@ -173,9 +175,19 @@ func (f *fakeConflictResolver) Publish(context.Context, config.Config, gh.Issue,
 	return f.published, f.publishErr
 }
 
-func (f *fakePublisher) Publish(context.Context, config.Config, gh.Issue, string, string, string) (worker.GitResult, error) {
+func (f *fakePublisher) Publish(_ context.Context, _ config.Config, _ gh.Issue, _, _, _, baseSHA string, declared []string) (worker.GitResult, publication.Audit, error) {
 	f.called = true
-	return f.result, f.err
+	audit := f.audit
+	if audit.BaseSHA == "" {
+		audit.BaseSHA = baseSHA
+	}
+	if audit.DeclaredResources == nil {
+		audit.DeclaredResources = declared
+	}
+	if audit.ActualResources == nil {
+		audit.ActualResources = declared
+	}
+	return f.result, audit, f.err
 }
 
 type recordingWorker struct {
@@ -292,6 +304,99 @@ func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
 	}
 	if got := snapshot.Issues["1"].PullRequestURL; got != publisher.result.PullRequestURL {
 		t.Fatalf("pull request=%q, want %q", got, publisher.result.PullRequestURL)
+	}
+}
+
+func TestResourceClaimMismatchPersistsAuditAndRefusesPublicationIntoNeedsInput(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done"}
+	loop, github := testLoop(t, result)
+	loop.Config.Resources.Definitions = []config.ResourceDefinition{
+		{Name: "git", Paths: []string{"internal/git/**"}},
+		{Name: "docs", Paths: []string{"docs/**"}},
+	}
+	github.issue.Body = "<!-- agent-loop:metadata\nversion: 1\ndepends_on: []\n-->"
+	github.issue.Labels = append(github.issue.Labels, "area:git")
+	publisher := &fakePublisher{
+		audit: publication.Audit{
+			ChangedPaths: []string{"docs/architecture.md"}, DeclaredResources: []string{"git"},
+			ActualResources: []string{"docs"}, Reason: publication.ReasonResourceClaimMismatch,
+		},
+		err: publication.ClaimMismatchError{Declared: []string{"git"}, Actual: []string{"docs"}},
+	}
+	loop.Publisher = publisher
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := snapshot.Issues["1"]
+	if issue.Status != "needs_input" || issue.Lease == nil || strings.Join(issue.DeclaredResources, ",") != "git" || strings.Join(issue.ActualResources, ",") != "docs" || len(snapshot.PendingRequests) != 1 {
+		t.Fatalf("issue=%+v requests=%+v", issue, snapshot.PendingRequests)
+	}
+	if !github.needsInput || issue.PullRequestURL != "" {
+		t.Fatalf("publication was not safely refused: issue=%+v github=%+v", issue, github)
+	}
+	events, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || !strings.Contains(string(events), publication.ReasonResourceClaimMismatch) || !strings.Contains(string(events), `"actual_resources":["docs"]`) {
+		t.Fatalf("audit event missing: err=%v events=%s", err, events)
+	}
+}
+
+func TestPullRequestLifecycleAnomaliesBlockWithoutReleasingLease(t *testing.T) {
+	tests := []struct {
+		name       string
+		pulls      []gh.PullRequest
+		inspection *worktree.Inspection
+		want       string
+	}{
+		{
+			name:  "closed without merge",
+			pulls: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "CLOSED", HeadRefName: "codex/issue-1-test"}},
+			want:  "closed without merge",
+		},
+		{
+			name: "multiple Pull Requests",
+			pulls: []gh.PullRequest{
+				{Number: 2, URL: "https://example.test/pr/2", State: "OPEN", HeadRefName: "codex/issue-1-test"},
+				{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", HeadRefName: "codex/issue-1-test"},
+			},
+			want: "multiple Pull Requests",
+		},
+		{
+			name:       "remote branch disappeared",
+			pulls:      []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", HeadRefName: "codex/issue-1-test"}},
+			inspection: &worktree.Inspection{Exists: true, Valid: true, Branch: "codex/issue-1-test", LocalBranchExists: true},
+			want:       "disappeared",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+			loop, github := testLoop(t, result)
+			if _, err := loop.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			github.remote = &gh.RemoteState{
+				Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+				PullRequests: test.pulls,
+			}
+			if test.inspection != nil {
+				loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: test.inspection}
+			}
+			if _, err := loop.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			issue := snapshot.Issues["1"]
+			if issue.Status != "blocked" || issue.Lease == nil || !strings.Contains(issue.LastError, test.want) {
+				t.Fatalf("issue=%+v", issue)
+			}
+		})
 	}
 }
 

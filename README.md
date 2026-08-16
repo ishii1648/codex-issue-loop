@@ -130,7 +130,7 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 "$agent_loop_bin" doctor --repo /absolute/path/to/repo-b --json
 ```
 
-リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。現在、同一リポジトリ内のIssueは`queue.concurrency: 1`で直列に処理します。
+リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。同一リポジトリでは`resources.definitions`とIssueの`area:` claimを設定した場合に`queue.concurrency`まで並列実行できます。resource設定がない既存configは`queue.concurrency: 1`と`repo:*`で安全に直列実行されます。
 
 - 同じGitHubリポジトリを複数のcloneやhostから同時に動かさないでください。
 - `status`、`watch`、`stop`などでは常に`--repo`で対象を明示してください。
@@ -152,7 +152,7 @@ gh issue edit 123 --add-label codex-loop:ready
 
 PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
 
-同一repository内並列実行で使う`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。現行schema v3はdurable resource leaseを導入済みですが、queueは引き続き`concurrency: 1`だけを受理します。
+同一repository内並列実行で使う`resources.definitions`、`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。publisherは保存済みbase SHAからtracked/untracked変更pathを検査し、actual resourceが宣言claimを超える場合はcommit・pushせず`needs_input`へ移します。
 
 ### 2. 状態を確認・監視する
 

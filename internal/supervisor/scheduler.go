@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -256,7 +257,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 		return dispatched, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
 	s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
-	selected, ok, selectErr := s.selectReady(issues, snapshot)
+	selected, evaluation, ok, selectErr := s.selectReady(ctx, issues, snapshot)
 	if selectErr != nil {
 		return dispatched, failure.Wrap(failure.Supervisor, "select Issue admission", selectErr)
 	}
@@ -269,12 +270,12 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 	}
 	runID := state.NewID("run")
 	s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
-		return s.loop.startIssueAtSlot(jobCtx, selected, runID, slot)
+		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
 	})
 	return true, nil
 }
 
-func (s *scheduler) selectReady(issues []gh.Issue, snapshot state.Snapshot) (gh.Issue, bool, error) {
+func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot state.Snapshot) (gh.Issue, admission.Evaluation, bool, error) {
 	candidates := make([]admission.Candidate, 0, len(issues))
 	byNumber := make(map[int]gh.Issue, len(issues))
 	for _, issue := range issues {
@@ -283,6 +284,35 @@ func (s *scheduler) selectReady(issues []gh.Issue, snapshot state.Snapshot) (gh.
 			Labels: append([]string(nil), issue.Labels...), Body: issue.Body,
 		})
 		byNumber[issue.Number] = issue
+	}
+	settings := s.loop.Config.AdmissionSettings()
+	dependencies := map[int]admission.DependencyState{}
+	for _, candidate := range candidates {
+		evaluation, err := admission.EvaluateCandidate(settings, candidate)
+		if err != nil {
+			return gh.Issue{}, admission.Evaluation{}, false, err
+		}
+		for _, number := range evaluation.Dependencies {
+			if _, exists := dependencies[number]; exists {
+				continue
+			}
+			if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
+				dependencies[number] = admission.DependencyState{
+					Exists: true, Accessible: true,
+					Closed:                   local.Status == "completed",
+					LocalCompleted:           local.Status == "completed",
+					PullRequestMergeRecorded: local.PullRequestURL == "" || local.PullRequestMerged,
+					KnownOpenOrUnmergedPR:    local.PullRequestURL != "" && !local.PullRequestMerged,
+				}
+				continue
+			}
+			remote, getErr := s.loop.GitHub.Get(ctx, s.loop.Config, number)
+			if getErr == nil {
+				dependencies[number] = admission.DependencyState{
+					Exists: true, Accessible: true, Closed: strings.EqualFold(remote.State, "closed"),
+				}
+			}
+		}
 	}
 	active := make([]admission.Lease, 0, len(snapshot.Issues))
 	activeLeaseNumbers := map[int]bool{}
@@ -315,19 +345,20 @@ func (s *scheduler) selectReady(issues []gh.Issue, snapshot state.Snapshot) (gh.
 	if concurrency < 1 {
 		concurrency = 1
 	}
+	settings.Concurrency = concurrency
 	result, err := admission.Select(admission.Input{
-		Settings: admission.Settings{Concurrency: concurrency, MetadataVersion: 1, Legacy: true},
+		Settings: settings,
 		Queue: admission.Queue{
 			Order:          s.loop.Config.Queue.Order,
 			PriorityLabels: append([]string(nil), s.loop.Config.Queue.PriorityLabels...),
 		},
-		Candidates: candidates, Active: active, OccupiedSlots: s.workerCount(),
+		Candidates: candidates, Active: active, OccupiedSlots: s.workerCount(), Dependencies: dependencies,
 		Ineligible: ineligible,
 	})
 	if err != nil || len(result.Selected) == 0 {
-		return gh.Issue{}, false, err
+		return gh.Issue{}, admission.Evaluation{}, false, err
 	}
-	return byNumber[result.Selected[0].Candidate.Number], true, nil
+	return byNumber[result.Selected[0].Candidate.Number], result.Selected[0], true, nil
 }
 
 func (s *scheduler) preflight(snapshot state.Snapshot) error {

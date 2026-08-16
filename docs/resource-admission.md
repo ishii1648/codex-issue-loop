@@ -1,6 +1,6 @@
 # Resource claim・依存metadata・admission契約
 
-この文書は、同一repository内で複数Issueを並列実行するschedulerが使用するresource claim、Issue依存関係、resource leaseの正本仕様である。schema v3ではdurable leaseとv2 migrationを先に導入し、現行queueは`concurrency: 1`のまま`repo:*`を予約する。resource definitionと複数worker admissionは後続段階で有効化する。
+この文書は、同一repository内で複数Issueを並列実行するschedulerが使用するresource claim、Issue依存関係、resource leaseの正本仕様である。schema v3ではdurable lease、resource definition、複数worker admission、publish前の実diff監査を扱う。definition未設定のqueueは`concurrency: 1`と`repo:*`へ安全側に縮退する。
 
 単一host並列化と複数host冗長化の責務分離は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。本書のleaseは、特記しない限り1つのsupervisorがlocal stateに保持する単一host用の論理leaseを指す。
 

@@ -163,11 +163,19 @@ github:
 
 queue:
   poll_interval: 60s
-  concurrency: 1
+  concurrency: 2
   order: issue_number_asc
   priority_labels: []
   max_attempts: 3
   continue_after_needs_input: true
+
+resources:
+  metadata_version: 1
+  definitions:
+    - name: supervisor
+      paths: [internal/supervisor/**]
+    - name: docs
+      paths: [README.md, docs/**]
 
 worker:
   backend: codex
@@ -221,9 +229,10 @@ security:
 
 ### 5.1 設定規則
 
-- `version` は必須。現行は`2`とし、v1は明示migrationの対象、未知versionはエラーとする。
+- `version` は必須。現行は`3`とし、v2は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
-- `queue.concurrency` はMVPでは `1` のみ許可する。将来の単一host並列化と複数host冗長化は別のmigrationであり、この値だけでdistributed modeを有効化しない。
+- `queue.concurrency` は1以上とする。`resources.definitions`未設定時は安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。2以上はresource definition、valid metadata、既知の`area:` claimを使う単一host worker poolであり、distributed modeは有効化しない。
+- `resources.metadata_version`は`1`、各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
 - `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
 - `priority_then_created_at`では`queue.priority_labels`を高い順に1件以上指定する。labelなしは最低順位、複数該当は最上位一致とする。
 - `worker.model: null` はユーザーのCodex既定値を使う。
@@ -667,7 +676,7 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 
 `state_revision` は有効な状態更新ごとに単調増加させる。event通知を取りこぼしたwatchも、最後に確認したrevisionとの差分から状態変化を検出できる。
 
-Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフラグに加え、active時はslot、declared/resolved resources、base SHA、reserved timestamp、`(run_id, generation)` ownerを持つleaseを保持する。これによりworker起動前のwrite-ahead予約と再起動後の排他復元を行う。
+Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフラグに加え、active時はslot、declared/resolved/actual resources、base SHA、reserved timestamp、`(run_id, generation)` ownerを持つleaseを保持する。declared/actual resourcesはlease解放後もIssue auditとして残す。これによりworker起動前のwrite-ahead予約、publish前のpath scope検査、再起動後の排他復元を行う。
 
 ### 12.2 events.jsonl
 

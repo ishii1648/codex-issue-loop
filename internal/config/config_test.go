@@ -184,6 +184,45 @@ func TestLoadAcceptsQueueOrderStrategies(t *testing.T) {
 	}
 }
 
+func TestLoadResourceDefinitionsEnableRepositoryConcurrency(t *testing.T) {
+	dir := writeConfig(t, `version: 3
+github:
+  repo: owner/repo
+queue:
+  concurrency: 3
+resources:
+  metadata_version: 1
+  definitions:
+    - name: config
+      paths: [internal/config/**, .agent-loop.yaml]
+    - name: docs
+      paths: [docs/**, README.md]
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := cfg.AdmissionSettings()
+	if settings.Legacy || settings.Concurrency != 3 || len(settings.Definitions) != 2 {
+		t.Fatalf("settings=%+v", settings)
+	}
+}
+
+func TestLoadRejectsConcurrentQueueWithoutValidResourceDefinitions(t *testing.T) {
+	fragments := []string{
+		"queue:\n  concurrency: 2\n",
+		"queue:\n  concurrency: 2\nresources:\n  definitions:\n    - name: repo\n      paths: [docs/**]\n",
+		"resources:\n  metadata_version: 2\n  definitions:\n    - name: docs\n      paths: [docs/**]\n",
+		"resources:\n  definitions:\n    - name: docs\n      paths: [../docs/**]\n",
+	}
+	for _, fragment := range fragments {
+		dir := writeConfig(t, "version: 3\ngithub:\n  repo: owner/repo\n"+fragment)
+		if _, err := Load(dir); err == nil {
+			t.Fatalf("invalid resource config accepted:\n%s", fragment)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidQueueOrderConfiguration(t *testing.T) {
 	for _, fragment := range []string{
 		"order: random\n",

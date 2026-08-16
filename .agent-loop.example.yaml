@@ -11,12 +11,20 @@ github:
 
 queue:
   poll_interval: 60s
-  concurrency: 1
+  concurrency: 2
   order: issue_number_asc
   # Used from highest to lowest when order is priority_then_created_at.
   priority_labels: []
   max_attempts: 3
   continue_after_needs_input: true
+
+resources:
+  metadata_version: 1
+  definitions:
+    - name: application
+      paths: [src/**]
+    - name: docs
+      paths: [README.md, docs/**]
 
 worker:
   command: codex

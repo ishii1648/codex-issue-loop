@@ -190,6 +190,37 @@ func TestRepositoryLeaseConflictsWithEveryResource(t *testing.T) {
 	}
 }
 
+func TestResourcesForPathsMapsSharedGeneratedAndUnknownPathsConservatively(t *testing.T) {
+	settings := Settings{
+		Concurrency: 3, MetadataVersion: 1,
+		Definitions: []ResourceDefinition{
+			{Name: "api", Paths: []string{"internal/api/**", "generated/**"}},
+			{Name: "client", Paths: []string{"web/**", "generated/**"}},
+		},
+	}
+	tests := []struct {
+		name  string
+		paths []string
+		want  []string
+	}{
+		{name: "single resource", paths: []string{"internal/api/server.go"}, want: []string{"api"}},
+		{name: "shared generated file requires all owners", paths: []string{"generated/schema.json"}, want: []string{"api", "client"}},
+		{name: "unknown path falls back repository wide", paths: []string{"release/output.bin"}, want: []string{RepositoryResource}},
+		{name: "unsafe path falls back repository wide", paths: []string{"../outside"}, want: []string{RepositoryResource}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ResourcesForPaths(settings, test.paths)
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("resources=%v want=%v err=%v", got, test.want, err)
+			}
+		})
+	}
+	if Covers([]string{"api"}, []string{"api", "client"}) || !Covers([]string{"api", "client"}, []string{"api"}) {
+		t.Fatal("resource subset validation is incorrect")
+	}
+}
+
 func TestMetadataValidationRejectsAmbiguousForms(t *testing.T) {
 	bodies := []string{
 		"",

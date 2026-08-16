@@ -149,7 +149,9 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		}
 	}
 
-	if done {
+	// A done label cannot release an existing PR lease. Only an observed merge
+	// below is authoritative once a Pull Request URL has been recorded.
+	if done && current.PullRequestURL == "" && len(remote.PullRequests) == 0 {
 		decision.status, decision.lastError = "completed", ""
 		for _, pr := range remote.PullRequests {
 			if pr.MergedAt != nil {
@@ -210,6 +212,9 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		} else if closedPR == nil {
 			closedPR = pr
 		}
+	}
+	if len(remote.PullRequests) > 1 {
+		return blockDecision(decision, "multiple Pull Requests target the saved branch")
 	}
 	if mergedPR != nil {
 		decision.status, decision.lastError, decision.pullRequest = "completed", "", mergedPR.URL
