@@ -247,7 +247,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 		return dispatched, nil
 	}
 	if !s.loop.Config.Queue.ContinueAfterNeedsInput {
-		if _, attention := snapshot.Attention(false); attention {
+		if hasPendingRequests(snapshot) {
 			s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
 			return dispatched, s.markPollingIfIdle(snapshot, "waiting for user input")
 		}
@@ -273,6 +273,15 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
 	})
 	return true, nil
+}
+
+func hasPendingRequests(snapshot state.Snapshot) bool {
+	for _, request := range snapshot.PendingRequests {
+		if request != nil && request.Status == "pending" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot state.Snapshot) (gh.Issue, admission.Evaluation, bool, error) {

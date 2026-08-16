@@ -192,7 +192,7 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 		return false, l.markPolling("waiting for Pull Request checks or merge")
 	}
 	if !l.Config.Queue.ContinueAfterNeedsInput {
-		if _, attention := snapshot.Attention(false); attention {
+		if hasPendingRequests(snapshot) {
 			return false, l.markPolling("waiting for user input")
 		}
 	}

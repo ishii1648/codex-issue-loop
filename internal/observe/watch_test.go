@@ -45,6 +45,23 @@ func TestFaultDroppedEventReconcilesAttention(t *testing.T) {
 	}
 }
 
+func TestWatchReturnsEveryPendingRequestInRequestIDOrder(t *testing.T) {
+	store := newWatchStore(t)
+	_, err := store.Update("input_requested", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.PendingRequests["req_b"] = &state.Request{ID: "req_b", IssueNumber: 2, Status: "pending"}
+		snapshot.PendingRequests["req_answered"] = &state.Request{ID: "req_answered", IssueNumber: 3, Status: "answered"}
+		snapshot.PendingRequests["req_a"] = &state.Request{ID: "req_a", IssueNumber: 1, Status: "pending"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Wait(context.Background(), store, time.Second, 0, false)
+	if err != nil || len(result.PendingRequests) != 2 || result.PendingRequests[0].ID != "req_a" || result.PendingRequests[1].ID != "req_b" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
 func TestFaultReadSubscribeReadRace(t *testing.T) {
 	store := newWatchStore(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

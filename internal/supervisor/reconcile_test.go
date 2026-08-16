@@ -2,9 +2,12 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -164,6 +167,47 @@ func TestStartupReconciliationSkipsMergeConfirmedHistory(t *testing.T) {
 	}
 	if github.inspectCalls != 0 {
 		t.Fatalf("inspect calls=%d", github.inspectCalls)
+	}
+}
+
+func TestStartupReconciliationStopsAllOrphanGroupsBeforeInspectingIssues(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	github.issue = gh.Issue{State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	_, err := loop.Store.Update("workers_running", 0, "", nil, func(snapshot *state.Snapshot) error {
+		for _, number := range []int{1, 2} {
+			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
+				Number: number, RunID: fmt.Sprintf("run_%d", number), Status: "running",
+				WorkerPID: 100 + number, WorkerPGID: 100 + number,
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := &fakeProcessGroups{
+		alive: map[int]bool{101: true, 102: true}, owned: map[int]bool{101: true, 102: true},
+		signals: map[int][]syscall.Signal{},
+	}
+	loop.Processes = groups
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileStartup(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if github.inspectCalls != 2 || len(groups.signals) != 2 {
+		t.Fatalf("inspect calls=%d signals=%v", github.inspectCalls, groups.signals)
+	}
+	loaded, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"1", "2"} {
+		if issue := loaded.Issues[key]; issue.Status != "retry_wait" || issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
+			t.Fatalf("Issue %s=%+v", key, issue)
+		}
 	}
 }
 
