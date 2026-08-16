@@ -19,6 +19,7 @@ type Issue struct {
 	Title     string
 	Body      string
 	URL       string
+	CreatedAt time.Time
 	Labels    []string
 	Assignees []string
 	Milestone string
@@ -27,12 +28,20 @@ type Issue struct {
 }
 
 type PullRequest struct {
-	Number      int
-	URL         string
-	State       string
-	IsDraft     bool
-	MergedAt    *time.Time
-	HeadRefName string
+	Number           int
+	URL              string
+	State            string
+	IsDraft          bool
+	MergedAt         *time.Time
+	HeadRefName      string
+	MergeStateStatus string
+	ChecksStatus     string
+}
+
+type checkRollup struct {
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	State      string `json:"state"`
 }
 
 type RemoteState struct {
@@ -49,6 +58,9 @@ type Client interface {
 	MarkDone(context.Context, config.Config, int, string) error
 	MarkFailed(context.Context, config.Config, int, string, bool) error
 	MarkRunning(context.Context, config.Config, int) error
+	ReadyPullRequest(context.Context, config.Config, string) error
+	UpdatePullRequest(context.Context, config.Config, string) error
+	MergePullRequest(context.Context, config.Config, string) error
 }
 
 type CLI struct {
@@ -64,12 +76,13 @@ const (
 )
 
 type rawIssue struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	URL    string `json:"url"`
-	State  string `json:"state"`
-	Labels []struct {
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	URL       string    `json:"url"`
+	CreatedAt time.Time `json:"createdAt"`
+	State     string    `json:"state"`
+	Labels    []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 	Assignees []struct {
@@ -90,7 +103,7 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 	}
 	// gh paginates internally up to the requested limit. Keep this above the
 	// MVP's original 100 so large queues are not silently truncated.
-	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,labels,assignees,milestone"}
+	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,createdAt,labels,assignees,milestone"}
 	if cfg.GitHub.Assignee != "" {
 		args = append(args, "--assignee", cfg.GitHub.Assignee)
 	}
@@ -123,11 +136,11 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 			milestone = item.Milestone.Title
 		}
 		issues = append(issues, NormalizeIssue(Issue{
-			Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL,
+			Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt,
 			Labels: labels, Assignees: assignees, Milestone: milestone,
 		}))
 	}
-	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
+	OrderIssues(issues, cfg.Queue)
 	return issues, nil
 }
 
@@ -136,7 +149,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,state,labels,assignees,milestone,comments").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,labels,assignees,milestone,comments").CombinedOutput()
 	if err != nil {
 		return Issue{}, fmt.Errorf("get GitHub Issue #%d: %w: %s", number, err, c.safe(out))
 	}
@@ -160,7 +173,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	for _, comment := range item.Comments {
 		comments = append(comments, comment.Body)
 	}
-	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State}), nil
+	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State}), nil
 }
 
 func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (RemoteState, error) {
@@ -176,17 +189,19 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName,mergeStateStatus,statusCheckRollup").CombinedOutput()
 	if err != nil {
 		return RemoteState{}, fmt.Errorf("inspect Pull Requests for branch %s: %w: %s", branch, err, c.safe(out))
 	}
 	var raw []struct {
-		Number      int        `json:"number"`
-		URL         string     `json:"url"`
-		State       string     `json:"state"`
-		IsDraft     bool       `json:"isDraft"`
-		MergedAt    *time.Time `json:"mergedAt"`
-		HeadRefName string     `json:"headRefName"`
+		Number            int           `json:"number"`
+		URL               string        `json:"url"`
+		State             string        `json:"state"`
+		IsDraft           bool          `json:"isDraft"`
+		MergedAt          *time.Time    `json:"mergedAt"`
+		HeadRefName       string        `json:"headRefName"`
+		MergeStateStatus  string        `json:"mergeStateStatus"`
+		StatusCheckRollup []checkRollup `json:"statusCheckRollup"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return RemoteState{}, fmt.Errorf("decode Pull Requests for branch %s: %w", branch, err)
@@ -195,10 +210,47 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		state.PullRequests = append(state.PullRequests, PullRequest{
 			Number: item.Number, URL: item.URL, State: item.State, IsDraft: item.IsDraft,
 			MergedAt: item.MergedAt, HeadRefName: item.HeadRefName,
+			MergeStateStatus: item.MergeStateStatus,
+			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
 		})
 	}
 	sort.Slice(state.PullRequests, func(i, j int) bool { return state.PullRequests[i].Number > state.PullRequests[j].Number })
 	return state, nil
+}
+
+func pullRequestChecksStatus(mergeState string, checks []checkRollup) string {
+	if len(checks) == 0 {
+		if strings.EqualFold(mergeState, "CLEAN") {
+			return "success"
+		}
+		return "pending"
+	}
+	result := "success"
+	for _, check := range checks {
+		status := strings.ToUpper(check.Status)
+		conclusion := strings.ToUpper(check.Conclusion)
+		state := strings.ToUpper(check.State)
+		if state != "" {
+			switch state {
+			case "SUCCESS", "EXPECTED":
+			case "PENDING":
+				result = "pending"
+			default:
+				return "failure"
+			}
+			continue
+		}
+		if status != "COMPLETED" {
+			result = "pending"
+			continue
+		}
+		switch conclusion {
+		case "SUCCESS", "NEUTRAL", "SKIPPED":
+		default:
+			return "failure"
+		}
+	}
+	return result
 }
 
 func Eligible(labels []string, cfg config.GitHub) bool {
@@ -300,7 +352,43 @@ func (c CLI) MarkFailed(ctx context.Context, cfg config.Config, number int, reas
 }
 
 func (c CLI) MarkRunning(ctx context.Context, cfg config.Config, number int) error {
-	return c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, []string{cfg.GitHub.NeedsInputLabel})
+	return c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel})
+}
+
+func (c CLI) ReadyPullRequest(ctx context.Context, cfg config.Config, prURL string) error {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "ready", prURL, "--repo", cfg.GitHub.Repo).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mark Pull Request ready: %w: %s", err, c.safe(out))
+	}
+	return nil
+}
+
+func (c CLI) UpdatePullRequest(ctx context.Context, cfg config.Config, prURL string) error {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "update-branch", prURL, "--repo", cfg.GitHub.Repo).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("update Pull Request branch: %w: %s", err, c.safe(out))
+	}
+	return nil
+}
+
+func (c CLI) MergePullRequest(ctx context.Context, cfg config.Config, prURL string) error {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "merge", prURL, "--repo", cfg.GitHub.Repo, "--squash").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("merge Pull Request: %w: %s", err, c.safe(out))
+	}
+	return nil
 }
 
 func (c CLI) editLabels(ctx context.Context, repo string, number int, add, remove []string) error {
@@ -376,8 +464,47 @@ func safeText(value string, limit int) string {
 	return value + "\n[TRUNCATED]"
 }
 
-func SelectReady(issues []Issue, snapshotIssues map[string]string) (Issue, bool) {
-	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
+func OrderIssues(issues []Issue, queue config.Queue) {
+	priorityRank := make(map[string]int, len(queue.PriorityLabels))
+	for index, label := range queue.PriorityLabels {
+		priorityRank[strings.ToLower(label)] = index
+	}
+	rank := func(issue Issue) int {
+		result := len(priorityRank)
+		for _, label := range issue.Labels {
+			if candidate, ok := priorityRank[strings.ToLower(label)]; ok && candidate < result {
+				result = candidate
+			}
+		}
+		return result
+	}
+	createdBefore := func(left, right Issue) bool {
+		if left.CreatedAt.IsZero() != right.CreatedAt.IsZero() {
+			return !left.CreatedAt.IsZero()
+		}
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.Before(right.CreatedAt)
+		}
+		return left.Number < right.Number
+	}
+	sort.SliceStable(issues, func(i, j int) bool {
+		switch queue.Order {
+		case "created_at_asc":
+			return createdBefore(issues[i], issues[j])
+		case "priority_then_created_at":
+			left, right := rank(issues[i]), rank(issues[j])
+			if left != right {
+				return left < right
+			}
+			return createdBefore(issues[i], issues[j])
+		default:
+			return issues[i].Number < issues[j].Number
+		}
+	})
+}
+
+func SelectReady(issues []Issue, snapshotIssues map[string]string, queue config.Queue) (Issue, bool) {
+	OrderIssues(issues, queue)
 	for _, issue := range issues {
 		status := snapshotIssues[fmt.Sprint(issue.Number)]
 		if status == "running" || status == "claimed" || status == "needs_input" || status == "completed" || status == "blocked" {

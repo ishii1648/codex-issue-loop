@@ -8,36 +8,35 @@
 
 ## 2. 全体構成
 
-![codex-issue-loopの全体構成](images/architecture-overview.png)
+![codex-issue-loopの全体構成](images/architecture-overview-v2.png)
 
 ```text
-ChatGPT mobile app
-        │ Codex Remote
-        ▼
-ChatGPT desktop app on Mac mini
-        │
-        ├─ [LOOP] monitor task
-        │      └─ Skill ──► agent-loop CLI
-        │                       ├─ start ──► launchctl ──► launchd
-        │                       │                         └─ supervisor
-        │                       ├─ status / answer ───────────┤
-        │                       └─ watch ── event + 60s ──────┤
-        │                                      reconcile     ▼
-        │                                             durable state/events
-        │
-        └─ [INTAKE] new issue task ──► GitHub Issue
-
-supervisor ──► GitHub Issues ── pick/claim ──► worktree + codex exec
-     ▲                                                   │
-     └────────────── durable state/events ◄──────────────┘
-                                                         ▼
-                                                branch / draft PR
+Issue producers (outside Mac mini)
+  ├─ Codex intake task on any host
+  ├─ GitHub UI
+  ├─ CLI / GitHub API
+  └─ automation ─────────────────────────► GitHub Issues
+                                                  │ ready queue
+                                                  ▼
+Mac mini — execution host
+  ├─ ChatGPT mobile app ── Codex Remote ──► [LOOP] monitor task
+  │          ◄──────────── Codex notification ────────┘
+  │                                             └─ Skill ──► agent-loop CLI
+  │                                                            ├─ start ──► launchctl ──► launchd
+  │                                                            ├─ status / answer ───────────┤
+  │                                                            └─ watch ── event + 60s ──────┤
+  │                                                                         reconcile        ▼
+  └─ supervisor ◄──────── GitHub Issues                            durable state/events
+         └─ pick/claim ──► worktree + codex exec ──► branch / draft PR
 ```
+
+Codex notificationは、`watch`がattention状態を返した監視taskからChatGPTモバイルアプリへ届く。supervisorや永続状態からスマートフォンへ直接pushするadapterは、この経路に含めない。
 
 ### 2.1 責務境界
 
 | コンポーネント | 責務 | 保持しないもの |
 | --- | --- | --- |
+| Issue producer | GitHub Issue作成、要望・完了条件の記載、着手可能ラベル付与 | ループ制御、Mac mini上の状態 |
 | Codex監視task | ユーザーとの会話、CLI操作、質問表示 | ループの正本状態 |
 | agent-loop Skill | 自然言語からCLIへの安全な操作手順 | 常駐プロセス、Issue選択ロジック |
 | agent-loop CLI | 設定、プロセス制御、監視、回答登録 | 実装判断、監視状態の正本 |
@@ -47,7 +46,7 @@ supervisor ──► GitHub Issues ── pick/claim ──► worktree + codex 
 | GitHub | Issue/PRの共有状態 | ローカル実行詳細 |
 | 永続snapshot/event log | supervisor状態、attention request、revision | ユーザーとの会話 |
 
-Codex Skill の実行主体はCodex taskである。Skillは実行可能プロセスではなく、Codexが読む操作手順である。長時間動き続ける実行主体は `agent-loop run` supervisor である。
+Codex Skill の実行主体はCodex taskである。Skillは実行可能プロセスではなく、Codexが読む操作手順である。長時間動き続ける実行主体は `agent-loop run` supervisor である。Issue producerはこの実行経路から独立しており、Mac mini上で動作する必要はない。
 
 ## 3. 技術選定
 
@@ -116,13 +115,20 @@ target-repository/
 
 ```text
 ~/Library/Application Support/codex-issue-loop/
+├─ bin/agent-loop
+├─ install.json
+├─ backups/<timestamp>-<version>/
+├─ migration.json
+├─ migrations/<timestamp>-v1-to-v2/
 ├─ registry.json
 ├─ worktrees/<repo-id>/issue-<number>/
 └─ repos/<repo-id>/
    ├─ state.json
    ├─ events.jsonl
+   ├─ events.jsonl.<timestamp>.gz
    ├─ supervisor.log
-   ├─ supervisor.err.log
+   ├─ launchd.stdout.log
+   ├─ launchd.stderr.log
    ├─ lock
    ├─ prompts/
    └─ runs/<run-id>/
@@ -131,17 +137,20 @@ target-repository/
 └─ com.codex-issue-loop.<repo-id>.plist
 
 ~/.codex/skills/agent-loop/
-└─ SKILL.md
+├─ SKILL.md
+└─ VERSION
 ```
 
 `repo-id` は GitHub の `owner/repo` とcanonicalなローカルパスから生成した、人間が識別可能なprefix付きstable hashとする。リポジトリ移動時は再登録を必要とする。
+
+`install.json`はrelease version、Git commit、binaryとSkillのSHA-256、そのbinaryが要求する永続schema versionを保持する。`update`はinstall一式を`backups`へ保存してから、稼働中だったLaunchAgentだけを停止し、binary・Skill・plistを置換して再開する。途中失敗時は自動rollbackする。state、event、registry、worktreeはinstall/update/uninstallの対象外とする。
 
 ## 5. 設定仕様
 
 設定ファイル名は対象リポジトリ直下の `.agent-loop.yaml` とする。
 
 ```yaml
-version: 1
+version: 2
 
 github:
   repo: ishii1648/example
@@ -156,6 +165,7 @@ queue:
   poll_interval: 60s
   concurrency: 1
   order: issue_number_asc
+  priority_labels: []
   max_attempts: 3
   continue_after_needs_input: true
 
@@ -184,7 +194,21 @@ git:
 
 completion:
   create_draft_pr: true
-  close_issue: false
+  auto_merge: false
+  close_issue: true
+
+worktrees:
+  completed_max_age: 168h
+  failed_max_age: 720h
+  blocked_max_age: 0s
+  needs_input_max_age: 0s
+
+logs:
+  rotate_bytes: 16777216
+  rotate_interval: 24h
+  generations: 7
+  worker_run_max_age: 720h
+  worker_run_max_count: 100
 
 security:
   redact_env: []
@@ -192,9 +216,11 @@ security:
 
 ### 5.1 設定規則
 
-- `version` は必須。未知のmajor versionはエラーとする。
+- `version` は必須。現行は`2`とし、v1は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
-- `queue.concurrency` はMVPでは `1` のみ許可する。
+- `queue.concurrency` はMVPでは `1` のみ許可する。将来の単一host並列化と複数host冗長化は別のmigrationであり、この値だけでdistributed modeを有効化しない。
+- `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
+- `priority_then_created_at`では`queue.priority_labels`を高い順に1件以上指定する。labelなしは最低順位、複数該当は最上位一致とする。
 - `worker.model: null` はユーザーのCodex既定値を使う。
 - `worker.sandbox` の既定値は `workspace-write` とする。
 - `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。terminal状態へ到達したIssueのsession IDはactive stateから外す。
@@ -207,6 +233,20 @@ security:
 - secretsを設定ファイルに記述しない。
 - `security.redact_env`には追加でマスクする値そのものではなく、値を保持する環境変数名だけを記述する。
 - `git.worktree_root`を指定する場合は絶対pathとし、branch prefix、base branch、GitHub repository名はargv/refとして安全な形式だけを許可する。
+- `completion.create_draft_pr`の既定は`true`とする。`completion.auto_merge`の既定は`false`であり、`true`はdraft PR作成を前提とする。
+- `completion.auto_merge: false`ではCI成功後にPRをReady for reviewへ移し、人手のmergeを待つ。`true`ではbase branchへの追随とCI再確認後にsquash mergeする。
+- `completion.close_issue`はPRのmerge確認後にだけ適用し、既定は`true`とする。
+- worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、その他の非terminal状態は期間にかかわらず保持する。
+- event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
+
+### 5.2 log rotationと容量保護
+
+- `events.jsonl`はstate lock内で、現行logをgzip archiveへcopyした後、現在の`state_revision`を持つ`event_log_checkpoint`へ原子的に置換する。以後のsequenceはcheckpointから連続させる。
+- archive作成中に停止した場合、active logは置換前の完全な履歴または置換後のcheckpointのどちらかであり、次回Loadで検証できる。余分なarchiveは世代整理で除去する。
+- supervisorとworkerのstream logは書込前に閾値を検査し、close、gzip、active file再作成の順でrotationする。
+- launchdが直接開くstdout/stderrは起動時にrotationする。常時の運用logはprocess管理の`supervisor.log`へ出力し、`logs`はgzip archiveからactive fileまで時系列で表示する。
+- terminal worker runを削除した場合は`worker_logs_pruned`監査eventを残す。未回答requestとactive/retry中のrunは保持する。
+- 利用可能容量がrotation閾値の2倍未満なら、新しいworkerを起動する前にsupervisorを`blocked`へ移し、`doctor`と容量復旧手順で扱う。
 
 ## 6. CLI仕様
 
@@ -236,6 +276,8 @@ agent-loop <command> [options]
 | `watch` | イベントを追跡する |
 | `answer` | 未回答requestへ回答を登録する |
 | `logs` | supervisorまたはIssue別ログを表示する |
+| `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
+| `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
 | `doctor` | 依存関係、認証、設定、電源条件、状態整合性を検査する |
 | `bootstrap-labels --repo PATH [--apply]` | 必須GitHubラベルの変更計画を表示し、明示時だけ不足分を作成する |
 | `run` | launchd専用の内部supervisorエントリーポイント |
@@ -275,7 +317,7 @@ agent-loop watch --repo /path/to/repo --until-attention [--json]
 
 未回答質問が既に存在する場合、待機せず即時返却する。watchはsnapshotとevent logを読み取るだけで、supervisorの親プロセスにはならない。
 
-watchは永続snapshotを正本とし、socket、ファイル通知、プロセス内channel等のeventを低遅延化のヒントとして扱う。event payloadだけで終了条件を判定せず、起床のたびにsnapshotを読み直す。
+watchは永続snapshotを正本とし、fsnotify/kqueueによるstate directory eventを低遅延化のヒントとして扱う。event payloadだけで終了条件を判定せず、起床のたびにsnapshotを読み直す。個別fileではなくdirectoryを監視するため、`state.json`のatomic rename後も新しいfileを検出できる。watcher作成・登録失敗またはchannel終了時はpolling-onlyへ降格する。[ADR-0003](adr/0003-event-notification.md)を正本とする。
 
 raceを避けるため、watchは次の順序で待機する。
 
@@ -336,7 +378,7 @@ agent-loop answer --request-id req_... --message-file -
 - `StandardOutPath` / `StandardErrorPath`: repo別状態ディレクトリ
 - `EnvironmentVariables`: 必要最小限のPATHとHOME。tokenは含めない
 
-LaunchAgentなので、ユーザーがログアウトしている間は動作保証しない。システムwideなLaunchDaemonは、ユーザーcredential、HOME、Codex認証との境界が複雑になるためMVPでは採用しない。
+LaunchAgentなので、ユーザーがログアウトしている間は動作保証しない。system-wideなLaunchDaemon、自動ログイン、daemon/helper分割は、ユーザーcredential、HOME、Keychain、Codex認証、worktree ownershipの境界を変え、現在の可用性要件に対して過剰なため採用しない。正式な比較と再検討条件は[ADR-0001](adr/0001-macos-execution-model.md)を正本とする。
 
 ## 8. supervisor状態機械
 
@@ -355,12 +397,14 @@ starting ──► polling ◄──────────────┐
               running               │
         ┌────────┼─────────┐        │
         ▼        ▼         ▼        │
-   completed needs_input retry_wait  │
+ awaiting_checks needs_input retry_wait
         │        │         │         │
-        │        │ answer  └─────────┘
-        │        ▼
-        │      running
-        └───────────────────────────► polling
+  CI成功│        │ answer  └─────────┘
+        ▼        ▼
+ awaiting_merge running
+        │ merge確認
+        ▼
+   completed ───────────────────────► polling
 
 running ──fatal/nonrecoverable──► blocked
 ```
@@ -373,6 +417,8 @@ running ──fatal/nonrecoverable──► blocked
 - `running`
 - `needs_input`
 - `retry_wait`
+- `awaiting_checks`
+- `awaiting_merge`
 - `completed`
 - `failed`
 - `blocked`
@@ -392,9 +438,13 @@ Issueは以下をすべて満たす場合に着手可能とする。
 - Pull Requestではない
 - ローカル状態で処理中ではない
 
+Issueのauthor、作成場所、作成に使ったclientは着手可能条件に含めない。producerは着手可能ラベルを付与できるGitHub権限、または同ラベルを付与するautomationを持つ必要がある。
+
 ### 9.2 並び順
 
-MVPの既定はIssue番号昇順とする。将来、priorityラベルと作成日時を追加できるが、GitHub APIの返却順には依存しない。
+既定はIssue番号昇順とする。`created_at_asc`は作成日時、Issue番号の順、`priority_then_created_at`はconfigured priority、作成日時、Issue番号の順で比較する。configured priority labelがないIssueはpriority付きIssueの後へ置き、複数付いている場合は設定上の最高順位を採用する。
+
+GitHub CLIのpaginationが完了した候補集合をlocalでsortし、APIの返却順やpage境界には依存しない。設定変更時もactiveなIssueはそのまま継続し、未claim候補の次回選択から新しい順序を使う。詳細とtarget repositoryのlabel準備は[Queue ordering](queue-ordering.md)を参照する。
 
 ### 9.3 claim手順
 
@@ -407,7 +457,7 @@ MVPの既定はIssue番号昇順とする。将来、priorityラベルと作成�
 
 `claiming`で停止した場合は、再起動後に最新Issueを再取得し、同じrun IDと冪等markerでclaimを再実行する。
 
-GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リポジトリを処理するsupervisorは1つ」という運用制約を置く。複数ホスト対応時はGitHub外の分散lockが必要になる。
+GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リポジトリを処理するsupervisorは1つ」という運用制約を置く。local `flock`は同一hostだけを保護する。複数host対応では単なる分散lockだけでなく、線形化可能なcoordinator、epoch、durable publication intent、GitHub副作用を集約するfenced publication gatewayを必要とする。[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
 
 ## 10. worktreeとGit仕様
 
@@ -419,6 +469,10 @@ GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リ
 - 未コミット変更があるworktreeを自動削除しない
 - force pushを行わない
 - 完了後もPRがopenの間はworktreeを保持できる設定を用意する
+- cleanupは既定read-onlyとし、`--apply`でもdirty、未push commit、open PR、未回答requestを削除しない
+- cleanup/purge適用時はLaunchAgent停止を必須とし、`git worktree remove`後に`git worktree prune`を実行する
+- cleanupはlocal branchを残し、削除前後を`worktree_cleanup_started` / `worktree_cleaned`へ監査記録する
+- purgeはIssue単位の完全一致確認tokenを必須とし、`worktree_purge_started` / `worktree_purged`へ安全性と復元元を記録する
 
 ## 11. Codexワーカー仕様
 
@@ -454,7 +508,7 @@ preflightは別プロセスではなく、初回worker promptに含める論理�
 
 初回workerはpreflight結果を実行ログへ構造化eventとして出力するが、preflightだけで終了しない。したがって `extended` の判定だけを理由に2つのworkerが必ず動くわけではない。初回runで完了しなかった場合に限り、supervisorが保存されたsession ID、worktree、検証結果を使って `codex exec resume` を起動する。ユーザー回答後の再開は自動continuation budgetとは別に扱う。
 
-MVPではnative Goalをheadless workerの実行機構にしない。Goalは監視task内の単一目的の復旧作業等に利用できるが、Issueキュー、process lifetime、永続状態を所有しない。公式に利用可能なheadless Goal interfaceが提供された場合のみ、`extended` profileのoptional adapterとして追加を検討する。
+MVPではnative Goalをheadless workerの実行機構にしない。Goalは監視task内の単一目的の復旧作業等に利用できるが、Issueキュー、process lifetime、永続状態を所有しない。App Serverの`thread/goal/set|get|clear`、`thread/resume`、`turn/start`は公式提供済みであり、`extended` profileのoptional adapterをIssue #53で検証する。導入までは`codex exec resume`を維持する。[Codex公式仕様確認](codex-capability-review.md)を正本とする。
 
 ### 11.3 ワーカープロンプト
 
@@ -466,10 +520,26 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 - 過去の質問とユーザー回答
 - 実行可能な範囲と禁止事項
 - 対象リポジトリのAGENTS.mdに従う指示
-- 実装、テスト、commit、push、draft PRに関する完了条件
+- 実装とテストに関する完了条件
+- `git add`、commit、push、PR作成、`agent-loop`の再帰起動を行わず、公開処理をsupervisorへ返す指示
 - 構造化結果の意味
 - 質問すべき条件と、推測して進めてよい条件
 - preflightの分類規則と、曖昧な場合は質問せず`extended`を選ぶ指示
+
+### 11.3.1 決定論的な公開境界
+
+Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked worktreeのGit metadataは元repositoryの`.git/worktrees`配下にありsandbox外なので、workerへ書き込み権限を広げない。workerが`completed`を返した後、supervisor内のpublisherが次を順に実行する。
+
+1. `git status --porcelain`で差分を確認し、差分があれば`git add --all`と`git diff --cached --check`を行う。
+2. `git -c commit.gpgsign=false ... commit`で対話的な署名promptを発生させずcommitする。
+3. 対象branchをpushする。
+4. 同じhead branchのopen PRを検索し、1件なら再利用、0件ならdraft PRを作成、複数なら安全側で停止する。
+5. `gh`が警告文を併記しても出力内の有効なPR URLを抽出し、異なるURLが複数なら拒否する。
+6. `statusCheckRollup`を定期的に確認し、未完了ならモデルを呼ばず待機、失敗なら同じworktreeと失敗理由をworkerへ返す。
+7. CI成功後にdraftをReady for reviewへ移す。`auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。
+8. `auto_merge: true`ではbase branchより遅れているPRを更新してCIを再確認し、conflictがなければsquash mergeする。merge確認後だけIssueを完了扱いにする。
+
+この境界により、モデルのsandboxをremote操作のために広げず、公開処理の引数、順序、冪等性をGo側で固定する。
 
 ### 11.4 質問ポリシー
 
@@ -545,7 +615,7 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "repo_id": "example-a1b2c3d4",
   "state_revision": 42,
   "supervisor": {
@@ -562,6 +632,8 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 一時ファイルへのwrite、fsync、renameにより原子的に更新する。ファイルpermissionはユーザーのみ読み書き可能とする。
 
 `state_revision` は有効な状態更新ごとに単調増加させる。event通知を取りこぼしたwatchも、最後に確認したrevisionとの差分から状態変化を検出できる。
+
+Issue状態にはbranch、worktree、session ID、PR URLに加えてmerge確認済みフラグを保持する。これにより起動時は未確認の旧`completed` PRだけを一度照合し、merge確認済みの履歴へ毎回GitHub APIを呼ばない。
 
 ### 12.2 events.jsonl
 
@@ -588,6 +660,9 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 - `worker_preflight_completed`
 - `worker_continuation_started`
 - `worker_completed`
+- `pull_request_checks_pending`
+- `pull_request_poll_scheduled`
+- `pull_request_ready`
 - `input_requested`
 - `answer_recorded`
 - `retry_scheduled`
@@ -611,6 +686,22 @@ MVPではnative Goalをheadless workerの実行機構にしない。Goalは監�
 改行前で停止したevent log末尾は、最後の完全なeventとsnapshot revisionが一致する場合に限り切り詰め、`event_log_tail_truncated` を記録する。prepared transactionが残っている場合は、そのtransactionを正本としてeventとsnapshotのcommitを完了する。
 
 transactionなしでsnapshotとevent logが食い違う場合、途中に壊れたeventがある場合、またはsnapshotを復元できない場合は自動推測しない。既存の `state.json`、`events.jsonl`、`state.txn.json` をrepository state directory配下の `recovery/` へ隔離し、元の理由とbackup pathを含む `recovery_blocked` 状態を新しいsnapshotへ保存する。blocked状態では通常の状態更新とIssue処理を拒否し、backupを保持したまま手動復旧を待つ。
+
+### 12.4 永続schema migration
+
+config、registry、state、active event log、prepared transactionの現行schemaはv2とする。v1を検出したbinaryはsupervisor開始、status、通常update後の自動再開を拒否し、`migrate --json`と`doctor`で`SCHEMA_MIGRATION_REQUIRED`を返す。v3以上やversion欠落は自動変換しない。
+
+v1からv2へのforward migrationは次の順序で行う。
+
+1. 全登録LaunchAgentが停止中であることを確認する
+2. config、registry、state、active event、transactionをchecksum付きmigration backupへcopyする
+3. `migration.json`へ`prepared` journalを原子的に保存する
+4. 各fileを個別に原子的置換する
+5. 全対象がv2へ収束したことを再検査し、journalを`completed`にする
+
+process停止でv1/v2が混在しても、再実行は同じjournalとbackupを使い、v1のfileだけを変換する。active event logはfile全体を一度に置換し、同一log内のversion混在を許可しない。rotation済みgzip archiveはruntime復旧入力ではないためimmutableな監査履歴として保持する。
+
+rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。schema v1対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。
 
 ## 13. 監視とCodex task連携
 
@@ -644,11 +735,19 @@ watch呼び出し後、Codexは独自のtimerや定期status確認を開始し�
 
 外部supervisorからCodexアプリ内taskへ直接メッセージを挿入したり、task状態を変更したりする非公開機能には依存しない。
 
-`Needs input` の表示とpush通知は、監視task内で実行中のwatchが戻り、Codex自身がユーザーへ質問することで成立する。監視taskが接続されていない間も質問は永続状態に残るが、Codex由来の即時push通知は保証しない。再接続時には未回答質問を即時表示する。
+`Needs input` のCodex内表示は、監視task内で実行中のwatchが戻り、Codex自身がユーザーへ質問することで成立する。監視taskが接続されていない間も質問は永続状態に残り、opt-inの外部push adapterは永続outboxからスマートフォンへ直接通知できる。再接続時には通知の成否に関係なく未回答質問をsnapshotから即時表示する。
 
-将来、公式に利用可能なtask wakeupまたは通知APIが提供された場合は、optional adapterとして追加できる。
+App Server所有threadのprogrammatic continuationと、任意のDesktop taskを外部processからwakeしてmobile表示を変更する機能は別契約として扱う。後者の公式APIが提供された場合はoptional adapterとして追加できる。
 
-CodexにはClaude Codeのmonitor toolと同じ公開契約を持つ汎用的なtoken-free monitorがあるとは仮定しない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。保留中のtool callを含むCodex製品全体のtoken計測や課金については、公式に保証された範囲を超えて断定しない。
+### 13.2.1 外部push adapter
+
+初期providerはntfyとする。attentionの永続更新と同じtransactionで通知outboxへenqueueし、`pending`、`sent`、`failed`、`canceled`、試行回数、次回試行時刻をsnapshotへ保持する。notification IDはrequestまたはblocked原因から決定し、再起動やreconciliationで同じattentionを重複enqueueしない。
+
+送信はsupervisor cycleの前後で行う。失敗は上限付きexponential backoffで再試行し、event/logへ記録するが、Issue選択・worker・publisherを停止しない。回答済みrequestに対する未送信通知は送信前に取消す。既定本文はrepository、Issue番号、request ID、状態だけとし、質問文と失敗理由は`include_details`が明示された場合だけ含める。
+
+credentialはrepository別管理directoryのmode `0600` fileへ専用CLIで保存し、設定file、LaunchAgent plist、repository、command引数へ置かない。endpointはHTTPS、topicは推測困難かつaccess control済みとする。通知tapはGitHub Issueを開き、安定した公式deep linkが提供されるまではCodex taskを直接起動しない。詳細は[スマートフォン直接push通知](notifications.md)を正本とする。
+
+Codex App Serverは`thread/tokenUsage/updated`とGoalの`tokensUsed`を提供し、`codex exec --json`もturn完了時のusageを返す。一方、Claude Codeのmonitor toolと同じ汎用的なtoken-free契約や、保留中tool call・long commandの厳密なzero-token/zero-costは公式に保証されていない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。[Codex公式仕様確認](codex-capability-review.md)を参照する。
 
 ### 13.3 eventとreconciliationの役割
 
@@ -704,7 +803,7 @@ supervisor起動時に次を行う。
 3. GitHub Issue、branch、PRの現況を取得する
 4. 保存されたworker PIDが生存しているか確認する
 5. worktreeとGit状態を検証する
-6. completed PRがあれば完了へ収束させる
+6. merge済みPRがあれば完了へ収束させ、旧versionでcompletedにされたopen PRはCI/merge監視へ戻す
 7. 実行途中でworkerが消えていればretryへ移す
 8. 未回答requestはneeds_inputのまま保持する
 9. reconciliationイベントを記録してpollingを開始する
@@ -716,6 +815,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 | 保存済みworker PIDが存在するがprocessは消失 | PIDを破棄し、active Issueを即時retryへ移す |
 | write-ahead claim後に停止し、GitHubはrunningへ遷移済み | claim済みとして即時retryへ移す |
 | 保存前にpush・PR作成まで完了 | branchに紐づく単一のopen PRを保存して処理を継続する |
+| 旧versionでcompletedだがPRがopen | draftなら`awaiting_checks`、Readyなら`awaiting_merge`へ戻し、done labelを除いて監視を再開する |
 | PRがmerge済み | Issueをcompletedへ移し、未反映のdone label/commentを再同期する |
 | needs-input、done、failedのlabel/comment同期が途中 | marker付きcommentを照合し、不足しているGitHub更新だけを再実行する |
 | running labelだけが欠落し、worktreeが整合 | running labelを修復する |
@@ -742,6 +842,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - 管理directoryは0700、plist、registry、状態、event、transaction、worker/supervisor logは0600で作成する
 - credentialをpromptへ明示的に埋め込まない
 - 既知credential形式と`security.redact_env`の値をstdout/stderr、worker result、state、event、GitHub通知の境界でmaskする
+- 外部push tokenは専用のprivate管理fileへmode `0600`で保存し、設定、plist、repository、log、state、eventへ値を残さない
 - Codex sandboxは既定で `workspace-write`とし、worker起動時に`approval_policy="never"`を上書きする
 - dangerous bypassは設定schemaでもMVPでは許可しない
 - GitHub Issueは信頼済み入力とはみなさず、prompt injectionの可能性をworkerへ明示する
@@ -773,10 +874,16 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - worker kill後のreconciliation
 - watchの接続、切断、複数接続
 - event通知を破棄した場合の60秒reconciliation
+- watcher生成・購読失敗とevent channel終了時のpolling-only fallback
+- 実fsnotifyを使う複数watchと終了後の再接続
 - read-subscribe-read間に状態が変わるrace
 - attention状態と`state_revision`の永続化
 - standard workerが追加runなしで完了すること
 - extended workerだけが設定上限内でresumeされること
+- 外部pushのoutbox永続化、重複抑止、再送、rate limit、回答後取消、adapter障害からのsupervisor分離
+- 外部push credentialの0600保存、無出力、redaction、通知本文の詳細opt-in
+- 将来のsingle-host worker slotで同一Issueを二重割当しないこと、およびclaim/publishの直列化
+- coordinator adapterのCAS、epoch、lease expiry、partition、古いhost拒否、publication takeover conformance
 
 ### 17.3 macOS E2E
 
@@ -785,20 +892,19 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - Macの画面off中の継続
 - Codex Remoteからの監視開始
 - `needs_input`のスマートフォン通知、回答、再開
+- 監視task未接続時の外部push到達、再起動後の非重複、provider障害中のloop継続
 - ChatGPT desktop taskを閉じた後のsupervisor継続
 - Codexによる定期status確認なしでwatchがattentionまで待機すること
+- multi-host障害環境でpartition中に片側だけが進行し、二重branch・Pull Requestを作らないこと
 
 ## 18. 実装時に確定する項目
 
 以下は要件を変えずに実装検証で確定する。
 
 - Goの最低version
-- event logのrotation閾値
 - Codex CLIの最低対応version
 - `gh` JSON fieldとlabel更新の具体コマンド
 - worker timeout時のgrace period
-- worktreeの既定保持期間
 - desktop app更新によるRemote/通知表示差異のE2E手順
-- event通知方式（Unix domain socket、ファイル通知、プロセス内IPC）の最終選定
 - Codex CLI session resumeのversion別capabilityとfallback
-- Codexの保留中tool callに関する公式token計測仕様
+- distributed coordinatorとpublication gatewayのbackend、認証、backup、障害環境

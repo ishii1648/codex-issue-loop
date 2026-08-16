@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,10 +12,14 @@ import (
 	"time"
 	"unicode"
 
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
 	"gopkg.in/yaml.v3"
 )
 
-const FileName = ".agent-loop.yaml"
+const (
+	FileName       = ".agent-loop.yaml"
+	CurrentVersion = schemaversion.Current
+)
 
 type Duration struct{ time.Duration }
 
@@ -28,15 +33,18 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type Config struct {
-	Version    int        `yaml:"version" json:"version"`
-	GitHub     GitHub     `yaml:"github" json:"github"`
-	Queue      Queue      `yaml:"queue" json:"queue"`
-	Worker     Worker     `yaml:"worker" json:"worker"`
-	Watch      Watch      `yaml:"watch" json:"watch"`
-	Git        Git        `yaml:"git" json:"git"`
-	Completion Completion `yaml:"completion" json:"completion"`
-	Security   Security   `yaml:"security" json:"security"`
-	RepoPath   string     `yaml:"-" json:"repo_path"`
+	Version       int           `yaml:"version" json:"version"`
+	GitHub        GitHub        `yaml:"github" json:"github"`
+	Queue         Queue         `yaml:"queue" json:"queue"`
+	Worker        Worker        `yaml:"worker" json:"worker"`
+	Watch         Watch         `yaml:"watch" json:"watch"`
+	Git           Git           `yaml:"git" json:"git"`
+	Completion    Completion    `yaml:"completion" json:"completion"`
+	Worktrees     Worktrees     `yaml:"worktrees" json:"worktrees"`
+	Notifications Notifications `yaml:"notifications" json:"notifications"`
+	Logs          Logs          `yaml:"logs" json:"logs"`
+	Security      Security      `yaml:"security" json:"security"`
+	RepoPath      string        `yaml:"-" json:"repo_path"`
 }
 
 type GitHub struct {
@@ -55,6 +63,7 @@ type Queue struct {
 	PollInterval            Duration `yaml:"poll_interval" json:"poll_interval"`
 	Concurrency             int      `yaml:"concurrency" json:"concurrency"`
 	Order                   string   `yaml:"order" json:"order"`
+	PriorityLabels          []string `yaml:"priority_labels" json:"priority_labels,omitempty"`
 	MaxAttempts             int      `yaml:"max_attempts" json:"max_attempts"`
 	ContinueAfterNeedsInput bool     `yaml:"continue_after_needs_input" json:"continue_after_needs_input"`
 }
@@ -125,7 +134,36 @@ type Git struct {
 
 type Completion struct {
 	CreateDraftPR bool `yaml:"create_draft_pr" json:"create_draft_pr"`
+	AutoMerge     bool `yaml:"auto_merge" json:"auto_merge"`
 	CloseIssue    bool `yaml:"close_issue" json:"close_issue"`
+}
+
+type Worktrees struct {
+	CompletedMaxAge  Duration `yaml:"completed_max_age" json:"completed_max_age"`
+	FailedMaxAge     Duration `yaml:"failed_max_age" json:"failed_max_age"`
+	BlockedMaxAge    Duration `yaml:"blocked_max_age" json:"blocked_max_age"`
+	NeedsInputMaxAge Duration `yaml:"needs_input_max_age" json:"needs_input_max_age"`
+}
+
+type Notifications struct {
+	Enabled        bool     `yaml:"enabled" json:"enabled"`
+	Provider       string   `yaml:"provider" json:"provider"`
+	Endpoint       string   `yaml:"endpoint" json:"endpoint"`
+	Topic          string   `yaml:"topic" json:"topic,omitempty"`
+	IncludeDetails bool     `yaml:"include_details" json:"include_details"`
+	Timeout        Duration `yaml:"timeout" json:"timeout"`
+	MinInterval    Duration `yaml:"min_interval" json:"min_interval"`
+	RetryInitial   Duration `yaml:"retry_initial" json:"retry_initial"`
+	RetryMax       Duration `yaml:"retry_max" json:"retry_max"`
+	MaxAttempts    int      `yaml:"max_attempts" json:"max_attempts"`
+}
+
+type Logs struct {
+	RotateBytes       int64    `yaml:"rotate_bytes" json:"rotate_bytes"`
+	RotateInterval    Duration `yaml:"rotate_interval" json:"rotate_interval"`
+	Generations       int      `yaml:"generations" json:"generations"`
+	WorkerRunMaxAge   Duration `yaml:"worker_run_max_age" json:"worker_run_max_age"`
+	WorkerRunMaxCount int      `yaml:"worker_run_max_count" json:"worker_run_max_count"`
 }
 
 type Security struct {
@@ -138,7 +176,7 @@ var githubRepository = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/
 
 func Defaults() Config {
 	return Config{
-		Version: 1,
+		Version: CurrentVersion,
 		GitHub: GitHub{
 			ReadyLabels:     []string{"codex-loop:ready"},
 			ExcludeLabels:   []string{"blocked", "do-not-automate"},
@@ -174,7 +212,25 @@ func Defaults() Config {
 			BranchPrefix: "codex/issue-",
 			BaseBranch:   "main",
 		},
-		Completion: Completion{CreateDraftPR: true},
+		Completion: Completion{CreateDraftPR: true, AutoMerge: false, CloseIssue: true},
+		Worktrees: Worktrees{
+			CompletedMaxAge:  Duration{7 * 24 * time.Hour},
+			FailedMaxAge:     Duration{30 * 24 * time.Hour},
+			BlockedMaxAge:    Duration{0},
+			NeedsInputMaxAge: Duration{0},
+		},
+		Notifications: Notifications{
+			Provider: "ntfy", Endpoint: "https://ntfy.sh",
+			Timeout: Duration{10 * time.Second}, MinInterval: Duration{5 * time.Second},
+			RetryInitial: Duration{10 * time.Second}, RetryMax: Duration{10 * time.Minute}, MaxAttempts: 8,
+		},
+		Logs: Logs{
+			RotateBytes:       16 * 1024 * 1024,
+			RotateInterval:    Duration{24 * time.Hour},
+			Generations:       7,
+			WorkerRunMaxAge:   Duration{30 * 24 * time.Hour},
+			WorkerRunMaxCount: 100,
+		},
 	}
 }
 
@@ -227,8 +283,11 @@ func CanonicalRepoPath(path string) (string, error) {
 }
 
 func (c Config) Validate() error {
-	if c.Version != 1 {
-		return fmt.Errorf("unsupported config version %d", c.Version)
+	if c.Version != CurrentVersion {
+		if c.Version == schemaversion.Previous {
+			return fmt.Errorf("config schema migration required from version 1 to %d; stop loops and run agent-loop migrate --apply", CurrentVersion)
+		}
+		return fmt.Errorf("unsupported config version %d; this binary supports version %d", c.Version, CurrentVersion)
 	}
 	if !githubRepository.MatchString(c.GitHub.Repo) {
 		return fmt.Errorf("github.repo must use owner/name format")
@@ -237,10 +296,31 @@ func (c Config) Validate() error {
 		return fmt.Errorf("github.ready_labels must not be empty")
 	}
 	if c.Queue.Concurrency != 1 {
-		return fmt.Errorf("queue.concurrency must be 1 in version 1")
+		return fmt.Errorf("queue.concurrency must be 1 in version %d", CurrentVersion)
 	}
-	if c.Queue.Order != "issue_number_asc" {
-		return fmt.Errorf("queue.order must be issue_number_asc in version 1")
+	switch c.Queue.Order {
+	case "issue_number_asc", "created_at_asc":
+	case "priority_then_created_at":
+		if len(c.Queue.PriorityLabels) == 0 {
+			return fmt.Errorf("queue.priority_labels must not be empty when queue.order is priority_then_created_at")
+		}
+	default:
+		return fmt.Errorf("queue.order must be issue_number_asc, created_at_asc, or priority_then_created_at")
+	}
+	seenPriorities := map[string]bool{}
+	for _, label := range c.Queue.PriorityLabels {
+		trimmed := strings.TrimSpace(label)
+		canonical := strings.ToLower(trimmed)
+		if canonical == "" {
+			return fmt.Errorf("queue.priority_labels must not contain empty labels")
+		}
+		if trimmed != label {
+			return fmt.Errorf("queue.priority_labels must not contain leading or trailing whitespace in %q", label)
+		}
+		if seenPriorities[canonical] {
+			return fmt.Errorf("queue.priority_labels must not contain duplicate label %q", label)
+		}
+		seenPriorities[canonical] = true
 	}
 	if c.Queue.PollInterval.Duration <= 0 || c.Watch.ReconcileInterval.Duration <= 0 || c.Worker.Timeout.Duration <= 0 {
 		return fmt.Errorf("durations must be positive")
@@ -250,6 +330,19 @@ func (c Config) Validate() error {
 	}
 	if c.Worker.TimeoutGrace.Duration > c.Worker.Timeout.Duration {
 		return fmt.Errorf("worker.timeout_grace must not exceed worker.timeout")
+	}
+	if c.Logs.RotateBytes < 1024 || c.Logs.RotateInterval.Duration <= 0 || c.Logs.Generations < 1 {
+		return fmt.Errorf("logs rotation requires rotate_bytes >= 1024, positive rotate_interval, and generations >= 1")
+	}
+	if c.Logs.WorkerRunMaxAge.Duration <= 0 || c.Logs.WorkerRunMaxCount < 1 {
+		return fmt.Errorf("logs worker run retention requires positive worker_run_max_age and worker_run_max_count >= 1")
+	}
+	if c.Worktrees.CompletedMaxAge.Duration < 0 || c.Worktrees.FailedMaxAge.Duration < 0 ||
+		c.Worktrees.BlockedMaxAge.Duration < 0 || c.Worktrees.NeedsInputMaxAge.Duration < 0 {
+		return fmt.Errorf("worktree retention durations must not be negative; 0 keeps a status indefinitely")
+	}
+	if err := c.Notifications.validate(); err != nil {
+		return err
 	}
 	if c.Queue.MaxAttempts < 1 {
 		return fmt.Errorf("queue.max_attempts must be at least 1")
@@ -274,6 +367,9 @@ func (c Config) Validate() error {
 	}
 	if c.Git.WorktreeRoot != "" && !filepath.IsAbs(c.Git.WorktreeRoot) {
 		return fmt.Errorf("git.worktree_root must be an absolute path")
+	}
+	if c.Completion.AutoMerge && !c.Completion.CreateDraftPR {
+		return fmt.Errorf("completion.auto_merge requires completion.create_draft_pr")
 	}
 	if !safeRefFragment(c.Git.BranchPrefix) || !safeRefFragment(c.Git.BaseBranch) {
 		return fmt.Errorf("git.branch_prefix and git.base_branch must be safe Git ref fragments")
@@ -302,4 +398,31 @@ func (c Config) RedactionValues() []string {
 		}
 	}
 	return values
+}
+
+var notificationTopic = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
+
+func (n Notifications) validate() error {
+	if n.Provider != "ntfy" {
+		return fmt.Errorf("notifications.provider must be ntfy")
+	}
+	if n.Timeout.Duration <= 0 || n.MinInterval.Duration < 0 || n.RetryInitial.Duration <= 0 ||
+		n.RetryMax.Duration < n.RetryInitial.Duration || n.MaxAttempts < 1 {
+		return fmt.Errorf("notifications retry, timeout, and rate-limit settings are invalid")
+	}
+	if !n.Enabled {
+		return nil
+	}
+	endpoint, err := url.Parse(n.Endpoint)
+	if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return fmt.Errorf("notifications.endpoint must be an absolute URL without credentials, query, or fragment")
+	}
+	loopback := endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1" || endpoint.Hostname() == "::1"
+	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && loopback) {
+		return fmt.Errorf("notifications.endpoint must use https except for loopback tests")
+	}
+	if !notificationTopic.MatchString(n.Topic) {
+		return fmt.Errorf("notifications.topic must be an 8-128 character opaque identifier")
+	}
+	return nil
 }

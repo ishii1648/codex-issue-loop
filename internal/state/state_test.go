@@ -1,7 +1,10 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
 
 func TestStateAndEventsNeverPersistSecrets(t *testing.T) {
@@ -105,6 +109,20 @@ func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 	}
 }
 
+func TestUntilIdleWaitsForPullRequestLifecycle(t *testing.T) {
+	for _, status := range []string{"awaiting_checks", "awaiting_merge"} {
+		t.Run(status, func(t *testing.T) {
+			snapshot := Snapshot{
+				Supervisor: Supervisor{State: "polling"},
+				Issues:     map[string]*Issue{"7": {Number: 7, Status: status}},
+			}
+			if reason, ok := snapshot.Attention(true); ok {
+				t.Fatalf("reason=%q ok=%v", reason, ok)
+			}
+		})
+	}
+}
+
 func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 	for _, crashPoint := range []string{"prepared", "event_appended", "snapshot_written"} {
 		t.Run(crashPoint, func(t *testing.T) {
@@ -121,10 +139,10 @@ func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 			next.Supervisor.Message = "transaction completed"
 			next.Supervisor.UpdatedAt = time.Now().UTC()
 			event := Event{
-				Version: 1, EventID: "evt_transaction", Sequence: next.StateRevision,
+				Version: CurrentVersion, EventID: "evt_transaction", Sequence: next.StateRevision,
 				Timestamp: time.Now().UTC(), RepoID: store.RepoID, Type: "second",
 			}
-			if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: 1, Snapshot: next, Event: event}, 0o600); err != nil {
+			if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: next, Event: event}, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if crashPoint == "event_appended" || crashPoint == "snapshot_written" {
@@ -165,7 +183,7 @@ func TestFaultPartialEventTailIsTruncatedAndRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString(`{"version":1,"sequence":2`); err != nil {
+	if _, err := f.WriteString(`{"version":2,"sequence":2`); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
@@ -192,7 +210,7 @@ func TestFaultRevisionMismatchIsQuarantined(t *testing.T) {
 	}
 	payload, _ := json.Marshal(map[string]string{"cause": "missing transaction"})
 	if err := store.appendEventUnlocked(Event{
-		Version: 1, EventID: "evt_orphan", Sequence: 2, Timestamp: time.Now().UTC(),
+		Version: CurrentVersion, EventID: "evt_orphan", Sequence: 2, Timestamp: time.Now().UTC(),
 		RepoID: store.RepoID, Type: "orphan", Payload: payload,
 	}); err != nil {
 		t.Fatal(err)
@@ -233,6 +251,41 @@ func TestFaultCorruptSnapshotIsQuarantined(t *testing.T) {
 	}
 }
 
+func TestUnsupportedSchemaVersionIsRejectedWithoutQuarantine(t *testing.T) {
+	for _, version := range []int{1, CurrentVersion + 1} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			store := newStore(t)
+			data, err := os.ReadFile(store.StatePath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot Snapshot
+			if err := json.Unmarshal(data, &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			snapshot.Version = version
+			modified, err := json.MarshalIndent(snapshot, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			modified = append(modified, '\n')
+			if err := os.WriteFile(store.StatePath(), modified, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Load(); err == nil {
+				t.Fatal("unsupported schema was accepted")
+			}
+			after, err := os.ReadFile(store.StatePath())
+			if err != nil || !bytes.Equal(after, modified) {
+				t.Fatalf("unsupported state was modified: err=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(store.Dir, "recovery")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unsupported state was quarantined: %v", err)
+			}
+		})
+	}
+}
+
 func TestFaultSecondSupervisorCannotAcquireLock(t *testing.T) {
 	store := newStore(t)
 	first, err := store.AcquireSupervisorLock()
@@ -251,4 +304,34 @@ func TestFaultSecondSupervisorCannotAcquireLock(t *testing.T) {
 		t.Fatalf("lock was not reusable after release: %v", err)
 	}
 	ReleaseSupervisorLock(third)
+}
+
+func TestFaultEventRotationKeepsCheckpointAndRecoverySequence(t *testing.T) {
+	store := Store{
+		Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo",
+		EventRetention: retention.Policy{MaxBytes: 1, MaxAge: time.Hour, Keep: 2},
+	}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4; index++ {
+		if _, err := store.Update("tick", 0, "", map[string]int{"index": index}, func(*Snapshot) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.StateRevision != 4 {
+		t.Fatalf("revision=%d", snapshot.StateRevision)
+	}
+	events, _, partial, err := store.readEventsUnlocked()
+	if err != nil || partial || len(events) == 0 || events[0].Type != "event_log_checkpoint" {
+		t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
+	}
+	archives, err := filepath.Glob(store.EventsPath() + ".*.gz")
+	if err != nil || len(archives) == 0 || len(archives) > 2 {
+		t.Fatalf("archives=%v err=%v", archives, err)
+	}
 }

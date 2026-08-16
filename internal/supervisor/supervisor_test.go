@@ -1,10 +1,13 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,11 +20,32 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
 
+type failingNotificationDispatcher struct{ calls int }
+
+func (d *failingNotificationDispatcher) Dispatch(context.Context) error {
+	d.calls++
+	return errors.New("notification provider unavailable")
+}
+
+func TestNotificationFailureDoesNotStopSupervisor(t *testing.T) {
+	var logs bytes.Buffer
+	dispatcher := &failingNotificationDispatcher{}
+	loop := Loop{Logger: log.New(&logs, "", 0), Notifications: dispatcher}
+	loop.dispatchNotifications(context.Background())
+	if dispatcher.calls != 1 || !strings.Contains(logs.String(), "without stopping supervisor") {
+		t.Fatalf("calls=%d logs=%q", dispatcher.calls, logs.String())
+	}
+}
+
 type fakeGitHub struct {
 	issue                     gh.Issue
 	remote                    *gh.RemoteState
 	claimed, done, needsInput bool
 	markedRunning             bool
+	readyPullRequest          bool
+	updatedPullRequest        bool
+	mergedPullRequest         bool
+	inspectCalls              int
 	claimErr                  error
 	doneErr                   error
 	listErr                   error
@@ -35,6 +59,7 @@ func (f *fakeGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, erro
 }
 func (f *fakeGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) { return f.issue, nil }
 func (f *fakeGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
+	f.inspectCalls++
 	if f.remote != nil {
 		return *f.remote, nil
 	}
@@ -67,6 +92,18 @@ func (f *fakeGitHub) MarkRunning(context.Context, config.Config, int) error {
 	f.markedRunning = true
 	return nil
 }
+func (f *fakeGitHub) ReadyPullRequest(context.Context, config.Config, string) error {
+	f.readyPullRequest = true
+	return nil
+}
+func (f *fakeGitHub) UpdatePullRequest(context.Context, config.Config, string) error {
+	f.updatedPullRequest = true
+	return nil
+}
+func (f *fakeGitHub) MergePullRequest(context.Context, config.Config, string) error {
+	f.mergedPullRequest = true
+	return nil
+}
 
 type fakeWorktree struct {
 	path       string
@@ -86,6 +123,17 @@ func (f fakeWorktree) Inspect(context.Context, config.Config, string, string) (w
 type fakeWorker struct {
 	result worker.Result
 	err    error
+}
+
+type fakePublisher struct {
+	called bool
+	result worker.GitResult
+	err    error
+}
+
+func (f *fakePublisher) Publish(context.Context, config.Config, gh.Issue, string, string, string) (worker.GitResult, error) {
+	f.called = true
+	return f.result, f.err
 }
 
 type recordingWorker struct {
@@ -170,16 +218,163 @@ func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !worked || !github.claimed || !github.done {
+	if !worked || !github.claimed || github.done {
 		t.Fatalf("worked=%v github=%+v", worked, github)
 	}
 	snapshot, _ := loop.Store.Load()
 	issue := snapshot.Issues["1"]
-	if issue.Status != "completed" || issue.PullRequestURL == "" || issue.SessionID != "" {
+	if issue.Status != "awaiting_checks" || issue.PullRequestURL == "" || issue.SessionID == "" {
 		t.Fatalf("unexpected Issue: %+v", issue)
 	}
 	if scripted.runs != 1 || scripted.resumes != 0 {
 		t.Fatalf("runs=%d resumes=%d", scripted.runs, scripted.resumes)
+	}
+}
+
+func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done"}
+	loop, github := testLoop(t, result)
+	publisher := &fakePublisher{result: worker.GitResult{
+		Branch: "codex/issue-1-test", Commit: "abc", PullRequestURL: "https://example.test/pr/1",
+	}}
+	loop.Publisher = publisher
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !publisher.called || github.done {
+		t.Fatalf("publisher called=%v github done=%v", publisher.called, github.done)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Issues["1"].PullRequestURL; got != publisher.result.PullRequestURL {
+		t.Fatalf("pull request=%q, want %q", got, publisher.result.PullRequestURL)
+	}
+}
+
+func TestPullRequestChecksGateReadyAndOptionalMerge(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", ChecksStatus: "success"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "awaiting_merge" || !github.readyPullRequest || github.mergedPullRequest || github.done {
+		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+
+	loop.Config.Completion.AutoMerge = true
+	_, err := loop.Store.Update("test_reset", 1, "", nil, func(s *state.Snapshot) error {
+		s.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.readyPullRequest = false
+	github.remote.PullRequests[0].IsDraft = false
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ = loop.Store.Load()
+	if snapshot.Issues["1"].Status != "awaiting_merge" || github.readyPullRequest || !github.mergedPullRequest {
+		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+}
+
+func TestFailedPullRequestChecksReturnWorkerToRetry(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", ChecksStatus: "failure"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "retry_wait" || !strings.Contains(snapshot.Issues["1"].LastError, "checks failed") {
+		t.Fatalf("issue=%+v", snapshot.Issues["1"])
+	}
+	recorder := &recordingWorker{result: worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", SessionID: "session", Summary: "retry later",
+	}}
+	loop.Worker = recorder
+	_, err := loop.Store.Update("test_retry_due", 1, "", nil, func(s *state.Snapshot) error {
+		s.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.resumePrompts) != 1 || !strings.Contains(recorder.resumePrompts[0], "https://example.test/pr/1") {
+		t.Fatalf("resume prompts=%q", recorder.resumePrompts)
+	}
+}
+
+func TestQueueOnlyWaitsForMergeWhenAutoMergeIsEnabled(t *testing.T) {
+	snapshot := state.Snapshot{Issues: map[string]*state.Issue{
+		"1": {Number: 1, Status: "awaiting_merge"},
+	}}
+	if queueBlockedByPullRequest(snapshot, false) {
+		t.Fatal("manual merge wait blocked the Issue queue")
+	}
+	if !queueBlockedByPullRequest(snapshot, true) {
+		t.Fatal("auto merge wait did not retain queue ownership")
+	}
+}
+
+func TestAutoMergeUpdatesBehindBranchBeforeMerging(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	loop.Config.Completion.AutoMerge = true
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", MergeStateStatus: "BEHIND", ChecksStatus: "success"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "awaiting_checks" || !github.updatedPullRequest || github.readyPullRequest || github.mergedPullRequest {
+		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+}
+
+func TestMergedPullRequestCompletesAndClosesIssue(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "CLOSED", MergedAt: &now, HeadRefName: "codex/issue-1-test", ChecksStatus: "success"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "completed" || !github.done {
+		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
 	}
 }
 
@@ -237,8 +432,14 @@ func TestWorkerTimeoutStageIsPersistedForRetry(t *testing.T) {
 }
 
 func TestFaultGitHubSyncPartialFailureIsRetried(t *testing.T) {
-	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
-	loop, github := testLoop(t, result)
+	loop, github := testLoop(t, worker.Result{})
+	_, err := loop.Store.Update("completion_pending_sync", 1, "run_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{Number: 1, Status: "completed", RunID: "run_1", PullRequestURL: "https://example.test/pr/1", GitHubSync: "done"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	github.doneErr = fmt.Errorf("temporary GitHub error")
 	if _, err := loop.RunOnce(context.Background()); err == nil {
 		t.Fatal("expected initial sync error")
@@ -331,7 +532,7 @@ func TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit(t *testing.T) {
 		}
 	}
 	snapshot, _ := loop.Store.Load()
-	if scripted.runs != 2 || scripted.resumes != 2 || snapshot.Issues["1"].Status != "completed" {
+	if scripted.runs != 2 || scripted.resumes != 2 || snapshot.Issues["1"].Status != "awaiting_checks" {
 		t.Fatalf("runs=%d resumes=%d issue=%+v", scripted.runs, scripted.resumes, snapshot.Issues["1"])
 	}
 }
@@ -382,7 +583,7 @@ func TestFaultSupervisorStopsBeforeRecoveryBlockedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString("{\"version\":1,\"event_id\":\"evt_gap\",\"sequence\":99,\"repo_id\":\"repo-deadbeef\",\"type\":\"gap\"}\n"); err != nil {
+	if _, err := f.WriteString("{\"version\":2,\"event_id\":\"evt_gap\",\"sequence\":99,\"repo_id\":\"repo-deadbeef\",\"type\":\"gap\"}\n"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
@@ -397,5 +598,55 @@ func TestFaultSupervisorStopsBeforeRecoveryBlockedWork(t *testing.T) {
 	snapshot, loadErr := loop.Store.Load()
 	if loadErr != nil || snapshot.Supervisor.State != "blocked" || snapshot.Recovery == nil {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, loadErr)
+	}
+}
+
+func TestWorkerRunLogPruningPreservesActiveAndAuditsDeletion(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Config.Logs.WorkerRunMaxAge = config.Duration{Duration: 24 * time.Hour}
+	loop.Config.Logs.WorkerRunMaxCount = 1
+	runs := filepath.Join(loop.Store.Dir, "runs")
+	for _, name := range []string{"run_old", "run_recent", "run_active"} {
+		if err := os.MkdirAll(filepath.Join(runs, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(runs, "run_old"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Update("active", 1, "run_active", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{Number: 1, RunID: "run_active", Status: "needs_input"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.pruneRunLogs(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(runs, "run_old")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old run was not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runs, "run_active")); err != nil {
+		t.Fatalf("active run removed: %v", err)
+	}
+	data, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || !strings.Contains(string(data), "worker_logs_pruned") {
+		t.Fatalf("missing audit event: %s err=%v", data, err)
+	}
+}
+
+func TestFaultDiskSafetyReserveBlocksSupervisor(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.DiskAvailable = func(string) (uint64, error) { return 0, nil }
+	err := loop.Run(context.Background())
+	var blocked BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected BlockedError, got %v", err)
+	}
+	snapshot, loadErr := loop.Store.Load()
+	if loadErr != nil || snapshot.Supervisor.State != "blocked" || !strings.Contains(snapshot.Supervisor.Message, "safety reserve") {
+		t.Fatalf("snapshot=%+v err=%v", snapshot.Supervisor, loadErr)
 	}
 }

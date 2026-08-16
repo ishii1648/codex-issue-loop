@@ -19,6 +19,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
+	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 )
@@ -60,7 +61,16 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 		return exitError{2, err}
 	}
 
-	diagnostics := diagnoseHost(ctx)
+	diagnostics := diagnoseHost(ctx, l)
+	schemaDiagnostics, schemaReady := diagnoseSchemas(l)
+	diagnostics = append(diagnostics, schemaDiagnostics...)
+	if !schemaReady {
+		result := doctorResult{SchemaVersion: doctorSchemaVersion, OK: false, GeneratedAt: time.Now().UTC(), Diagnostics: diagnostics}
+		if err := a.writeDoctorResult(*jsonOut, result); err != nil {
+			return err
+		}
+		return exitError{1, fmt.Errorf("doctor found failing diagnostics")}
+	}
 	registryStore := registry.Store{Path: l.RegistryPath}
 	registered, registryErr := registryStore.Load()
 	if registryErr != nil {
@@ -98,8 +108,26 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 	return nil
 }
 
-func diagnoseHost(ctx context.Context) []diagnostic {
-	diagnostics := []diagnostic{}
+func diagnoseSchemas(l layout.Layout) ([]diagnostic, bool) {
+	report, err := schema.Inspect(l)
+	if err != nil {
+		return []diagnostic{failedDiagnostic("SCHEMA_INSPECTION_FAILED", "host", "", "永続schemaを検査できません", err.Error(), instruction("fileを削除せずbackupし、agent-loop migrate --jsonで再確認してください"))}, false
+	}
+	if len(report.Unsupported) > 0 {
+		parts := make([]string, 0, len(report.Unsupported))
+		for _, artifact := range report.Unsupported {
+			parts = append(parts, fmt.Sprintf("%s=%d", artifact.Path, artifact.Version))
+		}
+		return []diagnostic{failedDiagnostic("SCHEMA_VERSION_UNSUPPORTED", "host", "", "このbinaryで扱えない永続schemaがあります", strings.Join(parts, ", "), instruction("対応binaryへ戻すか、対応するmigration手順を確認してください"))}, false
+	}
+	if report.NeedsMigration {
+		return []diagnostic{failedDiagnostic("SCHEMA_MIGRATION_REQUIRED", "host", "", "永続schemaをv2へmigrationする必要があります", "agent-loop migrate --jsonで対象を確認してください", command("全loop停止後にforward migrationを実行します", "agent-loop migrate --apply --json"))}, false
+	}
+	return []diagnostic{passedDiagnostic("SCHEMA_VERSION_SUPPORTED", "host", "", "永続schemaはこのbinaryと互換です", fmt.Sprintf("version=%d artifacts=%d", report.TargetVersion, len(report.Artifacts)))}, true
+}
+
+func diagnoseHost(ctx context.Context, l layout.Layout) []diagnostic {
+	diagnostics := diagnoseInstallation(l)
 	paths := map[string]string{}
 	for _, name := range []string{"git", "gh", "codex", "launchctl", "pmset"} {
 		path, err := exec.LookPath(name)
@@ -165,6 +193,35 @@ func diagnoseHost(ctx context.Context) []diagnostic {
 	return diagnostics
 }
 
+func diagnoseInstallation(l layout.Layout) []diagnostic {
+	manifestPath := filepath.Join(l.Root, "install.json")
+	manifest, err := readInstallManifest(manifestPath)
+	if errors.Is(err, os.ErrNotExist) {
+		if _, binaryErr := os.Stat(filepath.Join(l.BinDir, "agent-loop")); errors.Is(binaryErr, os.ErrNotExist) {
+			return []diagnostic{passedDiagnostic("INSTALL_NOT_PRESENT", "host", "", "agent-loopはユーザー領域へ未インストールです", "source buildからdoctorを実行しています")}
+		}
+		return []diagnostic{failedDiagnostic("INSTALL_MANIFEST_MISSING", "host", "", "install manifestがありません", manifestPath, instruction("同じversionのbinaryからagent-loop installを再実行してください"))}
+	}
+	if err != nil {
+		return []diagnostic{failedDiagnostic("INSTALL_MANIFEST_INVALID", "host", "", "install manifestを読み取れません", err.Error(), instruction("install directoryをbackupし、検証済みreleaseから再installしてください"))}
+	}
+	manifestSchema := manifest.SchemaVersion
+	if manifestSchema == 0 {
+		manifestSchema = 1
+	}
+	if manifestSchema != schema.CurrentVersion {
+		return []diagnostic{failedDiagnostic("INSTALL_SCHEMA_INCOMPATIBLE", "host", "", "installed binaryと永続schemaの対応versionが一致しません", fmt.Sprintf("install_schema=%d binary_schema=%d", manifestSchema, schema.CurrentVersion), instruction("全loopを停止し、release手順に従ってbinary updateとschema migrationを組で実行してください"))}
+	}
+	binaryHash, binaryErr := fileSHA256(filepath.Join(l.BinDir, "agent-loop"))
+	skillHash, skillErr := fileSHA256(filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"))
+	skillVersion, versionErr := os.ReadFile(filepath.Join(l.SkillsDir, "agent-loop", "VERSION"))
+	if binaryErr != nil || skillErr != nil || versionErr != nil || binaryHash != manifest.BinarySHA256 || skillHash != manifest.SkillSHA256 || strings.TrimSpace(string(skillVersion)) != manifest.Version {
+		detail := fmt.Sprintf("manifest_version=%s binary_error=%v skill_error=%v version_error=%v", manifest.Version, binaryErr, skillErr, versionErr)
+		return []diagnostic{failedDiagnostic("INSTALL_VERSION_MISMATCH", "host", "", "binaryとSkillのinstall versionまたはchecksumが一致しません", detail, instruction("loopを停止し、検証済みreleaseからagent-loop updateまたはrollbackを実行してください"))}
+	}
+	return []diagnostic{passedDiagnostic("INSTALL_VERSION_CONSISTENT", "host", "", "binaryとSkillのinstall versionが一致します", fmt.Sprintf("version=%s commit=%s", manifest.Version, manifest.Commit))}
+}
+
 func diagnoseExplicitRepository(ctx context.Context, l layout.Layout, registryStore registry.Store, path string) []diagnostic {
 	canonical, canonicalErr := config.CanonicalRepoPath(path)
 	if canonicalErr != nil {
@@ -192,6 +249,7 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 			instruction(filepath.Join(entry.RepoPath, config.FileName)+"を修正し、doctorを再実行してください")))
 	}
 	diagnostics = append(diagnostics, passedDiagnostic("CONFIG_VALID", "repository", entry.RepoID, ".agent-loop.yamlを読み込めます", cfg.GitHub.Repo))
+	diagnostics = append(diagnostics, diagnoseNotificationCredential(l, entry, cfg)...)
 
 	if len(entry.Commands) > 0 {
 		missing := []string{}
@@ -253,6 +311,22 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	return diagnostics
 }
 
+func diagnoseNotificationCredential(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
+	if !cfg.Notifications.Enabled {
+		return []diagnostic{passedDiagnostic("NOTIFICATIONS_DISABLED", "repository", entry.RepoID, "外部push通知は無効です", "opt-in")}
+	}
+	_, err := loadNotificationToken(l, entry)
+	if errors.Is(err, os.ErrNotExist) {
+		return []diagnostic{failedDiagnostic("NOTIFICATION_CREDENTIAL_MISSING", "repository", entry.RepoID, "通知credentialが設定されていません", l.NotificationTokenPath(entry.RepoID),
+			command("標準入力からcredentialを安全に保存します", fmt.Sprintf("agent-loop notification-token --repo %q --token-file -", entry.RepoPath)))}
+	}
+	if err != nil {
+		return []diagnostic{failedDiagnostic("NOTIFICATION_CREDENTIAL_UNSAFE", "repository", entry.RepoID, "通知credentialを安全に読み込めません", err.Error(),
+			command("credentialを安全な管理fileへ保存し直します", fmt.Sprintf("agent-loop notification-token --repo %q --token-file -", entry.RepoPath)))}
+	}
+	return []diagnostic{passedDiagnostic("NOTIFICATION_CREDENTIAL_VALID", "repository", entry.RepoID, "通知credentialを安全に読み込めます", "managed file mode=0600")}
+}
+
 func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 	data, err := os.ReadFile(store.StatePath())
@@ -266,7 +340,7 @@ func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Conf
 		return []diagnostic{failedDiagnostic("STATE_UNREADABLE", "repository", entry.RepoID, "durable stateを読み取れません", err.Error(), instruction("state directoryの所有者とpermissionを確認してください"))}
 	}
 	var snapshot state.Snapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Version != 1 || snapshot.RepoID != entry.RepoID || snapshot.RepoPath != entry.RepoPath {
+	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Version != state.CurrentVersion || snapshot.RepoID != entry.RepoID || snapshot.RepoPath != entry.RepoPath {
 		detail := errorText(err)
 		if err == nil {
 			detail = fmt.Sprintf("version=%d repo_id=%q repo_path=%q", snapshot.Version, snapshot.RepoID, snapshot.RepoPath)
@@ -285,7 +359,7 @@ func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Conf
 	if event.Type != "" {
 		contextDetail += fmt.Sprintf(" latest_event=%s@%s", event.Type, event.Timestamp.Format(time.RFC3339))
 	}
-	line, logErr := tailFile(filepath.Join(store.Dir, "supervisor.err.log"), 4096)
+	line, logErr := tailFile(filepath.Join(store.Dir, "launchd.stderr.log"), 4096)
 	if line != "" {
 		contextDetail += " latest_log=" + truncate(line, 500)
 	} else if logErr == nil {

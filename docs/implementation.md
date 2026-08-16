@@ -15,10 +15,13 @@
 - 原子的な`state.json`とappend-only `events.jsonl`
 - write-ahead state transaction、partial event修復、破損時の隔離とrecovery blocked
 - `state_revision`、stickyな未回答request、回答の冪等性
-- fsnotifyによるmacOS event起床と低頻度reconciliation
+- fsnotify/kqueueによるstate directory event起床、購読失敗時のpolling-only fallback、低頻度reconciliation
 - 回答保存時のsupervisor即時起床
 - GitHub Issueのfilter、再取得、決定論的sort、write-ahead claim
+- Issue番号、作成日時、priority labelを使うconfigurableなqueue orderingと安定tie-break
 - Issue別branchとGit worktree
+- workerのworktree内実装と、supervisor publisherによるcommit・push・draft PR作成の分離
+- draft PRのCI監視、成功後のReady化、manifestで選べるbase branch追随・squash merge、merge後のIssue完了
 - schema付き`codex exec`、session ID保存、`codex exec resume`
 - `standard` / `extended` preflight policy
 - typed failure分類、±20% jitter付き上限5分のretry/polling backoff、extended continuation
@@ -31,10 +34,17 @@
 - fake GitHub/Codex統合テスト、実Git worktreeテスト、race test
 - `TestFault` prefixで独立実行できる障害注入・復旧suiteと仕様17.2の対応表
 - Mac miniへの初回導入、Codex Remoteからの日常操作、障害復旧、backup・restore、手動update・rollback、撤去、実機受け入れを一連で扱う常駐運用runbook
+- event checkpointを用いた復旧可能なrotation、gzip世代保持、worker run保持上限、容量reserveによるblocked化
+- tag由来version、再現build、SPDX SBOM、checksum、artifact attestationを含むGitHub Release workflow
+- binary/Skill manifest、稼働LaunchAgentを保ったupdate、自動rollback、明示backup rollback
+- config・registry・state・active event・transactionのv1→v2 migration、checksum backup、journal再開、paired rollback
+- status別保持期間、dirty・未push・open PR・未回答request検査、dry-run cleanup、確認token付きpurge、削除監査event
+- provider-neutral interface、永続outbox、重複抑止、上限付き再送を備えたopt-inのntfyスマートフォン直接push
+- mode `0600`のrepository別通知credential管理とdoctor診断
 
 ## 運用前に必要なもの
 
-対象GitHub repositoryには、設定したready、running、needs-input、failed、done、blocked labelを事前に作成する。`doctor`はrepository accessと必須labelを検査するが、外部状態を自動作成しない。
+対象GitHub repositoryには、設定したready、running、needs-input、failed、done、blocked、priority labelを事前に作成する。`doctor`はrepository accessと必須labelを検査するが、外部状態を自動作成しない。
 
 `doctor`では次も検査する。
 
@@ -49,13 +59,14 @@
 ## MVPの制限
 
 - 対象はmacOSのユーザーLaunchAgentのみである。
+- LaunchDaemonと自動ログインは採用せず、logout・再起動は運用時確認とする。[ADR-0001](adr/0001-macos-execution-model.md)を参照する。
 - 1 repositoryにつきconcurrencyは1である。
 - 同じrepositoryを複数hostから処理しない。
+- local `flock`はhostをまたぐ排他ではない。複数hostを登録するだけでは安全にならず、[ADR-0002](adr/0002-concurrency-and-multi-host.md)のcoordinatorとpublication gatewayが実装されるまで禁止する。
 - GitHub labelは自動作成しない。
-- event logとsupervisor logのrotationは未実装である。
 - 起動時reconciliationはactive run、write-ahead claim、未反映GitHub状態、未記録のpush/PR、merge/close済みPRを復旧する。branch・worktree・labelの人手変更と二重workerの可能性は自動上書きせず、理由を残してblockedへ移す。
-- Codex taskが接続されていない場合のスマートフォンへの直接push adapterは未実装である。
-- 実GitHub repositoryと実Codex workerを使うend-to-end testは、利用者のtest repositoryで実施する必要がある。
+- スマートフォン直接pushは初期adapterとしてntfyだけに対応する。外部account、private topic、credential、mobile appの準備と実機到達確認は運用者が行う。
+- 実GitHub repositoryと実Codex workerを使うMac mini E2Eの結果は[`docs/e2e/2026-08-15-mac-mini.md`](e2e/2026-08-15-mac-mini.md)に記録している。スマートフォンからのCodex Remote接続は確認済みである。display off、logout、OS再起動はM3の受け入れTODOとせず、発生時または計画保守時の運用確認としてrunbookで扱う。
 - Codex CLI 0.136.0以降とGitHub CLI 2.69.0以降を対応下限とし、起動時に必須capabilityを検査する。resume非対応時は既存worktreeと永続状態を使う新規sessionへfallbackする。詳細は`docs/compatibility.md`を正本とする。
 - worker timeout時は独立process groupへSIGTERMを送り、既定30秒のgrace period後も親子processが残る場合だけSIGKILLへ進む。終了段階をretry理由へ残し、worktreeと途中成果は削除しない。
 - `bootstrap-labels`は必須GitHubラベルのpreviewと冪等な不足分作成を提供する。既存metadataは保持し、部分成功後の再実行を安全にする。

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 )
@@ -49,6 +51,34 @@ func TestDoctorOutputHasStableSchemaCodesAndSafeRemediations(t *testing.T) {
 		if !strings.Contains(human.String(), expected) {
 			t.Fatalf("human output missing %q: %s", expected, human.String())
 		}
+	}
+}
+
+func TestDiagnoseSchemasDistinguishesSupportedRequiredAndUnsupported(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos")}
+	if err := os.MkdirAll(l.ReposRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		version int
+		code    string
+		ready   bool
+	}{
+		{name: "supported", version: 2, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
+		{name: "migration-required", version: 1, code: "SCHEMA_MIGRATION_REQUIRED"},
+		{name: "unsupported", version: 3, code: "SCHEMA_VERSION_UNSUPPORTED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(l.RegistryPath, []byte(fmt.Sprintf("{\"version\":%d,\"repos\":{}}\n", test.version)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			diagnostics, ready := diagnoseSchemas(l)
+			if ready != test.ready || len(diagnostics) != 1 || diagnostics[0].Code != test.code || diagnostics[0].OK != test.ready {
+				t.Fatalf("diagnostics=%+v ready=%v", diagnostics, ready)
+			}
+		})
 	}
 }
 
@@ -99,7 +129,7 @@ func TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(store.Dir, "supervisor.err.log"), []byte("older\nlatest failure context\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(store.Dir, "launchd.stderr.log"), []byte("older\nlatest failure context\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			code := "SUPERVISOR_" + strings.ToUpper(supervisorState)
@@ -146,6 +176,35 @@ esac
 	}
 }
 
+func TestDoctorDiagnosesNotificationCredentialLifecycle(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, repo)
+	cfg.Notifications.Enabled = true
+	entry := registry.Entry{RepoID: registry.RepoID(cfg.GitHub.Repo, repo), RepoPath: repo}
+	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_MISSING"); item.OK || len(item.Remediations) != 1 {
+		t.Fatalf("diagnostic=%+v", item)
+	}
+	path := l.NotificationTokenPath(entry.RepoID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("token-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_VALID"); !item.OK {
+		t.Fatalf("diagnostic=%+v", item)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_UNSAFE"); item.OK {
+		t.Fatalf("diagnostic=%+v", item)
+	}
+}
+
 func TestFaultDoctorHostAuthAndSleepFixturesHaveUniqueCodes(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
@@ -174,7 +233,7 @@ exit 2
 		}
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	diagnostics := diagnoseHost(context.Background())
+	diagnostics := diagnoseHost(context.Background(), layout.Layout{Root: root, BinDir: filepath.Join(root, "installed-bin"), SkillsDir: filepath.Join(root, "skills")})
 	for _, code := range []string{"GITHUB_AUTH_INVALID", "CODEX_AUTH_INVALID", "MACOS_SLEEP_ENABLED"} {
 		item := diagnosticByCode(t, diagnostics, code)
 		if item.OK || len(item.Remediations) == 0 {
@@ -187,6 +246,32 @@ exit 2
 			t.Fatalf("duplicate host diagnostic code %s", item.Code)
 		}
 		seen[item.Code] = true
+	}
+}
+
+func TestDoctorDetectsInstalledBinaryAndSkillMismatch(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root, BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills")}
+	for _, dir := range []string{l.BinDir, filepath.Join(l.SkillsDir, "agent-loop")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := filepath.Join(root, "source")
+	if err := os.WriteFile(source, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := installArtifacts(l, source, "v1.0.0", "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnosticByCode(t, diagnoseInstallation(l), "INSTALL_VERSION_CONSISTENT"); !item.OK {
+		t.Fatalf("diagnostic=%+v", item)
+	}
+	if err := os.WriteFile(filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnosticByCode(t, diagnoseInstallation(l), "INSTALL_VERSION_MISMATCH"); item.OK {
+		t.Fatalf("diagnostic=%+v", item)
 	}
 }
 

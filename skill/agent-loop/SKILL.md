@@ -1,6 +1,6 @@
 ---
 name: agent-loop
-description: Operate and monitor the codex-issue-loop supervisor from Codex. Use for starting, stopping, inspecting, watching, or answering a loop-managed GitHub Issue queue.
+description: Operate and monitor the codex-issue-loop supervisor from Codex. Use for starting, stopping, inspecting, watching, answering, or safely cleaning up a loop-managed GitHub Issue queue.
 ---
 
 # agent-loop
@@ -11,9 +11,12 @@ Use the `agent-loop` CLI as the only control interface. The Skill does not own t
 
 1. Run `agent-loop doctor --repo <path> --json` before the first start or after configuration changes.
    - Require `schema_version: 1`. If the version is unknown, stop and report that the installed CLI and Skill are incompatible.
+   - Require `INSTALL_VERSION_CONSISTENT` when an installed distribution is present. If binary, Skill, or manifest versions differ, do not start the loop.
+   - Require `SCHEMA_VERSION_SUPPORTED`. For `SCHEMA_MIGRATION_REQUIRED`, show `agent-loop migrate --json` as a read-only preview and do not start the loop. Apply or roll back a migration only when the user explicitly authorized the version change and every registered loop is stopped.
    - Branch on failed `diagnostics[].code`, not localized `summary` or `detail` text.
    - Present each failed diagnostic with its concrete `remediations`. Do not execute a remediation merely because doctor returned it; every remediation is advisory and has explicit `automatic` and `destructive` fields.
    - Never delete, reset, overwrite state, or change macOS/GitHub/Codex settings as an automatic repair. For `GITHUB_LABELS_MISSING`, preview `bootstrap-labels` first and apply only within the user's authorized repository scope.
+   - For `NOTIFICATION_CREDENTIAL_MISSING` or `NOTIFICATION_CREDENTIAL_UNSAFE`, explain that external push is opt-in. Configure it only when the user requests it, and read the token only with `agent-loop notification-token --repo <path> --token-file -`. Never put the token in chat, command arguments, repository files, config, or plist.
 2. Run `agent-loop status --repo <path> --json` before mutating loop state.
 3. Use `start`, `stop`, or `restart` only for the repository the user named.
 4. If status contains a pending request, present that request before starting a new watch.
@@ -22,4 +25,8 @@ Use the `agent-loop` CLI as the only control interface. The Skill does not own t
 7. When watch returns `needs_input`, preserve the request ID, ask the question with its recommendation and options, then record the answer with `agent-loop answer --request-id <id> --message-file -`.
 8. Return to one blocking watch call after the answer is recorded.
 
-Confirm the exact repository and impact before `stop`, `restart`, `unregister`, or `uninstall`. None of these commands should delete worktrees or uncommitted changes.
+For worktree retention, run `agent-loop cleanup --repo <path> --json` first and present every candidate, reason, safety flag, recovery source, and purge confirmation token. `cleanup --apply` requires the named repository loop to be stopped and explicit user authorization. Never use `cleanup --apply` for an entry marked dirty, unpushed, open-PR, or unanswered-request; the CLI must also reject it. Use `purge` only for the single Issue the user explicitly authorized, copy the exact confirmation token from the current cleanup preview, and explain that dirty changes are not recoverable. Never infer or synthesize approval for purge.
+
+Confirm the exact repository and impact before `stop`, `restart`, `unregister`, `update`, `migrate --apply`, either rollback, or `uninstall`. Use only a checksum- and attestation-verified release artifact for update. Use only the exact managed backup paths returned by update and migrate for rollback. When rolling back across schema versions, restore the schema backup before the installation backup. None of these commands should delete state, worktrees, or uncommitted changes.
+
+External push is an attention hint, not durable state. After a notification, always read `status` and present the current pending request. Clearing a managed notification token requires explicit user authorization and notifications must be disabled or the loop stopped first.

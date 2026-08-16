@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 )
@@ -34,7 +35,7 @@ case "$1 $2" in
     printf '%s\n' '{"number":7,"title":"Test","body":"Body","url":"https://example.test/issues/7","state":"OPEN","labels":[{"name":"codex-loop:running"}],"assignees":[],"milestone":null,"comments":[{"body":"claim"}]}'
     ;;
   "pr list")
-    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test"}]'
+    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
     ;;
   *) exit 2 ;;
 esac
@@ -48,8 +49,66 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" {
+	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" || remote.PullRequests[0].ChecksStatus != "success" {
 		t.Fatalf("remote=%+v", remote)
+	}
+}
+
+func TestPullRequestLifecycleCommands(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	logPath := filepath.Join(dir, "calls.log")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\n", logPath)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.Completion.CloseIssue = false
+	client := CLI{Path: fake}
+	prURL := "https://github.example/owner/repo/pull/11"
+	if err := client.ReadyPullRequest(context.Background(), cfg, prURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdatePullRequest(context.Background(), cfg, prURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MergePullRequest(context.Background(), cfg, prURL); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(calls)
+	if !strings.Contains(text, "pr ready "+prURL+" --repo owner/repo") ||
+		!strings.Contains(text, "pr update-branch "+prURL+" --repo owner/repo") ||
+		!strings.Contains(text, "pr merge "+prURL+" --repo owner/repo --squash") {
+		t.Fatalf("unexpected calls:\n%s", text)
+	}
+}
+
+func TestPullRequestChecksStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		mergeState string
+		checks     []checkRollup
+		want       string
+	}{
+		{name: "no checks on clean Pull Request", mergeState: "CLEAN", want: "success"},
+		{name: "no checks before mergeability is known", mergeState: "UNKNOWN", want: "pending"},
+		{name: "successful check run", checks: []checkRollup{{Status: "COMPLETED", Conclusion: "SUCCESS"}}, want: "success"},
+		{name: "pending check run", checks: []checkRollup{{Status: "IN_PROGRESS"}}, want: "pending"},
+		{name: "failed check run", checks: []checkRollup{{Status: "COMPLETED", Conclusion: "FAILURE"}}, want: "failure"},
+		{name: "successful status context", checks: []checkRollup{{State: "SUCCESS"}}, want: "success"},
+		{name: "pending status context", checks: []checkRollup{{State: "PENDING"}}, want: "pending"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pullRequestChecksStatus(test.mergeState, test.checks); got != test.want {
+				t.Fatalf("status=%q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -78,6 +137,7 @@ esac
 	}
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
+	cfg.Completion.CloseIssue = false
 	client := CLI{Path: fake}
 	if err := client.MarkDone(context.Background(), cfg, 7, "https://example.test/pull/1"); err == nil {
 		t.Fatal("injected comment failure was not returned")
@@ -143,16 +203,106 @@ func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "--limit 1000") {
+	if !strings.Contains(string(args), "--limit 1000") || !strings.Contains(string(args), "createdAt") {
 		t.Fatalf("large queue limit missing: %s", args)
 	}
 }
 
 func TestSelectReadyIsDeterministic(t *testing.T) {
 	issues := []Issue{{Number: 9}, {Number: 2}, {Number: 5}}
-	selected, ok := SelectReady(issues, map[string]string{"2": "completed"})
+	selected, ok := SelectReady(issues, map[string]string{"2": "completed"}, config.Defaults().Queue)
 	if !ok || selected.Number != 5 {
 		t.Fatalf("selected=%+v ok=%v", selected, ok)
+	}
+}
+
+func TestSelectReadyAppliesChangedOrderOnlyToUnclaimedIssues(t *testing.T) {
+	base := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	issues := []Issue{
+		{Number: 3, CreatedAt: base, Labels: []string{"priority:high"}},
+		{Number: 2, CreatedAt: base.Add(time.Hour)},
+		{Number: 1, CreatedAt: base.Add(2 * time.Hour)},
+	}
+	queue := config.Queue{Order: "priority_then_created_at", PriorityLabels: []string{"priority:high"}}
+	selected, ok := SelectReady(issues, map[string]string{"3": "running"}, queue)
+	if !ok || selected.Number != 2 {
+		t.Fatalf("active Issue was reordered or selected: selected=%+v ok=%v", selected, ok)
+	}
+}
+
+func TestOrderIssuesSupportsCreatedAtAndPriorityWithStableTieBreaks(t *testing.T) {
+	base := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	fixture := []Issue{
+		{Number: 40, CreatedAt: base.Add(2 * time.Hour)},
+		{Number: 30, CreatedAt: base, Labels: []string{"priority:low"}},
+		{Number: 20, CreatedAt: base.Add(time.Hour), Labels: []string{"PRIORITY:HIGH", "priority:low"}},
+		{Number: 10, CreatedAt: base.Add(time.Hour), Labels: []string{"priority:high"}},
+		{Number: 50},
+	}
+
+	created := append([]Issue(nil), fixture...)
+	OrderIssues(created, config.Queue{Order: "created_at_asc"})
+	assertIssueNumbers(t, created, []int{30, 10, 20, 40, 50})
+
+	priority := append([]Issue(nil), fixture...)
+	OrderIssues(priority, config.Queue{Order: "priority_then_created_at", PriorityLabels: []string{"priority:high", "priority:low"}})
+	assertIssueNumbers(t, priority, []int{10, 20, 30, 40, 50})
+
+	numbers := append([]Issue(nil), fixture...)
+	OrderIssues(numbers, config.Queue{Order: "issue_number_asc"})
+	assertIssueNumbers(t, numbers, []int{10, 20, 30, 40, 50})
+}
+
+func TestListReadyOrdersAfterCollectingPaginatedFixture(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	responsePath := filepath.Join(dir, "issues.json")
+	items := make([]map[string]any, 120)
+	base := time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)
+	for index := range items {
+		number := 120 - index
+		labels := []map[string]string{{"name": "codex-loop:ready"}}
+		if number == 120 {
+			labels = append(labels, map[string]string{"name": "priority:high"})
+		}
+		items[index] = map[string]any{
+			"number": number, "title": fmt.Sprintf("Issue %d", number), "body": "", "url": "https://example.test/issues",
+			"createdAt": base.Add(time.Duration(number) * time.Minute), "labels": labels, "assignees": []any{}, "milestone": nil,
+		}
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(responsePath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\ncat %q\n", responsePath)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.Queue.Order = "priority_then_created_at"
+	cfg.Queue.PriorityLabels = []string{"priority:high"}
+	issues, err := (CLI{Path: fake}).ListReady(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 120 || issues[0].Number != 120 || issues[1].Number != 1 || issues[119].Number != 119 {
+		t.Fatalf("pagination fixture order is unstable: len=%d first=%d second=%d last=%d", len(issues), issues[0].Number, issues[1].Number, issues[len(issues)-1].Number)
+	}
+}
+
+func assertIssueNumbers(t *testing.T, issues []Issue, want []int) {
+	t.Helper()
+	if len(issues) != len(want) {
+		t.Fatalf("len=%d want=%d", len(issues), len(want))
+	}
+	for index := range want {
+		if issues[index].Number != want[index] {
+			t.Fatalf("index %d: got=%d want=%d", index, issues[index].Number, want[index])
+		}
 	}
 }
 

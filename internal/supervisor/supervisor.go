@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
@@ -24,20 +26,31 @@ type WorktreeManager interface {
 	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
 }
 
+type Publisher interface {
+	Publish(context.Context, config.Config, gh.Issue, string, string, string) (worker.GitResult, error)
+}
+
 type ProcessInspector interface {
 	Alive(pid int) bool
 }
 
+type NotificationDispatcher interface {
+	Dispatch(context.Context) error
+}
+
 type Loop struct {
-	Config    config.Config
-	Store     state.Store
-	GitHub    gh.Client
-	Worktrees WorktreeManager
-	Worker    worker.Runner
-	Processes ProcessInspector
-	Clock     Clock
-	Random    RandomSource
-	Logger    *log.Logger
+	Config        config.Config
+	Store         state.Store
+	GitHub        gh.Client
+	Worktrees     WorktreeManager
+	Worker        worker.Runner
+	Publisher     Publisher
+	Processes     ProcessInspector
+	Clock         Clock
+	Random        RandomSource
+	Logger        *log.Logger
+	DiskAvailable func(string) (uint64, error)
+	Notifications NotificationDispatcher
 }
 
 type BlockedError struct{ Err error }
@@ -105,7 +118,9 @@ func (l *Loop) Run(ctx context.Context) error {
 			})
 			return nil
 		}
+		l.dispatchNotifications(ctx)
 		worked, err := l.RunOnce(ctx)
+		l.dispatchNotifications(ctx)
 		if err != nil {
 			kind := failure.KindOf(err)
 			if kind == failure.Supervisor {
@@ -192,8 +207,26 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, failure.Wrap(failure.Supervisor, "load durable state", err)
 	}
+	diskAvailable := l.DiskAvailable
+	if diskAvailable == nil {
+		diskAvailable = retention.AvailableBytes
+	}
+	available, err := diskAvailable(l.Store.Dir)
+	if err != nil {
+		return false, failure.Wrap(failure.Supervisor, "inspect log storage capacity", err)
+	}
+	reserve := uint64(l.Config.Logs.RotateBytes * 2)
+	if available < reserve {
+		return false, failure.Wrap(failure.Supervisor, "log storage safety reserve exhausted", fmt.Errorf("available=%d required=%d", available, reserve))
+	}
+	if err := l.pruneRunLogs(snapshot); err != nil {
+		return false, failure.Wrap(failure.Supervisor, "prune worker run logs", err)
+	}
 	if issueState := nextPending(snapshot, l.now()); issueState != nil {
 		return true, l.processExisting(ctx, *issueState)
+	}
+	if queueBlockedByPullRequest(snapshot, l.Config.Completion.AutoMerge) {
+		return false, l.markPolling("waiting for Pull Request checks or merge")
 	}
 	if !l.Config.Queue.ContinueAfterNeedsInput {
 		if _, attention := snapshot.Attention(false); attention {
@@ -208,17 +241,38 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	for number, issue := range snapshot.Issues {
 		statuses[number] = issue.Status
 	}
-	selected, ok := gh.SelectReady(issues, statuses)
+	selected, ok := gh.SelectReady(issues, statuses, l.Config.Queue)
 	if !ok {
 		return false, l.markPolling("")
 	}
 	return true, l.startIssue(ctx, selected)
 }
 
+func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
+	exclude := map[string]bool{}
+	for _, issue := range snapshot.Issues {
+		switch issue.Status {
+		case "claiming", "claimed", "running", "resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge":
+			if issue.RunID != "" {
+				exclude[issue.RunID] = true
+			}
+		}
+	}
+	removed, err := retention.PruneRunDirs(
+		filepath.Join(l.Store.Dir, "runs"), exclude,
+		l.Config.Logs.WorkerRunMaxAge.Duration, l.Config.Logs.WorkerRunMaxCount, l.now(),
+	)
+	if err != nil || len(removed) == 0 {
+		return err
+	}
+	_, err = l.Store.Update("worker_logs_pruned", 0, "", map[string]any{"run_ids": removed}, func(*state.Snapshot) error { return nil })
+	return err
+}
+
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
-		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "retry_wait" && issue.GitHubSync == "" {
+		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.GitHubSync == "" {
 			continue
 		}
 		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
@@ -230,6 +284,15 @@ func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 		}
 	}
 	return selected
+}
+
+func queueBlockedByPullRequest(snapshot state.Snapshot, autoMerge bool) bool {
+	for _, issue := range snapshot.Issues {
+		if issue.Status == "awaiting_checks" || (autoMerge && issue.Status == "awaiting_merge") {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Loop) startIssue(ctx context.Context, issue gh.Issue) error {
@@ -302,6 +365,9 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	if current.GitHubSync != "" {
 		return l.syncGitHub(ctx, current)
 	}
+	if current.Status == "awaiting_checks" || current.Status == "awaiting_merge" {
+		return l.processPullRequest(ctx, current)
+	}
 	issue, err := l.GitHub.Get(ctx, l.Config, current.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh existing GitHub Issue", err)
@@ -354,7 +420,11 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if err != nil {
 			return failure.Wrap(failure.Supervisor, "persist worker continuation", err)
 		}
-		result, err = l.Worker.Resume(ctx, workerCfg, issue, current, "Continue the implementation from the previous run. Resolve the retry reason, run verification, and return the schema-conforming final result.", l.recordWorkerPID(current.Number, current.RunID))
+		instruction := "Continue the implementation from the previous run. Resolve the retry reason, run verification, and return the schema-conforming final result."
+		if current.LastError != "" {
+			instruction += " Retry reason: " + current.LastError
+		}
+		result, err = l.Worker.Resume(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 	} else {
 		current.Attempts++
 		current.RunID = state.NewID("run")
@@ -368,7 +438,11 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if err != nil {
 			return failure.Wrap(failure.Supervisor, "persist worker retry start", err)
 		}
-		result, err = l.Worker.Run(ctx, workerCfg, issue, current, "Retry the Issue after the previous recoverable failure. Inspect the existing worktree first and preserve valid work.", l.recordWorkerPID(current.Number, current.RunID))
+		instruction := "Retry the Issue after the previous recoverable failure. Inspect the existing worktree first and preserve valid work."
+		if current.LastError != "" {
+			instruction += " Retry reason: " + current.LastError
+		}
+		result, err = l.Worker.Run(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 	}
 	return l.handleResult(ctx, issue, current, result, err)
 }
@@ -403,26 +477,36 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	}
 	switch result.Status {
 	case "completed":
+		if l.Publisher != nil {
+			published, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, result.Summary)
+			if publishErr != nil {
+				return l.scheduleRetry(ctx, current, "publish completed work: "+publishErr.Error())
+			}
+			result.Git = &published
+		}
+		if result.Git == nil {
+			return l.scheduleRetry(ctx, current, "completed work has not been published")
+		}
 		prURL := ""
 		if result.Git != nil {
 			prURL = result.Git.PullRequestURL
 		}
-		_, err := l.Store.Update("issue_completed", issue.Number, current.RunID, result, func(s *state.Snapshot) error {
+		if prURL == "" {
+			return l.completeIssue(ctx, current, prURL, result)
+		}
+		_, err := l.Store.Update("pull_request_checks_pending", issue.Number, current.RunID, result, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
-			item.Status, item.PullRequestURL, item.LastError, item.SessionID = "completed", prURL, "", ""
+			item.Status, item.PullRequestURL, item.LastError = "awaiting_checks", prURL, ""
+			item.PullRequestMerged = false
 			item.FailureKind = ""
-			item.GitHubSync = "done"
+			item.GitHubSync = ""
 			item.RetryAfter, item.UpdatedAt = nil, l.now()
 			return nil
 		})
 		if err != nil {
-			return failure.Wrap(failure.Supervisor, "persist Issue completion", err)
+			return failure.Wrap(failure.Supervisor, "persist Pull Request check wait", err)
 		}
-		updated, stateErr := l.issueState(issue.Number)
-		if stateErr != nil {
-			return stateErr
-		}
-		return l.syncGitHub(ctx, updated)
+		return nil
 	case "needs_input":
 		requestID := state.NewID("req")
 		q := result.Question
@@ -458,6 +542,110 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
 	}
 }
+
+func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) error {
+	remote, err := l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+	if err != nil {
+		return failure.Wrap(failure.Transient, "inspect Pull Request lifecycle", err)
+	}
+	var selected *gh.PullRequest
+	for index := range remote.PullRequests {
+		candidate := &remote.PullRequests[index]
+		if candidate.URL == current.PullRequestURL || (current.PullRequestURL == "" && candidate.HeadRefName == current.Branch) {
+			selected = candidate
+			break
+		}
+	}
+	if selected == nil {
+		return l.schedulePullRequestPoll(current, "Pull Request is not visible yet")
+	}
+	if selected.MergedAt != nil {
+		return l.completeIssue(ctx, current, selected.URL, nil)
+	}
+	if !strings.EqualFold(selected.State, "open") {
+		return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "Pull Request lifecycle", errors.New("Pull Request was closed without merge")), true)
+	}
+	if current.Status == "awaiting_merge" && !l.Config.Completion.AutoMerge {
+		return l.schedulePullRequestPoll(current, "waiting for Pull Request merge")
+	}
+	switch selected.ChecksStatus {
+	case "pending", "":
+		return l.schedulePullRequestPoll(current, "waiting for Pull Request checks")
+	case "failure":
+		return l.scheduleRetry(ctx, current, "Pull Request checks failed: "+selected.URL)
+	case "success":
+		if l.Config.Completion.AutoMerge && strings.EqualFold(selected.MergeStateStatus, "behind") {
+			if err := l.GitHub.UpdatePullRequest(ctx, l.Config, selected.URL); err != nil {
+				return failure.Wrap(failure.Transient, "update Pull Request branch", err)
+			}
+			return l.schedulePullRequestPoll(current, "Pull Request branch updated; waiting for checks")
+		}
+		if l.Config.Completion.AutoMerge && strings.EqualFold(selected.MergeStateStatus, "dirty") {
+			return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "Pull Request lifecycle", errors.New("Pull Request has merge conflicts")), true)
+		}
+		if selected.IsDraft {
+			if err := l.GitHub.ReadyPullRequest(ctx, l.Config, selected.URL); err != nil {
+				return failure.Wrap(failure.Transient, "mark Pull Request ready", err)
+			}
+		}
+		if l.Config.Completion.AutoMerge {
+			if err := l.GitHub.MergePullRequest(ctx, l.Config, selected.URL); err != nil {
+				return failure.Wrap(failure.Transient, "merge Pull Request", err)
+			}
+		}
+		_, err := l.Store.Update("pull_request_ready", current.Number, current.RunID, map[string]any{
+			"pull_request_url": selected.URL, "auto_merge": l.Config.Completion.AutoMerge,
+		}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(current.Number)]
+			item.Status = "awaiting_merge"
+			item.PullRequestURL = selected.URL
+			item.LastError = ""
+			item.FailureKind = ""
+			item.RetryAfter = deadlinePointer(l.now().Add(l.Config.Queue.PollInterval.Duration))
+			item.UpdatedAt = l.now()
+			return nil
+		})
+		return failure.Wrap(failure.Supervisor, "persist Pull Request ready state", err)
+	default:
+		return failure.Wrap(failure.Supervisor, "inspect Pull Request checks", fmt.Errorf("unknown check status %q", selected.ChecksStatus))
+	}
+}
+
+func (l *Loop) schedulePullRequestPoll(current state.Issue, reason string) error {
+	retryAt := l.now().Add(l.Config.Queue.PollInterval.Duration)
+	_, err := l.Store.Update("pull_request_poll_scheduled", current.Number, current.RunID, map[string]any{
+		"status": current.Status, "reason": reason, "retry_at": retryAt,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.LastError = reason
+		item.RetryAfter = &retryAt
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	return failure.Wrap(failure.Supervisor, "persist Pull Request poll", err)
+}
+
+func (l *Loop) completeIssue(ctx context.Context, current state.Issue, prURL string, payload any) error {
+	_, err := l.Store.Update("issue_completed", current.Number, current.RunID, payload, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.Status, item.PullRequestURL, item.LastError, item.SessionID = "completed", prURL, "", ""
+		item.PullRequestMerged = prURL != ""
+		item.FailureKind = ""
+		item.GitHubSync = "done"
+		item.RetryAfter, item.UpdatedAt = nil, l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist Issue completion", err)
+	}
+	updated, stateErr := l.issueState(current.Number)
+	if stateErr != nil {
+		return stateErr
+	}
+	return l.syncGitHub(ctx, updated)
+}
+
+func deadlinePointer(value time.Time) *time.Time { return &value }
 
 func (l *Loop) recordWorkerPID(number int, runID string) worker.Started {
 	return func(pid int) error {
@@ -623,7 +811,17 @@ func (l *Loop) blockSupervisor(cause error, kind failure.Kind, consecutive int) 
 		s.Supervisor.RetryAfter = nil
 		return nil
 	})
+	l.dispatchNotifications(context.Background())
 	return BlockedError{Err: cause}
+}
+
+func (l *Loop) dispatchNotifications(ctx context.Context) {
+	if l.Notifications == nil {
+		return
+	}
+	if err := l.Notifications.Dispatch(ctx); err != nil {
+		l.Logger.Printf("notification delivery failed without stopping supervisor: %v", err)
+	}
 }
 
 func (l *Loop) maxContinuations() int {

@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish macOS arm64 release
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Confirm target architecture
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Validate annotated release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          git cat-file -t "${GITHUB_REF_NAME}" | grep -qx tag
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+
+      - name: Run release quality gates
+        run: make ci
+
+      - name: Build reproducible release twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_epoch=$(git show -s --format=%ct "${GITHUB_SHA}")
+          scripts/build-release.sh "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${source_epoch}" dist/first
+          scripts/build-release.sh "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${source_epoch}" dist/second
+          cmp dist/first/agent-loop_Darwin_arm64 dist/second/agent-loop_Darwin_arm64
+          cmp dist/first/agent-loop_Darwin_arm64.spdx.json dist/second/agent-loop_Darwin_arm64.spdx.json
+          cmp dist/first/checksums.txt dist/second/checksums.txt
+          dist/first/agent-loop_Darwin_arm64 version --json | jq -e \
+            --arg version "${GITHUB_REF_NAME}" --arg commit "${GITHUB_SHA}" \
+            '.version == $version and .commit == $commit'
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/first/agent-loop_Darwin_arm64
+            dist/first/agent-loop_Darwin_arm64.spdx.json
+            dist/first/checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/first/agent-loop_Darwin_arm64 \
+            dist/first/agent-loop_Darwin_arm64.spdx.json \
+            dist/first/checksums.txt \
+            --verify-tag \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}"

@@ -1,117 +1,172 @@
 # codex-issue-loop
 
-GitHub Issue をキューとして、着手可能な Issue が存在する限り Codex CLI のワーカーを繰り返し実行する、macOS 向けの常駐ループです。
+GitHub Issueをキューとして、着手可能なIssueが存在する限りCodex CLI workerを繰り返し実行する、Apple Silicon macOS向けの常駐ループです。
 
-Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状態、監視・回答フローを含みます。現在は初期MVPです。本番リポジトリへ登録する前に、テスト用リポジトリで権限・ラベル・worker promptを確認してください。
+## 使い方
 
-## Documents
+### 1. Macへインストールする
 
-- 設計: [アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[仕様](docs/specification.md)、[実装状況](docs/implementation.md)
-- 運用: [Mac mini runbook](docs/mac-mini-runbook.md)、[doctor・復旧](docs/doctor.md)、[GitHubラベル](docs/github-labels.md)、[CLI互換性](docs/compatibility.md)
-- 安全性: [脅威モデル](docs/threat-model.md)、[セキュリティrunbook](docs/security-runbook.md)
-
-![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
-
-## 設計の要点
-
-- 独立した`agent-loop` CLIを`launchd`が常駐させ、Codexのtaskやgoalからループの寿命を分離する
-- Issueごとに専用worktreeと`codex exec`ワーカーを用意する
-- 状態と質問を永続化し、Codex Skill経由で監視・回答する
-- `watch`はイベント通知と定期的なreconciliationを組み合わせる
-
-## Requirements
-
-- Apple Silicon macOS
-- Go 1.22以降（ソースからビルドする場合）
-- `git`
-- `gh` 2.69.0以降と対象リポジトリへの認証
-- `codex` 0.136.0以降と有効なCodex認証
-- ログイン中のmacOSユーザーセッション（LaunchAgentを使用）
-
-Mac miniでは、macOSの「ディスプレイがオフのときに自動でスリープさせない」を有効にすることを推奨します。初回導入、Codex Remote接続、スマートフォン操作、障害復旧、backup、更新、撤去は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)に従ってください。
-
-## Build and test
+Macへ`git`、`gh` 2.69.0以降、`codex` 0.136.0以降を用意し、LaunchAgentを動かすmacOSユーザーでGitHubとCodexへログインします。
 
 ```sh
-make ci
-./bin/agent-loop --version
+gh auth status
+codex login status
 ```
 
-`make ci`はformat、schema、依存関係、test、race、vet、脆弱性、buildを含むGitHub Actionsと同じ品質ゲートを実行します。個別targetと障害注入ケースは[テストマトリクス](docs/testing.md)を参照してください。
-
-## Setup
-
-1. 対象リポジトリに`.agent-loop.yaml`を追加します。[設定例](.agent-loop.example.yaml)を参照してください。
-2. CLIとCodex Skillをユーザー領域へインストールします。
-3. 必須GitHubラベルの変更計画を確認し、作成します。
-4. 対象リポジトリを登録し、診断後に開始します。
+最新のGitHub ReleaseからApple Silicon用artifactを取得し、checksum、provenance、versionを確認してインストールします。
 
 ```sh
-./bin/agent-loop install
-~/Library/Application\ Support/codex-issue-loop/bin/agent-loop bootstrap-labels --repo /absolute/path/to/repository
-~/Library/Application\ Support/codex-issue-loop/bin/agent-loop bootstrap-labels --repo /absolute/path/to/repository --apply
-~/Library/Application\ Support/codex-issue-loop/bin/agent-loop register --repo /absolute/path/to/repository
-~/Library/Application\ Support/codex-issue-loop/bin/agent-loop doctor --repo /absolute/path/to/repository
-~/Library/Application\ Support/codex-issue-loop/bin/agent-loop start --repo /absolute/path/to/repository
+agent_loop_version="$(gh release view \
+  --repo ishii1648/codex-issue-loop \
+  --json tagName \
+  --jq .tagName)"
+agent_loop_download_dir="$PWD/agent-loop-release-$agent_loop_version"
+
+mkdir -p "$agent_loop_download_dir"
+gh release download "$agent_loop_version" \
+  --repo ishii1648/codex-issue-loop \
+  --dir "$agent_loop_download_dir"
+
+cd "$agent_loop_download_dir"
+shasum -a 256 -c checksums.txt
+gh attestation verify agent-loop_Darwin_arm64 \
+  --repo ishii1648/codex-issue-loop
+chmod 0755 agent-loop_Darwin_arm64
+./agent-loop_Darwin_arm64 version --json
+./agent-loop_Darwin_arm64 install --json
+
+agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loop"
+"$agent_loop_bin" doctor --json
 ```
 
-`install`はCLIとCodex Skillをユーザー領域へ配置します。`bootstrap-labels`は既定ではpreviewのみ、`register`はリポジトリ別の状態領域とLaunchAgentを作成します。`doctor`は修復を行わず、開始前に互換性・設定・GitHub操作を診断します。詳細は[ラベルrunbook](docs/github-labels.md)と[doctor runbook](docs/doctor.md)を参照してください。
+更新・rollbackを含む詳細は[Release・install・update](docs/release.md)を参照してください。
 
-## 複数リポジトリでの並列運用
+### 2. 対象リポジトリを準備する
 
-CLIの`install`は1回だけ行い、設定、ラベル、登録、診断、起動はリポジトリごとに実施します。
+対象リポジトリをMacへcloneし、rootに`.agent-loop.yaml`を置きます。設定にはtokenや秘密値を記載しません。
 
 ```sh
-agent-loop bootstrap-labels --repo /path/to/repo-a
-agent-loop bootstrap-labels --repo /path/to/repo-a --apply
-agent-loop register --repo /path/to/repo-a
-agent-loop doctor --repo /path/to/repo-a --json
-agent-loop start --repo /path/to/repo-a
+git clone https://github.com/owner/repository.git
+cd repository
 
-agent-loop bootstrap-labels --repo /path/to/repo-b
-agent-loop bootstrap-labels --repo /path/to/repo-b --apply
-agent-loop register --repo /path/to/repo-b
-agent-loop doctor --repo /path/to/repo-b --json
-agent-loop start --repo /path/to/repo-b
+agent_loop_version="$(gh release view \
+  --repo ishii1648/codex-issue-loop \
+  --json tagName \
+  --jq .tagName)"
+
+gh api \
+  -H 'Accept: application/vnd.github.raw+json' \
+  "repos/ishii1648/codex-issue-loop/contents/.agent-loop.example.yaml?ref=$agent_loop_version" \
+  > .agent-loop.yaml
 ```
 
-登録したリポジトリごとにLaunchAgent、永続状態、ログ、Issue worktree、supervisorが分かれるため、各ループは並列に動作します。ただし、各リポジトリ内のIssue処理は現在`queue.concurrency: 1`の直列実行です。
+release binaryと同じtagの設定例を使い、`github.repo`、label、base branch、worker、完了条件を対象リポジトリに合わせます。設定項目は[設定例](.agent-loop.example.yaml)と[システム仕様](docs/specification.md)を参照してください。
 
-注意点:
+### 3. ラベルを作成して起動する
 
-- 同じGitHubリポジトリを複数のcloneや別ホストから同時に動かさない。ローカルのsupervisor lockはホストをまたぐ二重claimを防止しません。
-- 手動で`agent-loop run`を多重起動せず、各リポジトリを`register`して`start`する。
-- `status`、`watch`、`stop`などの操作では常に`--repo`で対象を明示する。引数なしの`doctor`はhostと登録済みリポジトリ全体を診断します。
-- Codexの利用枠とMacのCPU、メモリ、ディスク、networkは共有されるため、リポジトリ数を段階的に増やす。
-
-本番運用の構成とリポジトリごとの監視taskについては[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
-
-## Operation
+ラベルの変更計画を確認してから不足分を作成し、リポジトリをLaunchAgentへ登録します。
 
 ```sh
-# 状態確認
-agent-loop status --repo /path/to/repository --json
+agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loop"
 
-# attentionが必要になるまで1回のblocking watch
-agent-loop watch --repo /path/to/repository --until-attention --json
+"$agent_loop_bin" bootstrap-labels --repo "$PWD" --json
+"$agent_loop_bin" bootstrap-labels --repo "$PWD" --apply --json
+"$agent_loop_bin" bootstrap-labels --repo "$PWD" --json
 
-# 質問へ回答
-printf '%s\n' '選択した方針' | agent-loop answer \
-  --repo /path/to/repository \
+"$agent_loop_bin" register --repo "$PWD" --json
+"$agent_loop_bin" start --repo "$PWD" --json
+sleep 3
+"$agent_loop_bin" doctor --repo "$PWD" --json
+"$agent_loop_bin" status --repo "$PWD" --json
+```
+
+`doctor`が`ok: true`を返し、LaunchAgentとsupervisorが稼働していることを確認します。LaunchAgentのPATH、aqua利用時の登録、初回セットアップの詳細は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
+
+### 4. 複数リポジトリを並列実行する
+
+CLIのinstallはMacごとに1回だけ行います。各リポジトリへ`.agent-loop.yaml`とラベルを用意し、それぞれを`register`、`start`します。
+
+```sh
+agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loop"
+
+"$agent_loop_bin" register --repo /absolute/path/to/repo-a --json
+"$agent_loop_bin" register --repo /absolute/path/to/repo-b --json
+
+"$agent_loop_bin" start --repo /absolute/path/to/repo-a --json
+"$agent_loop_bin" start --repo /absolute/path/to/repo-b --json
+
+"$agent_loop_bin" doctor --repo /absolute/path/to/repo-a --json
+"$agent_loop_bin" doctor --repo /absolute/path/to/repo-b --json
+```
+
+リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。現在、同一リポジトリ内のIssueは`queue.concurrency: 1`で直列に処理します。
+
+- 同じGitHubリポジトリを複数のcloneやhostから同時に動かさないでください。
+- `status`、`watch`、`stop`などでは常に`--repo`で対象を明示してください。
+- Codexの利用枠とMacのCPU、メモリ、ディスク、networkは全ループで共有されます。
+
+並列化と複数hostの制約は[ADR-0002](docs/adr/0002-concurrency-and-multi-host.md)を参照してください。
+
+### 5. Issueをキューへ投入する
+
+着手可能なopen Issueへready labelを付けます。既定例では次のとおりです。
+
+```sh
+gh issue edit 123 --add-label codex-loop:ready
+```
+
+PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
+
+### 6. 状態を確認・監視する
+
+```sh
+"$agent_loop_bin" status --repo "$PWD" --json
+
+"$agent_loop_bin" watch \
+  --repo "$PWD" \
+  --until-attention \
+  --json
+```
+
+短い間隔で`status`を繰り返さず、入力や復旧操作が必要になるまで1回のblocking `watch`で待機します。Codex Remoteからの監視方法は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
+
+### 7. 質問へ回答する
+
+`watch`または`status`が返したrequest IDを変えずに回答します。回答に秘密値を含めないでください。
+
+```sh
+printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
+  --repo "$PWD" \
   --request-id req_... \
   --message-file - \
   --json
-
-# 状態を残して停止
-agent-loop stop --repo /path/to/repository
 ```
 
-Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部のmacOS event通知とreconciliation pollingが永続状態を確認します。
+### 8. 停止・再開する
 
-## State and safety
+```sh
+"$agent_loop_bin" status --repo "$PWD" --json
+"$agent_loop_bin" stop --repo "$PWD" --json
 
-- 通常のworking treeは変更せず、Issueごとのworktreeを使用します。
-- force push、sandbox bypass、状態やworktreeの自動削除は行いません。`stop`、`unregister`、`uninstall`後も状態とworktreeを保持します。
-- timeoutや未回答requestがあっても途中状態を保持し、安全に再試行・再開します。
-- Issue入力を未信頼データとして扱い、既知token形式と`security.redact_env`の値をログや状態からマスクします。秘密をIssueや回答へ含めないでください。
-- 権限、認証、backupの本番チェックは[セキュリティ運用runbook](docs/security-runbook.md)に従ってください。
+"$agent_loop_bin" start --repo "$PWD" --json
+"$agent_loop_bin" status --repo "$PWD" --json
+```
+
+`stop`は永続状態やIssue worktreeを削除しません。restart、cleanup、復旧は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)と[doctor・復旧runbook](docs/doctor.md)を参照してください。
+
+### 9. 更新する
+
+新しいrelease artifactをインストール時と同じ手順で検証してから更新します。
+
+```sh
+./agent-loop_Darwin_arm64 update --json
+"$agent_loop_bin" doctor --json
+```
+
+schema migrationが必要な場合はloopを開始せず、[migration runbook](docs/migration.md)に従ってください。
+
+## 詳細ドキュメント
+
+- 運用: [Mac mini常駐運用](docs/mac-mini-runbook.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[通知](docs/notifications.md)、[worktree](docs/worktree-lifecycle.md)
+- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
+- 開発: [Build・test](Makefile)、[実装状況](docs/implementation.md)、[脅威モデル](docs/threat-model.md)、[セキュリティ運用](docs/security-runbook.md)、[CLI互換性](docs/compatibility.md)

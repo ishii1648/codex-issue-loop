@@ -53,7 +53,7 @@ func (m Manager) WritePlist(entry registry.Entry, binary string) error {
 	}
 	values := map[string]string{
 		"label": m.Layout.Label(entry.RepoID), "binary": binary, "repo": entry.RepoPath,
-		"stdout": filepath.Join(stateDir, "supervisor.log"), "stderr": filepath.Join(stateDir, "supervisor.err.log"),
+		"stdout": filepath.Join(stateDir, "launchd.stdout.log"), "stderr": filepath.Join(stateDir, "launchd.stderr.log"),
 		"home": home, "path": pathEnv,
 	}
 	for _, logPath := range []string{values["stdout"], values["stderr"]} {
@@ -156,7 +156,15 @@ func (m Manager) Stop(ctx context.Context, entry registry.Entry) error {
 	if err != nil {
 		return fmt.Errorf("launchctl bootout: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, _ = m.Status(ctx, entry)
+		if !status.Loaded {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("LaunchAgent did not become unloaded")
 }
 
 func (m Manager) Restart(ctx context.Context, entry registry.Entry) error {

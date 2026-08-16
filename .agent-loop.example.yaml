@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 github:
   repo: owner/repository
@@ -13,6 +13,8 @@ queue:
   poll_interval: 60s
   concurrency: 1
   order: issue_number_asc
+  # Used from highest to lowest when order is priority_then_created_at.
+  priority_labels: []
   max_attempts: 3
   continue_after_needs_input: true
 
@@ -41,7 +43,38 @@ git:
 
 completion:
   create_draft_pr: true
-  close_issue: false
+  # false: CI成功後にReady for reviewへ移し、人手のmergeを待つ。
+  # true: CI成功後にsquash mergeまで実行する。
+  auto_merge: false
+  close_issue: true
+
+# 0s means that worktrees in the status are retained indefinitely.
+worktrees:
+  completed_max_age: 168h
+  failed_max_age: 720h
+  blocked_max_age: 0s
+  needs_input_max_age: 0s
+
+# Direct smartphone push is opt-in. Store the token with the
+# `agent-loop notification-token` command, never in this file.
+notifications:
+  enabled: false
+  provider: ntfy
+  endpoint: https://ntfy.sh
+  topic: replace-with-opaque-topic
+  include_details: false
+  timeout: 10s
+  min_interval: 5s
+  retry_initial: 10s
+  retry_max: 10m
+  max_attempts: 8
+
+logs:
+  rotate_bytes: 16777216
+  rotate_interval: 24h
+  generations: 7
+  worker_run_max_age: 720h
+  worker_run_max_count: 100
 
 # Values are read from these environment variables at runtime. Never put the
 # secret values themselves in this file.

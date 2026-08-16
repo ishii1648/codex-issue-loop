@@ -2,6 +2,7 @@ package state
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,23 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
+	"github.com/ishii1648/codex-issue-loop/internal/retention"
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
 )
+
+const CurrentVersion = schemaversion.Current
+
+type SchemaVersionError struct {
+	Kind    string
+	Version int
+}
+
+func (e SchemaVersionError) Error() string {
+	if e.Version == schemaversion.Previous {
+		return fmt.Sprintf("%s schema migration required from version 1 to %d; stop loops and run agent-loop migrate --apply", e.Kind, CurrentVersion)
+	}
+	return fmt.Sprintf("unsupported %s version %d; this binary supports version %d", e.Kind, e.Version, CurrentVersion)
+}
 
 type Supervisor struct {
 	State               string     `json:"state"`
@@ -35,24 +52,25 @@ type AnswerRecord struct {
 }
 
 type Issue struct {
-	Number           int            `json:"number"`
-	Title            string         `json:"title"`
-	Status           string         `json:"status"`
-	RunID            string         `json:"run_id,omitempty"`
-	Branch           string         `json:"branch,omitempty"`
-	Worktree         string         `json:"worktree,omitempty"`
-	Attempts         int            `json:"attempts"`
-	Continuations    int            `json:"continuations"`
-	ExecutionProfile string         `json:"execution_profile,omitempty"`
-	SessionID        string         `json:"session_id,omitempty"`
-	WorkerPID        int            `json:"worker_pid,omitempty"`
-	PullRequestURL   string         `json:"pull_request_url,omitempty"`
-	GitHubSync       string         `json:"github_sync,omitempty"`
-	FailureKind      string         `json:"failure_kind,omitempty"`
-	LastError        string         `json:"last_error,omitempty"`
-	RetryAfter       *time.Time     `json:"retry_after,omitempty"`
-	Answers          []AnswerRecord `json:"answers,omitempty"`
-	UpdatedAt        time.Time      `json:"updated_at"`
+	Number            int            `json:"number"`
+	Title             string         `json:"title"`
+	Status            string         `json:"status"`
+	RunID             string         `json:"run_id,omitempty"`
+	Branch            string         `json:"branch,omitempty"`
+	Worktree          string         `json:"worktree,omitempty"`
+	Attempts          int            `json:"attempts"`
+	Continuations     int            `json:"continuations"`
+	ExecutionProfile  string         `json:"execution_profile,omitempty"`
+	SessionID         string         `json:"session_id,omitempty"`
+	WorkerPID         int            `json:"worker_pid,omitempty"`
+	PullRequestURL    string         `json:"pull_request_url,omitempty"`
+	PullRequestMerged bool           `json:"pull_request_merged,omitempty"`
+	GitHubSync        string         `json:"github_sync,omitempty"`
+	FailureKind       string         `json:"failure_kind,omitempty"`
+	LastError         string         `json:"last_error,omitempty"`
+	RetryAfter        *time.Time     `json:"retry_after,omitempty"`
+	Answers           []AnswerRecord `json:"answers,omitempty"`
+	UpdatedAt         time.Time      `json:"updated_at"`
 }
 
 type Option struct {
@@ -81,15 +99,30 @@ type Recovery struct {
 	DetectedAt time.Time `json:"detected_at"`
 }
 
+type Notification struct {
+	ID          string     `json:"id"`
+	Kind        string     `json:"kind"`
+	IssueNumber int        `json:"issue_number,omitempty"`
+	RequestID   string     `json:"request_id,omitempty"`
+	RunID       string     `json:"run_id,omitempty"`
+	Status      string     `json:"status"`
+	Attempts    int        `json:"attempts"`
+	CreatedAt   time.Time  `json:"created_at"`
+	NextAttempt time.Time  `json:"next_attempt,omitempty"`
+	SentAt      *time.Time `json:"sent_at,omitempty"`
+	LastError   string     `json:"last_error,omitempty"`
+}
+
 type Snapshot struct {
-	Version         int                 `json:"version"`
-	RepoID          string              `json:"repo_id"`
-	RepoPath        string              `json:"repo_path"`
-	StateRevision   uint64              `json:"state_revision"`
-	Supervisor      Supervisor          `json:"supervisor"`
-	Issues          map[string]*Issue   `json:"issues"`
-	PendingRequests map[string]*Request `json:"pending_requests"`
-	Recovery        *Recovery           `json:"recovery,omitempty"`
+	Version         int                      `json:"version"`
+	RepoID          string                   `json:"repo_id"`
+	RepoPath        string                   `json:"repo_path"`
+	StateRevision   uint64                   `json:"state_revision"`
+	Supervisor      Supervisor               `json:"supervisor"`
+	Issues          map[string]*Issue        `json:"issues"`
+	PendingRequests map[string]*Request      `json:"pending_requests"`
+	Notifications   map[string]*Notification `json:"notifications,omitempty"`
+	Recovery        *Recovery                `json:"recovery,omitempty"`
 }
 
 type Event struct {
@@ -105,10 +138,12 @@ type Event struct {
 }
 
 type Store struct {
-	Dir      string
-	RepoID   string
-	RepoPath string
-	Secrets  []string
+	Dir                  string
+	RepoID               string
+	RepoPath             string
+	Secrets              []string
+	EventRetention       retention.Policy
+	NotificationsEnabled bool
 }
 
 func (s Store) StatePath() string  { return filepath.Join(s.Dir, "state.json") }
@@ -154,11 +189,17 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
 		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
 	}
+	if err := s.rotateEventsUnlocked(snapshot); err != nil {
+		return Snapshot{}, fmt.Errorf("rotate event log: %w", err)
+	}
 	if err := mutate(&snapshot); err != nil {
 		return Snapshot{}, err
 	}
 	snapshot.StateRevision++
 	now := time.Now().UTC()
+	if s.NotificationsEnabled {
+		enqueueAttention(&snapshot, eventType, issueNumber, runID, now)
+	}
 	snapshot.Supervisor.UpdatedAt = now
 	snapshotJSON, err := redact.Marshal(snapshot, s.Secrets)
 	if err != nil {
@@ -172,11 +213,11 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, fmt.Errorf("marshal event payload: %w", err)
 	}
 	event := Event{
-		Version: 1, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
 		Timestamp: now, RepoID: s.RepoID, IssueNumber: issueNumber,
 		RunID: runID, Type: eventType, Payload: payloadJSON,
 	}
-	txn := transaction{Version: 1, Snapshot: snapshot, Event: event}
+	txn := transaction{Version: CurrentVersion, Snapshot: snapshot, Event: event}
 	if err := fsutil.WriteJSON(s.TransactionPath(), txn, 0o600); err != nil {
 		return Snapshot{}, fmt.Errorf("prepare state transaction: %w", err)
 	}
@@ -190,6 +231,65 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func enqueueAttention(snapshot *Snapshot, eventType string, issueNumber int, runID string, now time.Time) {
+	if snapshot.Notifications == nil {
+		snapshot.Notifications = map[string]*Notification{}
+	}
+	add := func(id, kind, requestID string) {
+		if id == "" || snapshot.Notifications[id] != nil {
+			return
+		}
+		snapshot.Notifications[id] = &Notification{
+			ID: id, Kind: kind, IssueNumber: issueNumber, RequestID: requestID, RunID: runID,
+			Status: "pending", CreatedAt: now, NextAttempt: now,
+		}
+	}
+	switch eventType {
+	case "input_requested":
+		for _, request := range snapshot.PendingRequests {
+			if request != nil && request.IssueNumber == issueNumber && request.Status == "pending" {
+				add("needs_input:"+request.ID, "needs_input", request.ID)
+			}
+		}
+	case "issue_blocked":
+		id := fmt.Sprintf("issue_blocked:%d:%s", issueNumber, runID)
+		add(id, "issue_blocked", "")
+	case "supervisor_blocked":
+		digest := sha256.Sum256([]byte(snapshot.Supervisor.Message))
+		add(fmt.Sprintf("supervisor_blocked:%x", digest[:8]), "supervisor_blocked", "")
+	}
+}
+
+func (s Store) rotateEventsUnlocked(snapshot Snapshot) error {
+	policy := s.EventRetention
+	if policy.MaxBytes <= 0 || policy.MaxAge <= 0 || policy.Keep <= 0 || snapshot.StateRevision == 0 {
+		return nil
+	}
+	info, err := os.Stat(s.EventsPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Size() <= policy.MaxBytes && time.Since(info.ModTime()) <= policy.MaxAge {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]uint64{"archived_through": snapshot.StateRevision})
+	if err != nil {
+		return err
+	}
+	checkpoint := Event{
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
+		Timestamp: time.Now().UTC(), RepoID: s.RepoID, Type: "event_log_checkpoint", Payload: payload,
+	}
+	line, err := json.Marshal(checkpoint)
+	if err != nil {
+		return err
+	}
+	return retention.ArchiveAndReplace(s.EventsPath(), append(line, '\n'), policy)
 }
 
 func (s Store) Initialize() error {
@@ -302,7 +402,7 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "retry_wait" {
+			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" {
 				return "", false
 			}
 		}

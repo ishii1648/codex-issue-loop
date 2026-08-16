@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
+	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 )
 
@@ -121,12 +123,13 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	resultPath := filepath.Join(runDir, fmt.Sprintf("result-%d.json", time.Now().UnixNano()))
 	stdoutPath := filepath.Join(runDir, "codex.jsonl")
 	stderrPath := filepath.Join(runDir, "codex.stderr.log")
-	stdout, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	policy := retention.Policy{MaxBytes: cfg.Logs.RotateBytes, MaxAge: cfg.Logs.RotateInterval.Duration, Keep: cfg.Logs.Generations}
+	stdout, err := retention.OpenWriter(stdoutPath, policy)
 	if err != nil {
 		return Result{}, err
 	}
 	defer stdout.Close()
-	stderr, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	stderr, err := retention.OpenWriter(stderrPath, policy)
 	if err != nil {
 		return Result{}, err
 	}
@@ -178,7 +181,6 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	if err := safeStderr.Flush(); err != nil && runErr == nil {
 		runErr = err
 	}
-	_ = stdout.Sync()
 	session := sessionID
 	if discovered := findSessionID(stdoutPath); discovered != "" {
 		session = discovered
@@ -283,12 +285,11 @@ func processAlive(pid int) bool {
 }
 
 func findSessionID(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
+	var history bytes.Buffer
+	if err := retention.WriteHistory(&history, path); err != nil {
 		return ""
 	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(&history)
 	session := ""
 	for scanner.Scan() {
 		var event any
@@ -341,9 +342,6 @@ func (r Result) Validate() error {
 	}
 	switch r.Status {
 	case "completed":
-		if r.Git == nil {
-			return fmt.Errorf("completed result requires git details")
-		}
 	case "needs_input":
 		if r.Question == nil || strings.TrimSpace(r.Question.Text) == "" {
 			return fmt.Errorf("needs_input result requires a question")
@@ -368,9 +366,9 @@ func BuildPrompt(cfg config.Config, issue gh.Issue, current state.Issue, suffix 
 		URL      string   `json:"url"`
 		Comments []string `json:"comments"`
 	}{issue.Number, issue.Title, issue.Body, issue.URL, issue.Comments})
-	completion := "Commit and push the implementation."
+	completion := "Leave the verified changes in the worktree for the deterministic supervisor publisher. Do not stage, commit, push, create a pull request, invoke agent-loop, or invoke a publishing skill. Return git as null when completed."
 	if cfg.Completion.CreateDraftPR {
-		completion += " Create or update a draft pull request."
+		completion += " The supervisor will create or update a draft pull request after your completed result."
 	}
 	if cfg.Completion.CloseIssue {
 		completion += " Close the Issue only after the configured completion criteria are satisfied."

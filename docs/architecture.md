@@ -2,53 +2,62 @@
 
 ## 1. この仕組みが解決すること
 
-`codex-issue-loop` は、常時稼働する Mac mini 上で GitHub Issue を順番に取得し、Issue が存在する限り Codex CLI のワーカーを繰り返し実行する仕組みである。
+`codex-issue-loop` は、常時稼働する Mac mini 上で GitHub Issue を順番に取得し、Issue が存在する限り Codex CLI のワーカーを繰り返し実行する仕組みである。Mac miniは実行ホストであり、Issueの作成主体ではない。
 
-ユーザーはスマートフォンから次の2つの Codex taskを主な入口として利用する。
+ユーザーはスマートフォンから監視taskを主な操作入口として利用できる。
 
 - **監視task**: ループの起動・停止・状態確認・質問への回答
-- **Issue作成task**: 要望の整理と新しいGitHub Issueの作成
 
-Codex taskは操作画面であり、ループの実行主体ではない。監視taskが終了しても、`launchd` 配下のsupervisorは処理を継続する。
+仕事の投入元はCodexのIssue作成task、GitHub UI、`gh`やGitHub API、GitHub Actions等のautomationのいずれでもよい。作成元にかかわらず、着手可能条件を満たすGitHub Issueが共通のキュー境界になる。Codex taskは操作画面または任意のproducerであり、ループの実行主体ではない。監視taskが終了しても、`launchd` 配下のsupervisorは処理を継続する。
 
 ## 2. 全体像
 
-![スマートフォン、Codex task、supervisor、GitHub、Codex workerの関係](images/architecture-overview.png)
+![任意のIssue producer、GitHub、Mac mini上のsupervisorとCodex workerの関係](images/architecture-overview-v2.png)
 
-図中の `DURABLE STATE` がループ状態の正本である。socket等のevent通知は即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしを修復する。
+図中の `DURABLE STATE` がループ状態の正本である。fsnotify/kqueueによるstate directory eventは即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしやbackend停止を修復する。[ADR-0003](adr/0003-event-notification.md)を正本とする。
+
+スマートフォンから監視taskへの紺色の矢印はCodex Remoteによる操作経路、`WATCH`から監視taskを経てスマートフォンへ戻るオレンジ色の破線はCodexの通知経路を表す。これに加えて、監視task未接続時はopt-inの外部push adapterが永続outboxからスマートフォンへ直接通知できる。いずれの通知も正本ではなく、永続snapshotへ戻るための補助経路である。
 
 ## 3. コンポーネントと責務
 
 | コンポーネント | 実行主体 | 主な責務 |
 | --- | --- | --- |
 | 監視task | Codex app | CLI操作、状態の要約、ユーザーへの質問、回答登録 |
-| Issue作成task | Codex app | 要望整理、リポジトリ調査、Issue作成 |
+| Issue producer | Codex app、GitHub UI、CLI/API、automation等 | 要望整理、Issue作成、着手可能ラベル付与 |
 | agent-loop Skill | Codexが読む手順 | 自然言語を安全なCLI操作へ対応づける |
 | agent-loop CLI | Goの短命プロセス | start、stop、status、watch、answer |
 | launchd | macOS | supervisorの起動と異常終了時の再起動 |
 | supervisor | Goの常駐プロセス | Issue選択、claim、worker起動、状態遷移、復旧 |
-| Codex worker | `codex exec` | 1件のIssueの調査、実装、検証、PR作成 |
+| Codex worker | `codex exec` | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
+| publisher | supervisor内の決定論的処理 | 差分検査、commit、push、draft PR作成・既存PR再利用 |
+| PR lifecycle controller | supervisor内の決定論的処理 | CI監視、Ready化、任意のbranch更新・squash merge、merge確認 |
 | GitHub | 外部共有状態 | Issueキュー、ラベル、コメント、Pull Request |
 | 永続状態 | ローカルファイル | snapshot、event log、未回答request、世代番号 |
 
 責務の中心は次のように分かれる。
 
 ```text
-Codex app     = 人との対話
-agent-loop    = 決定論的な制御と継続実行
-Codex worker  = 1 Issue内の非決定的な開発作業
-GitHub        = 人とループが共有する仕事のキュー
+Issue producer = 作成場所を問わない仕事の投入
+Codex app      = 人との対話、任意のproducer、監視
+agent-loop     = 決定論的な制御と継続実行
+Codex worker   = 1 Issue内の非決定的な開発作業
+GitHub         = producerとループが共有する仕事のキュー
 ```
+
+現行のownership境界は1 host・1 supervisor・1 workerである。将来の単一host並列化は同じsupervisor内のworker slotとして実装し、複数host冗長化は外部の線形化可能なcoordinatorとfenced publication gatewayを必須とする。GitHub labelを分散lockとして使わない。詳細は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
 
 ## 4. 通常の実行フロー
 
-1. supervisorがGitHubから着手可能なIssueを取得する。
-2. 決定論的な順序で1件を選び、ラベルとローカル状態でclaimする。
-3. Issue専用のbranchとworktreeを用意する。
-4. `codex exec`ワーカーがpreflightを行い、そのまま実装を開始する。
-5. ワーカーがテスト、commit、push、draft PR作成まで進める。
-6. supervisorが構造化された結果を永続化し、GitHubへ反映する。
-7. 次のIssueを選ぶ。キューが空なら低負荷で待機する。
+1. 任意のproducerが着手可能ラベル付きのGitHub Issueを作成する。
+2. supervisorがGitHubから着手可能なIssueを取得する。
+3. 決定論的な順序で1件を選び、ラベルとローカル状態でclaimする。
+4. Issue専用のbranchとworktreeを用意する。
+5. `codex exec`ワーカーがpreflightを行い、そのまま実装を開始する。
+6. ワーカーはworktree内で実装とテストを行い、構造化結果を返す。Git metadata、remote、GitHubは変更しない。
+7. supervisorのpublisherが差分を検査し、署名なしで非対話commit、push、draft PR作成を冪等に行う。
+8. supervisorがCIを監視し、成功したdraft PRをReady for reviewへ移す。失敗時は同じworktreeでworkerを再試行する。
+9. `auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。`auto_merge: true`では必要ならbase branchへ追随してCIを再確認し、squash mergeまで同じIssueを所有する。
+10. mergeを確認した後でIssueを完了扱いにし、設定に応じてcloseする。キューが空なら低負荷で待機する。
 
 IssueごとのCodex workerは外側のループを所有しない。次のIssueを選ぶのは常にsupervisorである。
 
@@ -80,10 +89,10 @@ Codex Goalは、一つの具体的な目的と検証可能な完了条件を追�
 このため、次の境界を設ける。
 
 - Goalを外側のIssueループ、プロセス監視、永続状態の正本にはしない。
-- 現行のheadless workerは `standard` / `extended` profileで制御する。
+- 現行のheadless workerは `standard` / `extended` profileと`codex exec`で制御する。
 - `extended` の継続はsupervisorが `codex exec resume` を管理する。
 - 監視taskで「この障害を復旧する」など単一目的を追う場合は、ユーザーがGoalを利用してよい。
-- 将来、公式のheadless Goal APIが提供された場合は、`extended` profileのoptional adapterとして評価する。
+- App ServerのGoal APIは公式提供済みである。`extended` profileのoptional adapterとしてIssue #53で検証し、導入までは現行workerを維持する。
 
 したがってGoalは排除せず、適用範囲を単一目的の内側に限定する。
 
@@ -110,7 +119,7 @@ Codex Goalは、一つの具体的な目的と検証可能な完了条件を追�
 2. **event通知は低遅延化のヒント**
 3. **低頻度pollingは取りこぼし修復**
 
-socket、ファイル通知、プロセス内channel等のeventだけに依存しない。eventを受信した場合も、そのpayloadを正本とはせず永続状態を読み直す。
+fsnotify/kqueueでstate directoryを監視するが、そのeventだけに依存しない。eventを受信した場合も、そのpayloadを正本とはせず永続状態を読み直す。watcherを作成・登録できない場合はpolling-onlyへ降格する。
 
 ### 8.2 watchアルゴリズム
 
@@ -147,7 +156,7 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 | supervisorが異常終了 | snapshot、event log、GitHub状態 | launchd再起動後にreconciliation |
 | Macがスリープ | 実行は停止し得る | macOSの「ディスプレイoff時もスリープさせない」を有効化 |
 
-外部supervisorからCodex taskを直接wakeする公開APIには依存しない。監視taskが接続されていない期間の即時pushが必要になった場合は、スマートフォンへの直接通知adapterを別機能として追加する。
+App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できるが、外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。監視taskが接続されていない期間は、opt-inのntfy adapterが`needs_input`とsupervisor blockedを永続outboxから通知する。詳細は[公式仕様確認](codex-capability-review.md)と[スマートフォン直接push通知](notifications.md)を参照する。
 
 ## 10. 設計上の不変条件
 
@@ -156,15 +165,16 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 - eventを状態そのものとして扱わない。
 - Codexによる定期pollingを行わない。
 - 1 Issueにつき同時に1つのwriterだけを許可する。
+- GitHubへ公開できるpublisherをrepository単位で1つの論理writerに限定する。
 - workerに次Issueの選択や無限ループを任せない。
 - preflightの実行経路選択でユーザーを止めない。
 - Goalを永続supervisorの代替にしない。
 
 ## 11. 日常運用のイメージ
 
-通常、ユーザーが触るのは次の2つだけである。
+通常、ユーザーが直接操作する必要があるのは監視taskだけである。
 
-1. `[INTAKE] <repo> — new issue` で新しい仕事を登録する。
+1. GitHub UI、CLI/API、automation、または任意の `[INTAKE] <repo> — new issue` taskから新しい仕事を登録する。
 2. `[LOOP] <repo> — monitor` で状態確認と必要な回答を行う。
 
 ループに着手可能なIssueがあればsupervisorが自動的に処理する。質問が必要になれば監視taskのwatchが戻り、Codexがユーザーへ質問する。回答後は同じworktreeと保存済みコンテキストを使って処理を再開する。

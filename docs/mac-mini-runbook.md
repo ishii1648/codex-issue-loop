@@ -1,6 +1,6 @@
 # Mac mini常駐運用runbook
 
-最終確認日: 2026-08-15
+最終確認日: 2026-08-16
 
 このrunbookは、Apple Silicon Mac mini上で`agent-loop`を常駐させ、ChatGPTモバイルアプリのCodex Remoteから起動、監視、質問への回答、停止を行うための標準手順である。ループ本体はLaunchAgentとして動作し、Codex taskやCodex desktop appの生存には依存しない。一方、スマートフォンからMacを操作する経路には、ログイン中のmacOSユーザーセッション、起動中のCodex desktop app、同一アカウントのRemote接続が必要である。
 
@@ -17,7 +17,7 @@ Mac miniには、日常利用や管理者作業と分離した標準macOSユー�
 - `git`、互換範囲内の`gh`、`codex`、ソースからbuildする場合はGoがインストール済みである。対応versionは[CLI互換性マトリクス](compatibility.md)を参照する。
 - 対象repositoryのdefault branchにbranch protectionとrequired checksが設定され、workerの資格情報にbypass権限がない。
 
-FileVaultを利用するMacでは、OS再起動後に利用者がdiskをunlockしてmacOSへログインするまでLaunchAgentとRemoteは復旧しない。自動ログインは物理アクセス時の保護を弱めるため既定では使用しない。無人再起動まで必要な環境では、組織の端末管理・物理セキュリティ・FileVault方針を先に決める。
+FileVaultを利用するMacでは、OS再起動後に利用者がdiskをunlockしてmacOSへログインするまでLaunchAgentとRemoteは復旧しない。自動ログイン、LaunchDaemon、root/system-wide credentialは採用しない。比較、security boundary、再検討条件は[ADR-0001](adr/0001-macos-execution-model.md)を正本とする。
 
 ## 2. 初回セットアップ
 
@@ -38,6 +38,8 @@ make ci
 - `~/.codex/skills/agent-loop/SKILL.md`
 
 以降、インストール済みbinaryへPATHを通すか、絶対パスで実行する。LaunchAgentには登録時のbinary絶対パスが記録される。
+
+`aqua`のproxy経由で`gh`や`go`を使う環境では、非対話LaunchAgentのPATHに`aqua`本体がないとproxyが失敗することがある。`command -v`の結果がproxy symlinkなら、実体のCLI絶対パスを登録するか、`aqua`本体を含むPATHで再登録し、`doctor`を実行する。
 
 ### 2.2 GitHubとCodexの認証
 
@@ -105,9 +107,9 @@ Mac miniのCodex desktop appでSettingsのConnectionsを開き、「Control this
 
 Codex desktop appを終了、sign out、またはRemote Controlを無効化するとスマートフォン経路は切れる。再login後はRemote Controlを再度有効化する。Mac側のCodex設定で、Remote接続中にMacをawakeに保つoptionが利用できる場合も有効にする。ただし常駐運用ではmacOSのEnergy設定を正本とし、desktop appのoptionだけに依存しない。
 
-## 3. Codex app上の2つのtask
+## 3. Codex app上の監視taskと任意のIssue作成task
 
-通常運用では、repositoryごとに次の2 taskを分ける。会話履歴や役割が混ざらず、監視taskがblocking watch中でも新しい仕事を投入できる。
+通常運用ではrepositoryごとに監視taskを用意する。Issue作成taskを使う場合は監視taskと分けると、会話履歴や役割が混ざらず、監視taskがblocking watch中でも新しい仕事を投入できる。
 
 ### 監視task
 
@@ -119,7 +121,9 @@ Codex desktop appを終了、sign out、またはRemote Controlを無効化す�
 
 ### Issue作成task
 
-名前の例は`[issues] owner/repository`とする。Issueの背景、完了条件、対象repository、着手可能かを会話で整理し、`codex-loop:ready`を付けてキューへ投入する。監視やloop processの所有はこのtaskに持たせない。
+Issue作成taskは任意である。名前の例は`[issues] owner/repository`とする。Issueの背景、完了条件、対象repository、着手可能かを会話で整理し、`codex-loop:ready`を付けてキューへ投入する。監視やloop processの所有はこのtaskに持たせない。
+
+IssueはGitHub UI、`gh`、GitHub API、GitHub Actions等のautomation、または別ホストのCodexから作成してもよい。Mac miniは実行ホストであり、Issue作成元ではない。どの経路でも、対象repositoryにopen Issueを作成し、設定されたreadyラベルと任意のassignee・milestone条件を満たせば同じキューへ入る。readyラベルを付ける主体には対象repositoryの適切なGitHub権限が必要である。
 
 ## 4. スマートフォンからの日常操作
 
@@ -144,6 +148,8 @@ Codex taskが終了または切断してもループ本体は継続する。同�
 ```sh
 agent-loop watch --repo /absolute/path/to/repository --until-attention --json
 ```
+
+監視task未接続時もスマートフォンへattentionを知らせる場合は、opt-inの外部pushを設定する。tokenを会話やcommand引数へ貼らず、[スマートフォン直接push通知](notifications.md)のprovider準備、`notification-token --token-file -`、実機到達確認に従う。通知は正本ではないため、tap後は必ず`status`から現在のrequestを読み直す。
 
 ### 質問へ回答
 
@@ -181,6 +187,8 @@ agent-loop logs --repo /absolute/path/to/repository
 agent-loop logs --repo /absolute/path/to/repository --stderr
 ```
 
+`logs`は保持中のgzip世代と現行`supervisor.log`を古い順に連結して表示する。`--stderr`はlaunchdが捕捉した起動失敗を同様に表示する。既定のrotation・保持値は`.agent-loop.yaml`の`logs`で変更できるが、容量reserveを小さくしすぎない。
+
 ### `needs_input`
 
 これは障害ではなく、workerが安全に続行するための入力待ちである。質問、推奨案、選択肢、Issue番号、request IDを確認し、[質問へ回答](#質問へ回答)の手順で回答する。質問が不明瞭なら、秘密を渡さず追加説明を回答として記録する。
@@ -195,6 +203,12 @@ agent-loop status --repo /absolute/path/to/repository --json
 ```
 
 worktreeのbranch変更、未commit変更、remote PRとの不一致がある場合は自動修復しない。対象Issueのworktreeを人が確認し、変更を保持する方針を決める。
+
+### Git transportまたはcommit署名で停止する
+
+`git config --global --get-regexp '^url\..*\.insteadof$'`でHTTPS URLがSSHへ書き換えられていないか確認する。LaunchAgentでSSH agentに依存しない運用では、対象repositoryのremoteをcredential helperで扱えるHTTPS URLに直す。URLやtokenをlogへ出さない。
+
+publisherは対話停止を避けるため当該自動commitだけ`commit.gpgsign=false`を指定する。通常のユーザーcommit署名設定は変更しない。署名必須policyのrepositoryでは自動キューへ入れず、別の非対話署名方式を設計してから有効化する。
 
 ### GitHubまたはCodex認証の期限切れ
 
@@ -257,16 +271,17 @@ path、ユーザー、CLI version、state schemaが異なるMacへ移す場合�
 
 ## 7. 更新とrollback
 
-自動update/rollback機能が導入されるまでは、停止とbackupを伴う手動手順とする。
+release artifactの検証と更新方針は[Release・install・update方針](release.md)を正本とする。
 
 1. 全loopを停止し、[backup](#backup)を取る。
-2. 現在のinstalled binaryとsource commitを記録し、binaryのversion付きcopyをbackup領域へ保全する。
-3. 更新先commitで`make ci`を実行する。
-4. 新しいbinaryから`install`を実行する。
-5. 全対象repositoryを再度`register`し、plistのbinary pathを更新する。
-6. `doctor`後、1 repositoryずつstartする。
+2. `gh release download`、checksum、attestation、`version --json`でartifactを検証する。
+3. 新しいbinaryから`update --json`を実行し、返されたbackup pathを記録する。
+4. `update`が元々稼働していたLaunchAgentを再開し、全登録repositoryのplistを再生成したことを出力で確認する。
+5. `doctor`と各repositoryの`status`を確認する。
 
-更新後に失敗した場合はloopを停止し、保存した旧binaryと互換性のあるstate/config backupへ組で戻す。binaryだけを戻して新schemaのstateを読み込ませない。旧binaryをinstallして再registerし、doctor、start、statusの順で確認する。復旧にstateの削除やschema変換が必要なら自動実行せずescalationする。
+`update`が`schema_migration_required: true`を返すreleaseでは全loopを停止したままにし、[永続schema migration runbook](migration.md)に従って`migrate --apply`を完了してからdoctorとstartへ進む。
+
+更新後に失敗した場合は`update`が返したbackupを`rollback --backup`へ指定する。binaryだけを戻して新schemaのstateを読み込ませない。旧binaryと互換性のあるstate/config backupへ組で戻し、doctor、start、statusの順で確認する。復旧にstateの削除や未定義のschema変換が必要なら自動実行せずescalationする。
 
 ## 8. 登録解除とuninstall
 
@@ -284,7 +299,7 @@ agent-loop unregister --repo /absolute/path/to/repository --json
 agent-loop uninstall --json
 ```
 
-`uninstall`もstateとworktreeを保持する。完全削除は通常手順に含めない。保持不要と判断したデータはbackupとレビューを経て、CLIとは別の明示的な作業として削除する。
+`uninstall`もstateとworktreeを保持する。worktreeの整理は直接削除せず、[Worktree保持・cleanup・purge runbook](worktree-lifecycle.md)に従う。通常は`cleanup --json`でpreviewし、対象と理由をレビューしてからloop停止中に`cleanup --apply`する。dirty、未push、open PR、未回答requestを含む対象の`purge`はbackupと完全一致確認tokenを必須とする。
 
 ## 9. log収集とescalation
 
@@ -347,26 +362,36 @@ agent-loop logs --repo /absolute/path/to/repository --stderr
 新しいMac miniへ導入するときは、次を順に記録する。実repositoryで初めて試さず、branch protectionを設定したtest repositoryから始める。
 
 - [ ] 初期状態からbuild、install、認証確認、label preview/apply、register、doctorを完了した
-- [ ] AC Powerの`sleep`が`0`で、display off後もLaunchAgentが動作した
-- [ ] ChatGPTモバイルアプリからMac miniへ接続し、新しい監視taskを開始した
+- [ ] AC Powerの`sleep`が`0`であることを確認した
+- [x] ChatGPTモバイルアプリからMac miniへのCodex Remote接続を確認した（2026-08-16）
 - [ ] スマートフォンからstart、status、watch、stopを実行できた
-- [ ] test Issueをclaimし、Codex workerがworktreeで実行され、draft PRまたは期待した完了状態へ到達した
+- [ ] test Issueをclaimし、Codex workerがworktreeで実行され、draft PR作成、CI成功後のReady化、manifestどおりの手動または自動merge待ちへ到達した
 - [ ] 意図的な`needs_input`をスマートフォンで受け、request IDを保ってanswerし、workerがresumeした
 - [ ] desktop app/taskを終了してもloopが継続し、新しいtaskから監視へ再接続できた
 - [ ] network一時切断後、eventの取りこぼしがあってもreconciliationで最新snapshotへ復旧した
 - [ ] auth失効をtest credentialで再現し、blockedの検出、再認証、restartを確認した
 - [ ] 容量制限されたtest volumeまたはfixtureで書き込み失敗を再現し、停止・backup・復旧手順を確認した
-- [ ] screen lockとdisplay offでは継続し、logoutでは停止することを確認した
-- [ ] 計画したOS再起動後、login、Remote再接続、LaunchAgent/status復旧を確認した
 - [ ] backupからtest環境をrestoreし、doctor後に再開できた
 - [ ] unregisterとuninstall後もstate/worktreeが保持されることを確認した
 
-再起動、logout、認証失効、容量不足は稼働中の本番repositoryでは試さない。実施日時、tester、commit、CLI version、Mac model、macOS version、結果、関連Issueを記録し、未確認項目を「成功」と扱わない。
+認証失効、容量不足は稼働中の本番repositoryでは試さない。実施日時、tester、commit、CLI version、Mac model、macOS version、結果、関連Issueを記録し、未確認項目を「成功」と扱わない。
+
+### 10.1 端末ライフサイクルの運用時確認
+
+display off、screen lock、logout、OS再起動はMac miniの通常運用では発生頻度が低く、意図的な中断を伴うため、導入やmilestone完了を妨げるTODOにはしない。実際に発生したとき、または計画保守時に次を確認して運用記録へ残す。
+
+- display offまたはscreen lock中、Macがawakeでユーザーsessionが維持されていればLaunchAgentが継続する
+- logoutするとLaunchAgentとCodex Remoteが停止する
+- OS再起動後、FileVault unlockとlogin、Codex Remote再接続、LaunchAgentのstatus確認まで復旧する
+
+異常があった場合だけ、実施日時、tester、CLI version、Mac model、macOS version、観測結果を添えてIssue化する。
 
 ## 11. 公式仕様への依存
 
 - [OpenAI: Remote connections](https://learn.chatgpt.com/docs/remote-connections.md)
 - [OpenAI: Codex authentication](https://learn.chatgpt.com/docs/auth.md)
+- [Apple: Service Management](https://developer.apple.com/documentation/servicemanagement)
+- [Apple: Automatic login and FileVault](https://support.apple.com/en-gb/102316)
 - [GitHub CLI: gh auth status](https://cli.github.com/manual/gh_auth_status)
 - [GitHub CLI: gh auth login](https://cli.github.com/manual/gh_auth_login)
 - [Apple: Set sleep and wake settings for your Mac](https://support.apple.com/en-gb/guide/mac-help/mchle41a6ccd/mac)

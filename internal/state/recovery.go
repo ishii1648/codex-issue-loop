@@ -25,19 +25,31 @@ type transaction struct {
 func (s Store) recoverUnlocked() (Snapshot, error) {
 	snapshot, snapshotExists, err := s.loadSnapshotUnlocked()
 	if err != nil {
+		if isSchemaVersionError(err) {
+			return Snapshot{}, err
+		}
 		return s.quarantineUnlocked(err)
 	}
 	events, validBytes, partial, err := s.readEventsUnlocked()
 	if err != nil {
+		if isSchemaVersionError(err) {
+			return Snapshot{}, err
+		}
 		return s.quarantineUnlocked(err)
 	}
 
 	txn, txnExists, err := s.loadTransactionUnlocked()
 	if err != nil {
+		if isSchemaVersionError(err) {
+			return Snapshot{}, err
+		}
 		return s.quarantineUnlocked(err)
 	}
 	if txnExists {
 		if err := s.validateTransaction(txn); err != nil {
+			if isSchemaVersionError(err) {
+				return Snapshot{}, err
+			}
 			return s.quarantineUnlocked(err)
 		}
 		if partial {
@@ -130,9 +142,9 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 func (s Store) emptySnapshot() Snapshot {
 	now := time.Now().UTC()
 	return Snapshot{
-		Version: 1, RepoID: s.RepoID, RepoPath: s.RepoPath,
+		Version: CurrentVersion, RepoID: s.RepoID, RepoPath: s.RepoPath,
 		Supervisor: Supervisor{State: "stopped", UpdatedAt: now},
-		Issues:     map[string]*Issue{}, PendingRequests: map[string]*Request{},
+		Issues:     map[string]*Issue{}, PendingRequests: map[string]*Request{}, Notifications: map[string]*Notification{},
 	}
 }
 
@@ -148,19 +160,26 @@ func (s Store) loadSnapshotUnlocked() (Snapshot, bool, error) {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return Snapshot{}, false, fmt.Errorf("decode state: %w", err)
 	}
-	if snapshot.Version != 1 {
-		return Snapshot{}, false, fmt.Errorf("unsupported state version %d", snapshot.Version)
+	if snapshot.Version != CurrentVersion {
+		return Snapshot{}, false, SchemaVersionError{Kind: "state", Version: snapshot.Version}
 	}
 	if snapshot.RepoID != s.RepoID {
 		return Snapshot{}, false, fmt.Errorf("state repo_id %q does not match %q", snapshot.RepoID, s.RepoID)
 	}
+	normalizeSnapshot(&snapshot)
+	return snapshot, true, nil
+}
+
+func normalizeSnapshot(snapshot *Snapshot) {
 	if snapshot.Issues == nil {
 		snapshot.Issues = map[string]*Issue{}
 	}
 	if snapshot.PendingRequests == nil {
 		snapshot.PendingRequests = map[string]*Request{}
 	}
-	return snapshot, true, nil
+	if snapshot.Notifications == nil {
+		snapshot.Notifications = map[string]*Notification{}
+	}
 }
 
 func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {
@@ -189,7 +208,10 @@ func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {
 			if err := json.Unmarshal(bytes.TrimSpace(line), &event); err != nil {
 				return nil, validBytes, false, fmt.Errorf("decode event at byte %d: %w", validBytes, err)
 			}
-			if event.Version != 1 || event.RepoID != s.RepoID {
+			if event.Version != CurrentVersion {
+				return nil, validBytes, false, SchemaVersionError{Kind: "event", Version: event.Version}
+			}
+			if event.RepoID != s.RepoID {
 				return nil, validBytes, false, fmt.Errorf("invalid event metadata at sequence %d", event.Sequence)
 			}
 			events = append(events, event)
@@ -216,12 +238,20 @@ func (s Store) loadTransactionUnlocked() (transaction, bool, error) {
 	if err := json.Unmarshal(data, &txn); err != nil {
 		return transaction{}, false, fmt.Errorf("decode state transaction: %w", err)
 	}
+	normalizeSnapshot(&txn.Snapshot)
 	return txn, true, nil
 }
 
 func (s Store) validateTransaction(txn transaction) error {
-	if txn.Version != 1 || txn.Snapshot.Version != 1 || txn.Event.Version != 1 {
-		return errors.New("unsupported transaction version")
+	if txn.Version != CurrentVersion || txn.Snapshot.Version != CurrentVersion || txn.Event.Version != CurrentVersion {
+		version := txn.Version
+		if version == CurrentVersion && txn.Snapshot.Version != CurrentVersion {
+			version = txn.Snapshot.Version
+		}
+		if version == CurrentVersion && txn.Event.Version != CurrentVersion {
+			version = txn.Event.Version
+		}
+		return SchemaVersionError{Kind: "transaction", Version: version}
 	}
 	if txn.Snapshot.RepoID != s.RepoID || txn.Event.RepoID != s.RepoID {
 		return errors.New("transaction repository does not match state store")
@@ -238,6 +268,13 @@ func (s Store) validateTransaction(txn transaction) error {
 func (s Store) validateConsistency(snapshot Snapshot, events []Event) error {
 	last := uint64(0)
 	for index, event := range events {
+		if index == 0 && event.Type == "event_log_checkpoint" {
+			if event.Sequence == 0 {
+				return fmt.Errorf("event log checkpoint sequence must be positive")
+			}
+			last = event.Sequence
+			continue
+		}
 		expected := last + 1
 		if event.Sequence != expected {
 			return fmt.Errorf("event sequence at index %d is %d, expected %d", index, event.Sequence, expected)
@@ -295,10 +332,10 @@ func (s Store) recordRepairUnlocked(snapshot Snapshot, eventType string, payload
 		return Snapshot{}, err
 	}
 	event := Event{
-		Version: 1, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
 		Timestamp: now, RepoID: s.RepoID, Type: eventType, Payload: payloadJSON,
 	}
-	txn := transaction{Version: 1, Snapshot: snapshot, Event: event}
+	txn := transaction{Version: CurrentVersion, Snapshot: snapshot, Event: event}
 	if err := fsutil.WriteJSON(s.TransactionPath(), txn, 0o600); err != nil {
 		return Snapshot{}, err
 	}
@@ -344,7 +381,7 @@ func (s Store) quarantineUnlocked(cause error) (Snapshot, error) {
 	snapshot.Recovery = &Recovery{Status: "blocked", Reason: safeCause, BackupDir: backupDir, DetectedAt: now}
 	payload, _ := redact.Marshal(map[string]string{"reason": safeCause, "backup_dir": backupDir}, s.Secrets)
 	event := Event{
-		Version: 1, EventID: NewID("evt"), Sequence: 1, Timestamp: now,
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: 1, Timestamp: now,
 		RepoID: s.RepoID, Type: "recovery_blocked", Payload: payload,
 	}
 	if err := s.appendEventUnlocked(event); err != nil {
@@ -363,4 +400,9 @@ func syncDirectory(path string) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
+}
+
+func isSchemaVersionError(err error) bool {
+	var versionError SchemaVersionError
+	return errors.As(err, &versionError)
 }
