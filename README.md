@@ -6,29 +6,18 @@ Go製の`agent-loop` CLI、launchd supervisor、GitHub/Codex adapter、永続状
 
 ## Documents
 
-- [アーキテクチャ概要](docs/architecture.md)
-- [MVP実装状況](docs/implementation.md)
-- [要件定義](docs/requirements.md)
-- [システム仕様](docs/specification.md)
-- [脅威モデル](docs/threat-model.md)
-- [セキュリティ運用runbook](docs/security-runbook.md)
-- [CLI互換性マトリクス](docs/compatibility.md)
-- [GitHubラベルbootstrap runbook](docs/github-labels.md)
-- [doctor診断・復旧runbook](docs/doctor.md)
-- [Mac mini常駐運用runbook](docs/mac-mini-runbook.md)
+- 設計: [アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[仕様](docs/specification.md)、[実装状況](docs/implementation.md)
+- 運用: [Mac mini runbook](docs/mac-mini-runbook.md)、[doctor・復旧](docs/doctor.md)、[GitHubラベル](docs/github-labels.md)、[CLI互換性](docs/compatibility.md)
+- 安全性: [脅威モデル](docs/threat-model.md)、[セキュリティrunbook](docs/security-runbook.md)
 
 ![codex-issue-loop アーキテクチャ](docs/images/architecture-overview.png)
 
 ## 設計の要点
 
-- ループ本体は Codex の task や goal ではなく、独立した `agent-loop` CLI が担う
-- macOS の `launchd` がループの生存を管理する
-- Issue ごとに独立した `codex exec` ワーカーを起動する
-- Codex Skill は起動・停止・監視・回答を CLI に橋渡しする薄い操作層とする
-- スマートフォンでは、監視用 task と Issue 作成用 task の2つを主な入口にする
-- ユーザーへの質問が必要になった場合は状態を永続化し、監視用 task を通して回答できるようにする
-- `watch` は永続状態を正本とし、イベント通知と60秒間隔のreconciliationを併用する
-- Codex Goalは外側のIssueループには使わず、単一目的の長時間作業に限定して活用する
+- 独立した`agent-loop` CLIを`launchd`が常駐させ、Codexのtaskやgoalからループの寿命を分離する
+- Issueごとに専用worktreeと`codex exec`ワーカーを用意する
+- 状態と質問を永続化し、Codex Skill経由で監視・回答する
+- `watch`はイベント通知と定期的なreconciliationを組み合わせる
 
 ## Requirements
 
@@ -48,21 +37,7 @@ make ci
 ./bin/agent-loop --version
 ```
 
-`make ci`はGitHub Actionsと同じ品質ゲートをローカルで再現し、次を順に実行します。
-
-- `gofmt`の差分検査
-- worker result schemaの同期検査
-- `go mod tidy`後の`go.mod` / `go.sum`差分検査
-- `go test ./...`
-- `go test ./... -run '^TestFault' -count=1`
-- `go test -race ./...`
-- `go vet ./...`
-- 到達可能なGo脆弱性の`govulncheck`
-- `make build`
-
-個別に実行する場合は、`make fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build`を使用してください。Pull Requestと`main`へのpushでは、Apple Siliconの`macos-15` runner上で同じ検査を実行します。障害注入ケースと仕様17.2の対応は[テストマトリクス](docs/testing.md)に記載しています。
-
-`vuln-check`は再現可能な検査のため`govulncheck v1.6.0`と脆弱性修正済みのGo 1.25.8 toolchainを固定し、Goのtoolchain機能で初回にdownloadします。アプリ本体の最小Go versionは1.22のままです。
+`make ci`はformat、schema、依存関係、test、race、vet、脆弱性、buildを含むGitHub Actionsと同じ品質ゲートを実行します。個別targetと障害注入ケースは[テストマトリクス](docs/testing.md)を参照してください。
 
 ## Setup
 
@@ -80,18 +55,36 @@ make ci
 ~/Library/Application\ Support/codex-issue-loop/bin/agent-loop start --repo /absolute/path/to/repository
 ```
 
-`install`は次を配置します。
+`install`はCLIとCodex Skillをユーザー領域へ配置します。`bootstrap-labels`は既定ではpreviewのみ、`register`はリポジトリ別の状態領域とLaunchAgentを作成します。`doctor`は修復を行わず、開始前に互換性・設定・GitHub操作を診断します。詳細は[ラベルrunbook](docs/github-labels.md)と[doctor runbook](docs/doctor.md)を参照してください。
 
-- `~/Library/Application Support/codex-issue-loop/bin/agent-loop`
-- `~/.codex/skills/agent-loop/SKILL.md`
+## 複数リポジトリでの並列運用
 
-`register`はリポジトリ別の永続状態ディレクトリと`~/Library/LaunchAgents/com.codex-issue-loop.<repo-id>.plist`を作成します。認証tokenはコピーしません。
+CLIの`install`は1回だけ行い、設定、ラベル、登録、診断、起動はリポジトリごとに実施します。
 
-`bootstrap-labels`は既定ではpreviewだけを表示し、`--apply`を指定した場合だけ不足ラベルを作成します。既存ラベルの色・説明は一致しない場合も保持し、ラベルの更新・削除は行いません。詳細は[GitHubラベルbootstrap runbook](docs/github-labels.md)を参照してください。
+```sh
+agent-loop bootstrap-labels --repo /path/to/repo-a
+agent-loop bootstrap-labels --repo /path/to/repo-a --apply
+agent-loop register --repo /path/to/repo-a
+agent-loop doctor --repo /path/to/repo-a --json
+agent-loop start --repo /path/to/repo-a
 
-`doctor`はversion文字列だけでなく、実行に必要なCLI optionとGitHub Issue操作を検査します。必須capabilityがない場合は開始を拒否します。Codexのsession resumeだけが利用できない場合は、既存worktreeと永続状態を引き継いだ新規sessionへ安全にfallbackします。対応範囲と更新確認の手順は[CLI互換性マトリクス](docs/compatibility.md)を参照してください。
+agent-loop bootstrap-labels --repo /path/to/repo-b
+agent-loop bootstrap-labels --repo /path/to/repo-b --apply
+agent-loop register --repo /path/to/repo-b
+agent-loop doctor --repo /path/to/repo-b --json
+agent-loop start --repo /path/to/repo-b
+```
 
-`doctor --repo`は対象repositoryを、`doctor`はhostと登録済みrepository全体を診断します。JSONは`schema_version`と安定した`diagnostics[].code`を持ち、blocked/stopped状態には直近event・logと具体的な次の操作を添えます。修復は自動実行しません。[doctor診断・復旧runbook](docs/doctor.md)を参照してください。
+登録したリポジトリごとにLaunchAgent、永続状態、ログ、Issue worktree、supervisorが分かれるため、各ループは並列に動作します。ただし、各リポジトリ内のIssue処理は現在`queue.concurrency: 1`の直列実行です。
+
+注意点:
+
+- 同じGitHubリポジトリを複数のcloneや別ホストから同時に動かさない。ローカルのsupervisor lockはホストをまたぐ二重claimを防止しません。
+- 手動で`agent-loop run`を多重起動せず、各リポジトリを`register`して`start`する。
+- `status`、`watch`、`stop`などの操作では常に`--repo`で対象を明示する。引数なしの`doctor`はhostと登録済みリポジトリ全体を診断します。
+- Codexの利用枠とMacのCPU、メモリ、ディスク、networkは共有されるため、リポジトリ数を段階的に増やす。
+
+本番運用の構成とリポジトリごとの監視taskについては[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
 
 ## Operation
 
@@ -118,11 +111,7 @@ Codex側で定期的に`status`を呼ぶ必要はありません。`watch`内部
 ## State and safety
 
 - 通常のworking treeは変更せず、Issueごとのworktreeを使用します。
-- force push、sandbox bypass、状態やworktreeの自動削除は行いません。
-- `stop`、`unregister`、`uninstall`後もIssueの状態とworktreeを保持します。
-- worker timeout時はprocess groupへSIGTERMを送り、`worker.timeout_grace`を超えた場合だけSIGKILLします。途中のworktreeは保持して再試行時に検査します。
-- 未回答requestは回答されるまでstickyに保持されます。
-- GitHub Issue本文は信頼済みのshell入力として扱いません。
-- Issue入力はサイズと制御文字を制限し、prompt内では命令ではないJSONデータとして分離します。
-- state、event、worker log/result、GitHub通知では既知token形式と`security.redact_env`の値をマスクします。秘密を回答として渡さないでください。
+- force push、sandbox bypass、状態やworktreeの自動削除は行いません。`stop`、`unregister`、`uninstall`後も状態とworktreeを保持します。
+- timeoutや未回答requestがあっても途中状態を保持し、安全に再試行・再開します。
+- Issue入力を未信頼データとして扱い、既知token形式と`security.redact_env`の値をログや状態からマスクします。秘密をIssueや回答へ含めないでください。
 - 権限、認証、backupの本番チェックは[セキュリティ運用runbook](docs/security-runbook.md)に従ってください。
