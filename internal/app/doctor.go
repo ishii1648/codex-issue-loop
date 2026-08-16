@@ -298,6 +298,7 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	}
 	diagnostics = append(diagnostics, passedDiagnostic("CONFIG_VALID", "repository", entry.RepoID, ".agent-loop.yamlを読み込めます", cfg.GitHub.Repo))
 	diagnostics = append(diagnostics, diagnoseWorkerBackend(ctx, entry, cfg)...)
+	diagnostics = append(diagnostics, diagnoseFormatters(ctx, entry, cfg)...)
 
 	if len(entry.Commands) > 0 {
 		missing := []string{}
@@ -357,6 +358,30 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 
 	diagnostics = append(diagnostics, diagnoseDurableState(l, entry, cfg)...)
 	return diagnostics
+}
+
+func diagnoseFormatters(ctx context.Context, entry registry.Entry, cfg config.Config) []diagnostic {
+	if !cfg.Formatters.Go.Enabled {
+		return []diagnostic{passedDiagnostic("FORMATTER_GO_DISABLED", "repository", entry.RepoID, "built-in Go formatterは無効です", "")}
+	}
+	path := entry.Commands["gofmt"]
+	if path == "" {
+		return []diagnostic{failedDiagnostic("FORMATTER_GO_NOT_REGISTERED", "repository", entry.RepoID, "built-in Go formatterが登録されていません", "gofmt",
+			command("gofmtの固定command pathを登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return []diagnostic{failedDiagnostic("FORMATTER_GO_UNAVAILABLE", "repository", entry.RepoID, "登録済みgofmtを実行できません", fmt.Sprintf("path=%s error=%v", path, err),
+			command("gofmtの固定command pathを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	probeErr := compat.ProbeGofmt(probeCtx, path)
+	cancel()
+	if probeErr != nil {
+		return []diagnostic{failedDiagnostic("FORMATTER_GO_CAPABILITY_MISSING", "repository", entry.RepoID, "登録済みgofmtの必須capabilityを確認できません", probeErr.Error(),
+			command("対応するgofmtの固定command pathを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+	}
+	return []diagnostic{passedDiagnostic("FORMATTER_GO_AVAILABLE", "repository", entry.RepoID, "built-in Go formatterを利用できます", path)}
 }
 
 func diagnoseWorkerBackend(ctx context.Context, entry registry.Entry, cfg config.Config) []diagnostic {

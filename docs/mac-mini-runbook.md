@@ -62,7 +62,7 @@ codex login
 
 ### 2.3 対象repositoryの設定とラベル
 
-対象repositoryのrootに`.agent-loop.yaml`を置き、[設定例](../.agent-loop.example.yaml)をもとにrepository名、ラベル、base branch、sandbox、timeoutを確認する。GitHub Issue本文や設定へtokenを保存しない。
+対象repositoryのrootに`.agent-loop.yaml`を置き、[設定例](../.agent-loop.example.yaml)をもとにrepository名、ラベル、base branch、sandbox、timeoutを確認する。Go publisher整形を使うrepositoryでは`formatters.go.enabled: true`を明示し、`gofmt`を利用できるPATHでregisterする。任意formatter commandや追加引数は指定できない。GitHub Issue本文や設定へtokenを保存しない。
 
 まず不足ラベルのplanだけを表示し、内容を確認してから適用する。
 
@@ -100,6 +100,8 @@ agent-loop status --repo /absolute/path/to/repository --json
 ```
 
 `doctor`はread-onlyである。`schema_version: 1`、`ok: true`、LaunchAgentのloaded状態、supervisorの状態を確認する。失敗codeに応じた復旧は[doctor診断・復旧runbook](doctor.md)に従い、表示されたremediationを無条件に自動実行しない。
+
+formatterを有効にした場合は`FORMATTER_GO_AVAILABLE`も確認する。`FORMATTER_GO_NOT_REGISTERED`、`FORMATTER_GO_UNAVAILABLE`、`FORMATTER_GO_CAPABILITY_MISSING`ではloopを開始せず、Go toolchainと非対話LaunchAgentのPATHを直してregister、doctorを繰り返す。registerとdoctorは固定sourceをstdinへ渡すread-only probeで実際の整形capabilityも確認する。
 
 ### 2.6 Codex Remoteを接続する
 
@@ -205,6 +207,8 @@ agent-loop status --repo /absolute/path/to/repository --json
 ```
 
 worktreeのbranch変更、未commit変更、remote PRとの不一致がある場合は自動修復しない。対象Issueのworktreeを人が確認し、変更を保持する方針を決める。
+
+`publication_audited`の`reason`が`formatter_failed`なら、`formatter.failure_code`（`executable_unavailable`、`path_unsafe`、`exit_failure`、`timeout`、`canceled`、`verification_failed`等）を確認する。worktreeを削除せず、path safety違反は対象file種別とsymlinkを調査し、availabilityは停止後の再registerで直す。再試行は同じworktree・branchへ冪等に収束し、整形済みなら空commitを作らない。
 
 PR conflictは検出時点では`resolving_conflict`となり、base SHAごとの自動復旧とCI再確認を行う。budget超過等で最終`blocked`になった場合は、`status --json`の`conflict_recovery`にある試行履歴、base SHA、競合file、最終理由を確認する。worktree・branch・open PRの対応と停止原因を直した後だけ、次の明示操作を使う。
 

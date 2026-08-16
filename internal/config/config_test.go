@@ -56,6 +56,9 @@ watch:
 	if cfg.ConflictRecovery.MaxAttemptsPerBase != 3 || cfg.ConflictRecovery.MaxBaseUpdates != 3 {
 		t.Fatalf("unexpected conflict recovery defaults: %+v", cfg.ConflictRecovery)
 	}
+	if cfg.Formatters.Go.Enabled || cfg.Formatters.Go.Timeout.Duration != 30*time.Second {
+		t.Fatalf("unexpected formatter defaults: %+v", cfg.Formatters)
+	}
 	if !cfg.Completion.CreateDraftPR || !cfg.Completion.CloseIssue {
 		t.Fatalf("unexpected completion defaults: %+v", cfg.Completion)
 	}
@@ -65,6 +68,24 @@ watch:
 	if cfg.Worktrees.CompletedMaxAge.Duration != 7*24*time.Hour || cfg.Worktrees.FailedMaxAge.Duration != 30*24*time.Hour ||
 		cfg.Worktrees.BlockedMaxAge.Duration != 0 || cfg.Worktrees.NeedsInputMaxAge.Duration != 0 {
 		t.Fatalf("unexpected worktree retention defaults: %+v", cfg.Worktrees)
+	}
+}
+
+func TestLoadBuiltInGoFormatterOptIn(t *testing.T) {
+	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nformatters:\n  go:\n    enabled: true\n    timeout: 45s\n")
+	cfg, err := Load(dir)
+	if err != nil || !cfg.Formatters.Go.Enabled || cfg.Formatters.Go.Timeout.Duration != 45*time.Second {
+		t.Fatalf("formatters=%+v err=%v", cfg.Formatters, err)
+	}
+	dir = writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nformatters:\n  go:\n    enabled: true\n    timeout: 0s\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "formatters.go.timeout") {
+		t.Fatalf("invalid formatter timeout accepted: %v", err)
+	}
+	for _, unsafe := range []string{"command: ./hook.sh", "args: [-local, malicious]"} {
+		dir = writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nformatters:\n  go:\n    enabled: true\n    "+unsafe+"\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "field") {
+			t.Fatalf("repository-provided formatter command accepted: %s: %v", unsafe, err)
+		}
 	}
 }
 

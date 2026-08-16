@@ -1226,7 +1226,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		Worktrees:      worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
 		Worker:         backend,
 		WorkerIdentity: identity,
-		Publisher:      publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
+		Publisher:      publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], GofmtPath: entry.Commands["gofmt"], Secrets: secrets},
 		Conflicts:      conflict.Manager{GitPath: entry.Commands["git"]},
 		Logger:         log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
 	}

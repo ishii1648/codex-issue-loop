@@ -11,11 +11,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 )
+
+func TestDoctorDiagnosesGoFormatterCapability(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Formatters.Go.Enabled = true
+	entry := registry.Entry{RepoID: "repo", RepoPath: "/repo", Commands: map[string]string{}}
+	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_NOT_REGISTERED"); item.OK {
+		t.Fatalf("missing gofmt passed: %+v", item)
+	}
+	formatter := filepath.Join(t.TempDir(), "gofmt")
+	if err := os.WriteFile(formatter, []byte("#!/bin/sh\nprintf 'wrong\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry.Commands["gofmt"] = formatter
+	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_CAPABILITY_MISSING"); item.OK {
+		t.Fatalf("invalid gofmt capability passed: %+v", item)
+	}
+	if err := os.WriteFile(formatter, []byte("#!/bin/sh\nprintf 'package probe\\n\\nfunc f() {}\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_AVAILABLE"); !item.OK {
+		t.Fatalf("available gofmt failed: %+v", item)
+	}
+	cfg.Formatters.Go.Enabled = false
+	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_DISABLED"); !item.OK {
+		t.Fatalf("disabled gofmt failed: %+v", item)
+	}
+}
 
 func diagnosticByCode(t *testing.T, diagnostics []diagnostic, code string) diagnostic {
 	t.Helper()
