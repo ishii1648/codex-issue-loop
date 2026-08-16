@@ -80,6 +80,7 @@ type ResourceLease struct {
 	Slot              int        `json:"slot"`
 	DeclaredResources []string   `json:"declared_resources"`
 	ResolvedResources []string   `json:"resolved_resources"`
+	ActualResources   []string   `json:"actual_resources,omitempty"`
 	BaseSHA           string     `json:"base_sha,omitempty"`
 	ReservedAt        time.Time  `json:"reserved_at"`
 }
@@ -132,6 +133,8 @@ type Issue struct {
 	RunID             string            `json:"run_id,omitempty"`
 	LeaseGeneration   uint64            `json:"lease_generation,omitempty"`
 	Lease             *ResourceLease    `json:"lease,omitempty"`
+	DeclaredResources []string          `json:"declared_resources,omitempty"`
+	ActualResources   []string          `json:"actual_resources,omitempty"`
 	Branch            string            `json:"branch,omitempty"`
 	Worktree          string            `json:"worktree,omitempty"`
 	Attempts          int               `json:"attempts"`

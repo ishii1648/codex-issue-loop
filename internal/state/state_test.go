@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,19 @@ func TestLeaseReservationSurvivesRestartAndFencesStaleOwners(t *testing.T) {
 	loaded, err := (Store{Dir: store.Dir, RepoID: store.RepoID, RepoPath: store.RepoPath}).Load()
 	if err != nil || loaded.Issues["7"].Lease == nil || loaded.Issues["7"].Lease.Owner != owner {
 		t.Fatalf("loaded=%+v err=%v", loaded.Issues["7"], err)
+	}
+	_, err = store.Update("publication_audited", 7, owner.RunID, nil, func(snapshot *Snapshot) error {
+		issue := snapshot.Issues["7"]
+		issue.ActualResources = []string{"docs", "state"}
+		issue.Lease.ActualResources = []string{"docs", "state"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = (Store{Dir: store.Dir, RepoID: store.RepoID, RepoPath: store.RepoPath}).Load()
+	if err != nil || !reflect.DeepEqual(loaded.Issues["7"].DeclaredResources, []string{"docs", "state"}) || !reflect.DeepEqual(loaded.Issues["7"].ActualResources, []string{"docs", "state"}) {
+		t.Fatalf("resource audit did not survive restart: issue=%+v err=%v", loaded.Issues["7"], err)
 	}
 	if _, err := store.ReleaseLease(7, LeaseOwner{RunID: "run_other", Generation: 1}, "stale"); err == nil {
 		t.Fatal("stale run released another run's lease")

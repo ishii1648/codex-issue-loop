@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strings"
 
+	"github.com/ishii1648/codex-issue-loop/internal/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 )
@@ -20,47 +23,97 @@ type Manager struct {
 	Secrets []string
 }
 
-func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue, worktreePath, branch, summary string) (worker.GitResult, error) {
+func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue, worktreePath, branch, summary, baseSHA string, declared []string) (worker.GitResult, publication.Audit, error) {
+	audit := publication.Audit{BaseSHA: baseSHA, DeclaredResources: append([]string(nil), declared...)}
 	if worktreePath == "" || branch == "" {
-		return worker.GitResult{}, fmt.Errorf("publish requires a worktree and branch")
+		return worker.GitResult{}, audit, fmt.Errorf("publish requires a worktree and branch")
 	}
 	git := m.GitPath
 	if git == "" {
 		git = "git"
 	}
+	actualBranch, err := m.run(ctx, git, "-C", worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil || strings.TrimSpace(actualBranch) != branch {
+		return worker.GitResult{}, audit, fmt.Errorf("publish worktree branch mismatch: saved=%s actual=%s", branch, strings.TrimSpace(actualBranch))
+	}
+	paths, err := m.changedPaths(ctx, git, worktreePath, baseSHA)
+	if err != nil {
+		return worker.GitResult{}, audit, err
+	}
+	audit.ChangedPaths = paths
+	actual, err := admission.ResourcesForPaths(cfg.AdmissionSettings(), paths)
+	if err != nil {
+		return worker.GitResult{}, audit, fmt.Errorf("map changed paths to resources: %w", err)
+	}
+	audit.ActualResources = actual
+	if !admission.Covers(declared, actual) {
+		audit.Reason = publication.ReasonResourceClaimMismatch
+		return worker.GitResult{}, audit, publication.ClaimMismatchError{Declared: declared, Actual: actual}
+	}
 	status, err := m.run(ctx, git, "-C", worktreePath, "status", "--porcelain", "--untracked-files=all")
 	if err != nil {
-		return worker.GitResult{}, fmt.Errorf("inspect publish changes: %w", err)
+		return worker.GitResult{}, audit, fmt.Errorf("inspect publish changes: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
 		if _, err := m.run(ctx, git, "-C", worktreePath, "add", "--all"); err != nil {
-			return worker.GitResult{}, fmt.Errorf("stage publish changes: %w", err)
+			return worker.GitResult{}, audit, fmt.Errorf("stage publish changes: %w", err)
 		}
 		if _, err := m.run(ctx, git, "-C", worktreePath, "diff", "--cached", "--check"); err != nil {
-			return worker.GitResult{}, fmt.Errorf("validate staged changes: %w", err)
+			return worker.GitResult{}, audit, fmt.Errorf("validate staged changes: %w", err)
 		}
 		if _, err := m.run(ctx, git, "-c", "commit.gpgsign=false", "-C", worktreePath, "commit", "-m", commitTitle(issue)); err != nil {
-			return worker.GitResult{}, fmt.Errorf("commit publish changes: %w", err)
+			return worker.GitResult{}, audit, fmt.Errorf("commit publish changes: %w", err)
 		}
 	}
 	commit, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "HEAD")
 	if err != nil {
-		return worker.GitResult{}, fmt.Errorf("resolve publish commit: %w", err)
+		return worker.GitResult{}, audit, fmt.Errorf("resolve publish commit: %w", err)
 	}
 	if _, err := m.run(ctx, git, "-C", worktreePath, "push", "--set-upstream", "origin", branch); err != nil {
-		return worker.GitResult{}, fmt.Errorf("push publish branch: %w", err)
+		return worker.GitResult{}, audit, fmt.Errorf("push publish branch: %w", err)
 	}
 
 	result := worker.GitResult{Branch: branch, Commit: strings.TrimSpace(commit)}
 	if !cfg.Completion.CreateDraftPR {
-		return result, nil
+		return result, audit, nil
 	}
 	prURL, err := m.openPullRequest(ctx, cfg, issue, branch, summary)
 	if err != nil {
-		return worker.GitResult{}, err
+		return worker.GitResult{}, audit, err
 	}
 	result.PullRequestURL = prURL
-	return result, nil
+	return result, audit, nil
+}
+
+func (m Manager) changedPaths(ctx context.Context, git, worktreePath, baseSHA string) ([]string, error) {
+	if strings.TrimSpace(baseSHA) == "" {
+		return nil, fmt.Errorf("inspect publish changes: durable base SHA is missing")
+	}
+	if _, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "--verify", baseSHA+"^{commit}"); err != nil {
+		return nil, fmt.Errorf("inspect publish base %s: %w", baseSHA, err)
+	}
+	tracked, err := m.run(ctx, git, "-C", worktreePath, "diff", "--name-only", "-z", "--no-renames", baseSHA, "--")
+	if err != nil {
+		return nil, fmt.Errorf("list tracked publish changes: %w", err)
+	}
+	untracked, err := m.run(ctx, git, "-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z", "--")
+	if err != nil {
+		return nil, fmt.Errorf("list untracked publish changes: %w", err)
+	}
+	set := map[string]bool{}
+	for _, output := range []string{tracked, untracked} {
+		for _, path := range strings.Split(output, "\x00") {
+			if path != "" {
+				set[path] = true
+			}
+		}
+	}
+	paths := make([]string, 0, len(set))
+	for path := range set {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 func (m Manager) openPullRequest(ctx context.Context, cfg config.Config, issue gh.Issue, branch, summary string) (string, error) {

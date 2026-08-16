@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,35 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 			},
 			inspection: valid, status: "awaiting_checks", prURL: "https://example.test/pull/11", reason: "legacy completed",
 		},
+		{
+			name: "done label cannot release unmerged PR lease", current: func() state.Issue {
+				value := base
+				value.Status = "awaiting_merge"
+				value.PullRequestURL = "https://example.test/pull/11"
+				return value
+			}(),
+			remote: gh.RemoteState{
+				Issue:        gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.DoneLabel}},
+				PullRequests: []gh.PullRequest{{Number: 11, URL: "https://example.test/pull/11", State: "OPEN", HeadRefName: base.Branch}},
+			},
+			inspection: valid, status: "awaiting_merge", prURL: "https://example.test/pull/11", reason: "state already converged",
+		},
+		{
+			name: "multiple Pull Requests block before merge authority", current: func() state.Issue {
+				value := base
+				value.Status = "awaiting_merge"
+				value.PullRequestURL = "https://example.test/pull/11"
+				return value
+			}(),
+			remote: gh.RemoteState{
+				Issue: runningIssue,
+				PullRequests: []gh.PullRequest{
+					{Number: 12, URL: "https://example.test/pull/12", State: "OPEN", HeadRefName: base.Branch},
+					{Number: 11, URL: "https://example.test/pull/11", State: "CLOSED", MergedAt: timePointer(), HeadRefName: base.Branch},
+				},
+			},
+			inspection: valid, status: "blocked", prURL: "https://example.test/pull/11", reason: "multiple Pull Requests",
+		},
 	}
 
 	for _, test := range tests {
@@ -176,6 +206,56 @@ func TestFaultStartupReconciliationPersistsDiscoveredPullRequest(t *testing.T) {
 	events, err := os.ReadFile(loop.Store.EventsPath())
 	if err != nil || !strings.Contains(string(events), "startup_reconciled") {
 		t.Fatalf("events=%s err=%v", events, err)
+	}
+}
+
+func TestStartupReconciliationRetainsPRLeaseUntilMergeThenReleasesIt(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run_1", Slot: 0,
+		DeclaredResources: []string{"git"}, ResolvedResources: []string{"git"}, BaseSHA: "base-sha", ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://example.test/pull/1"
+	_, err = loop.Store.Update("awaiting_merge", 1, owner.RunID, nil, func(s *state.Snapshot) error {
+		item := s.Issues["1"]
+		item.Status = "awaiting_merge"
+		item.Branch = "codex/issue-1-test"
+		item.Worktree = loop.Config.RepoPath
+		item.PullRequestURL = prURL
+		item.ActualResources = []string{"git"}
+		item.Lease.ActualResources = []string{"git"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: prURL, State: "OPEN", HeadRefName: "codex/issue-1-test"}},
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileStartup(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := loop.Store.Load()
+	if err != nil || retained.Issues["1"].Lease == nil || retained.Issues["1"].Status != "awaiting_merge" {
+		t.Fatalf("open PR lease was not retained: issue=%+v err=%v", retained.Issues["1"], err)
+	}
+	now := time.Now().UTC()
+	github.remote.PullRequests[0].State = "MERGED"
+	github.remote.PullRequests[0].MergedAt = &now
+	if err := loop.reconcileStartup(context.Background(), retained); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := loop.Store.Load()
+	if err != nil || completed.Issues["1"].Lease != nil || completed.Issues["1"].Status != "completed" || !completed.Issues["1"].PullRequestMerged || !reflect.DeepEqual(completed.Issues["1"].ActualResources, []string{"git"}) {
+		t.Fatalf("merged PR did not release lease atomically: issue=%+v err=%v", completed.Issues["1"], err)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ishii1648/codex-issue-loop/internal/admission"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
 	"gopkg.in/yaml.v3"
 )
@@ -36,6 +37,7 @@ type Config struct {
 	Version          int              `yaml:"version" json:"version"`
 	GitHub           GitHub           `yaml:"github" json:"github"`
 	Queue            Queue            `yaml:"queue" json:"queue"`
+	Resources        Resources        `yaml:"resources" json:"resources"`
 	Worker           Worker           `yaml:"worker" json:"worker"`
 	Watch            Watch            `yaml:"watch" json:"watch"`
 	Git              Git              `yaml:"git" json:"git"`
@@ -67,6 +69,16 @@ type Queue struct {
 	PriorityLabels          []string `yaml:"priority_labels" json:"priority_labels,omitempty"`
 	MaxAttempts             int      `yaml:"max_attempts" json:"max_attempts"`
 	ContinueAfterNeedsInput bool     `yaml:"continue_after_needs_input" json:"continue_after_needs_input"`
+}
+
+type Resources struct {
+	MetadataVersion int                  `yaml:"metadata_version" json:"metadata_version"`
+	Definitions     []ResourceDefinition `yaml:"definitions" json:"definitions,omitempty"`
+}
+
+type ResourceDefinition struct {
+	Name  string   `yaml:"name" json:"name"`
+	Paths []string `yaml:"paths" json:"paths"`
 }
 
 type Worker struct {
@@ -200,6 +212,7 @@ func Defaults() Config {
 			MaxAttempts:             3,
 			ContinueAfterNeedsInput: true,
 		},
+		Resources: Resources{MetadataVersion: 1},
 		Worker: Worker{
 			Backend:          "codex",
 			Sandbox:          "workspace-write",
@@ -304,8 +317,17 @@ func (c Config) Validate() error {
 	if len(c.GitHub.ReadyLabels) == 0 {
 		return fmt.Errorf("github.ready_labels must not be empty")
 	}
-	if c.Queue.Concurrency != 1 {
-		return fmt.Errorf("queue.concurrency must be 1 in version %d", CurrentVersion)
+	if c.Queue.Concurrency < 1 {
+		return fmt.Errorf("queue.concurrency must be at least 1")
+	}
+	settings := c.AdmissionSettings()
+	if err := settings.Validate(); err != nil {
+		return fmt.Errorf("resources: %w", err)
+	}
+	if len(c.Resources.Definitions) == 0 {
+		if c.Queue.Concurrency != 1 {
+			return fmt.Errorf("queue.concurrency greater than 1 requires resources.definitions")
+		}
 	}
 	switch c.Queue.Order {
 	case "issue_number_asc", "created_at_asc":
@@ -409,6 +431,22 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// AdmissionSettings returns an immutable copy of the resource taxonomy used
+// by both queue admission and publication auditing. A config without resource
+// definitions remains a conservative repository-wide legacy queue.
+func (c Config) AdmissionSettings() admission.Settings {
+	definitions := make([]admission.ResourceDefinition, len(c.Resources.Definitions))
+	for index, definition := range c.Resources.Definitions {
+		definitions[index] = admission.ResourceDefinition{
+			Name: definition.Name, Paths: append([]string(nil), definition.Paths...),
+		}
+	}
+	return admission.Settings{
+		Concurrency: c.Queue.Concurrency, MetadataVersion: c.Resources.MetadataVersion,
+		Definitions: definitions, Legacy: len(definitions) == 0,
+	}
 }
 
 // EffectiveCommand returns the fixed executable selected by the built-in

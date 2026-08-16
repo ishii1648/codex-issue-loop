@@ -14,10 +14,12 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/ishii1648/codex-issue-loop/internal/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
@@ -30,7 +32,7 @@ type WorktreeManager interface {
 }
 
 type Publisher interface {
-	Publish(context.Context, config.Config, gh.Issue, string, string, string) (worker.GitResult, error)
+	Publish(context.Context, config.Config, gh.Issue, string, string, string, string, []string) (worker.GitResult, publication.Audit, error)
 }
 
 type ConflictResolver interface {
@@ -261,6 +263,16 @@ func (l *Loop) startIssue(ctx context.Context, issue gh.Issue) error {
 }
 
 func (l *Loop) startIssueAtSlot(ctx context.Context, issue gh.Issue, runID string, slot int) error {
+	evaluation, err := admission.EvaluateCandidate(l.Config.AdmissionSettings(), admission.Candidate{
+		Number: issue.Number, CreatedAt: issue.CreatedAt, Labels: issue.Labels, Body: issue.Body,
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "evaluate Issue resource claim", err)
+	}
+	return l.startIssueAtSlotWithResources(ctx, issue, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
+}
+
+func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue, runID string, slot int, declared, resolved []string) error {
 	latest, err := l.GitHub.Get(ctx, l.Config, issue.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh GitHub Issue before claim", err)
@@ -272,7 +284,7 @@ func (l *Loop) startIssueAtSlot(ctx context.Context, issue gh.Issue, runID strin
 	now := l.now()
 	_, _, err = l.Store.ReserveLease(state.LeaseReservation{
 		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: slot,
-		ResolvedResources: []string{state.RepositoryResource}, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
+		DeclaredResources: declared, ResolvedResources: resolved, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
 	})
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "persist claim start", err)
@@ -487,10 +499,35 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	switch result.Status {
 	case "completed":
 		if l.Publisher != nil {
+			baseSHA := ""
+			declared := append([]string(nil), current.DeclaredResources...)
+			if current.Lease != nil {
+				baseSHA = current.Lease.BaseSHA
+				if len(declared) == 0 {
+					declared = append([]string(nil), current.Lease.DeclaredResources...)
+				}
+			}
 			l.publicationMu.Lock()
-			published, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, result.Summary)
+			published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, result.Summary, baseSHA, declared)
 			l.publicationMu.Unlock()
+			_, auditErr := l.Store.Update("publication_audited", issue.Number, current.RunID, audit, func(s *state.Snapshot) error {
+				item := s.Issues[strconv.Itoa(issue.Number)]
+				item.DeclaredResources = append([]string(nil), audit.DeclaredResources...)
+				item.ActualResources = append([]string(nil), audit.ActualResources...)
+				if item.Lease != nil {
+					item.Lease.ActualResources = append([]string(nil), audit.ActualResources...)
+				}
+				item.UpdatedAt = l.now()
+				return nil
+			})
+			if auditErr != nil {
+				return failure.Wrap(failure.Supervisor, "persist publication resource audit", auditErr)
+			}
 			if publishErr != nil {
+				var mismatch publication.ClaimMismatchError
+				if errors.As(publishErr, &mismatch) {
+					return l.requestResourceCorrection(ctx, current, audit, publishErr.Error())
+				}
 				return l.scheduleRetry(ctx, current, "publish completed work: "+publishErr.Error())
 			}
 			result.Git = &published
@@ -554,6 +591,41 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	}
 }
 
+func (l *Loop) requestResourceCorrection(ctx context.Context, current state.Issue, audit publication.Audit, detail string) error {
+	requestID := state.NewID("req")
+	question := fmt.Sprintf("Issue #%d has changes outside its declared resource claim. How should the existing worktree be corrected?", current.Number)
+	_, err := l.Store.Update("resource_claim_mismatch", current.Number, current.RunID, map[string]any{
+		"reason": publication.ReasonResourceClaimMismatch, "audit": audit,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.Status = "needs_input"
+		item.LastError = detail
+		item.FailureKind = string(failure.Issue)
+		item.GitHubSync = "needs_input"
+		item.RetryAfter = nil
+		item.UpdatedAt = l.now()
+		s.PendingRequests[requestID] = &state.Request{
+			ID: requestID, IssueNumber: current.Number, Question: question,
+			Reason:      "Publication was refused before commit or push because actual_resources is not a subset of declared_resources.",
+			Recommended: "revise_diff",
+			Options: []state.Option{
+				{ID: "revise_diff", Label: "Revise the diff"},
+				{ID: "abandon", Label: "Abandon this work"},
+			},
+			AllowFreeText: true, Status: "pending", CreatedAt: l.now(),
+		}
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist resource claim mismatch", err)
+	}
+	updated, err := l.issueState(current.Number)
+	if err != nil {
+		return err
+	}
+	return l.syncGitHub(ctx, updated)
+}
+
 func (l *Loop) canResume(current state.Issue) bool {
 	if current.SessionID == "" {
 		return false
@@ -581,19 +653,42 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	var selected *gh.PullRequest
 	for index := range remote.PullRequests {
 		candidate := &remote.PullRequests[index]
+		if candidate.MergedAt != nil && (candidate.URL == current.PullRequestURL || current.PullRequestURL == "") {
+			return l.completeIssue(ctx, current, candidate.URL, nil)
+		}
+	}
+	if len(remote.PullRequests) > 1 {
+		return l.blockPullRequestLifecycle(ctx, current, remote.PullRequests[0].URL, "multiple Pull Requests exist for the saved branch")
+	}
+	for index := range remote.PullRequests {
+		candidate := &remote.PullRequests[index]
 		if candidate.URL == current.PullRequestURL || (current.PullRequestURL == "" && candidate.HeadRefName == current.Branch) {
 			selected = candidate
 			break
 		}
 	}
 	if selected == nil {
+		inspection, inspectErr := l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+		if inspectErr != nil {
+			return failure.Wrap(failure.Transient, "inspect Pull Request worktree", inspectErr)
+		}
+		if !inspection.Exists || !inspection.Valid || !inspection.LocalBranchExists || !inspection.RemoteBranchExists {
+			return l.blockPullRequestLifecycle(ctx, current, current.PullRequestURL, "saved Pull Request branch or worktree disappeared")
+		}
 		return l.schedulePullRequestPoll(current, "Pull Request is not visible yet")
 	}
 	if selected.MergedAt != nil {
 		return l.completeIssue(ctx, current, selected.URL, nil)
 	}
 	if !strings.EqualFold(selected.State, "open") {
-		return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "Pull Request lifecycle", errors.New("Pull Request was closed without merge")), true)
+		return l.blockPullRequestLifecycle(ctx, current, selected.URL, "Pull Request was closed without merge")
+	}
+	inspection, inspectErr := l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+	if inspectErr != nil {
+		return failure.Wrap(failure.Transient, "inspect Pull Request worktree", inspectErr)
+	}
+	if !inspection.Exists || !inspection.Valid || !inspection.LocalBranchExists || !inspection.RemoteBranchExists {
+		return l.blockPullRequestLifecycle(ctx, current, selected.URL, "open Pull Request branch or worktree disappeared")
 	}
 	if current.Status == "awaiting_merge" && !l.Config.Completion.AutoMerge {
 		return l.schedulePullRequestPoll(current, "waiting for Pull Request merge")
@@ -639,6 +734,33 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	default:
 		return failure.Wrap(failure.Supervisor, "inspect Pull Request checks", fmt.Errorf("unknown check status %q", selected.ChecksStatus))
 	}
+}
+
+func (l *Loop) blockPullRequestLifecycle(ctx context.Context, current state.Issue, prURL, reason string) error {
+	cause := "Pull Request lifecycle: " + reason
+	_, err := l.Store.Update("pull_request_lifecycle_blocked", current.Number, current.RunID, map[string]any{
+		"reason": reason, "pull_request_url": prURL,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		item.Status = "blocked"
+		item.PullRequestURL = prURL
+		item.LastError = cause
+		item.FailureKind = string(failure.Issue)
+		item.GitHubSync = "blocked"
+		item.RetryAfter = nil
+		item.WorkerPID = 0
+		item.WorkerPGID = 0
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist Pull Request lifecycle attention", err)
+	}
+	updated, err := l.issueState(current.Number)
+	if err != nil {
+		return err
+	}
+	return l.syncGitHub(ctx, updated)
 }
 
 func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, pr gh.PullRequest) error {

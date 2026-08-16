@@ -79,6 +79,8 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 		owner = LeaseOwner{RunID: reservation.RunID, Generation: issue.LeaseGeneration}
 		payload["owner"] = owner
 		issue.Title, issue.Status, issue.RunID = reservation.Title, "claiming", reservation.RunID
+		issue.DeclaredResources = append([]string(nil), declared...)
+		issue.ActualResources = nil
 		if issue.Attempts == 0 {
 			issue.Attempts = 1
 		}
@@ -278,6 +280,24 @@ func validateResourceLeases(snapshot Snapshot) error {
 		resolved, err := normalizeResources(lease.ResolvedResources, false)
 		if err != nil || !reflect.DeepEqual(resolved, lease.ResolvedResources) {
 			return fmt.Errorf("Issue #%d resolved resources are not canonical", issue.Number)
+		}
+		if len(lease.ActualResources) > 0 {
+			actual, err := normalizeResources(lease.ActualResources, true)
+			if err != nil || !reflect.DeepEqual(actual, lease.ActualResources) {
+				return fmt.Errorf("Issue #%d actual resources are not canonical", issue.Number)
+			}
+		}
+		if len(issue.DeclaredResources) > 0 {
+			persistedDeclared, err := normalizeResources(issue.DeclaredResources, true)
+			if err != nil || !reflect.DeepEqual(persistedDeclared, issue.DeclaredResources) {
+				return fmt.Errorf("Issue #%d persisted declared resources are not canonical", issue.Number)
+			}
+		}
+		if len(issue.ActualResources) > 0 {
+			persistedActual, err := normalizeResources(issue.ActualResources, true)
+			if err != nil || !reflect.DeepEqual(persistedActual, issue.ActualResources) {
+				return fmt.Errorf("Issue #%d persisted actual resources are not canonical", issue.Number)
+			}
 		}
 		for _, other := range active {
 			if issueOccupiesWorkerSlot(issue) && issueOccupiesWorkerSlot(other) && lease.Slot == other.Lease.Slot {
