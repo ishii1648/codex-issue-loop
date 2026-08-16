@@ -267,9 +267,13 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 	if !ok {
 		return dispatched, nil
 	}
+	baseSHA, err := s.loop.resolveDispatchBase(ctx)
+	if err != nil {
+		return dispatched, err
+	}
 	runID := state.NewID("run")
 	s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
-		return s.loop.startIssueAtSlot(jobCtx, selected, runID, slot)
+		return s.loop.startIssueAtSlotWithBase(jobCtx, selected, runID, slot, baseSHA)
 	})
 	return true, nil
 }

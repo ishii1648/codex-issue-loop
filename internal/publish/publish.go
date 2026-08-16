@@ -10,6 +10,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/gitops"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 )
@@ -18,15 +19,30 @@ type Manager struct {
 	GitPath string
 	GHPath  string
 	Secrets []string
+	Gate    *gitops.Gate
 }
 
 func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue, worktreePath, branch, summary string) (worker.GitResult, error) {
+	var result worker.GitResult
+	err := m.Gate.Run(ctx, gitops.Publish, func() error {
+		var err error
+		result, err = m.publish(ctx, cfg, issue, worktreePath, branch, summary)
+		return err
+	})
+	return result, err
+}
+
+func (m Manager) publish(ctx context.Context, cfg config.Config, issue gh.Issue, worktreePath, branch, summary string) (worker.GitResult, error) {
 	if worktreePath == "" || branch == "" {
 		return worker.GitResult{}, fmt.Errorf("publish requires a worktree and branch")
 	}
 	git := m.GitPath
 	if git == "" {
 		git = "git"
+	}
+	actualBranch, err := m.run(ctx, git, "-C", worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil || strings.TrimSpace(actualBranch) != branch {
+		return worker.GitResult{}, fmt.Errorf("publish worktree branch mismatch: saved=%s actual=%s", branch, strings.TrimSpace(actualBranch))
 	}
 	status, err := m.run(ctx, git, "-C", worktreePath, "status", "--porcelain", "--untracked-files=all")
 	if err != nil {
@@ -68,21 +84,30 @@ func (m Manager) openPullRequest(ctx context.Context, cfg config.Config, issue g
 	if ghPath == "" {
 		ghPath = "gh"
 	}
-	out, err := m.run(ctx, ghPath, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--head", branch, "--limit", "2", "--json", "url")
+	out, err := m.run(ctx, ghPath, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "url,state,mergedAt")
 	if err != nil {
 		return "", fmt.Errorf("inspect publish Pull Request: %w", err)
 	}
 	var existing []struct {
-		URL string `json:"url"`
+		URL      string `json:"url"`
+		State    string `json:"state"`
+		MergedAt any    `json:"mergedAt"`
 	}
 	if err := json.Unmarshal([]byte(out), &existing); err != nil {
 		return "", fmt.Errorf("decode publish Pull Requests: %w", err)
 	}
 	if len(existing) > 1 {
-		return "", fmt.Errorf("multiple open Pull Requests exist for branch %s", branch)
+		return "", fmt.Errorf("multiple Pull Requests exist for branch %s", branch)
 	}
 	if len(existing) == 1 {
-		return validatePullRequestURL(existing[0].URL)
+		validated, validateErr := validatePullRequestURL(existing[0].URL)
+		if validateErr != nil {
+			return "", validateErr
+		}
+		if existing[0].State == "" || strings.EqualFold(existing[0].State, "open") || existing[0].MergedAt != nil || strings.EqualFold(existing[0].State, "merged") {
+			return validated, nil
+		}
+		return "", fmt.Errorf("existing Pull Request for branch %s is closed without merge: %s", branch, validated)
 	}
 
 	body := fmt.Sprintf("Automated implementation for #%d.\n\n%s", issue.Number, strings.TrimSpace(summary))

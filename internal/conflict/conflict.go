@@ -11,6 +11,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/gitops"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 )
@@ -38,9 +39,22 @@ type Preparation struct {
 	Commit          string
 }
 
-type Manager struct{ GitPath string }
+type Manager struct {
+	GitPath string
+	Gate    *gitops.Gate
+}
 
 func (m Manager) Prepare(ctx context.Context, cfg config.Config, worktreePath, branch string, previous *state.ConflictRecovery) (Preparation, error) {
+	var preparation Preparation
+	err := m.Gate.Run(ctx, gitops.Conflict, func() error {
+		var err error
+		preparation, err = m.prepare(ctx, cfg, worktreePath, branch, previous)
+		return err
+	})
+	return preparation, err
+}
+
+func (m Manager) prepare(ctx context.Context, cfg config.Config, worktreePath, branch string, previous *state.ConflictRecovery) (Preparation, error) {
 	if worktreePath == "" || branch == "" {
 		return Preparation{}, NonRecoverableError{fmt.Errorf("conflict recovery requires the saved worktree and branch")}
 	}
@@ -163,6 +177,16 @@ func (m Manager) describe(ctx context.Context, worktreePath, head, previousBase,
 }
 
 func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue, worktreePath, branch string, recovery state.ConflictRecovery, tests []worker.Test) (worker.GitResult, error) {
+	var result worker.GitResult
+	err := m.Gate.Run(ctx, gitops.Conflict, func() error {
+		var err error
+		result, err = m.publish(ctx, cfg, issue, worktreePath, branch, recovery, tests)
+		return err
+	})
+	return result, err
+}
+
+func (m Manager) publish(ctx context.Context, cfg config.Config, issue gh.Issue, worktreePath, branch string, recovery state.ConflictRecovery, tests []worker.Test) (worker.GitResult, error) {
 	if recovery.TargetBaseSHA == "" || recovery.OriginalHeadSHA == "" {
 		return worker.GitResult{}, NonRecoverableError{fmt.Errorf("conflict recovery publication is missing immutable Git SHAs")}
 	}

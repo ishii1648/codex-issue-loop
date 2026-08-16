@@ -11,11 +11,13 @@ import (
 	"strings"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	"github.com/ishii1648/codex-issue-loop/internal/gitops"
 )
 
 type Manager struct {
 	StateRoot string
 	GitPath   string
+	Gate      *gitops.Gate
 }
 
 type Result struct {
@@ -36,14 +38,52 @@ type Inspection struct {
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 var validRepoID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,100}$`)
+var validObjectID = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
-func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, issueNumber int, title string) (Result, error) {
+// ResolveBase fetches the configured base branch and resolves the fetched ref
+// to an immutable commit. Callers persist this SHA before dispatching workers.
+func (m Manager) ResolveBase(ctx context.Context, cfg config.Config) (string, error) {
+	var baseSHA string
+	err := m.Gate.Run(ctx, gitops.Base, func() error {
+		git := m.gitPath()
+		if out, err := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "fetch", "origin", cfg.Git.BaseBranch).CombinedOutput(); err != nil {
+			return fmt.Errorf("fetch base branch: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		out, err := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "rev-parse", "--verify", "refs/remotes/origin/"+cfg.Git.BaseBranch+"^{commit}").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("resolve fetched base branch: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		baseSHA = strings.TrimSpace(string(out))
+		if baseSHA == "" {
+			return fmt.Errorf("resolve fetched base branch: empty commit SHA")
+		}
+		return nil
+	})
+	return baseSHA, err
+}
+
+func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, issueNumber int, title, baseSHA string) (Result, error) {
+	var result Result
+	err := m.Gate.Run(ctx, gitops.Worktree, func() error {
+		var err error
+		result, err = m.ensure(ctx, cfg, repoID, issueNumber, title, baseSHA)
+		return err
+	})
+	return result, err
+}
+
+func (m Manager) ensure(ctx context.Context, cfg config.Config, repoID string, issueNumber int, title, baseSHA string) (Result, error) {
 	if !validRepoID.MatchString(repoID) {
 		return Result{}, fmt.Errorf("invalid repository ID %q", repoID)
 	}
 	if issueNumber <= 0 {
 		return Result{}, fmt.Errorf("issue number must be positive")
 	}
+	baseSHA = strings.TrimSpace(baseSHA)
+	if !validObjectID.MatchString(baseSHA) {
+		return Result{}, fmt.Errorf("immutable base SHA is invalid: %q", baseSHA)
+	}
+	git := m.gitPath()
 	root := cfg.Git.WorktreeRoot
 	if root == "" {
 		root = filepath.Join(m.StateRoot, "worktrees")
@@ -90,29 +130,33 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 	}
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return Result{}, fmt.Errorf("worktree path must not be a symbolic link: %s", path)
-	} else if err == nil && info.IsDir() {
-		inspection, inspectErr := m.Inspect(ctx, cfg, path, branch)
+	}
+	resolvedBase, err := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "rev-parse", "--verify", baseSHA+"^{commit}").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(resolvedBase)) != baseSHA {
+		return Result{}, fmt.Errorf("immutable base SHA is unavailable: %s", baseSHA)
+	}
+	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		inspection, inspectErr := m.inspect(ctx, cfg, path, branch)
 		if inspectErr != nil {
 			return Result{}, fmt.Errorf("inspect existing worktree: %w", inspectErr)
 		}
 		if !inspection.Valid || inspection.Branch != branch || !inspection.LocalBranchExists {
 			return Result{}, fmt.Errorf("existing worktree path is incomplete or belongs to another branch: %s", path)
 		}
+		if err := exec.CommandContext(ctx, git, "-C", path, "merge-base", "--is-ancestor", baseSHA, "HEAD").Run(); err != nil {
+			return Result{}, fmt.Errorf("existing worktree branch is not based on saved base SHA %s", baseSHA)
+		}
 		return Result{Path: path, Branch: branch}, nil
-	}
-	git := m.GitPath
-	if git == "" {
-		git = "git"
-	}
-	if out, err := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "fetch", "origin", cfg.Git.BaseBranch).CombinedOutput(); err != nil {
-		return Result{}, fmt.Errorf("fetch base branch: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	branchExists := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run() == nil
 	args := []string{"-C", cfg.RepoPath, "worktree", "add"}
 	if branchExists {
+		if err := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "merge-base", "--is-ancestor", baseSHA, branch).Run(); err != nil {
+			return Result{}, fmt.Errorf("existing branch %s is not based on saved base SHA %s", branch, baseSHA)
+		}
 		args = append(args, path, branch)
 	} else {
-		args = append(args, "-b", branch, path, "origin/"+cfg.Git.BaseBranch)
+		args = append(args, "-b", branch, path, baseSHA)
 	}
 	if out, err := exec.CommandContext(ctx, git, args...).CombinedOutput(); err != nil {
 		return Result{}, fmt.Errorf("create worktree: %w: %s", err, strings.TrimSpace(string(out)))
@@ -121,6 +165,16 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 }
 
 func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch string) (Inspection, error) {
+	var inspection Inspection
+	err := m.Gate.Run(ctx, gitops.Worktree, func() error {
+		var err error
+		inspection, err = m.inspect(ctx, cfg, path, branch)
+		return err
+	})
+	return inspection, err
+}
+
+func (m Manager) inspect(ctx context.Context, cfg config.Config, path, branch string) (Inspection, error) {
 	inspection := Inspection{}
 	root := cfg.Git.WorktreeRoot
 	if root == "" {
@@ -155,10 +209,7 @@ func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch st
 	if !inspection.Exists {
 		return inspection, nil
 	}
-	git := m.GitPath
-	if git == "" {
-		git = "git"
-	}
+	git := m.gitPath()
 	if out, err := exec.CommandContext(ctx, git, "-C", path, "rev-parse", "--is-inside-work-tree").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
 		return inspection, nil
 	}
@@ -203,6 +254,15 @@ func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch st
 // branch so committed work remains recoverable. Force is reserved for the
 // explicitly confirmed purge command.
 func (m Manager) Remove(ctx context.Context, cfg config.Config, path string, force bool) error {
+	return m.Gate.Run(ctx, gitops.Worktree, func() error {
+		if err := m.remove(ctx, cfg, path, force); err != nil {
+			return err
+		}
+		return m.prune(ctx, cfg)
+	})
+}
+
+func (m Manager) remove(ctx context.Context, cfg config.Config, path string, force bool) error {
 	root := cfg.Git.WorktreeRoot
 	if root == "" {
 		root = filepath.Join(m.StateRoot, "worktrees")
@@ -220,10 +280,7 @@ func (m Manager) Remove(ctx context.Context, cfg config.Config, path string, for
 	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
 	}
-	git := m.GitPath
-	if git == "" {
-		git = "git"
-	}
+	git := m.gitPath()
 	if _, statErr := os.Stat(absPath); statErr == nil {
 		args := []string{"-C", cfg.RepoPath, "worktree", "remove"}
 		if force {
@@ -234,18 +291,26 @@ func (m Manager) Remove(ctx context.Context, cfg config.Config, path string, for
 			return fmt.Errorf("remove worktree: %w: %s", removeErr, strings.TrimSpace(string(out)))
 		}
 	}
-	return m.Prune(ctx, cfg)
+	return nil
 }
 
 func (m Manager) Prune(ctx context.Context, cfg config.Config) error {
-	git := m.GitPath
-	if git == "" {
-		git = "git"
-	}
+	return m.Gate.Run(ctx, gitops.Worktree, func() error { return m.prune(ctx, cfg) })
+}
+
+func (m Manager) prune(ctx context.Context, cfg config.Config) error {
+	git := m.gitPath()
 	if out, err := exec.CommandContext(ctx, git, "-C", cfg.RepoPath, "worktree", "prune").CombinedOutput(); err != nil {
 		return fmt.Errorf("prune worktree metadata: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func (m Manager) gitPath() string {
+	if m.GitPath != "" {
+		return m.GitPath
+	}
+	return "git"
 }
 
 func canonicalPrivateRoot(root string) (string, error) {
