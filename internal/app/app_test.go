@@ -283,7 +283,7 @@ func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
 	assertRequest(outcome.result, secondRequest)
 }
 
-func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
+func TestForceStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -313,7 +313,7 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 	groups := &appProcessGroups{alive: map[int]bool{101: true, 102: true}, signals: map[int][]syscall.Signal{}}
 	var out, stderr bytes.Buffer
 	a := App{Out: &out, Err: &stderr, ProcessController: groups}
-	if code := a.Run(context.Background(), []string{"stop", "--repo", repo, "--json"}); code != 0 {
+	if code := a.Run(context.Background(), []string{"stop", "--repo", repo, "--force", "--json"}); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 	snapshot, err := store.Load()
@@ -327,6 +327,95 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 		if issue := snapshot.Issues[key]; issue.Status != "retry_wait" || issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
 			t.Fatalf("Issue %s=%+v", key, issue)
 		}
+	}
+}
+
+func TestDrainRequestIsDurableIdempotentAndPreservesIssueState(t *testing.T) {
+	store := state.Store{Dir: t.TempDir(), RepoID: "repo-drain", RepoPath: "/tmp/repo"}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	_, err := store.Update("worker_running", 12, "run_12", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "running"
+		snapshot.Supervisor.PID = 901
+		snapshot.Supervisor.Generation = 7
+		snapshot.Issues["12"] = &state.Issue{
+			Number: 12, RunID: "run_12", Status: "running", WorkerPID: 912, WorkerPGID: 912,
+			Attempts: 2, Continuations: 1, SessionID: "session-12", Worktree: "/tmp/worktree", UpdatedAt: now,
+			LeaseGeneration: 1, Lease: &state.ResourceLease{
+				Owner: state.LeaseOwner{RunID: "run_12", Generation: 1}, Slot: 0,
+				DeclaredResources: []string{}, ResolvedResources: []string{"repo:*"}, ReservedAt: now,
+			},
+		}
+		snapshot.PendingRequests["req_12"] = &state.Request{ID: "req_12", IssueNumber: 12, Question: "Keep?", Status: "pending", CreatedAt: now}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := requestDrain(store, "restart", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterFirst, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := requestDrain(store, "restart", 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID || first.PreviousGeneration != 7 || first.RemainingActive != 1 || len(first.Targets) != 1 {
+		t.Fatalf("first=%+v second=%+v", first, second)
+	}
+	if target := first.Targets[0]; target.IssueNumber != 12 || target.PID != 912 || target.PGID != 912 || target.Phase != "running" {
+		t.Fatalf("target=%+v", target)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := snapshot.Issues["12"]
+	if issue.Attempts != 2 || issue.Continuations != 1 || issue.SessionID != "session-12" || issue.Worktree != "/tmp/worktree" || issue.Lease == nil {
+		t.Fatalf("drain changed Issue checkpoint data: %+v", issue)
+	}
+	if snapshot.PendingRequests["req_12"] == nil || snapshot.PendingRequests["req_12"].Status != "pending" {
+		t.Fatalf("drain changed pending request: %+v", snapshot.PendingRequests)
+	}
+	if snapshot.StateRevision != afterFirst.StateRevision {
+		t.Fatalf("idempotent drain request appended another event: first=%d second=%d", afterFirst.StateRevision, snapshot.StateRevision)
+	}
+}
+
+func TestDrainTimeoutDoesNotSignalWorkersAndReturnsToRunning(t *testing.T) {
+	store := state.Store{Dir: t.TempDir(), RepoID: "repo-timeout", RepoPath: "/tmp/repo"}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	groups := &appProcessGroups{alive: map[int]bool{922: true}, signals: map[int][]syscall.Signal{}}
+	_, err := store.Update("worker_running", 22, "run_22", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "running"
+		snapshot.Issues["22"] = &state.Issue{Number: 22, RunID: "run_22", Status: "running", WorkerPID: 922, WorkerPGID: 922}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain, err := requestDrain(store, "stop", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain, err = markDrainTimedOut(store, drain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drain.Status != "timed_out" || len(groups.signals) != 0 {
+		t.Fatalf("drain=%+v signals=%v", drain, groups.signals)
+	}
+	snapshot, err := store.Load()
+	if err != nil || snapshot.Supervisor.State != "running" || snapshot.Issues["22"].Status != "running" {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 }
 

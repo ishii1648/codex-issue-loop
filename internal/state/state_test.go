@@ -104,6 +104,35 @@ func TestLeaseReservationSurvivesRestartAndFencesStaleOwners(t *testing.T) {
 	}
 }
 
+func TestDrainFencesNewLeaseReservationWithoutChangingQueueState(t *testing.T) {
+	store := Store{Dir: t.TempDir(), RepoID: "repo-drain-fence", RepoPath: "/tmp/repo"}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	before, err := store.Update("drain_requested", 0, "", nil, func(snapshot *Snapshot) error {
+		snapshot.Supervisor.State = "draining"
+		snapshot.Supervisor.Drain = &Drain{ID: "drain_fence", Operation: "stop", Status: "draining", RequestedAt: now, Deadline: now.Add(time.Minute)}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 93, Title: "Must wait", RunID: "run_93", Slot: 0,
+		ResolvedResources: []string{RepositoryResource}, ReservedAt: now,
+	}); err == nil {
+		t.Fatal("drain accepted a new Issue lease")
+	}
+	after, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.StateRevision != before.StateRevision || after.Issues["93"] != nil {
+		t.Fatalf("drain fence changed queue state: before=%d after=%d issue=%+v", before.StateRevision, after.StateRevision, after.Issues["93"])
+	}
+}
+
 func TestLeaseReservationAndExpansionAreExclusive(t *testing.T) {
 	store := newStore(t)
 	_, first, err := store.ReserveLease(LeaseReservation{IssueNumber: 1, RunID: "run_1", Slot: 0, ResolvedResources: []string{"state"}})

@@ -183,13 +183,13 @@ printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
 
 ```sh
 "$agent_loop_bin" status --repo "$PWD" --json
-"$agent_loop_bin" stop --repo "$PWD" --json
+"$agent_loop_bin" stop --repo "$PWD" --timeout 5m --json
 
 "$agent_loop_bin" start --repo "$PWD" --json
 "$agent_loop_bin" status --repo "$PWD" --json
 ```
 
-`stop`は永続状態やIssue worktreeを削除しません。restart、cleanup、復旧は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)と[doctor・復旧runbook](docs/doctor.md)を参照してください。
+`stop`は既定でactive workerをdurable checkpointまでgraceful drainし、永続状態やIssue worktreeを削除しません。timeout時もworkerを暗黙にkillせず稼働へ戻ります。`--force`の影響、restart、cleanup、復旧は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)と[doctor・復旧runbook](docs/doctor.md)を参照してください。
 
 ### 5. 更新する
 

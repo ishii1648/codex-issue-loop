@@ -45,6 +45,23 @@ func TestFaultDroppedEventReconcilesAttention(t *testing.T) {
 	}
 }
 
+func TestWatchReturnsDurableDrainingState(t *testing.T) {
+	store := newWatchStore(t)
+	now := time.Now().UTC()
+	_, err := store.Update("drain_requested", 0, "drain_watch", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "draining"
+		snapshot.Supervisor.Drain = &state.Drain{ID: "drain_watch", Operation: "restart", Status: "draining", RequestedAt: now, Deadline: now.Add(time.Minute), RemainingActive: 2}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Wait(context.Background(), store, time.Second, 0, false)
+	if err != nil || result.Reason != "draining" || result.Snapshot.Supervisor.Drain.RemainingActive != 2 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
 func TestWatchReturnsEveryPendingRequestInRequestIDOrder(t *testing.T) {
 	store := newWatchStore(t)
 	_, err := store.Update("input_requested", 0, "", nil, func(snapshot *state.Snapshot) error {
