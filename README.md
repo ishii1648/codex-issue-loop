@@ -2,7 +2,9 @@
 
 GitHub Issueをキューとして、着手可能なIssueが存在する限りCodex CLI workerを繰り返し実行する、Apple Silicon macOS向けの常駐ループです。
 
-## 使い方
+## セットアップ
+
+Macへのinstallと、対象リポジトリごとの設定・登録・起動を行います。
 
 ### 1. Macへインストールする
 
@@ -107,7 +109,11 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 
 並列化と複数hostの制約は[ADR-0002](docs/adr/0002-concurrency-and-multi-host.md)を参照してください。
 
-### 5. Issueをキューへ投入する
+## 運用
+
+登録済みリポジトリのIssue投入、監視、回答、停止、更新を行います。
+
+### 1. Issueをキューへ投入する
 
 着手可能なopen Issueへready labelを付けます。既定例では次のとおりです。
 
@@ -117,7 +123,7 @@ gh issue edit 123 --add-label codex-loop:ready
 
 PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
 
-### 6. 状態を確認・監視する
+### 2. 状態を確認・監視する
 
 ```sh
 "$agent_loop_bin" status --repo "$PWD" --json
@@ -130,7 +136,7 @@ PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`
 
 短い間隔で`status`を繰り返さず、入力や復旧操作が必要になるまで1回のblocking `watch`で待機します。Codex Remoteからの監視方法は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
 
-### 7. 質問へ回答する
+### 3. 質問へ回答する
 
 `watch`または`status`が返したrequest IDを変えずに回答します。回答に秘密値を含めないでください。
 
@@ -142,7 +148,7 @@ printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
   --json
 ```
 
-### 8. 停止・再開する
+### 4. 停止・再開する
 
 ```sh
 "$agent_loop_bin" status --repo "$PWD" --json
@@ -154,7 +160,7 @@ printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
 
 `stop`は永続状態やIssue worktreeを削除しません。restart、cleanup、復旧は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)と[doctor・復旧runbook](docs/doctor.md)を参照してください。
 
-### 9. 更新する
+### 5. 更新する
 
 新しいrelease artifactをインストール時と同じ手順で検証してから更新します。
 
