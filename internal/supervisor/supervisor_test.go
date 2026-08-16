@@ -27,6 +27,24 @@ func (d *failingNotificationDispatcher) Dispatch(context.Context) error {
 	return errors.New("notification provider unavailable")
 }
 
+func TestSessionResumeNeverCrossesBackendNamespace(t *testing.T) {
+	loop := Loop{Config: config.Defaults()}
+	loop.Config.Worker.Backend = "opencode"
+	current := state.Issue{SessionID: "ses_1", Session: &state.WorkerSession{Backend: "claude-code", ID: "ses_1"}}
+	if loop.canResume(current) {
+		t.Fatal("cross-backend session was accepted")
+	}
+	current.Session.Backend = "opencode"
+	if !loop.canResume(current) {
+		t.Fatal("same-backend session was rejected")
+	}
+	loop.Config.Worker.Backend = "codex"
+	current.Session = nil
+	if !loop.canResume(current) {
+		t.Fatal("legacy Codex session did not retain compatibility")
+	}
+}
+
 func TestNotificationFailureDoesNotStopSupervisor(t *testing.T) {
 	var logs bytes.Buffer
 	dispatcher := &failingNotificationDispatcher{}

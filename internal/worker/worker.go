@@ -58,11 +58,38 @@ type Result struct {
 	Git              *GitResult `json:"git"`
 	Retry            *Retry     `json:"retry"`
 	SessionID        string     `json:"-"`
+	Identity         Identity   `json:"-"`
 }
 
 type Runner interface {
 	Run(context.Context, config.Config, gh.Issue, state.Issue, string, Started) (Result, error)
 	Resume(context.Context, config.Config, gh.Issue, state.Issue, string, Started) (Result, error)
+}
+
+// Backend is the supervisor-facing contract implemented by every built-in
+// coding-agent runtime. Backend-specific argv and event formats stay behind it.
+type Backend interface {
+	Runner
+	ID() string
+	Capabilities() Capabilities
+}
+
+type Capabilities struct {
+	StructuredOutput     bool `json:"structured_output"`
+	ResumableSession     bool `json:"resumable_session"`
+	ModelSelection       bool `json:"model_selection"`
+	VariantSelection     bool `json:"variant_selection"`
+	NonInteractivePolicy bool `json:"non_interactive_permission_policy"`
+	WorkspaceIsolation   bool `json:"workspace_isolation"`
+}
+
+type Identity struct {
+	Backend        string `json:"backend"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	RequestedModel string `json:"requested_model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
+	Variant        string `json:"variant,omitempty"`
 }
 
 type Started func(pid int) error
@@ -91,6 +118,14 @@ type Codex struct {
 	StateDir        string
 	Secrets         []string
 	ResumeSupported *bool
+	RuntimeVersion  string
+}
+
+func (c Codex) ID() string { return "codex" }
+
+func (c Codex) Capabilities() Capabilities {
+	resume := c.ResumeSupported == nil || *c.ResumeSupported
+	return Capabilities{StructuredOutput: true, ResumableSession: resume, ModelSelection: true, VariantSelection: false, NonInteractivePolicy: true, WorkspaceIsolation: true}
 }
 
 func (c Codex) Run(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, promptSuffix string, started Started) (Result, error) {
@@ -109,6 +144,7 @@ func (c Codex) Resume(ctx context.Context, cfg config.Config, issue gh.Issue, cu
 }
 
 func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber int, runID, sessionID, prompt string, started Started) (Result, error) {
+	identity := Identity{Backend: c.ID(), RuntimeVersion: c.RuntimeVersion, RequestedModel: cfg.Worker.Model, ResolvedModel: cfg.Worker.Model, Variant: cfg.Worker.Variant}
 	runDir := filepath.Join(c.StateDir, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return Result{}, err
@@ -153,10 +189,7 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 		}
 		args = append(args, "-")
 	}
-	command := cfg.Worker.Command
-	if command == "" {
-		command = "codex"
-	}
+	command := cfg.Worker.EffectiveCommand()
 	cmd := exec.Command(command, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(prompt)
@@ -188,25 +221,26 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	data, readErr := os.ReadFile(resultPath)
 	if readErr != nil {
 		if runErr != nil {
-			return Result{SessionID: session}, fmt.Errorf("codex worker failed: %w", runErr)
+			return Result{SessionID: session, Identity: identity}, fmt.Errorf("codex worker failed: %w", runErr)
 		}
-		return Result{SessionID: session}, fmt.Errorf("read worker result: %w", readErr)
+		return Result{SessionID: session, Identity: identity}, fmt.Errorf("read worker result: %w", readErr)
 	}
-	var result Result
-	if err := json.Unmarshal(data, &result); err != nil {
-		return Result{SessionID: session}, fmt.Errorf("decode worker result: %w", err)
+	result, err := decodeResult(data)
+	if err != nil {
+		return Result{SessionID: session, Identity: identity}, fmt.Errorf("decode worker result: %w", err)
 	}
 	safeResult, err := redact.Marshal(result, c.Secrets)
 	if err != nil {
-		return Result{SessionID: session}, fmt.Errorf("sanitize worker result: %w", err)
+		return Result{SessionID: session, Identity: identity}, fmt.Errorf("sanitize worker result: %w", err)
 	}
 	if err := json.Unmarshal(safeResult, &result); err != nil {
-		return Result{SessionID: session}, fmt.Errorf("decode sanitized worker result: %w", err)
+		return Result{SessionID: session, Identity: identity}, fmt.Errorf("decode sanitized worker result: %w", err)
 	}
 	if err := fsutil.WriteFile(resultPath, append(safeResult, '\n'), 0o600); err != nil {
-		return Result{SessionID: session}, fmt.Errorf("replace worker result with sanitized result: %w", err)
+		return Result{SessionID: session, Identity: identity}, fmt.Errorf("replace worker result with sanitized result: %w", err)
 	}
 	result.SessionID = session
+	result.Identity = identity
 	if err := result.Validate(); err != nil {
 		return result, err
 	}
@@ -340,11 +374,20 @@ func (r Result) Validate() error {
 	if r.ExecutionProfile != "standard" && r.ExecutionProfile != "extended" {
 		return fmt.Errorf("invalid execution profile %q", r.ExecutionProfile)
 	}
+	if r.Tests == nil {
+		return fmt.Errorf("worker result tests must be an array")
+	}
 	switch r.Status {
 	case "completed":
 	case "needs_input":
 		if r.Question == nil || strings.TrimSpace(r.Question.Text) == "" {
 			return fmt.Errorf("needs_input result requires a question")
+		}
+		if len(r.Question.Options) > 3 {
+			return fmt.Errorf("needs_input question permits at most 3 options")
+		}
+		if r.Question.Options == nil {
+			return fmt.Errorf("needs_input question options must be an array")
 		}
 	case "retryable_failure":
 		if r.Retry == nil {
@@ -353,6 +396,73 @@ func (r Result) Validate() error {
 	case "blocked":
 	default:
 		return fmt.Errorf("invalid worker status %q", r.Status)
+	}
+	return nil
+}
+
+func decodeResult(data []byte) (Result, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return Result{}, err
+	}
+	for _, name := range []string{"version", "status", "execution_profile", "summary", "question", "tests", "git", "retry"} {
+		if _, ok := fields[name]; !ok {
+			return Result{}, fmt.Errorf("worker result missing required field %q", name)
+		}
+	}
+	for name, required := range map[string][]string{
+		"question": {"text", "reason", "recommended_option", "options", "allow_free_text"},
+		"git":      {"branch", "commit", "pull_request_url"},
+		"retry":    {"reason"},
+	} {
+		if err := requireObjectFields(fields[name], name, required...); err != nil {
+			return Result{}, err
+		}
+	}
+	var tests []json.RawMessage
+	if err := json.Unmarshal(fields["tests"], &tests); err != nil {
+		return Result{}, fmt.Errorf("worker result tests must be an array")
+	}
+	for index, test := range tests {
+		if err := requireObjectFields(test, fmt.Sprintf("tests[%d]", index), "command", "result"); err != nil {
+			return Result{}, err
+		}
+	}
+	if question := fields["question"]; len(question) > 0 && !bytes.Equal(bytes.TrimSpace(question), []byte("null")) {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(question, &object) == nil {
+			var options []json.RawMessage
+			if err := json.Unmarshal(object["options"], &options); err != nil {
+				return Result{}, fmt.Errorf("worker result question.options must be an array")
+			}
+			for index, option := range options {
+				if err := requireObjectFields(option, fmt.Sprintf("question.options[%d]", index), "id", "label"); err != nil {
+					return Result{}, err
+				}
+			}
+		}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var result Result
+	if err := decoder.Decode(&result); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func requireObjectFields(data json.RawMessage, name string, required ...string) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return fmt.Errorf("worker result %s must be an object or null", name)
+	}
+	for _, field := range required {
+		if _, ok := object[field]; !ok {
+			return fmt.Errorf("worker result %s missing required field %q", name, field)
+		}
 	}
 	return nil
 }

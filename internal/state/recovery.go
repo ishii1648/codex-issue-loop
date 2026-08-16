@@ -180,6 +180,18 @@ func normalizeSnapshot(snapshot *Snapshot) {
 	if snapshot.Notifications == nil {
 		snapshot.Notifications = map[string]*Notification{}
 	}
+	for _, issue := range snapshot.Issues {
+		if issue == nil {
+			continue
+		}
+		if issue.Session == nil && issue.SessionID != "" {
+			// session_id predates backend selection and was only ever produced by Codex.
+			issue.Session = &WorkerSession{Backend: "codex", ID: issue.SessionID}
+		}
+		if issue.Session != nil && issue.SessionID == "" {
+			issue.SessionID = issue.Session.ID
+		}
+	}
 }
 
 func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {
