@@ -10,6 +10,21 @@
    Claude Code adapterはnative OS sandboxを有効化し、利用不能時をhard failureにし、unsandboxed escapeを拒否する。OpenCode adapterは`OPENCODE_CONFIG_CONTENT`で`external_directory`、質問待ち、`git commit`、`git push`、PR publishをdenyする。ただしOpenCodeの境界はapplication-levelでOS sandboxと同等ではないため、専用標準ユーザー、最小権限credential、branch protectionを併用する。
 5. branch protectionでmainへの直接pushを禁止し、CIとレビューを必須にする。worker用資格情報にbranch protection bypass権限を与えない。
 
+## Built-in formatterの境界
+
+Go repositoryでpublisher整形を使う場合は、trustedなdefault branchの設定へ次だけを追加し、loop停止中に`register`と`doctor`を再実行する。
+
+```yaml
+formatters:
+  go:
+    enabled: true
+    timeout: 30s
+```
+
+これは任意hookではない。supervisorは登録時に固定した`gofmt`だけを使い、Issue本文、worker出力、repository fileからcommandや引数を組み立てない。GitがNUL区切りで返した変更対象`.go` fileをcanonicalなIssue worktree内のregular fileとして検証し、symlink、hard link、directory traversal、worktree外参照を拒否してからshellなしで実行する。formatterはcredential、network、GitHub APIを必要とせず、CIの`contents: read`と`make fmt-check`を最終検査境界として維持する。
+
+`publication_audited` eventと`status --json`のIssue `publication_audit`にはadapter名、対象数、変更有無、結果とfailure codeだけを保存し、source内容や任意command outputは保存しない。`formatter_failed`ではcommit・push前にretryへ移るため、worktreeを削除せず、`doctor`のformatter codeとeventを確認する。
+
 ## 追加の秘密をマスクする
 
 値ではなく環境変数名だけを設定する。
@@ -47,7 +62,7 @@ stat -f '%Sp %N' "$HOME/Library/LaunchAgents"/com.codex-issue-loop.*.plist
 - stateとログはTime Machine等のユーザーbackup対象になり得る。backupの暗号化とアクセス制御を確認する。サポートbundleやIssueへraw log/stateを添付しない。
 - M2導入前の既存state、event、recovery backup、ログは自動で遡及マスクされない。漏えいが疑われる場合はループを停止し、該当credentialを先に失効・再発行してから、保持要件に従って旧ファイルを隔離または削除する。
 - tokenらしい文字列を検出したら、`agent-loop stop`、token失効、GitHub audit log/PR/Issueの確認、Codexセッションの無効化、原因修正、再登録の順で復旧する。
-- backend、command path、runtime version、modelを変更した場合はloopを停止して`register`と`doctor`を再実行する。異なるbackendの保存sessionは再利用されずfresh sessionになることを`status --json`の`session.backend`と`worker_identity`で確認する。
+- backend、command path、runtime version、model、built-in formatter設定を変更した場合はloopを停止して`register`と`doctor`を再実行する。異なるbackendの保存sessionは再利用されずfresh sessionになることを`status --json`の`session.backend`と`worker_identity`で確認する。
 - `govulncheck`の検出は到達可能性と影響を確認し、修正版へ更新する。例外を恒久的に黙殺せず、期限付きIssueとして記録する。
 
 ## リポジトリ外で管理する棚卸し

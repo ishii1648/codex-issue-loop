@@ -156,7 +156,7 @@ func (f *fakeConflictResolver) Publish(context.Context, config.Config, gh.Issue,
 	return f.published, f.publishErr
 }
 
-func (f *fakePublisher) Publish(_ context.Context, _ config.Config, _ gh.Issue, _, _, _, baseSHA string, declared []string) (worker.GitResult, publication.Audit, error) {
+func (f *fakePublisher) Publish(_ context.Context, _ config.Config, _ gh.Issue, _, _, _, _, baseSHA string, declared []string) (worker.GitResult, publication.Audit, error) {
 	f.called = true
 	audit := f.audit
 	if audit.BaseSHA == "" {
@@ -322,6 +322,34 @@ func TestResourceClaimMismatchPersistsAuditAndRefusesPublicationIntoNeedsInput(t
 	events, err := os.ReadFile(loop.Store.EventsPath())
 	if err != nil || !strings.Contains(string(events), publication.ReasonResourceClaimMismatch) || !strings.Contains(string(events), `"actual_resources":["docs"]`) {
 		t.Fatalf("audit event missing: err=%v events=%s", err, events)
+	}
+}
+
+func TestFormatterFailurePersistsStructuredAuditAndSchedulesRetry(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done"}
+	loop, _ := testLoop(t, result)
+	loop.Publisher = &fakePublisher{
+		audit: publication.Audit{
+			Reason: publication.ReasonFormatterFailed,
+			Formatter: publication.FormatterAudit{
+				Name: "gofmt", Enabled: true, FileCount: 2, Result: "failed", FailureCode: "timeout",
+			},
+		},
+		err: publication.FormatterError{Code: "timeout", Detail: "deadline exceeded"},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue := snapshot.Issues["1"]; issue.Status != "retry_wait" || issue.PullRequestURL != "" || issue.PublicationAudit == nil || issue.PublicationAudit.Formatter.FailureCode != "timeout" {
+		t.Fatalf("formatter failure crossed publication boundary: %+v", issue)
+	}
+	events, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || !strings.Contains(string(events), `"reason":"formatter_failed"`) || !strings.Contains(string(events), `"failure_code":"timeout"`) || !strings.Contains(string(events), `"file_count":2`) {
+		t.Fatalf("structured formatter event missing: err=%v events=%s", err, events)
 	}
 }
 

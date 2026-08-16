@@ -40,6 +40,7 @@ type Config struct {
 	Worker           Worker           `yaml:"worker" json:"worker"`
 	Watch            Watch            `yaml:"watch" json:"watch"`
 	Git              Git              `yaml:"git" json:"git"`
+	Formatters       Formatters       `yaml:"formatters" json:"formatters"`
 	Completion       Completion       `yaml:"completion" json:"completion"`
 	ConflictRecovery ConflictRecovery `yaml:"conflict_recovery" json:"conflict_recovery"`
 	Worktrees        Worktrees        `yaml:"worktrees" json:"worktrees"`
@@ -155,6 +156,18 @@ type Git struct {
 	BaseBranch   string `yaml:"base_branch" json:"base_branch"`
 }
 
+// Formatters contains the fixed, built-in publication adapters. It is not a
+// command hook: repositories can only opt in to adapters implemented by the
+// supervisor, with no repository-supplied executable or arguments.
+type Formatters struct {
+	Go GoFormatter `yaml:"go" json:"go"`
+}
+
+type GoFormatter struct {
+	Enabled bool     `yaml:"enabled" json:"enabled"`
+	Timeout Duration `yaml:"timeout" json:"timeout"`
+}
+
 type Completion struct {
 	CreateDraftPR bool `yaml:"create_draft_pr" json:"create_draft_pr"`
 	AutoMerge     bool `yaml:"auto_merge" json:"auto_merge"`
@@ -232,6 +245,7 @@ func Defaults() Config {
 			BranchPrefix: "codex/issue-",
 			BaseBranch:   "main",
 		},
+		Formatters:       Formatters{Go: GoFormatter{Timeout: Duration{30 * time.Second}}},
 		Completion:       Completion{CreateDraftPR: true, AutoMerge: false, CloseIssue: true},
 		ConflictRecovery: ConflictRecovery{MaxAttemptsPerBase: 3, MaxBaseUpdates: 3},
 		Worktrees: Worktrees{
@@ -415,6 +429,9 @@ func (c Config) Validate() error {
 	}
 	if c.Git.WorktreeRoot != "" && !filepath.IsAbs(c.Git.WorktreeRoot) {
 		return fmt.Errorf("git.worktree_root must be an absolute path")
+	}
+	if c.Formatters.Go.Timeout.Duration <= 0 {
+		return fmt.Errorf("formatters.go.timeout must be positive")
 	}
 	if c.Completion.AutoMerge && !c.Completion.CreateDraftPR {
 		return fmt.Errorf("completion.auto_merge requires completion.create_draft_pr")

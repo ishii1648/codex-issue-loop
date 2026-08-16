@@ -55,6 +55,12 @@ git:
   worktree_root: null
   base_branch: main
 
+# Fixed built-in adapter; no shell command or extra arguments are accepted.
+formatters:
+  go:
+    enabled: false
+    timeout: 30s
+
 completion:
   create_draft_pr: true
   # false: CI成功後にReady for reviewへ移し、人手のmergeを待つ。

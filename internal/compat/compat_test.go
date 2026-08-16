@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -103,6 +104,17 @@ exit 2
 		if report := ProbeBackend(context.Background(), backend, path); !report.OK() || !report.Has("structured_output") || !report.Has("session_resume") {
 			t.Fatalf("backend=%s report=%+v", backend, report)
 		}
+	}
+}
+
+func TestGofmtCapabilityProbe(t *testing.T) {
+	if err := ProbeGofmt(context.Background(), filepath.Join(runtime.GOROOT(), "bin", "gofmt")); err != nil {
+		t.Fatal(err)
+	}
+	invalid := filepath.Join(t.TempDir(), "gofmt")
+	writeExecutable(t, invalid, "#!/bin/sh\nprintf 'not gofmt\\n'\n")
+	if err := ProbeGofmt(context.Background(), invalid); err == nil {
+		t.Fatal("invalid gofmt capability passed")
 	}
 }
 

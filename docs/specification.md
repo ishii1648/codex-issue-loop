@@ -205,6 +205,11 @@ git:
   worktree_root: null
   base_branch: main
 
+formatters:
+  go:
+    enabled: false
+    timeout: 30s
+
 completion:
   create_draft_pr: true
   auto_merge: false
@@ -233,7 +238,7 @@ security:
 
 ### 5.1 設定規則
 
-- `version` は必須。現行は`3`とし、v2は明示migrationの対象、未知versionはエラーとする。
+- `version` は必須。現行は`4`とし、v3は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
 - `queue.concurrency` は1以上とする。`resources.definitions`未設定時は安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。2以上はresource definition、valid metadata、既知の`area:` claimを使う単一host worker poolであり、distributed modeは有効化しない。
 - `resources.metadata_version`は`1`、各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
@@ -257,6 +262,7 @@ security:
 - secretsを設定ファイルに記述しない。
 - `security.redact_env`には追加でマスクする値そのものではなく、値を保持する環境変数名だけを記述する。
 - `git.worktree_root`を指定する場合は絶対pathとし、branch prefix、base branch、GitHub repository名はargv/refとして安全な形式だけを許可する。
+- `formatters.go.enabled`は既定で`false`とし、後方互換なpublisher動作を維持する。有効時はregisterが`gofmt`を絶対pathへ固定し、固定sourceのstdin整形probeを通過したcapabilityだけを正数の`timeout`内でbuilt-in adapterとして実行する。doctorも同じread-only probeを再実行する。repository設定からcommand、追加引数、shell hookは指定できない。
 - `completion.create_draft_pr`の既定は`true`とする。`completion.auto_merge`の既定は`false`であり、`true`はdraft PR作成を前提とする。
 - `completion.auto_merge: false`ではCI成功後にPRをReady for reviewへ移し、人手のmergeを待つ。`true`ではbase branchへの追随とCI再確認後にsquash mergeする。
 - `conflict_recovery.max_attempts_per_base`は同じimmutable base SHAに対するworker試行上限、`max_base_updates`は1つのPRが自律追随するbase SHA世代数の上限とし、既定はいずれも3とする。
@@ -577,20 +583,24 @@ App Server Goal adapterはopt-inの検証実装であり、Goalは監視task内�
 
 ### 11.3.1 決定論的な公開境界
 
-Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked worktreeのGit metadataは元repositoryの`.git/worktrees`配下にありsandbox外なので、workerへ書き込み権限を広げない。workerが`completed`を返した後、supervisor内のpublisherが次を順に実行する。
+Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked worktreeのGit metadataは元repositoryの`.git/worktrees`配下にありsandbox外なので、workerへ書き込み権限を広げない。workerが`completed`を返した後、supervisor内のpublisherがrepository Git operation gate内で次を順に実行する。
 
-1. `git status --porcelain`で差分を確認し、差分があれば`git add --all`と`git diff --cached --check`を行う。
-2. `git -c commit.gpgsign=false ... commit`で対話的な署名promptを発生させずcommitする。
-3. 対象branchをpushする。
-4. 同じhead branchのopen PRを検索し、1件なら再利用、0件ならdraft PRを作成、複数なら安全側で停止する。
-5. `gh`が警告文を併記しても出力内の有効なPR URLを抽出し、異なるURLが複数なら拒否する。
-6. `statusCheckRollup`を定期的に確認し、未完了ならモデルを呼ばず待機、失敗なら同じworktreeと失敗理由をworkerへ返す。
-7. CI成功後にdraftをReady for reviewへ移す。`auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。
-8. `auto_merge: true`ではbase branchより遅れているcleanなPRを既存のUpdate branch経路で更新する。`dirty`なら`resolving_conflict`へ移し、最新baseをfetchしてSHAを固定し、既存PR branchのworktreeへ`--no-commit` mergeする。
-9. conflict workerにはIssue本文・コメント、元PR diff、前回baseから対象baseまでのcommit、競合fileと内容、許可path、検証要件を渡す。workerは`git add`、commit、push、force push、branch/PR作成を行わない。
-10. supervisorは解消後に未解消indexが0件、markerなし、`MERGE_HEAD`と保存base SHAの一致、変更path scope、workerの検証証跡を確認する。supervisorだけがmerge commitと通常pushを行い、同じPRを`awaiting_checks`へ戻す。
-11. 再起動時は保存済みmergeを再準備せず、未解消状態、local commit済み、push済みを識別して再開する。push済みcommitを検出した場合はworker、commit、push、コメントを重複させない。
-12. workerの仕様選択は`needs_input`へ移し、回答後は同じ`resolving_conflict`へ戻る。同一base SHAの試行またはbase世代数が設定上限に達した場合と非回復障害だけを`blocked`にする。
+1. 保存済みPRがある場合は全stateの同一head branch PRを列挙し、保存URL、open state、base/head ref名、authoritative base/head SHA、local HEADのforward-only関係を検証する。複数PR、closed-without-merge、別branch、divergeは変更前に拒否する。
+2. 保存済みbase SHA（既存PRではauthoritative base SHA）からHEAD/worktreeまでのtracked pathとuntracked pathをNUL区切りで列挙し、resource claimを監査する。
+3. `formatters.go.enabled: true`なら、列挙済みの既存・新規`.go` regular fileだけを対象にする。各pathがworktree内のcleanな相対pathで、symlink、hard link、directory、worktree外参照でないことを検証し、shellを介さず固定済み`gofmt -w <paths...>`を実行する。続けて`gofmt -l`相当と`git diff --check`を検証する。
+4. formatterの対象数、変更有無、成功またはsecret-safeなfailure codeを`publication_audited` eventとIssueの最新`publication_audit` statusへ保存する。timeout、cancellation、実行・検証失敗ではcommit、push、PR更新を行わずretryへ移す。
+5. `git status --porcelain`で差分を確認し、差分があれば`git add --all`と`git diff --cached --check`を行う。formatter変更はworker変更と同じcommitへ含め、整形済みまたはretry済みで差分がなければ空commitを作らない。
+6. `git -c commit.gpgsign=false ... commit`で対話的な署名promptを発生させずcommitする。
+7. 対象branchを通常pushする。commit後にpushが失敗したretryでは既存local commitを再利用し、二重commitしない。
+8. 同じhead branchのopen PRを検索し、検証済み1件なら再利用、0件ならdraft PRを作成する。
+9. `gh`が警告文を併記しても出力内の有効なPR URLを抽出し、異なるURLが複数なら拒否する。
+10. `statusCheckRollup`を定期的に確認し、未完了ならモデルを呼ばず待機、失敗なら同じworktreeと失敗理由をworkerへ返す。
+11. CI成功後にdraftをReady for reviewへ移す。`auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。
+12. `auto_merge: true`ではbase branchより遅れているcleanなPRを既存のUpdate branch経路で更新する。`dirty`なら`resolving_conflict`へ移し、最新baseをfetchしてSHAを固定し、既存PR branchのworktreeへ`--no-commit` mergeする。
+13. conflict workerにはIssue本文・コメント、元PR diff、前回baseから対象baseまでのcommit、競合fileと内容、許可path、検証要件を渡す。workerは`git add`、commit、push、force push、branch/PR作成を行わない。
+14. supervisorは解消後に未解消indexが0件、markerなし、`MERGE_HEAD`と保存base SHAの一致、変更path scope、workerの検証証跡を確認する。supervisorだけがmerge commitと通常pushを行い、同じPRを`awaiting_checks`へ戻す。
+15. 再起動時は保存済みmergeを再準備せず、未解消状態、local commit済み、push済みを識別して再開する。push済みcommitを検出した場合はworker、commit、push、コメントを重複させない。
+16. workerの仕様選択は`needs_input`へ移し、回答後は同じ`resolving_conflict`へ戻る。同一base SHAの試行またはbase世代数が設定上限に達した場合と非回復障害だけを`blocked`にする。
 
 この境界により、モデルのsandboxをremote操作のために広げず、公開処理の引数、順序、冪等性をGo側で固定する。
 
@@ -713,6 +723,7 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `worker_preflight_completed`
 - `worker_continuation_started`
 - `worker_completed`
+- `publication_audited`（resource監査とbuilt-in formatter結果を含む）
 - `pull_request_checks_pending`
 - `pull_request_poll_scheduled`
 - `pull_request_ready`

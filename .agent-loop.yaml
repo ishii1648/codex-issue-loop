@@ -25,7 +25,7 @@ resources:
     - name: scheduler
       paths: [internal/supervisor/**, internal/state/**, internal/schema/**, internal/failure/**, internal/fsutil/**]
     - name: github
-      paths: [internal/github/**, internal/publish/**]
+      paths: [internal/github/**, internal/publish/**, internal/publication/**]
     - name: worker
       paths: [internal/worker/**, schemas/**]
     - name: host
@@ -59,6 +59,11 @@ git:
   branch_prefix: codex/issue-
   worktree_root: null
   base_branch: main
+
+formatters:
+  go:
+    enabled: true
+    timeout: 30s
 
 completion:
   create_draft_pr: true

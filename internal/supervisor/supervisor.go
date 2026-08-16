@@ -32,7 +32,7 @@ type WorktreeManager interface {
 }
 
 type Publisher interface {
-	Publish(context.Context, config.Config, gh.Issue, string, string, string, string, []string) (worker.GitResult, publication.Audit, error)
+	Publish(context.Context, config.Config, gh.Issue, string, string, string, string, string, []string) (worker.GitResult, publication.Audit, error)
 }
 
 type ConflictResolver interface {
@@ -507,10 +507,12 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 				}
 			}
 			l.publicationMu.Lock()
-			published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, result.Summary, baseSHA, declared)
+			published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, current.PullRequestURL, result.Summary, baseSHA, declared)
 			l.publicationMu.Unlock()
 			_, auditErr := l.Store.Update("publication_audited", issue.Number, current.RunID, audit, func(s *state.Snapshot) error {
 				item := s.Issues[strconv.Itoa(issue.Number)]
+				auditCopy := audit
+				item.PublicationAudit = &auditCopy
 				item.DeclaredResources = append([]string(nil), audit.DeclaredResources...)
 				item.ActualResources = append([]string(nil), audit.ActualResources...)
 				if item.Lease != nil {

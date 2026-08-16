@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
@@ -142,34 +143,35 @@ type ConflictRecovery struct {
 }
 
 type Issue struct {
-	Number            int               `json:"number"`
-	Title             string            `json:"title"`
-	Status            string            `json:"status"`
-	RunID             string            `json:"run_id,omitempty"`
-	LeaseGeneration   uint64            `json:"lease_generation,omitempty"`
-	Lease             *ResourceLease    `json:"lease,omitempty"`
-	DeclaredResources []string          `json:"declared_resources,omitempty"`
-	ActualResources   []string          `json:"actual_resources,omitempty"`
-	Branch            string            `json:"branch,omitempty"`
-	Worktree          string            `json:"worktree,omitempty"`
-	Attempts          int               `json:"attempts"`
-	Continuations     int               `json:"continuations"`
-	ExecutionProfile  string            `json:"execution_profile,omitempty"`
-	SessionID         string            `json:"session_id,omitempty"`
-	Session           *WorkerSession    `json:"session,omitempty"`
-	WorkerIdentity    WorkerIdentity    `json:"worker_identity,omitempty"`
-	Goal              *WorkerGoal       `json:"goal,omitempty"`
-	WorkerPID         int               `json:"worker_pid,omitempty"`
-	WorkerPGID        int               `json:"worker_pgid,omitempty"`
-	PullRequestURL    string            `json:"pull_request_url,omitempty"`
-	PullRequestMerged bool              `json:"pull_request_merged,omitempty"`
-	GitHubSync        string            `json:"github_sync,omitempty"`
-	FailureKind       string            `json:"failure_kind,omitempty"`
-	LastError         string            `json:"last_error,omitempty"`
-	RetryAfter        *time.Time        `json:"retry_after,omitempty"`
-	Answers           []AnswerRecord    `json:"answers,omitempty"`
-	ConflictRecovery  *ConflictRecovery `json:"conflict_recovery,omitempty"`
-	UpdatedAt         time.Time         `json:"updated_at"`
+	Number            int                `json:"number"`
+	Title             string             `json:"title"`
+	Status            string             `json:"status"`
+	RunID             string             `json:"run_id,omitempty"`
+	LeaseGeneration   uint64             `json:"lease_generation,omitempty"`
+	Lease             *ResourceLease     `json:"lease,omitempty"`
+	DeclaredResources []string           `json:"declared_resources,omitempty"`
+	ActualResources   []string           `json:"actual_resources,omitempty"`
+	PublicationAudit  *publication.Audit `json:"publication_audit,omitempty"`
+	Branch            string             `json:"branch,omitempty"`
+	Worktree          string             `json:"worktree,omitempty"`
+	Attempts          int                `json:"attempts"`
+	Continuations     int                `json:"continuations"`
+	ExecutionProfile  string             `json:"execution_profile,omitempty"`
+	SessionID         string             `json:"session_id,omitempty"`
+	Session           *WorkerSession     `json:"session,omitempty"`
+	WorkerIdentity    WorkerIdentity     `json:"worker_identity,omitempty"`
+	Goal              *WorkerGoal        `json:"goal,omitempty"`
+	WorkerPID         int                `json:"worker_pid,omitempty"`
+	WorkerPGID        int                `json:"worker_pgid,omitempty"`
+	PullRequestURL    string             `json:"pull_request_url,omitempty"`
+	PullRequestMerged bool               `json:"pull_request_merged,omitempty"`
+	GitHubSync        string             `json:"github_sync,omitempty"`
+	FailureKind       string             `json:"failure_kind,omitempty"`
+	LastError         string             `json:"last_error,omitempty"`
+	RetryAfter        *time.Time         `json:"retry_after,omitempty"`
+	Answers           []AnswerRecord     `json:"answers,omitempty"`
+	ConflictRecovery  *ConflictRecovery  `json:"conflict_recovery,omitempty"`
+	UpdatedAt         time.Time          `json:"updated_at"`
 }
 
 type Option struct {

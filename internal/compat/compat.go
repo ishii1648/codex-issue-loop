@@ -214,6 +214,25 @@ func ProbeGH(ctx context.Context, path string) Report {
 	return report
 }
 
+// ProbeGofmt verifies the fixed stdin formatting contract without reading or
+// writing repository files. It deliberately accepts no repository-provided
+// arguments or source.
+func ProbeGofmt(ctx context.Context, path string) error {
+	if path == "" {
+		return fmt.Errorf("gofmt path is missing")
+	}
+	command := exec.CommandContext(ctx, path)
+	command.Stdin = strings.NewReader("package probe\nfunc f( ){}\n")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gofmt capability probe: %s", safeDetail(output, err))
+	}
+	if string(output) != "package probe\n\nfunc f() {}\n" {
+		return fmt.Errorf("gofmt capability probe returned unexpected output")
+	}
+	return nil
+}
+
 var versionPattern = regexp.MustCompile(`\b([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][0-9A-Za-z.-]+)?\b`)
 
 func parseVersion(value string) string {
