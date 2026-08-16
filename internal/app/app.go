@@ -32,6 +32,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/supervisor"
+	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
@@ -89,6 +90,21 @@ func (a App) Run(ctx context.Context, args []string) int {
 			fmt.Fprintf(a.Out, "agent-loop %s (%s)\n", Version, Commit)
 		}
 		return 0
+	}
+	// init is deliberately handled before Layout.Ensure so a preview does not
+	// create agent-loop directories or change user-owned files.
+	if args[0] == "init" {
+		err := a.initUserRules(args[1:])
+		if err == nil {
+			return 0
+		}
+		var ee exitError
+		if errors.As(err, &ee) {
+			fmt.Fprintln(a.Err, ee.Err)
+			return ee.Code
+		}
+		fmt.Fprintln(a.Err, err)
+		return 1
 	}
 	l, err := layout.New()
 	if err != nil {
@@ -162,6 +178,7 @@ func (a App) usage() {
 	fmt.Fprintln(a.Out, `Usage: agent-loop <command> [options]
 
 Commands:
+  init          Preview or apply user-scoped Codex / Claude Code rules
   install       Install the binary and Codex Skill
   update        Safely replace the binary and Skill, preserving state
   rollback      Restore a backup created by update
@@ -182,6 +199,39 @@ Commands:
   doctor        Validate dependencies, auth, config, and registration
   bootstrap-labels  Preview or create required GitHub labels
   run           Run the supervisor (used by launchd)`)
+}
+
+func (a App) initUserRules(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	apply := fs.Bool("apply", false, "apply the planned user rule changes")
+	agentNames := fs.String("agents", "codex,claude", "comma-separated agents: codex,claude")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	agents, err := userrules.ParseAgents(*agentNames)
+	if err != nil {
+		return exitError{2, err}
+	}
+	config, err := userrules.ConfigFromEnvironment()
+	if err != nil {
+		return err
+	}
+	report, err := userrules.Plan(config, agents)
+	if err != nil {
+		return err
+	}
+	if *apply {
+		report, err = userrules.Apply(report)
+	}
+	if outputErr := a.output(*jsonOut, report); outputErr != nil {
+		return outputErr
+	}
+	return err
 }
 
 func (a App) bootstrapLabels(ctx context.Context, args []string) error {

@@ -265,6 +265,7 @@ agent-loop <command> [options]
 
 | コマンド | 目的 |
 | --- | --- |
+| `init [--agents codex,claude] [--apply]` | Codex / Claude Codeのuser-scope Issue作成ルールをpreviewまたは明示適用する |
 | `install` | バイナリに対応するSkillと共通ディレクトリをセットアップする |
 | `uninstall` | 実行中プロセスを確認してインストール物を削除する |
 | `register --repo PATH` | 対象リポジトリを検証し、registryとplistを生成する |
@@ -283,6 +284,8 @@ agent-loop <command> [options]
 | `run` | launchd専用の内部supervisorエントリーポイント |
 
 `bootstrap-labels`は`--apply`なしではread-onlyのplanを返す。`--apply`時も不足ラベルの`gh label create`だけを実行し、既存ラベルに`--force`を指定せず、更新・削除を行わない。部分成功は成功分を保持してlabel別のfailureを返し、再実行で不足分だけを処理する。`doctor`が不足ラベルを検出した場合はこの修復コマンドを表示する。
+
+`init`は`--apply`なしではuser設定もagent-loop内部ディレクトリも変更しない。release binaryに埋め込んだrule versionと本文を、Codexの有効なuser-level `AGENTS.md`系file内の管理block、およびfrontmatterなしのClaude Code専用ruleへ反映する。競合は上書きせず、symlinkの解決先、予定action、適用結果、backup pathをJSONへ出力する。詳細と復旧手順は[user-scope Issue作成ルール](user-rules.md)を参照する。install manifestのSkill整合性とは分離し、`install`、`update`、`doctor`、`uninstall`はこの設定を暗黙に変更しない。
 
 `doctor --repo PATH`はhostと対象repository、`doctor`はhostとregistry内の全repositoryを診断する。JSONは`schema_version: 1`、全体`ok`、`generated_at`、`diagnostics`から成る。各diagnosticは安定した`code`、`ok`、`scope`、任意の`repo_id`、人間向けsummary/detail、0件以上のremediationを持つ。remediationはkind、summary、command/settings、automatic、destructiveを持つ。doctor自身は修復を実行せず、state破損時にもfileを変更しない。
 

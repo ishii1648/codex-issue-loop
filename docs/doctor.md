@@ -26,6 +26,9 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | `INSTALL_VERSION_MISMATCH` | binary、Skill、manifestのversion/checksum不一致 | 検証済みreleaseからupdateまたはrollback |
 | `INSTALL_SCHEMA_INCOMPATIBLE` | installed binaryが想定する永続schemaと不一致 | binary updateとschema migrationを組で実行 |
 | `INSTALL_VERSION_CONSISTENT` | binary、Skill、manifestが一致 | 対応不要 |
+| `USER_RULE_CODEX_MISSING` / `USER_RULE_CLAUDE_MISSING` | user-scope Issue作成ruleが未導入 | `agent-loop init --json`を確認後、明示的に`--apply` |
+| `USER_RULE_CODEX_OUTDATED` / `USER_RULE_CLAUDE_OUTDATED` | agent-loop管理ruleが旧version | 対象agentの`init --json`を確認後、明示的に`--apply` |
+| `USER_RULE_CODEX_CONFLICT` / `USER_RULE_CLAUDE_CONFLICT` | marker不整合または所有できないfile | `agent-loop init --json`のpathとdetailを確認し、手動で競合を解消 |
 | `SCHEMA_MIGRATION_REQUIRED` | v1のconfig・registry・state・event等が残る | 全loop停止後にpreviewを確認して`migrate --apply` |
 | `SCHEMA_VERSION_UNSUPPORTED` | v3以上など対応外schema | fileを変更せず対応binary・migration手順を確認 |
 | `SCHEMA_INSPECTION_FAILED` | schema version自体を安全に読み取れない | fileを削除せずbackupして調査 |

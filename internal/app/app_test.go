@@ -16,6 +16,7 @@ import (
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 )
 
 func testEnvironment(t *testing.T) (string, layout.Layout) {
@@ -197,6 +198,67 @@ func TestBootstrapLabelsCommandRequiresApplyToMutate(t *testing.T) {
 	}
 	if strings.Count(string(calls), "label create") != len(gh.RequiredLabelSpecs(mustConfig(t, repo))) {
 		t.Fatalf("calls=%s", calls)
+	}
+}
+
+func TestInitCommandPreviewIsReadOnlyAndAgentsCanBeLimited(t *testing.T) {
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex")
+	claudeDir := filepath.Join(root, "claude")
+	agentLoopHome := filepath.Join(root, "agent-loop")
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	t.Setenv("AGENT_LOOP_HOME", agentLoopHome)
+
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	if code := a.Run(context.Background(), []string{"init", "--agents", "claude", "--json"}); code != 0 {
+		t.Fatalf("preview code=%d stderr=%s", code, stderr.String())
+	}
+	var preview userrules.Report
+	if err := json.Unmarshal(out.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if preview.Apply || preview.Changed || len(preview.Targets) != 1 || preview.Targets[0].Agent != userrules.AgentClaude || preview.Targets[0].Status != userrules.StatusMissing {
+		t.Fatalf("preview=%+v", preview)
+	}
+	for _, path := range []string{codexHome, claudeDir, agentLoopHome} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("preview created %s: %v", path, err)
+		}
+	}
+
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), []string{"init", "--agents", "claude", "--apply", "--json"}); code != 0 {
+		t.Fatalf("apply code=%d stderr=%s", code, stderr.String())
+	}
+	var applied userrules.Report
+	if err := json.Unmarshal(out.Bytes(), &applied); err != nil {
+		t.Fatal(err)
+	}
+	if !applied.Apply || !applied.Changed || applied.Targets[0].ApplyResult != userrules.ResultCreated {
+		t.Fatalf("applied=%+v", applied)
+	}
+	if _, err := os.Stat(filepath.Join(claudeDir, "rules", "codex-issue-loop.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(codexHome, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("limited apply changed Codex target: %v", err)
+	}
+}
+
+func TestInitCommandRejectsUnknownAgentWithoutChangingFiles(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("AGENT_LOOP_HOME", filepath.Join(root, "agent-loop"))
+	var out, stderr bytes.Buffer
+	if code := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"init", "--agents", "cursor", "--apply", "--json"}); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("unexpected changes=%v err=%v", entries, err)
 	}
 }
 
