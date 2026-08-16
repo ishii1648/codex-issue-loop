@@ -210,7 +210,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
 		switch issue.Status {
-		case "claiming", "claimed", "running", "resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 			if issue.RunID != "" {
 				exclude[issue.RunID] = true
 			}
@@ -230,7 +230,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
-		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 			continue
 		}
 		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
@@ -382,6 +382,39 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			if current.SessionID != "" {
 				instruction = "The saved session belongs to a different worker backend. Start a fresh session in the existing worktree and use durable state.\n\n" + instruction
 			}
+			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+		}
+		return l.handleResult(ctx, issue, current, result, err)
+	}
+	if current.Status == "environment_resume_pending" {
+		current.Status = "running"
+		current.RetryAfter = nil
+		_, err = l.Store.Update("worker_started", current.Number, current.RunID, map[string]string{"mode": "environment_block_resume"}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(current.Number)]
+			if item == nil || item.Status != "environment_resume_pending" || item.GitHubSync != "" {
+				return fmt.Errorf("Issue #%d environment resume is no longer pending", current.Number)
+			}
+			item.Status = "running"
+			item.RetryAfter = nil
+			if item.EnvironmentResume != nil {
+				item.EnvironmentResume.Status = "running"
+			}
+			item.UpdatedAt = l.now()
+			return nil
+		})
+		if err != nil {
+			return failure.Wrap(failure.Supervisor, "persist environment-blocked resume", err)
+		}
+		workerCfg := l.Config
+		workerCfg.RepoPath = current.Worktree
+		instruction := "The operator confirmed that the external environment prerequisite is resolved. Continue in the existing worktree, preserve all valid dirty changes and prior metadata, rerun the blocked verification, and return the schema-conforming result."
+		if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
+			instruction += " Previous environment block: " + current.BlockedCause.Reason
+		}
+		var result worker.Result
+		if l.canResume(current) {
+			result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+		} else {
 			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 		}
 		return l.handleResult(ctx, issue, current, result, err)
@@ -586,7 +619,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		}
 		return l.scheduleRetry(ctx, current, reason)
 	case "blocked":
-		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "worker blocked", errors.New(result.Summary)), true)
+		return l.blockWorkerEnvironment(ctx, issue.Number, result.Summary)
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
 	}
@@ -1312,6 +1345,47 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 	return l.syncGitHub(ctx, updated)
 }
 
+func (l *Loop) blockWorkerEnvironment(ctx context.Context, number int, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		reason = "worker reported an unresolved environment prerequisite"
+	}
+	current, err := l.issueState(number)
+	if err != nil {
+		return err
+	}
+	cause := failure.Wrap(failure.Issue, "worker blocked", errors.New(reason))
+	_, err = l.Store.Update("issue_blocked", number, current.RunID, map[string]string{
+		"error": cause.Error(), "failure_kind": string(failure.Issue), "blocked_origin": "worker", "blocked_kind": "environment",
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(number)]
+		if item == nil || item.RunID != current.RunID {
+			return fmt.Errorf("Issue #%d run changed while recording worker block", number)
+		}
+		// Keep the lease, session, Goal, answers, worktree, branch, dirty files,
+		// and resource metadata. They are the continuation boundary used by the
+		// explicit operator resume operation.
+		item.Status = "blocked"
+		item.LastError = cause.Error()
+		item.FailureKind = string(failure.Issue)
+		item.GitHubSync = "blocked"
+		item.BlockedCause = &state.BlockedCause{
+			Origin: "worker", Kind: "environment", Resumable: true,
+			Reason: reason, BlockedAt: l.now(),
+		}
+		item.RetryAfter = nil
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist worker environment block", err)
+	}
+	updated, err := l.issueState(number)
+	if err != nil {
+		return err
+	}
+	return l.syncGitHub(ctx, updated)
+}
+
 func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 	var err error
 	switch issue.GitHubSync {
@@ -1343,6 +1417,18 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			}
 		}
 		err = l.GitHub.MarkConflictRetry(ctx, l.Config, issue.Number, recoveryID)
+	case "environment_resume":
+		resumeID := issue.RunID
+		if issue.EnvironmentResume != nil && issue.EnvironmentResume.ID != "" {
+			resumeID = issue.EnvironmentResume.ID
+		}
+		if resumer, ok := l.GitHub.(interface {
+			MarkEnvironmentResume(context.Context, config.Config, int, string) error
+		}); ok {
+			err = resumer.MarkEnvironmentResume(ctx, l.Config, issue.Number, resumeID)
+		} else {
+			err = l.GitHub.MarkRunning(ctx, l.Config, issue.Number)
+		}
 	case "failed", "blocked":
 		err = l.GitHub.MarkFailed(ctx, l.Config, issue.Number, issue.LastError, issue.GitHubSync == "blocked")
 	default:
@@ -1358,6 +1444,9 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		}
 		if item.GitHubSync == issue.GitHubSync {
 			item.GitHubSync = ""
+			if issue.GitHubSync == "environment_resume" && item.EnvironmentResume != nil {
+				item.EnvironmentResume.Status = "github_synced"
+			}
 		}
 		item.UpdatedAt = l.now()
 		return nil

@@ -142,6 +142,24 @@ type ConflictRecovery struct {
 	UpdatedAt       time.Time              `json:"updated_at,omitempty"`
 }
 
+// BlockedCause records provenance needed by the operator resume command. Older
+// or manually-created blocked records intentionally have no provenance and are
+// therefore not resumable.
+type BlockedCause struct {
+	Origin    string    `json:"origin"`
+	Kind      string    `json:"kind"`
+	Resumable bool      `json:"resumable"`
+	Reason    string    `json:"reason"`
+	BlockedAt time.Time `json:"blocked_at"`
+}
+
+type EnvironmentResume struct {
+	ID             string    `json:"id"`
+	Status         string    `json:"status"`
+	ConfirmedAt    time.Time `json:"confirmed_at"`
+	PreviousReason string    `json:"previous_reason"`
+}
+
 type Issue struct {
 	Number            int                `json:"number"`
 	Title             string             `json:"title"`
@@ -171,6 +189,8 @@ type Issue struct {
 	RetryAfter        *time.Time         `json:"retry_after,omitempty"`
 	Answers           []AnswerRecord     `json:"answers,omitempty"`
 	ConflictRecovery  *ConflictRecovery  `json:"conflict_recovery,omitempty"`
+	BlockedCause      *BlockedCause      `json:"blocked_cause,omitempty"`
+	EnvironmentResume *EnvironmentResume `json:"environment_resume,omitempty"`
 	UpdatedAt         time.Time          `json:"updated_at"`
 }
 
@@ -464,7 +484,7 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
+			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
 				return "", false
 			}
 		}

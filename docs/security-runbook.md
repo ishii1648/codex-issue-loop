@@ -6,7 +6,7 @@
 2. `gh auth status`で利用中のアカウントとhostを確認する。token値は表示・記録しない。対象リポジトリに限定できるfine-grained tokenまたはGitHub Appを優先し、Metadata read、Contents read/write、Issues read/write、Pull requests read/writeだけを付与する。Administration、Actions、Packages、組織管理権限は通常不要である。
 3. `codex login status`で認証済みであることだけを確認する。CodexのtokenやAPI keyを`.agent-loop.yaml`、plist、Issue、回答、shell履歴へ書かない。
    Claude Codeでは`claude auth status`、OpenCodeでは`opencode models`を使う。いずれもcredential値を出力・転記せず、runtimeの既存ユーザー認証領域を使う。
-4. `.agent-loop.yaml`の`worker.sandbox`を`workspace-write`（調査専用なら`read-only`）にする。`danger-full-access`は設定検証で拒否される。workerは承認を要求できないため、worktree外への追加書き込みやnetwork権限が必要なIssueは自動キューへ入れない。
+4. `.agent-loop.yaml`の`worker.sandbox`を`workspace-write`（調査専用なら`read-only`）にする。`danger-full-access`は設定検証で拒否される。workerは承認を要求できないため、worktree外への追加書き込みが必要なIssueは自動キューへ入れない。command networkは既定無効とし、local HTTP/CDPが必要なrepositoryだけ[localhost-only command network](localhost-network.md)の固定policyと実機負テストを適用する。`sandbox_workspace_write.network_access=true`だけを設定してはならない。
    Claude Code adapterはnative OS sandboxを有効化し、利用不能時をhard failureにし、unsandboxed escapeを拒否する。OpenCode adapterは`OPENCODE_CONFIG_CONTENT`で`external_directory`、質問待ち、`git commit`、`git push`、PR publishをdenyする。ただしOpenCodeの境界はapplication-levelでOS sandboxと同等ではないため、専用標準ユーザー、最小権限credential、branch protectionを併用する。
 5. branch protectionでmainへの直接pushを禁止し、CIとレビューを必須にする。worker用資格情報にbranch protection bypass権限を与えない。
 

@@ -463,6 +463,176 @@ esac
 	}
 }
 
+func TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "config", "user.name", "Test User")
+	runGitApp(t, repo, "config", "user.email", "test@example.com")
+	runGitApp(t, repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "add", "README.md")
+	runGitApp(t, repo, "commit", "-m", "initial")
+	branch := "codex/issue-8-network"
+	runGitApp(t, repo, "checkout", "-b", branch)
+	remotePath := filepath.Join(filepath.Dir(repo), "environment-remote.git")
+	runGitApp(t, filepath.Dir(repo), "init", "--bare", remotePath)
+	runGitApp(t, repo, "remote", "add", "origin", remotePath)
+	runGitApp(t, repo, "push", "-u", "origin", branch)
+	if err := os.WriteFile(filepath.Join(repo, "dirty-evidence.txt"), []byte("preserve me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeGH := filepath.Join(filepath.Dir(repo), "bin", "gh-resume")
+	logPath := filepath.Join(filepath.Dir(repo), "resume-gh-calls.log")
+	failOncePath := filepath.Join(filepath.Dir(repo), "resume-gh-failed-once")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$AGENT_LOOP_TEST_GH_LOG"
+case "$1 $2" in
+  "issue view") printf '%s\n' '{"number":8,"title":"Network","body":"","url":"https://example.test/issues/8","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[]}' ;;
+  "pr list") printf '%s\n' '[]' ;;
+  "issue edit") if [ ! -e "$AGENT_LOOP_TEST_GH_FAIL_ONCE" ]; then : > "$AGENT_LOOP_TEST_GH_FAIL_ONCE"; exit 1; fi; exit 0 ;;
+  "issue comment") exit 0 ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_LOOP_TEST_GH_LOG", logPath)
+	t.Setenv("AGENT_LOOP_TEST_GH_FAIL_ONCE", failOncePath)
+	configFile, err := os.OpenFile(filepath.Join(repo, config.FileName), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(configFile, "git:\n  worktree_root: %q\n", filepath.Dir(repo)); err != nil {
+		t.Fatal(err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, repo)
+	repo = cfg.RepoPath
+	entry := registry.Entry{
+		RepoID: registry.RepoID(cfg.GitHub.Repo, repo), RepoPath: repo, GitHubRepo: cfg.GitHub.Repo,
+		Commands: map[string]string{"git": "/usr/bin/git", "gh": fakeGH},
+	}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("issue_blocked", 8, "run_8", nil, func(s *state.Snapshot) error {
+		s.Issues["8"] = &state.Issue{
+			Number: 8, Status: "blocked", RunID: "run_8", Branch: branch, Worktree: repo,
+			SessionID: "session-8", Session: &state.WorkerSession{Backend: "codex", ID: "session-8"},
+			FailureKind: "issue", LastError: "issue: worker blocked: localhost bind denied", UpdatedAt: time.Now().UTC(),
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		var out, stderr bytes.Buffer
+		a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+		code := a.Run(context.Background(), []string{"resume-blocked", "--repo", repo, "--issue", "8", "--confirm-prerequisite-resolved", "--json"})
+		if attempt == 0 {
+			if code == 0 {
+				t.Fatal("injected GitHub synchronization failure was not reported")
+			}
+			pending, loadErr := store.Load()
+			if loadErr != nil || pending.Issues["8"].Status != "environment_resume_pending" || pending.Issues["8"].GitHubSync != "environment_resume" {
+				t.Fatalf("write-ahead resume was not retained: issue=%+v err=%v", pending.Issues["8"], loadErr)
+			}
+			continue
+		}
+		if code != 0 {
+			t.Fatalf("attempt=%d code=%d stderr=%s", attempt, code, stderr.String())
+		}
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["8"]
+	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.RunID != "run_8" || item.Branch != branch || item.Worktree != repo || item.SessionID != "session-8" || item.Lease == nil {
+		t.Fatalf("item=%+v", item)
+	}
+	if item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" || item.Lease.ResolvedResources[0] != state.RepositoryResource {
+		t.Fatalf("legacy worker block was not normalized conservatively: %+v", item)
+	}
+	if data, err := os.ReadFile(filepath.Join(repo, "dirty-evidence.txt")); err != nil || string(data) != "preserve me\n" {
+		t.Fatalf("dirty changes were lost: data=%q err=%v", data, err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calls), "--remove-label blocked") || strings.Contains(string(calls), "--remove-label do-not-automate") || !strings.Contains(string(calls), "codex-issue-loop:environment-resume:") {
+		t.Fatalf("calls=%s", calls)
+	}
+}
+
+func TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("manual_block", 9, "run_9", nil, func(s *state.Snapshot) error {
+		s.Issues["9"] = &state.Issue{Number: 9, Status: "blocked", RunID: "run_9", Worktree: repo, Branch: "manual", LastError: "manual exclusion"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"resume-blocked", "--repo", repo, "--issue", "9", "--json"},
+		{"resume-blocked", "--repo", repo, "--issue", "9", "--confirm-prerequisite-resolved", "--json"},
+	} {
+		var out, stderr bytes.Buffer
+		if code := (App{Out: &out, Err: &stderr}).Run(context.Background(), args); code == 0 {
+			t.Fatalf("unsafe resume accepted: %v output=%s", args, out.String())
+		}
+	}
+	for _, test := range []struct {
+		name  string
+		issue state.Issue
+	}{
+		{name: "conflict", issue: state.Issue{Number: 9, Status: "blocked", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}, ConflictRecovery: &state.ConflictRecovery{PullRequestURL: "https://example.test/pr/9"}}},
+		{name: "running", issue: state.Issue{Number: 9, Status: "running", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
+		{name: "completed", issue: state.Issue{Number: 9, Status: "completed", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
+		{name: "security", issue: state.Issue{Number: 9, Status: "blocked", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "supervisor", Kind: "security", Resumable: false}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := store.Update("replace_block", 9, "run_9", nil, func(s *state.Snapshot) error {
+				copy := test.issue
+				s.Issues["9"] = &copy
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out, stderr bytes.Buffer
+			args := []string{"resume-blocked", "--repo", repo, "--issue", "9", "--confirm-prerequisite-resolved", "--json"}
+			if code := (App{Out: &out, Err: &stderr}).Run(context.Background(), args); code == 0 {
+				t.Fatalf("unsafe %s resume accepted: %s", test.name, out.String())
+			}
+		})
+	}
+}
+
 func runGitApp(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {

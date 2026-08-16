@@ -37,6 +37,10 @@ make test-race
 | App Server切断時のstate保全と非対応fallback | `TestCodexAppServerDisconnectAfterTurnStartDoesNotFallback`、`TestCodexAppServerConnectionFailureFallsBackToExecResume`、`TestBackendFactoryEnablesGoalOnlyWhenConfiguredAndSupported` |
 | event rotation後のsequence復旧 | `TestFaultEventRotationKeepsCheckpointAndRecoverySequence` |
 | disk容量reserveでのblocked化 | `TestFaultDiskSafetyReserveBlocksSupervisor` |
+| localhost-only configの閉じたallowlistと不整合拒否 | `TestLoadLocalhostOnlyCommandNetworkIsClosedAndOptIn` |
+| Codex proxy/tool隔離argvとcapability検出 | `TestCodexLocalhostNetworkArgumentsAreFailClosed`、`TestCodexProbeDetectsLocalhostNetworkProxyCapability` |
+| worker環境blockedのsession/resource保持と同一worktree resume | `TestWorkerEnvironmentBlockPreservesContinuationAndResourceState`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
+| operator resumeの冪等性・dirty保持・手動block拒否 | `TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
 
 ## 追加の部分障害と境界
 
@@ -62,6 +66,8 @@ make test-race
 障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
 
 Codex Desktopのquestion notification、macOS通知権限、Activityの回答待ち、pinした`codex-issue-loop` / `zeitreise`監視chatの責務分離はrepository内の自動testでは再現しない。[Codex Desktop監視task運用](codex-desktop-monitoring.md)の実機受け入れ手順で検証する。
+
+Codex network proxy、macOS sandbox、Deno listen/connect、spawnしたChrome CDP、親/子processのpublic/LAN/link-local拒否は認証済みrelease hostだけで[localhost-only command network](localhost-network.md)の実機受け入れを行う。通常suiteはmodel呼び出しや外部networkを使わない。
 
 concurrency 2のfault matrix、self-hosting canary、resource計測、concurrency 1 rollbackは[concurrency 2 rollout・rollback runbook](concurrency-rollout.md)を正本とする。
 

@@ -31,6 +31,34 @@ func TestResultValidation(t *testing.T) {
 	}
 }
 
+func TestCodexLocalhostNetworkArgumentsAreFailClosed(t *testing.T) {
+	cfg := config.Defaults()
+	disabled := strings.Join(codexExecBaseArgs(cfg), " ")
+	if strings.Contains(disabled, "network_access=true") || strings.Contains(disabled, "network_proxy") {
+		t.Fatalf("disabled policy enabled network: %s", disabled)
+	}
+	cfg.Worker.CommandNetwork = config.CommandNetwork{
+		Policy: "localhost-only", Proxy: true, AllowedHosts: []string{"localhost", "127.0.0.1"},
+	}
+	args := strings.Join(codexExecBaseArgs(cfg), " ")
+	for _, required := range []string{
+		"--ignore-user-config", "--strict-config", "sandbox_workspace_write.network_access=true",
+		`features.network_proxy.enabled=true`, `domains={localhost="allow","127.0.0.1"="allow"}`,
+		"allow_upstream_proxy=false", "dangerously_allow_all_unix_sockets=false",
+		"dangerously_allow_non_loopback_proxy=false", "enable_socks5_udp=false",
+		"tools.web_search=false", "mcp_servers={}", "--disable browser_use", "--disable plugins",
+	} {
+		if !strings.Contains(args, required) {
+			t.Fatalf("localhost policy missing %q: %s", required, args)
+		}
+	}
+	for _, forbidden := range []string{`example.com="allow"`, `*="allow"`, "dangerously_allow_all_unix_sockets=true", "allow_upstream_proxy=true"} {
+		if strings.Contains(args, forbidden) {
+			t.Fatalf("localhost policy contains forbidden %q: %s", forbidden, args)
+		}
+	}
+}
+
 func TestDecodeResultRevalidatesPublishedSchemaShape(t *testing.T) {
 	valid := []byte(`{"version":1,"status":"completed","execution_profile":"standard","summary":"done","question":null,"tests":[],"git":null,"retry":null}`)
 	if _, err := decodeResult(valid); err != nil {

@@ -188,7 +188,9 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		return decision
 	}
 	if excluded {
-		if current.GitHubSync == "conflict_retry" && current.Status == "resolving_conflict" {
+		if current.GitHubSync == "environment_resume" && current.Status == "environment_resume_pending" {
+			decision.reason = "explicit environment resume is waiting for GitHub label synchronization"
+		} else if current.GitHubSync == "conflict_retry" && current.Status == "resolving_conflict" {
 			decision.reason = "explicit conflict retry is waiting for GitHub label synchronization"
 		} else if current.GitHubSync == "blocked" {
 			decision.status, decision.workerPID, decision.retryAt = "blocked", 0, nil
@@ -323,6 +325,8 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		}
 	case "resume_pending":
 		decision.reason = "recorded answer remains pending for resume"
+	case "environment_resume_pending":
+		decision.reason = "operator-confirmed environment resume remains pending in the saved worktree"
 	case "needs_input":
 		decision.reason = "unanswered request remains sticky"
 		if !needsInput {

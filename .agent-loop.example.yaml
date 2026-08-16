@@ -35,6 +35,12 @@ worker:
     enabled: false
     goal_token_budget: 200000
     goal_time_budget: 2h
+  # Default is disabled. For local HTTP/CDP verification, set all three values
+  # exactly as shown; arbitrary hosts and proxy bypass are rejected.
+  command_network:
+    policy: disabled
+    proxy: false
+    allowed_hosts: []
   sandbox: workspace-write
   session_mode: resumable
   timeout: 2h

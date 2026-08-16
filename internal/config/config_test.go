@@ -107,6 +107,44 @@ func TestLoadAppServerGoalOptInAndRejectsUnsafeBudgets(t *testing.T) {
 	}
 }
 
+func TestLoadLocalhostOnlyCommandNetworkIsClosedAndOptIn(t *testing.T) {
+	dir := writeConfig(t, `version: 4
+github:
+  repo: owner/repo
+worker:
+  command_network:
+    policy: localhost-only
+    proxy: true
+    allowed_hosts: [localhost, 127.0.0.1]
+`)
+	cfg, err := Load(dir)
+	if err != nil || !cfg.Worker.CommandNetwork.LocalhostOnly() {
+		t.Fatalf("command_network=%+v err=%v", cfg.Worker.CommandNetwork, err)
+	}
+	for _, fragment := range []string{
+		"policy: localhost-only\n    proxy: false\n    allowed_hosts: [localhost, 127.0.0.1]",
+		"policy: localhost-only\n    proxy: true\n    allowed_hosts: []",
+		"policy: localhost-only\n    proxy: true\n    allowed_hosts: ['*']",
+		"policy: localhost-only\n    proxy: true\n    allowed_hosts: [localhost, example.com]",
+		"policy: disabled\n    proxy: true\n    allowed_hosts: []",
+	} {
+		dir = writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  command_network:\n    "+fragment+"\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "command_network") {
+			t.Fatalf("unsafe command network accepted: %s: %v", fragment, err)
+		}
+	}
+	for _, fragment := range []string{
+		"backend: claude-code",
+		"sandbox: read-only",
+		"app_server:\n    enabled: true",
+	} {
+		dir = writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  "+fragment+"\n  command_network:\n    policy: localhost-only\n    proxy: true\n    allowed_hosts: [localhost, 127.0.0.1]\n")
+		if _, err := Load(dir); err == nil {
+			t.Fatalf("incompatible command network accepted: %s", fragment)
+		}
+	}
+}
+
 func TestLoadWorkerBackendsModelsAndVariants(t *testing.T) {
 	tests := []struct{ backend, model, variant, command string }{
 		{backend: "codex", model: "gpt-test", command: "codex"},

@@ -61,20 +61,24 @@ func ProbeCodex(ctx context.Context, path string) Report {
 
 	execHelp, execErr := exec.CommandContext(ctx, path, "exec", "--help").CombinedOutput()
 	resumeHelp, resumeErr := exec.CommandContext(ctx, path, "exec", "resume", "--help").CombinedOutput()
+	features, featuresErr := exec.CommandContext(ctx, path, "features", "list").CombinedOutput()
 	base := execErr == nil && containsAll(string(execHelp), "--json", "--output-schema", "--output-last-message", "--sandbox", "--cd")
 	resume := resumeErr == nil && containsAll(string(resumeHelp), "--json", "--output-schema", "--output-last-message")
 	report.Capabilities["exec_structured"] = base
 	report.Capabilities["session_resume"] = resume
 	report.Capabilities["session_event_thread_id"] = true // Accepted by the tolerant JSONL parser.
 	report.Capabilities["app_server_goal"] = probeCodexAppServerGoal(ctx, path)
+	report.Capabilities["localhost_network_proxy"] = execErr == nil && featuresErr == nil &&
+		containsAll(string(execHelp), "--ignore-user-config", "--strict-config", "--disable") &&
+		containsAll(string(features), "network_proxy", "apps", "browser_use", "computer_use", "plugins", "remote_plugin", "skill_search", "tool_suggest")
 	if !base {
 		report.Missing = append(report.Missing, "exec_structured")
 	}
 	if !report.VersionOK {
 		report.Missing = append(report.Missing, "minimum_version")
 	}
-	if execErr != nil || resumeErr != nil {
-		report.Detail = safeDetail(append(execHelp, resumeHelp...), firstError(execErr, resumeErr))
+	if execErr != nil || resumeErr != nil || featuresErr != nil {
+		report.Detail = safeDetail(append(append(execHelp, resumeHelp...), features...), firstError(execErr, resumeErr, featuresErr))
 	}
 	return report
 }

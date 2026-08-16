@@ -86,12 +86,23 @@ type Worker struct {
 	Model            string             `yaml:"model" json:"model,omitempty"`
 	Variant          string             `yaml:"variant" json:"variant,omitempty"`
 	AppServer        AppServer          `yaml:"app_server" json:"app_server"`
+	CommandNetwork   CommandNetwork     `yaml:"command_network" json:"command_network"`
 	Sandbox          string             `yaml:"sandbox" json:"sandbox"`
 	SessionMode      string             `yaml:"session_mode" json:"session_mode"`
 	Timeout          Duration           `yaml:"timeout" json:"timeout"`
 	TimeoutGrace     Duration           `yaml:"timeout_grace" json:"timeout_grace"`
 	AmbiguousProfile string             `yaml:"ambiguous_profile" json:"ambiguous_profile"`
 	Profiles         map[string]Profile `yaml:"profiles" json:"profiles"`
+}
+
+// CommandNetwork is deliberately narrower than Codex's native proxy
+// configuration. Repository configuration can select no command networking or
+// the one reviewed localhost-only policy; it cannot pass arbitrary proxy
+// options through to Codex.
+type CommandNetwork struct {
+	Policy       string   `yaml:"policy" json:"policy"`
+	Proxy        bool     `yaml:"proxy" json:"proxy"`
+	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts,omitempty"`
 }
 
 // AppServer controls the opt-in Codex App Server Goal adapter. It is only
@@ -222,7 +233,8 @@ func Defaults() Config {
 		},
 		Resources: Resources{MetadataVersion: 1},
 		Worker: Worker{
-			Backend: "codex",
+			Backend:        "codex",
+			CommandNetwork: CommandNetwork{Policy: "disabled"},
 			AppServer: AppServer{
 				GoalTokenBudget: 200000,
 				GoalTimeBudget:  Duration{2 * time.Hour},
@@ -393,6 +405,9 @@ func (c Config) Validate() error {
 	if c.Worker.AppServer.Enabled && (c.Worker.AppServer.GoalTokenBudget <= 0 || c.Worker.AppServer.GoalTimeBudget.Duration <= 0) {
 		return fmt.Errorf("worker.app_server requires positive goal_token_budget and goal_time_budget")
 	}
+	if err := c.Worker.CommandNetwork.Validate(c.Worker); err != nil {
+		return err
+	}
 	if c.Logs.RotateBytes < 1024 || c.Logs.RotateInterval.Duration <= 0 || c.Logs.Generations < 1 {
 		return fmt.Errorf("logs rotation requires rotate_bytes >= 1024, positive rotate_interval, and generations >= 1")
 	}
@@ -446,6 +461,37 @@ func (c Config) Validate() error {
 	}
 	return nil
 }
+
+func (n CommandNetwork) Validate(worker Worker) error {
+	switch n.Policy {
+	case "disabled":
+		if n.Proxy || len(n.AllowedHosts) != 0 {
+			return fmt.Errorf("worker.command_network disabled policy requires proxy=false and an empty allowed_hosts list")
+		}
+		return nil
+	case "localhost-only":
+		if worker.Backend != "codex" {
+			return fmt.Errorf("worker.command_network localhost-only is supported by the codex backend only")
+		}
+		if worker.Sandbox != "workspace-write" {
+			return fmt.Errorf("worker.command_network localhost-only requires worker.sandbox=workspace-write")
+		}
+		if worker.AppServer.Enabled {
+			return fmt.Errorf("worker.command_network localhost-only cannot be combined with worker.app_server; codex exec isolation is required")
+		}
+		if !n.Proxy {
+			return fmt.Errorf("worker.command_network localhost-only requires proxy=true")
+		}
+		if len(n.AllowedHosts) != 2 || n.AllowedHosts[0] != "localhost" || n.AllowedHosts[1] != "127.0.0.1" {
+			return fmt.Errorf("worker.command_network localhost-only allowed_hosts must be exactly [localhost, 127.0.0.1] in that order")
+		}
+		return nil
+	default:
+		return fmt.Errorf("worker.command_network.policy must be disabled or localhost-only")
+	}
+}
+
+func (n CommandNetwork) LocalhostOnly() bool { return n.Policy == "localhost-only" }
 
 // AdmissionSettings returns an immutable copy of the resource taxonomy used
 // by both queue admission and publication auditing. A config without resource

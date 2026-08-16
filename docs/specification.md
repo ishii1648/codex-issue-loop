@@ -185,6 +185,10 @@ worker:
     enabled: false
     goal_token_budget: 200000
     goal_time_budget: 2h
+  command_network:
+    policy: disabled
+    proxy: false
+    allowed_hosts: []
   sandbox: workspace-write
   session_mode: resumable
   timeout: 2h
@@ -249,9 +253,11 @@ security:
 - `worker.command`省略時は順に`codex`、`claude`、`opencode`を使い、登録時に絶対pathへ解決する。
 - `worker.model`はinitial runとresumeの両方へ渡す。OpenCodeでは必須の`provider/model`形式で、最初の`/`だけを分割する。
 - `worker.app_server.enabled`はCodex backendのoptionalな検証機能である。最初のrunと`standard`は常に`codex exec`を使い、初回結果ですでに`extended`と確定した後のcontinuationまたはfresh retryだけApp Server Goalを利用する。`goal_token_budget`と`goal_time_budget`は有効時に正数を必須とする。
+- `worker.command_network.policy`の既定は`disabled`であり、`proxy: false`、空の`allowed_hosts`だけを許可する。opt-inの`localhost-only`はCodex backend、`workspace-write`、`app_server.enabled: false`を必須とし、`proxy: true`と順序を含め完全一致する`allowed_hosts: [localhost, 127.0.0.1]`だけを許可する。空、wildcard、public/private/LAN/link-local host、Unix socket、`dangerously_*`相当の設定は指定できない。
+- `localhost-only`では`codex exec --ignore-user-config --strict-config`を使い、`sandbox_workspace_write.network_access=true`と`features.network_proxy.enabled=true`を同時に固定する。upstream proxy、UDP、任意Unix socketを無効化し、Web Search、Browser/Computer Use、apps/plugins、MCP、remote plugin、skill由来MCP/tool suggestionを無効化する。Codex capabilityを確認できない場合やstrict config/proxy初期化に失敗した場合はworker commandを開始せず、network無効へのfallbackも行わない。詳細は[localhost-only command network](localhost-network.md)を参照する。
 - `worker.variant`はClaude Codeの`--effort`またはOpenCode messageのprovider variantとしてinitial runとresumeの両方へ渡す。
 - `worker.sandbox` の既定値は `workspace-write` とする。
-- `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。terminal状態へ到達したIssueのsession IDはactive stateから外す。
+- `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。completed/failedではsession IDをactive stateから外すが、worker起因の環境`blocked`では正式な再開に備えて保持する。
 - sessionは`{"backend":"<backend>","id":"<session-id>"}`としてnamespace付きで保存する。v3以前に作成された`session_id`もv3 migration時にCodex sessionとして正規化済みであり、v4 migrationは両fieldを保持する。backend変更時はsessionを渡さず、同じworktreeとdurable stateを使うfresh sessionへfallbackする。
 - `worker.ambiguous_profile` は `extended` 固定とし、MVPではユーザー確認へ切り替える設定を設けない。
 - `queue.poll_interval` はGitHub Issueキューの再取得間隔、`watch.reconcile_interval` はattention監視の取りこぼし修復間隔であり、別の設定として扱う。
@@ -267,7 +273,7 @@ security:
 - `completion.auto_merge: false`ではCI成功後にPRをReady for reviewへ移し、人手のmergeを待つ。`true`ではbase branchへの追随とCI再確認後にsquash mergeする。
 - `conflict_recovery.max_attempts_per_base`は同じimmutable base SHAに対するworker試行上限、`max_base_updates`は1つのPRが自律追随するbase SHA世代数の上限とし、既定はいずれも3とする。
 - `completion.close_issue`はPRのmerge確認後にだけ適用し、既定は`true`とする。
-- worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、その他の非terminal状態は期間にかかわらず保持する。
+- worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、`environment_resume_pending`を含むその他の非terminal状態は期間にかかわらず保持する。
 - event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
 
 同一repository内並列化で追加するresource definition、`area:` label、Issue本文の`depends_on`、決定論的admission、lease lifecycleは[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。schema v3ではdurable leaseとmigrationを導入済みで、resource definitionと複数worker admissionは後続段階で有効化する。
@@ -310,6 +316,7 @@ agent-loop <command> [options]
 | `watch` | イベントを追跡する |
 | `answer` | 未回答requestへ回答を登録する |
 | `retry` | PR conflictで最終blockedになったIssueを監査付きで`resolving_conflict`へ戻す |
+| `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -399,10 +406,18 @@ agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
 ```
 
 対象Issueが非activeな`blocked`で、原因がPR conflictであることを確認する。保存済みworktree、branch、open PRの対応をGitHubとGitで検査し、整合する場合だけ試行budgetを明示的に再開する。先にdurable stateへ`conflict_recovery_retry_requested`とGitHub同期intentを書き、blocked labelの除去、running label、idempotency marker付きcommentを同期する。無関係なblocked原因、missing branch/PR、別branchのPRは拒否し、新しいbranch/PRやforce pushは作らない。
-4. supervisorをwakeする
-5. 既に同一回答が登録済みなら成功、異なる回答ならconflictとする
 
-### 6.6 終了コード
+### 6.7 resume-blocked
+
+```sh
+agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
+```
+
+`blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは`failure_kind=issue`とsupervisor生成の`worker blocked` errorが一致する場合だけlegacy worker blockとして同じ操作内でprovenanceを正規化し、失われたleaseは最小の`repo:*`として保守的に再予約する。他のleaseと競合すれば拒否する。operatorの明示確認、active process不在、pending request不在、run/worktree/branch/resource lease、GitHub open Issueとblocked label、保存PRの対応を検査する。dirty changes、session/Goal、回答、resource metadataを保持し、先に`environment_resume_requested`と`github_sync=environment_resume`を原子的に保存してから、blocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止してもsupervisorが同じintentを再実行し、重複worker/commentを作らず収束する。
+
+PR conflict、手動exclusion、security block、上記markerのないlegacy block、running/completed、closed Issue、missing/inconsistent worktree・branch・PRを拒否する。`retry`と`resume-blocked`は交換可能ではなく、state fileやsupervisor-owned labelの手編集を復旧手順にしない。
+
+### 6.8 終了コード
 
 | code | 意味 |
 | --- | --- |
@@ -730,6 +745,7 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `input_requested`
 - `answer_recorded`
 - `retry_scheduled`
+- `environment_resume_requested`
 - `issue_completed`
 - `issue_failed`
 - `github_state_synced`

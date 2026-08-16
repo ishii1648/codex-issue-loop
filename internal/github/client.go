@@ -376,6 +376,23 @@ func (c CLI) MarkConflictRetry(ctx context.Context, cfg config.Config, number in
 	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
 }
 
+// MarkEnvironmentResume removes only supervisor-owned terminal labels. Manual
+// exclusions such as do-not-automate are never removed by this operation.
+func (c CLI) MarkEnvironmentResume(ctx context.Context, cfg config.Config, number int, resumeID string) error {
+	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			remove = append(remove, label)
+		}
+	}
+	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
+		return err
+	}
+	marker := fmt.Sprintf("<!-- codex-issue-loop:environment-resume:%s -->", resumeID)
+	body := marker + "\nEnvironment-blocked worker execution was explicitly resumed using the existing worktree and durable state."
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
+}
+
 func (c CLI) ReadyPullRequest(ctx context.Context, cfg config.Config, prURL string) error {
 	path := c.Path
 	if path == "" {

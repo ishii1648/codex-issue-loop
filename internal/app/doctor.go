@@ -425,6 +425,13 @@ func diagnoseWorkerBackend(ctx context.Context, entry registry.Entry, cfg config
 		diagnostics = append(diagnostics, failedDiagnostic(codePrefix+"_RUNTIME_INCOMPATIBLE", "repository", entry.RepoID, "選択worker runtimeのversionまたはcapabilityが非対応です", compatibilityDetail(report), instruction("runtimeを対応versionへ更新してdoctorを再実行してください")))
 		return diagnostics
 	}
+	if cfg.Worker.CommandNetwork.LocalhostOnly() {
+		if report.Has("localhost_network_proxy") {
+			diagnostics = append(diagnostics, passedDiagnostic("CODEX_LOCALHOST_NETWORK_PROXY_READY", "repository", entry.RepoID, "localhost-only command network policyを初期化できます", "strict config、user config isolation、network_proxy、hosted tool disable capabilityを確認しました"))
+		} else {
+			diagnostics = append(diagnostics, failedDiagnostic("CODEX_LOCALHOST_NETWORK_PROXY_UNAVAILABLE", "repository", entry.RepoID, "localhost-only command network policyを安全に初期化できません", "必要なCodex network_proxyまたはtool隔離capabilityがありません。workerは開始されません", instruction("Codex CLIをnetwork_proxy対応versionへ更新し、doctorを再実行してください")))
+		}
+	}
 	if entry.WorkerVersion != "" && entry.WorkerVersion != report.Version {
 		diagnostics = append(diagnostics, failedDiagnostic("WORKER_RUNTIME_VERSION_DRIFT", "repository", entry.RepoID, "登録後にworker runtime versionが変化しました", fmt.Sprintf("registered=%s current=%s", entry.WorkerVersion, report.Version),
 			command("互換性確認後にrepositoryを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath))))
