@@ -50,6 +50,9 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 		"base_sha": reservation.BaseSHA, "reserved_at": reservation.ReservedAt,
 	}
 	snapshot, err := s.Update("lease_reserved", reservation.IssueNumber, reservation.RunID, payload, func(snapshot *Snapshot) error {
+		if snapshot.Supervisor.Drain.Active() {
+			return fmt.Errorf("supervisor is draining; new Issue claims are disabled")
+		}
 		key := strconv.Itoa(reservation.IssueNumber)
 		issue := snapshot.Issues[key]
 		if issue == nil {

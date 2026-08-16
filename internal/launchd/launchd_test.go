@@ -23,7 +23,7 @@ func TestWritePlistUsesAbsoluteCommandsAndEscapesPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, expected := range []string{"/absolute/agent-loop", "repo &amp; work", "/custom/bin:/usr/bin", "SuccessfulExit"} {
+	for _, expected := range []string{"/absolute/agent-loop", "repo &amp; work", "/custom/bin:/usr/bin", "SuccessfulExit", "ExitTimeOut"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("plist missing %q:\n%s", expected, text)
 		}
@@ -33,6 +33,30 @@ func TestWritePlistUsesAbsoluteCommandsAndEscapesPaths(t *testing.T) {
 		if statErr != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("unsafe mode for %s: info=%v err=%v", path, info, statErr)
 		}
+	}
+}
+
+func TestWritePlistExitTimeoutExceedsConfiguredWorkerGrace(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := "version: 3\ngithub:\n  repo: owner/repo\nworker:\n  timeout_grace: 75s\n"
+	if err := os.WriteFile(filepath.Join(repo, ".agent-loop.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := layout.Layout{Root: root, ReposRoot: filepath.Join(root, "repos"), LaunchAgents: filepath.Join(root, "launch")}
+	entry := registry.Entry{RepoID: "repo-grace", RepoPath: repo}
+	if err := (Manager{Layout: l}).WritePlist(entry, "/absolute/agent-loop"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(l.PlistPath(entry.RepoID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "<key>ExitTimeOut</key><integer>80</integer>") {
+		t.Fatalf("plist ExitTimeOut does not exceed configured grace:\n%s", data)
 	}
 }
 

@@ -105,8 +105,13 @@ func (l *Loop) Run(ctx context.Context) error {
 		defer watcher.Close()
 	}
 	now := l.now()
-	_, err = l.Store.Update("supervisor_started", 0, "", nil, func(s *state.Snapshot) error {
-		s.Supervisor.State = "starting"
+	started, err := l.Store.Update("supervisor_started", 0, "", nil, func(s *state.Snapshot) error {
+		s.Supervisor.Generation++
+		if s.Supervisor.Drain.Active() {
+			s.Supervisor.State = "draining"
+		} else {
+			s.Supervisor.State = "starting"
+		}
 		s.Supervisor.PID = os.Getpid()
 		s.Supervisor.StartedAt = now
 		s.Supervisor.Message = ""
@@ -114,6 +119,24 @@ func (l *Loop) Run(ctx context.Context) error {
 	})
 	if err != nil {
 		return err
+	}
+	if drain := started.Supervisor.Drain; drain != nil && drain.Operation == "restart" && drain.Status == "completed" && started.Supervisor.Generation > drain.PreviousGeneration {
+		_, err = l.Store.Update("restart_completed", 0, "", map[string]any{
+			"drain_id": drain.ID,
+			"previous_generation": drain.PreviousGeneration, "new_generation": started.Supervisor.Generation,
+		}, func(s *state.Snapshot) error {
+			if s.Supervisor.Drain == nil || s.Supervisor.Drain.ID != drain.ID || s.Supervisor.Drain.Status != "completed" {
+				return errDrainStateChanged
+			}
+			now := l.now()
+			s.Supervisor.Drain.Status = "restart_completed"
+			s.Supervisor.Drain.NewGeneration = s.Supervisor.Generation
+			s.Supervisor.Drain.CompletedAt = &now
+			return nil
+		})
+		if err != nil && !errors.Is(err, errDrainStateChanged) {
+			return err
+		}
 	}
 
 	return l.runScheduler(ctx, watcher)
@@ -169,6 +192,9 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	snapshot, err := l.Store.Load()
 	if err != nil {
 		return false, failure.Wrap(failure.Supervisor, "load durable state", err)
+	}
+	if snapshot.Supervisor.Drain.Active() {
+		return false, nil
 	}
 	diskAvailable := l.DiskAvailable
 	if diskAvailable == nil {
@@ -273,6 +299,11 @@ func (l *Loop) startIssueAtSlot(ctx context.Context, issue gh.Issue, runID strin
 }
 
 func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue, runID string, slot int, declared, resolved []string) error {
+	if snapshot, err := l.Store.Load(); err != nil {
+		return failure.Wrap(failure.Supervisor, "check drain before claim", err)
+	} else if snapshot.Supervisor.Drain.Active() {
+		return nil
+	}
 	latest, err := l.GitHub.Get(ctx, l.Config, issue.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh GitHub Issue before claim", err)
@@ -287,6 +318,11 @@ func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue
 		DeclaredResources: declared, ResolvedResources: resolved, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
 	})
 	if err != nil {
+		// A drain request may win the race after the pre-claim check. That is a
+		// successful scheduling fence, not a supervisor failure.
+		if snapshot, loadErr := l.Store.Load(); loadErr == nil && snapshot.Supervisor.Drain.Active() {
+			return nil
+		}
 		return failure.Wrap(failure.Supervisor, "persist claim start", err)
 	}
 	return l.claimAndRun(ctx, issue, runID)

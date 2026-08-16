@@ -20,11 +20,11 @@ make test-race
 | snapshot途中書き込みからの復旧 | `TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint`、`TestFaultPartialEventTailIsTruncatedAndRecorded` |
 | worker kill後のreconciliation | `TestFaultWorkerKillReturnsRecoverableProcessError`、`TestFaultWorkerAndGitHubStateReconciliationDecisions` |
 | timeoutの段階的終了とprocess group回収 | `TestFaultWorkerTimeoutUsesGracefulProcessGroupTermination`、`TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace`、`TestWorkerTimeoutStageIsPersistedForRetry` |
-| 複数workerのstop・orphan回収 | `TestSchedulerCancellationStopsAllWorkers`、`TestStopWorkersTerminatesAndRecordsEveryIssueIndependently`、`TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue` |
+| graceful drain・timeout・force・orphan回収 | `TestFaultGracefulDrainWaitsForWorkerCheckpointWithoutCancellationOrNewDispatch`、`TestFaultGracefulDrainCheckpointsMultipleWorkersBeforeStopping`、`TestFaultDrainTimeoutResumesSchedulingWithoutCancelingWorker`、`TestForceStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped`、`TestStopWorkersTerminatesAndRecordsEveryIssueIndependently`、`TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue` |
 | concurrency 2の同時result barrier | `TestFaultSchedulerConcurrentResultBarrier` |
 | same-resourceの同時予約競合 | `TestFaultConcurrentLeaseReservationsNeverOverlapResources` |
 | 実processのstop・restart・orphan回収 | `TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases` |
-| watchの接続、切断、複数接続 | `TestFaultDisconnectedEventChannelsFallBackToTimer`、`TestFaultMultipleWatchConnectionsObserveSameRevision`、`TestFSNotifyMultipleWatchersWakeAndCanReconnect` |
+| watchの接続、切断、複数接続、draining表示 | `TestFaultDisconnectedEventChannelsFallBackToTimer`、`TestFaultMultipleWatchConnectionsObserveSameRevision`、`TestFSNotifyMultipleWatchersWakeAndCanReconnect`、`TestWatchReturnsDurableDrainingState` |
 | 複数requestの表示・個別回答 | `TestWatchReturnsEveryPendingRequestInRequestIDOrder`、`TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
 | Desktop監視の即時再表示・payload保持・冪等回答・watch再開 | `TestWatchAnswerReconnectRoundTripPreservesQuestionContract` |
 | event通知を破棄した場合のreconciliation | `TestFaultDroppedEventReconcilesAttention` |
@@ -63,6 +63,8 @@ make test-race
 Codex Desktopのquestion notification、macOS通知権限、Activityの回答待ち、pinした`codex-issue-loop` / `zeitreise`監視chatの責務分離はrepository内の自動testでは再現しない。[Codex Desktop監視task運用](codex-desktop-monitoring.md)の実機受け入れ手順で検証する。
 
 concurrency 2のfault matrix、self-hosting canary、resource計測、concurrency 1 rollbackは[concurrency 2 rollout・rollback runbook](concurrency-rollout.md)を正本とする。
+
+実Codex workerを使うmacOS launchd E2Eでは、active turn中の`stop --timeout`でworker PGIDへsignalが送られずcheckpoint後に停止すること、`restart --timeout`でgenerationが増えて旧PID/PGIDが残らないこと、短いtimeoutでは稼働復帰し明示的な`--force`だけがprocess groupを回収することを、実行前後の`status --json`とevent logで記録する。
 
 ## セキュリティ負テスト
 

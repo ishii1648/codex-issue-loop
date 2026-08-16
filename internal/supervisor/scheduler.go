@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -44,6 +45,8 @@ func (systemSchedulerTimers) NewTimer(delay time.Duration) SchedulerTimer {
 type schedulerEventKind string
 
 const schedulerJobFinished schedulerEventKind = "job_finished"
+
+var errDrainStateChanged = errors.New("durable drain state changed")
 
 // schedulerEvent is the typed hand-off from a lifecycle goroutine. The run ID
 // fences late results from a prior dispatch of the same Issue.
@@ -98,7 +101,19 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 	}
 	pollCandidates := !s.pollAt.After(l.now())
 	for {
-		dispatched, scheduleErr := s.schedule(ctx, pollCandidates)
+		draining, completed, drainErr := s.reconcileDrain()
+		if drainErr != nil {
+			s.cancelAndDrain()
+			return l.blockSupervisor(failure.Wrap(failure.Supervisor, "reconcile graceful drain", drainErr), failure.Supervisor, consecutiveFailures+1)
+		}
+		if completed {
+			return nil
+		}
+		dispatched := false
+		var scheduleErr error
+		if !draining {
+			dispatched, scheduleErr = s.schedule(ctx, pollCandidates)
+		}
 		pollCandidates = false
 		if scheduleErr != nil {
 			kind := failure.KindOf(scheduleErr)
@@ -149,6 +164,10 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 			if fatal := s.handleEvent(event); fatal != nil {
 				s.cancelAndDrain()
 				return l.blockSupervisor(fatal, failure.Supervisor, consecutiveFailures+1)
+			}
+			if checkpointErr := s.recordDrainCheckpoint(event); checkpointErr != nil {
+				s.cancelAndDrain()
+				return l.blockSupervisor(failure.Wrap(failure.Supervisor, "record drain checkpoint", checkpointErr), failure.Supervisor, consecutiveFailures+1)
 			}
 			// A freed slot immediately admits the next candidate instead of
 			// waiting for the regular GitHub poll interval.
@@ -210,6 +229,9 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 	}
 	if err := s.preflight(snapshot); err != nil {
 		return false, err
+	}
+	if snapshot.Supervisor.Drain.Active() {
+		return false, nil
 	}
 
 	dispatched := false
@@ -273,6 +295,94 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
 	})
 	return true, nil
+}
+
+func (s *scheduler) reconcileDrain() (draining bool, completed bool, err error) {
+	snapshot, err := s.loop.Store.Load()
+	if err != nil || !snapshot.Supervisor.Drain.Active() {
+		return false, false, err
+	}
+	drain := snapshot.Supervisor.Drain
+	remaining := len(s.active)
+	if remaining == 0 {
+		now := s.loop.now()
+		_, err = s.loop.Store.Update("drain_completed", 0, "", map[string]any{
+			"drain_id": drain.ID, "operation": drain.Operation, "generation": snapshot.Supervisor.Generation,
+		}, func(current *state.Snapshot) error {
+			if current.Supervisor.Drain == nil || current.Supervisor.Drain.ID != drain.ID || !current.Supervisor.Drain.Active() {
+				return errDrainStateChanged
+			}
+			current.Supervisor.Drain.Status = "completed"
+			current.Supervisor.Drain.RemainingActive = 0
+			current.Supervisor.Drain.CompletedAt = &now
+			current.Supervisor.State = "stopped"
+			current.Supervisor.PID = 0
+			current.Supervisor.Message = "graceful drain completed"
+			return nil
+		})
+		if errors.Is(err, errDrainStateChanged) {
+			return s.reconcileDrain()
+		}
+		return true, err == nil, err
+	}
+	if !drain.Deadline.After(s.loop.now()) {
+		now := s.loop.now()
+		_, err = s.loop.Store.Update("drain_timed_out", 0, "", map[string]any{
+			"drain_id": drain.ID, "remaining_active": remaining, "deadline": drain.Deadline,
+		}, func(current *state.Snapshot) error {
+			if current.Supervisor.Drain == nil || current.Supervisor.Drain.ID != drain.ID || !current.Supervisor.Drain.Active() {
+				return errDrainStateChanged
+			}
+			current.Supervisor.Drain.Status = "timed_out"
+			current.Supervisor.Drain.RemainingActive = remaining
+			current.Supervisor.Drain.CompletedAt = &now
+			current.Supervisor.Drain.Message = "graceful drain timed out; workers were not signaled"
+			current.Supervisor.State = "running"
+			current.Supervisor.Message = current.Supervisor.Drain.Message
+			return nil
+		})
+		if errors.Is(err, errDrainStateChanged) {
+			return s.reconcileDrain()
+		}
+		return false, false, err
+	}
+	if snapshot.Supervisor.State != "draining" || drain.Status != "draining" || drain.RemainingActive != remaining {
+		_, err = s.loop.Store.Update("drain_progress", 0, "", map[string]any{"drain_id": drain.ID, "remaining_active": remaining}, func(current *state.Snapshot) error {
+			if current.Supervisor.Drain == nil || current.Supervisor.Drain.ID != drain.ID || !current.Supervisor.Drain.Active() {
+				return errDrainStateChanged
+			}
+			current.Supervisor.State = "draining"
+			current.Supervisor.Message = "waiting for active workers to reach durable checkpoints"
+			current.Supervisor.Drain.Status = "draining"
+			current.Supervisor.Drain.RemainingActive = remaining
+			return nil
+		})
+		if errors.Is(err, errDrainStateChanged) {
+			return s.reconcileDrain()
+		}
+	}
+	return true, false, err
+}
+
+func (s *scheduler) recordDrainCheckpoint(event schedulerEvent) error {
+	snapshot, err := s.loop.Store.Load()
+	if err != nil || !snapshot.Supervisor.Drain.Active() {
+		return err
+	}
+	remaining := len(s.active)
+	_, err = s.loop.Store.Update("worker_checkpointed", event.IssueNumber, event.RunID, map[string]any{
+		"drain_id": snapshot.Supervisor.Drain.ID, "remaining_active": remaining,
+	}, func(current *state.Snapshot) error {
+		if current.Supervisor.Drain == nil || current.Supervisor.Drain.ID != snapshot.Supervisor.Drain.ID || !current.Supervisor.Drain.Active() {
+			return errDrainStateChanged
+		}
+		current.Supervisor.Drain.RemainingActive = remaining
+		return nil
+	})
+	if errors.Is(err, errDrainStateChanged) {
+		return nil
+	}
+	return err
 }
 
 func hasPendingRequests(snapshot state.Snapshot) bool {
@@ -516,6 +626,9 @@ func (s *scheduler) nextRetryDelay() time.Duration {
 		}
 	}
 	if snapshot, err := s.loop.Store.Load(); err == nil {
+		if snapshot.Supervisor.Drain.Active() && (deadline.IsZero() || snapshot.Supervisor.Drain.Deadline.Before(deadline)) {
+			deadline = snapshot.Supervisor.Drain.Deadline
+		}
 		for _, issue := range snapshot.Issues {
 			if issue != nil && issue.RetryAfter != nil {
 				if _, active := s.active[issue.Number]; !active && (deadline.IsZero() || issue.RetryAfter.Before(deadline)) {

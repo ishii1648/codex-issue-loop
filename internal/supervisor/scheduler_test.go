@@ -119,6 +119,194 @@ func TestSchedulerCancellationStopsAllWorkers(t *testing.T) {
 	}
 }
 
+func TestFaultGracefulDrainWaitsForWorkerCheckpointWithoutCancellationOrNewDispatch(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Queue.Concurrency = 1
+	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
+	loop.Random = fixedRandom(0.5)
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
+	pool := &blockingPoolWorker{
+		started: make(chan int, 2), release: make(chan struct{}, 1), canceled: make(chan int, 1),
+	}
+	loop.Worker = pool
+	_, err := loop.Store.Update("drain_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		for _, number := range []int{1, 2} {
+			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
+				Number: number, Title: "Test", Status: "retry_wait", RunID: "run_" + strconv.Itoa(number),
+				Worktree: loop.Config.RepoPath, Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{
+		loop: loop, events: make(chan schedulerEvent, 2), active: map[int]activeJob{},
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if dispatched, scheduleErr := s.schedule(ctx, false); scheduleErr != nil || !dispatched {
+		t.Fatalf("dispatched=%v err=%v", dispatched, scheduleErr)
+	}
+	if number := <-pool.started; number != 1 {
+		t.Fatalf("started Issue=%d, want 1", number)
+	}
+	beforeDrain, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgetAttempts := beforeDrain.Issues["1"].Attempts
+	budgetContinuations := beforeDrain.Issues["1"].Continuations
+	deadline := loop.now().Add(time.Minute)
+	_, err = loop.Store.Update("drain_requested", 0, "drain_test", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "draining"
+		snapshot.Supervisor.Drain = &state.Drain{ID: "drain_test", Operation: "stop", Status: "requested", RequestedAt: loop.now(), Deadline: deadline, RemainingActive: 1}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draining, completed, reconcileErr := s.reconcileDrain(); reconcileErr != nil || !draining || completed {
+		t.Fatalf("draining=%v completed=%v err=%v", draining, completed, reconcileErr)
+	}
+	if dispatched, scheduleErr := s.schedule(ctx, true); scheduleErr != nil || dispatched {
+		t.Fatalf("drain admitted new work: dispatched=%v err=%v", dispatched, scheduleErr)
+	}
+	select {
+	case number := <-pool.canceled:
+		t.Fatalf("graceful drain canceled Issue #%d", number)
+	default:
+	}
+	pool.release <- struct{}{}
+	event := <-s.events
+	if err := s.handleEvent(event); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.recordDrainCheckpoint(event); err != nil {
+		t.Fatal(err)
+	}
+	if draining, completed, reconcileErr := s.reconcileDrain(); reconcileErr != nil || !draining || !completed {
+		t.Fatalf("final draining=%v completed=%v err=%v", draining, completed, reconcileErr)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Supervisor.State != "stopped" || snapshot.Supervisor.Drain == nil || snapshot.Supervisor.Drain.Status != "completed" {
+		t.Fatalf("supervisor=%+v", snapshot.Supervisor)
+	}
+	if snapshot.Issues["1"].Attempts != budgetAttempts || snapshot.Issues["1"].Continuations != budgetContinuations {
+		t.Fatalf("operator drain consumed worker budget: %+v", snapshot.Issues["1"])
+	}
+	select {
+	case number := <-pool.started:
+		t.Fatalf("Issue #%d started during drain", number)
+	default:
+	}
+}
+
+func TestFaultDrainTimeoutResumesSchedulingWithoutCancelingWorker(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
+	loop.Logger = log.New(io.Discard, "", 0)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &scheduler{
+		loop: loop, active: map[int]activeJob{1: {runID: "run_1", slot: 0, cancel: cancel}},
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+	}
+	past := loop.now().Add(-time.Second)
+	_, err := loop.Store.Update("drain_requested", 0, "drain_timeout", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "draining"
+		snapshot.Supervisor.Drain = &state.Drain{ID: "drain_timeout", Operation: "stop", Status: "draining", RequestedAt: past, Deadline: past, RemainingActive: 1}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draining, completed, err := s.reconcileDrain()
+	if err != nil || draining || completed {
+		t.Fatalf("draining=%v completed=%v err=%v", draining, completed, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil || snapshot.Supervisor.State != "running" || snapshot.Supervisor.Drain.Status != "timed_out" {
+		t.Fatalf("supervisor=%+v err=%v", snapshot.Supervisor, err)
+	}
+}
+
+func TestFaultGracefulDrainCheckpointsMultipleWorkersBeforeStopping(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Queue.Concurrency = 2
+	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
+	loop.Random = fixedRandom(0.5)
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
+	pool := &blockingPoolWorker{started: make(chan int, 3), release: make(chan struct{}, 2), canceled: make(chan int, 2)}
+	loop.Worker = pool
+	_, err := loop.Store.Update("multi_drain_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		for number := 1; number <= 3; number++ {
+			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
+				Number: number, Title: "Test", Status: "retry_wait", RunID: "run_" + strconv.Itoa(number),
+				Worktree: loop.Config.RepoPath, Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{
+		loop: loop, events: make(chan schedulerEvent, 3), active: map[int]activeJob{},
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if dispatched, scheduleErr := s.schedule(ctx, false); scheduleErr != nil || !dispatched {
+		t.Fatalf("dispatched=%v err=%v", dispatched, scheduleErr)
+	}
+	first, second := <-pool.started, <-pool.started
+	started := map[int]bool{first: true, second: true}
+	if len(started) != 2 || len(s.active) != 2 {
+		t.Fatalf("started=%v active=%v", started, s.active)
+	}
+	deadline := loop.now().Add(time.Minute)
+	_, err = loop.Store.Update("drain_requested", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "draining"
+		snapshot.Supervisor.Drain = &state.Drain{ID: "drain_multi", Operation: "restart", Status: "requested", RequestedAt: loop.now(), Deadline: deadline, RemainingActive: 2}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.release <- struct{}{}
+	pool.release <- struct{}{}
+	for range 2 {
+		event := <-s.events
+		if err := s.handleEvent(event); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.recordDrainCheckpoint(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if draining, completed, reconcileErr := s.reconcileDrain(); reconcileErr != nil || !draining || !completed {
+		t.Fatalf("draining=%v completed=%v err=%v", draining, completed, reconcileErr)
+	}
+	select {
+	case number := <-pool.started:
+		t.Fatalf("queued Issue #%d started during multi-worker drain", number)
+	default:
+	}
+	select {
+	case number := <-pool.canceled:
+		t.Fatalf("Issue #%d was canceled by graceful drain", number)
+	default:
+	}
+}
+
 func TestSchedulerContinuesAfterNeedsInputWhenConfigured(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Config.Queue.Concurrency = 2

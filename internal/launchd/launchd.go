@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
@@ -56,6 +57,18 @@ func (m Manager) WritePlist(entry registry.Entry, binary string) error {
 		"stdout": filepath.Join(stateDir, "launchd.stdout.log"), "stderr": filepath.Join(stateDir, "launchd.stderr.log"),
 		"home": home, "path": pathEnv,
 	}
+	exitTimeout := 60
+	if _, statErr := os.Stat(filepath.Join(entry.RepoPath, config.FileName)); statErr == nil {
+		cfg, loadErr := config.Load(entry.RepoPath)
+		if loadErr != nil {
+			return fmt.Errorf("load worker grace period for launchd: %w", loadErr)
+		}
+		exitTimeout = int((cfg.Worker.TimeoutGrace.Duration + time.Second - 1) / time.Second)
+		// launchd must never expire its service exit window before the worker
+		// process-group grace period used by an explicit forced stop.
+		exitTimeout += 5
+	}
+	values["exit_timeout"] = strconv.Itoa(exitTimeout)
 	for _, logPath := range []string{values["stdout"], values["stderr"]} {
 		if info, statErr := os.Lstat(logPath); statErr == nil && !info.Mode().IsRegular() {
 			return fmt.Errorf("supervisor log path is not a regular file: %s", logPath)
@@ -84,6 +97,7 @@ func (m Manager) WritePlist(entry registry.Entry, binary string) error {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>30</integer>
+  <key>ExitTimeOut</key><integer>{{exit_timeout}}</integer>
   <key>WorkingDirectory</key><string>{{repo}}</string>
   <key>StandardOutPath</key><string>{{stdout}}</string>
   <key>StandardErrorPath</key><string>{{stderr}}</string>

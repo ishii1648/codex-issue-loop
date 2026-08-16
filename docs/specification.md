@@ -293,8 +293,8 @@ agent-loop <command> [options]
 | `register --repo PATH` | 対象リポジトリを検証し、registryとplistを生成する |
 | `unregister --repo PATH` | 停止確認後に登録を解除する |
 | `start` | LaunchAgentをbootstrap/kickstartする |
-| `stop` | LaunchAgentを停止する。Issue状態は保持する |
-| `restart` | 停止後に再起動する |
+| `stop [--timeout 5m] [--force]` | 既定ではactive workerをcheckpointまでdrainしてLaunchAgentを停止する。Issue状態は保持する |
+| `restart [--timeout 5m] [--force]` | graceful drainと旧世代の終了確認後に新世代を起動する |
 | `status` | snapshot、launchd状態、GitHub状態の要約を返す |
 | `watch` | イベントを追跡する |
 | `answer` | 未回答requestへ回答を登録する |
@@ -328,9 +328,15 @@ agent-loop start --repo /path/to/repo [--json]
 
 `start` 自身は常駐しない。
 
-`stop`と`restart`はLaunchAgentをunloadした後、snapshotに保存された全Issueのworker PID/PGIDを照合する。所有権を確認できたprocess groupすべてへ先に`SIGTERM`を送り、pool共通の`worker.timeout_grace`だけ待機する。残存groupだけを`SIGKILL`し、全groupの終了を確認してからIssueごとに`worker_process_stopped`を記録する。worktree、session、branch、leaseは保持し、通常workerは`retry_wait`、conflict workerは`resolving_conflict`から次回起動時に再開する。PID再利用などで所有権を確認できないgroupはsignalせず停止処理を失敗させる。
+`stop`と`restart`の通常経路は、deadline付きのdrain requestをsnapshotへ先に保存し、supervisorを`draining`へ遷移させる。drain中は新規claim、`retry_wait` / `resume_pending` worker、PR polling/publisher、conflict-resolution workerを新たにdispatchしない。すでにdispatch済みのlifecycleはcancelせず、worker resultとsession ID、publisher/PR lifecycle、GitHub sync intent、resource leaseを永続化してworker PID/PGIDが0になるcheckpointまで待つ。`awaiting_checks`、`awaiting_merge`、`retry_wait`、`resume_pending`、`needs_input`は停止可能なcheckpointであり、再起動後は通常のreconciliationで続行する。operator drainだけを理由にattemptまたはcontinuationを増やさない。
 
-`status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、`limit`、`available`、Issue番号順の`issues`を返す。各active Issueは`issue_number`、`run_id`、`phase`、PID/PGID、slot、resolved resources、`(run_id, generation)` resource ownerを持つ。未回答requestは`pending_requests`へrequest ID順で返す。
+既定のdrain timeoutは5分である。deadline到達時は`drain_timed_out`を記録し、workerへsignalせずsupervisorを`running`へ戻す。CLIはactive数と「後でgraceful操作を再試行」「影響を評価して`--force`」というremediationを返す。CLI中断時にもdurable requestは残り、supervisor自身がdeadlineで完了またはtimeoutへ収束させる。
+
+`--force`を明示した場合だけLaunchAgentをunloadし、snapshotに保存された全Issueのworker PID/PGIDを照合する。所有権を確認できたprocess groupすべてへ先に`SIGTERM`を送り、pool共通の`worker.timeout_grace`だけ待機する。残存groupだけを`SIGKILL`し、全groupの終了を確認してからIssueごとに`worker_process_stopped`を記録する。worktree、session、branch、leaseは保持する。plistの`ExitTimeOut`はこのgrace periodより長く生成し、launchdが先にsupervisorを強制終了しないようにする。PID再利用などで所有権を確認できないgroupはsignalせず停止処理を失敗させる。
+
+graceful restartは`drain_completed`後にLaunchAgentをunloadして旧supervisorの終了を確定し、保存済みworker PID/PGIDがないことを検証してからbootstrapする。supervisor generationは起動ごとに増加し、CLIは新しいPIDとgenerationを確認して`restart_completed`を記録する。
+
+`status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、`limit`、`available`、Issue番号順の`issues`を返す。各active Issueは`issue_number`、`run_id`、`phase`、PID/PGID、slot、resolved resources、`(run_id, generation)` resource ownerを持つ。`state.supervisor`にはgenerationと、drain中または直近のdrainについてID、operation、status、開始時刻、deadline、残りactive数、対象IssueのPID/PGID/phase、旧・新generation、結果を保持する。未回答requestは`pending_requests`へrequest ID順で返す。
 
 ### 6.4 watch
 
@@ -343,6 +349,7 @@ agent-loop watch --repo /path/to/repo --until-attention [--json]
 - 未回答の `needs_input`
 - いずれかのIssueが `blocked`
 - supervisorが `blocked`
+- supervisorが `draining`
 - 明示的な停止
 - `--until-idle` も指定された場合のキュー空
 
@@ -717,6 +724,13 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `issue_completed`
 - `issue_failed`
 - `github_state_synced`
+- `drain_requested`
+- `drain_progress`
+- `worker_checkpointed`
+- `drain_completed`
+- `drain_timed_out`
+- `forced_stop`
+- `restart_completed`
 - `supervisor_blocked`
 - `supervisor_stopped`
 

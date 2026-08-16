@@ -192,8 +192,8 @@ Commands:
   register      Register a repository and write its LaunchAgent
   unregister    Stop and unregister a repository
   start         Start the repository LaunchAgent
-  stop          Stop the repository LaunchAgent without deleting state
-  restart       Restart the repository LaunchAgent
+  stop          Gracefully drain and stop the repository LaunchAgent
+  restart       Gracefully drain, stop, and restart the LaunchAgent
   status        Show durable and launchd state
   watch         Wait for needs_input, blocked, stopped, or optional idle
   answer        Record an answer for a pending request
@@ -789,7 +789,7 @@ func (a App) unregister(ctx context.Context, l layout.Layout, args []string) err
 }
 
 func (a App) control(ctx context.Context, l layout.Layout, command string, args []string) error {
-	entry, jsonOut, err := a.resolve(l, command, args)
+	entry, jsonOut, timeout, force, err := a.resolveControl(l, command, args)
 	if err != nil {
 		return err
 	}
@@ -800,6 +800,8 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 	lm := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 	stopReport := supervisor.WorkerStopReport{Workers: []supervisor.WorkerStop{}}
+	var drain *state.Drain
+	restartStartAttempted := false
 	switch command {
 	case "start":
 		var launchStatus launchd.Status
@@ -811,43 +813,315 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 			err = lm.Start(ctx, entry)
 		}
 	case "stop":
-		err = lm.Stop(ctx, entry)
-		if err == nil {
-			stopReport, err = supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, "worker canceled by explicit stop", a.ProcessController)
-		}
+		drain, stopReport, err = a.stopGracefully(ctx, lm, entry, store, cfg, "stop", timeout, force)
 	case "restart":
-		err = lm.Stop(ctx, entry)
-		if err == nil {
-			stopReport, err = supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, "worker canceled by supervisor restart", a.ProcessController)
+		var previousGeneration uint64
+		if snapshot, loadErr := store.Load(); loadErr == nil {
+			previousGeneration = snapshot.Supervisor.Generation
 		}
+		drain, stopReport, err = a.stopGracefully(ctx, lm, entry, store, cfg, "restart", timeout, force)
 		if err == nil {
 			err = recordSupervisorControl(store, "starting", "restart requested")
 		}
 		if err == nil {
+			restartStartAttempted = true
 			err = lm.Start(ctx, entry)
+		}
+		if err == nil {
+			drain, err = waitForRestartGeneration(ctx, store, previousGeneration, timeout)
 		}
 	}
 	if err != nil {
-		if command == "start" || command == "restart" {
+		var controlExit exitError
+		if drain != nil && errors.As(err, &controlExit) && controlExit.Code == 5 {
+			status, _ := lm.Status(ctx, entry)
+			result := map[string]any{
+				"repo_id": entry.RepoID, "command": command, "launchd": status,
+				"drain": drain, "result": "timed_out", "workers_signaled": false,
+				"remediation": []string{"retry the graceful operation later", "inspect active workers and use --force only if interruption is acceptable"},
+			}
+			if outputErr := a.output(jsonOut, result); outputErr != nil {
+				return outputErr
+			}
+		}
+		if command == "start" || command == "restart" && restartStartAttempted {
 			_ = recordSupervisorControl(store, "stopped", "start failed: "+err.Error())
 		}
 		return err
-	}
-	if command == "stop" {
-		_, err = store.Update("supervisor_stopped", 0, "", map[string]string{"reason": "explicit stop"}, func(s *state.Snapshot) error {
-			s.Supervisor.State, s.Supervisor.PID, s.Supervisor.Message = "stopped", 0, "explicit stop"
-			return nil
-		})
-		if err != nil {
-			return err
-		}
 	}
 	status, _ := lm.Status(ctx, entry)
 	result := map[string]any{"repo_id": entry.RepoID, "command": command, "launchd": status}
 	if command == "stop" || command == "restart" {
 		result["worker_stop"] = stopReport
+		result["drain"] = drain
 	}
 	return a.output(jsonOut, result)
+}
+
+const defaultDrainTimeout = 5 * time.Minute
+
+func (a App) resolveControl(l layout.Layout, command string, args []string) (registry.Entry, bool, time.Duration, bool, error) {
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	repo := fs.String("repo", "", "repository path")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	timeout := defaultDrainTimeout
+	force := false
+	if command == "stop" || command == "restart" {
+		fs.DurationVar(&timeout, "timeout", defaultDrainTimeout, "maximum graceful drain duration")
+		fs.BoolVar(&force, "force", false, "skip graceful drain and terminate worker process groups")
+	}
+	if err := fs.Parse(args); err != nil {
+		return registry.Entry{}, false, 0, false, exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return registry.Entry{}, false, 0, false, exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	if timeout <= 0 {
+		return registry.Entry{}, false, 0, false, exitError{2, fmt.Errorf("--timeout must be positive")}
+	}
+	entry, err := a.resolvePath(l, *repo)
+	return entry, *jsonOut, timeout, force, err
+}
+
+func (a App) stopGracefully(ctx context.Context, lm launchd.Manager, entry registry.Entry, store state.Store, cfg config.Config, operation string, timeout time.Duration, force bool) (*state.Drain, supervisor.WorkerStopReport, error) {
+	empty := supervisor.WorkerStopReport{Workers: []supervisor.WorkerStop{}}
+	if force {
+		if err := lm.Stop(ctx, entry); err != nil {
+			return nil, empty, err
+		}
+		report, err := supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, "worker canceled by forced "+operation, a.ProcessController)
+		if err != nil {
+			return nil, report, err
+		}
+		now := time.Now().UTC()
+			snapshot, err := store.Update("forced_stop", 0, "", map[string]any{"operation": operation, "workers": report.Workers}, func(s *state.Snapshot) error {
+			if s.Supervisor.Drain == nil {
+				s.Supervisor.Drain = &state.Drain{ID: state.NewID("drain"), Operation: operation, RequestedAt: now, Deadline: now, PreviousGeneration: s.Supervisor.Generation, Targets: []state.DrainTarget{}}
+			}
+			s.Supervisor.Drain.Operation = operation
+			s.Supervisor.Drain.Status = "forced"
+			s.Supervisor.Drain.Forced = true
+			s.Supervisor.Drain.CompletedAt = &now
+			s.Supervisor.Drain.RemainingActive = 0
+			s.Supervisor.Drain.Message = "forced stop completed"
+			s.Supervisor.State, s.Supervisor.PID, s.Supervisor.Message = "stopped", 0, "forced "+operation
+			return nil
+		})
+		return snapshot.Supervisor.Drain, report, err
+	}
+
+	launchStatus, err := lm.Status(ctx, entry)
+	if err != nil {
+		return nil, empty, err
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		return nil, empty, err
+	}
+	if snapshot.Supervisor.PID == 0 && snapshot.Supervisor.Drain != nil && snapshot.Supervisor.Drain.Status == "completed" {
+		if err := lm.Stop(ctx, entry); err != nil {
+			return snapshot.Supervisor.Drain, empty, err
+		}
+		if err := verifyWorkerCheckpoint(store, a.ProcessController); err != nil {
+			return snapshot.Supervisor.Drain, empty, err
+		}
+		return snapshot.Supervisor.Drain, empty, nil
+	}
+	if !launchStatus.Loaded && snapshot.Supervisor.PID == 0 {
+		if activeDrainTargets(snapshot) > 0 {
+			return snapshot.Supervisor.Drain, empty, exitError{5, fmt.Errorf("supervisor is not running and saved workers cannot be drained; inspect status, then retry with --force to recover process groups")}
+		}
+		now := time.Now().UTC()
+		completed, updateErr := store.Update("drain_completed", 0, "", map[string]string{"operation": operation, "reason": "already stopped"}, func(s *state.Snapshot) error {
+			s.Supervisor.Drain = &state.Drain{ID: state.NewID("drain"), Operation: operation, Status: "completed", RequestedAt: now, Deadline: now, CompletedAt: &now, PreviousGeneration: s.Supervisor.Generation, Targets: []state.DrainTarget{}}
+			s.Supervisor.State, s.Supervisor.PID, s.Supervisor.Message = "stopped", 0, "already stopped"
+			return nil
+		})
+		return completed.Supervisor.Drain, empty, updateErr
+	}
+
+	drain, err := requestDrain(store, operation, timeout)
+	if err != nil {
+		return nil, empty, err
+	}
+	if drain.Operation != operation {
+		return drain, empty, exitError{4, fmt.Errorf("graceful %s cannot replace active %s drain %s; wait for the current operation to finish", operation, drain.Operation, drain.ID)}
+	}
+	drain, err = waitForDrain(ctx, store, drain.ID)
+	if err != nil {
+		return drain, empty, err
+	}
+	if drain.Status == "timed_out" {
+		return drain, empty, exitError{5, fmt.Errorf("graceful %s timed out with %d active worker(s); workers were not signaled; retry later or use --force after assessing interruption risk", operation, drain.RemainingActive)}
+	}
+	if err := lm.Stop(ctx, entry); err != nil {
+		return drain, empty, err
+	}
+	if err := verifyWorkerCheckpoint(store, a.ProcessController); err != nil {
+		return drain, empty, err
+	}
+	return drain, empty, nil
+}
+
+func requestDrain(store state.Store, operation string, timeout time.Duration) (*state.Drain, error) {
+	now := time.Now().UTC()
+	deadline := now.Add(timeout)
+	payload := map[string]any{"operation": operation, "deadline": deadline}
+	snapshot, err := store.Update("drain_requested", 0, "", payload, func(s *state.Snapshot) error {
+		if s.Supervisor.Drain.Active() {
+			return errDrainAlreadyActive
+		}
+		targets := make([]state.DrainTarget, 0)
+		for _, issue := range s.Issues {
+			if issue == nil || !occupiesWorkerSlot(issue.Status) && issue.WorkerPID == 0 && issue.WorkerPGID == 0 {
+				continue
+			}
+			targets = append(targets, state.DrainTarget{IssueNumber: issue.Number, RunID: issue.RunID, Phase: issue.Status, PID: issue.WorkerPID, PGID: issue.WorkerPGID})
+		}
+		sort.Slice(targets, func(i, j int) bool { return targets[i].IssueNumber < targets[j].IssueNumber })
+		s.Supervisor.Drain = &state.Drain{ID: state.NewID("drain"), Operation: operation, Status: "requested", RequestedAt: now, Deadline: deadline, PreviousGeneration: s.Supervisor.Generation, RemainingActive: len(targets), Targets: targets}
+		payload["drain_id"] = s.Supervisor.Drain.ID
+		payload["targets"] = targets
+		s.Supervisor.State = "draining"
+		s.Supervisor.Message = "graceful " + operation + " requested"
+		return nil
+	})
+	if errors.Is(err, errDrainAlreadyActive) {
+		current, loadErr := store.Load()
+		return current.Supervisor.Drain, loadErr
+	}
+	return snapshot.Supervisor.Drain, err
+}
+
+var (
+	errDrainAlreadyActive = errors.New("graceful drain is already active")
+	errDrainStateChanged  = errors.New("durable drain state changed")
+)
+
+func waitForDrain(ctx context.Context, store state.Store, id string) (*state.Drain, error) {
+	initial, err := store.Load()
+	if err != nil {
+		return nil, err
+	}
+	if initial.Supervisor.Drain == nil || initial.Supervisor.Drain.ID != id {
+		return initial.Supervisor.Drain, fmt.Errorf("graceful drain %s is no longer current", id)
+	}
+	wait := time.Until(initial.Supervisor.Drain.Deadline) + 250*time.Millisecond
+	if wait <= 0 {
+		wait = 250 * time.Millisecond
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snapshot, err := store.Load()
+		if err != nil {
+			return nil, err
+		}
+		drain := snapshot.Supervisor.Drain
+		if drain == nil || drain.ID != id {
+			return drain, fmt.Errorf("graceful drain %s was replaced before completion", id)
+		}
+		if !drain.Active() {
+			return drain, nil
+		}
+		select {
+		case <-ctx.Done():
+			return drain, ctx.Err()
+		case <-deadline.C:
+			return markDrainTimedOut(store, id)
+		case <-ticker.C:
+		}
+	}
+}
+
+func markDrainTimedOut(store state.Store, id string) (*state.Drain, error) {
+	now := time.Now().UTC()
+	snapshot, err := store.Update("drain_timed_out", 0, "", map[string]string{"drain_id": id, "reason": "operator timeout"}, func(s *state.Snapshot) error {
+		if s.Supervisor.Drain == nil || s.Supervisor.Drain.ID != id || !s.Supervisor.Drain.Active() {
+			return errDrainStateChanged
+		}
+		s.Supervisor.Drain.Status = "timed_out"
+		s.Supervisor.Drain.CompletedAt = &now
+		s.Supervisor.Drain.Message = "graceful drain timed out; workers were not signaled"
+		s.Supervisor.State = "running"
+		s.Supervisor.Message = s.Supervisor.Drain.Message
+		return nil
+	})
+	if errors.Is(err, errDrainStateChanged) {
+		current, loadErr := store.Load()
+		return current.Supervisor.Drain, loadErr
+	}
+	return snapshot.Supervisor.Drain, err
+}
+
+func waitForRestartGeneration(ctx context.Context, store state.Store, previous uint64, timeout time.Duration) (*state.Drain, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snapshot, err := store.Load()
+		if err != nil {
+			return nil, err
+		}
+		if snapshot.Supervisor.Generation > previous && snapshot.Supervisor.PID > 0 {
+			if snapshot.Supervisor.Drain != nil && snapshot.Supervisor.Drain.Status == "restart_completed" && snapshot.Supervisor.Drain.NewGeneration == snapshot.Supervisor.Generation {
+				return snapshot.Supervisor.Drain, nil
+			}
+			now := time.Now().UTC()
+			updated, updateErr := store.Update("restart_completed", 0, "", map[string]any{"previous_generation": previous, "new_generation": snapshot.Supervisor.Generation}, func(s *state.Snapshot) error {
+				if s.Supervisor.Drain == nil || s.Supervisor.Drain.Status == "restart_completed" {
+					return errDrainStateChanged
+				}
+				s.Supervisor.Drain.Status = "restart_completed"
+				s.Supervisor.Drain.NewGeneration = s.Supervisor.Generation
+				s.Supervisor.Drain.CompletedAt = &now
+				return nil
+			})
+			if errors.Is(updateErr, errDrainStateChanged) {
+				current, loadErr := store.Load()
+				return current.Supervisor.Drain, loadErr
+			}
+			return updated.Supervisor.Drain, updateErr
+		}
+		select {
+		case <-ctx.Done():
+			return snapshot.Supervisor.Drain, ctx.Err()
+		case <-deadline.C:
+			return snapshot.Supervisor.Drain, fmt.Errorf("new supervisor generation did not start within %s", timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+func activeDrainTargets(snapshot state.Snapshot) int {
+	count := 0
+	for _, issue := range snapshot.Issues {
+		if issue != nil && (occupiesWorkerSlot(issue.Status) || issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
+			count++
+		}
+	}
+	return count
+}
+
+func verifyWorkerCheckpoint(store state.Store, controller supervisor.ProcessGroupController) error {
+	snapshot, err := store.Load()
+	if err != nil {
+		return err
+	}
+	for _, issue := range snapshot.Issues {
+		if issue == nil || issue.WorkerPID == 0 && issue.WorkerPGID == 0 {
+			continue
+		}
+		if controller != nil && (controller.Alive(issue.WorkerPID) || controller.GroupAlive(issue.WorkerPGID)) {
+			return fmt.Errorf("Issue #%d worker process group %d is still alive after graceful drain", issue.Number, issue.WorkerPGID)
+		}
+		return fmt.Errorf("Issue #%d retained worker PID/PGID after graceful drain", issue.Number)
+	}
+	return nil
 }
 
 func recordSupervisorControl(store state.Store, supervisorState, message string) error {

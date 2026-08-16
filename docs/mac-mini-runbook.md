@@ -172,11 +172,19 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
 対象repositoryを確認してから、監視taskへ「状態とworktreeを残してloopを停止して」と依頼する。
 
 ```sh
-agent-loop stop --repo /absolute/path/to/repository --json
+agent-loop stop --repo /absolute/path/to/repository --timeout 5m --json
 agent-loop status --repo /absolute/path/to/repository --json
 ```
 
-停止はstate、event、Issue worktree、未commit変更を削除しない。
+通常の停止は新しいIssueやretry/resume/conflict workerの起動を止め、実行中workerがresult・session・publish/PR状態を保存して自然終了するまで待つ。`status --json`または`watch`の`draining`、対象Issue、PID/PGID、phase、deadline、残りactive数で進行を確認する。停止はstate、event、Issue worktree、未commit変更、pending request、session、resource leaseを削除しない。
+
+timeoutではworkerを暗黙にkillせず、supervisorは稼働へ戻る。まずactive workerのphaseとlogを確認し、後で同じgraceful stopを再試行する。binary破損やhost保守など中断影響を受け入れる必要がある場合だけ、次を明示する。
+
+```sh
+agent-loop stop --repo /absolute/path/to/repository --force --json
+```
+
+`--force`は全worker process groupへ`SIGTERM`を送り、`worker.timeout_grace`後も残るgroupへ`SIGKILL`を送る。attempt/session再開や実行中のcommit/push/publisherが中断され得るため、通常保守では使用しない。
 
 ## 5. 停止・障害からの復旧
 
@@ -200,7 +208,7 @@ agent-loop logs --repo /absolute/path/to/repository --stderr
 `doctor`の`diagnostics[].code`、直近event、supervisor stderrの順で原因を特定する。認証、設定、CLI互換性、GitHub権限、worktree不整合を直し、次を実行する。
 
 ```sh
-agent-loop restart --repo /absolute/path/to/repository --json
+agent-loop restart --repo /absolute/path/to/repository --timeout 5m --json
 agent-loop status --repo /absolute/path/to/repository --json
 ```
 

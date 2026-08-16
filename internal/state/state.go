@@ -36,12 +36,44 @@ func (e SchemaVersionError) Error() string {
 type Supervisor struct {
 	State               string     `json:"state"`
 	PID                 int        `json:"pid,omitempty"`
+	Generation          uint64     `json:"generation,omitempty"`
 	StartedAt           time.Time  `json:"started_at,omitempty"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 	Message             string     `json:"message,omitempty"`
 	FailureKind         string     `json:"failure_kind,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
 	RetryAfter          *time.Time `json:"retry_after,omitempty"`
+	Drain               *Drain     `json:"drain,omitempty"`
+}
+
+// Drain is the durable operator handshake used by graceful stop and restart.
+// Completed and timed-out records are retained for status/watch diagnostics;
+// only requested/draining records fence scheduler dispatch.
+type Drain struct {
+	ID                 string        `json:"id"`
+	Operation          string        `json:"operation"`
+	Status             string        `json:"status"`
+	RequestedAt        time.Time     `json:"requested_at"`
+	Deadline           time.Time     `json:"deadline"`
+	CompletedAt        *time.Time    `json:"completed_at,omitempty"`
+	PreviousGeneration uint64        `json:"previous_generation"`
+	NewGeneration      uint64        `json:"new_generation,omitempty"`
+	RemainingActive    int           `json:"remaining_active"`
+	Targets            []DrainTarget `json:"targets"`
+	Message            string        `json:"message,omitempty"`
+	Forced             bool          `json:"forced,omitempty"`
+}
+
+type DrainTarget struct {
+	IssueNumber int    `json:"issue_number"`
+	RunID       string `json:"run_id"`
+	Phase       string `json:"phase"`
+	PID         int    `json:"pid,omitempty"`
+	PGID        int    `json:"pgid,omitempty"`
+}
+
+func (d *Drain) Active() bool {
+	return d != nil && (d.Status == "requested" || d.Status == "draining")
 }
 
 type AnswerRecord struct {
@@ -471,6 +503,9 @@ func unlock(f *os.File) {
 }
 
 func (s Snapshot) Attention(untilIdle bool) (string, bool) {
+	if s.Supervisor.State == "draining" {
+		return "draining", true
+	}
 	requests := make([]string, 0)
 	for id, request := range s.PendingRequests {
 		if request.Status == "pending" {
