@@ -122,7 +122,7 @@ func diagnoseSchemas(l layout.Layout) ([]diagnostic, bool) {
 		return []diagnostic{failedDiagnostic("SCHEMA_VERSION_UNSUPPORTED", "host", "", "このbinaryで扱えない永続schemaがあります", strings.Join(parts, ", "), instruction("対応binaryへ戻すか、対応するmigration手順を確認してください"))}, false
 	}
 	if report.NeedsMigration {
-		return []diagnostic{failedDiagnostic("SCHEMA_MIGRATION_REQUIRED", "host", "", "永続schemaをv2へmigrationする必要があります", "agent-loop migrate --jsonで対象を確認してください", command("全loop停止後にforward migrationを実行します", "agent-loop migrate --apply --json"))}, false
+		return []diagnostic{failedDiagnostic("SCHEMA_MIGRATION_REQUIRED", "host", "", "永続schemaをv4へmigrationする必要があります", "agent-loop migrate --jsonで対象を確認してください", command("全loop停止後にforward migrationを実行します", "agent-loop migrate --apply --json"))}, false
 	}
 	return []diagnostic{passedDiagnostic("SCHEMA_VERSION_SUPPORTED", "host", "", "永続schemaはこのbinaryと互換です", fmt.Sprintf("version=%d artifacts=%d", report.TargetVersion, len(report.Artifacts)))}, true
 }
@@ -297,7 +297,6 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 			instruction(filepath.Join(entry.RepoPath, config.FileName)+"を修正し、doctorを再実行してください")))
 	}
 	diagnostics = append(diagnostics, passedDiagnostic("CONFIG_VALID", "repository", entry.RepoID, ".agent-loop.yamlを読み込めます", cfg.GitHub.Repo))
-	diagnostics = append(diagnostics, diagnoseNotificationCredential(l, entry, cfg)...)
 	diagnostics = append(diagnostics, diagnoseWorkerBackend(ctx, entry, cfg)...)
 
 	if len(entry.Commands) > 0 {
@@ -442,22 +441,6 @@ func containsModelLine(output, model string) bool {
 		}
 	}
 	return false
-}
-
-func diagnoseNotificationCredential(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
-	if !cfg.Notifications.Enabled {
-		return []diagnostic{passedDiagnostic("NOTIFICATIONS_DISABLED", "repository", entry.RepoID, "外部push通知は無効です", "opt-in")}
-	}
-	_, err := loadNotificationToken(l, entry)
-	if errors.Is(err, os.ErrNotExist) {
-		return []diagnostic{failedDiagnostic("NOTIFICATION_CREDENTIAL_MISSING", "repository", entry.RepoID, "通知credentialが設定されていません", l.NotificationTokenPath(entry.RepoID),
-			command("標準入力からcredentialを安全に保存します", fmt.Sprintf("agent-loop notification-token --repo %q --token-file -", entry.RepoPath)))}
-	}
-	if err != nil {
-		return []diagnostic{failedDiagnostic("NOTIFICATION_CREDENTIAL_UNSAFE", "repository", entry.RepoID, "通知credentialを安全に読み込めません", err.Error(),
-			command("credentialを安全な管理fileへ保存し直します", fmt.Sprintf("agent-loop notification-token --repo %q --token-file -", entry.RepoPath)))}
-	}
-	return []diagnostic{passedDiagnostic("NOTIFICATION_CREDENTIAL_VALID", "repository", entry.RepoID, "通知credentialを安全に読み込めます", "managed file mode=0600")}
 }
 
 func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {

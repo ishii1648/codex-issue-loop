@@ -73,7 +73,7 @@ App Serverの`thread/status/changed`とserver requestは、そのApp Server clie
 
 [Scheduled tasks](https://learn.chatgpt.com/docs/automations)は同じchatへ時刻ベースで戻り、long-running operationをpollできる。ただし各runはChatGPT/Codex workを実行する。filesystem eventで即時wakeする仕組みでも、modelを呼ばないmonitorでもないため、`agent-loop watch`の代替にはしない。
 
-[CLI notifications](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications)の外部`notify`が現在扱うeventは`agent-turn-complete`だけである。よって、監視task未接続時の`needs_input`とsupervisor blockedには引き続き永続outbox + ntfy adapterを使う。
+[CLI notifications](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications)の外部`notify`が現在扱うeventは`agent-turn-complete`だけであり、`needs_input`の正本には使わない。監視task未接続時は永続snapshotにattentionを保持し、再接続時のstatus-first手順で回収する。
 
 ## Token usageと待機
 

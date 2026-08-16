@@ -1,4 +1,4 @@
-version: 3
+version: 4
 
 github:
   repo: owner/repository
@@ -73,20 +73,6 @@ worktrees:
   failed_max_age: 720h
   blocked_max_age: 0s
   needs_input_max_age: 0s
-
-# Direct smartphone push is opt-in. Store the token with the
-# `agent-loop notification-token` command, never in this file.
-notifications:
-  enabled: false
-  provider: ntfy
-  endpoint: https://ntfy.sh
-  topic: replace-with-opaque-topic
-  include_details: false
-  timeout: 10s
-  min_interval: 5s
-  retry_initial: 10s
-  retry_max: 10m
-  max_attempts: 8
 
 logs:
   rotate_bytes: 16777216

@@ -1,11 +1,9 @@
 package supervisor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,13 +20,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
 
-type failingNotificationDispatcher struct{ calls int }
-
-func (d *failingNotificationDispatcher) Dispatch(context.Context) error {
-	d.calls++
-	return errors.New("notification provider unavailable")
-}
-
 func TestSessionResumeNeverCrossesBackendNamespace(t *testing.T) {
 	loop := Loop{Config: config.Defaults()}
 	loop.Config.Worker.Backend = "opencode"
@@ -44,16 +35,6 @@ func TestSessionResumeNeverCrossesBackendNamespace(t *testing.T) {
 	current.Session = nil
 	if !loop.canResume(current) {
 		t.Fatal("legacy Codex session did not retain compatibility")
-	}
-}
-
-func TestNotificationFailureDoesNotStopSupervisor(t *testing.T) {
-	var logs bytes.Buffer
-	dispatcher := &failingNotificationDispatcher{}
-	loop := Loop{Logger: log.New(&logs, "", 0), Notifications: dispatcher}
-	loop.dispatchNotifications(context.Background())
-	if dispatcher.calls != 1 || !strings.Contains(logs.String(), "without stopping supervisor") {
-		t.Fatalf("calls=%d logs=%q", dispatcher.calls, logs.String())
 	}
 }
 

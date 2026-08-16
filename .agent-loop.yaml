@@ -1,4 +1,4 @@
-version: 3
+version: 4
 
 github:
   repo: ishii1648/codex-issue-loop
@@ -31,7 +31,7 @@ resources:
     - name: host
       paths: [cmd/**, internal/app/**, internal/launchd/**, internal/registry/**, internal/layout/**, internal/lifecycle/**, internal/worktree/**]
     - name: operations
-      paths: [internal/observe/**, internal/notify/**, internal/retention/**, internal/redact/**, docs/*runbook.md]
+      paths: [internal/observe/**, internal/retention/**, internal/redact/**, docs/*runbook.md]
     - name: release
       paths: [.github/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/compat/**, internal/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
     - name: docs
@@ -70,18 +70,6 @@ worktrees:
   failed_max_age: 720h
   blocked_max_age: 0s
   needs_input_max_age: 0s
-
-notifications:
-  enabled: false
-  provider: ntfy
-  endpoint: https://ntfy.sh
-  topic: replace-with-opaque-topic
-  include_details: false
-  timeout: 10s
-  min_interval: 5s
-  retry_initial: 10s
-  retry_max: 10m
-  max_attempts: 8
 
 logs:
   rotate_bytes: 16777216

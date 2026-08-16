@@ -16,7 +16,7 @@
 
 図中の `DURABLE STATE` がループ状態の正本である。fsnotify/kqueueによるstate directory eventは即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしやbackend停止を修復する。[ADR-0003](adr/0003-event-notification.md)を正本とする。
 
-スマートフォンから監視taskへの紺色の矢印はCodex Remoteによる操作経路、`WATCH`から監視taskを経てスマートフォンへ戻るオレンジ色の破線はCodexの通知経路を表す。これに加えて、監視task未接続時はopt-inの外部push adapterが永続outboxからスマートフォンへ直接通知できる。いずれの通知も正本ではなく、永続snapshotへ戻るための補助経路である。
+スマートフォンから監視taskへの紺色の矢印はCodex Remoteによる操作経路、`WATCH`から監視taskを経てスマートフォンへ戻るオレンジ色の破線はCodexの通知経路を表す。通知は正本ではなく、永続snapshotへ戻るための補助経路である。supervisorから外部serviceへの直接配送経路は持たない。
 
 ## 3. コンポーネントと責務
 
@@ -158,7 +158,7 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 | supervisorが異常終了 | snapshot、event log、GitHub状態 | launchd再起動後にreconciliation |
 | Macがスリープ | 実行は停止し得る | macOSの「ディスプレイoff時もスリープさせない」を有効化 |
 
-App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できるが、外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。通常はrepositoryごとにpinしたDesktop監視taskがblocking watchから戻った後に質問し、question notificationとActivityの回答待ちへ残す。監視taskが接続されていない期間は、opt-inのntfy adapterが`needs_input`とsupervisor blockedを永続outboxから通知する。詳細は[Codex Desktop監視task運用](codex-desktop-monitoring.md)、[公式仕様確認](codex-capability-review.md)、[スマートフォン直接push通知](notifications.md)を参照する。
+App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できるが、外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。通常はrepositoryごとにpinしたDesktop監視taskがblocking watchから戻った後に質問し、question notificationとActivityの回答待ちへ残す。監視taskが接続されていない期間は永続snapshotにattentionを保持し、再接続時にstatus-firstで回収する。詳細は[Codex Desktop監視task運用](codex-desktop-monitoring.md)と[公式仕様確認](codex-capability-review.md)を参照する。
 
 ## 10. 設計上の不変条件
 

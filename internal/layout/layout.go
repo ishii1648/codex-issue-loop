@@ -58,10 +58,6 @@ func (l Layout) RepoDir(repoID string) string {
 	return filepath.Join(l.ReposRoot, repoID)
 }
 
-func (l Layout) NotificationTokenPath(repoID string) string {
-	return filepath.Join(l.RepoDir(repoID), "notification-token")
-}
-
 func (l Layout) PlistPath(repoID string) string {
 	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop."+repoID+".plist")
 }

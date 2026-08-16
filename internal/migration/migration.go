@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -38,15 +37,7 @@ type Report struct {
 	NeedsMigration bool             `json:"needs_migration"`
 	Artifacts      []Artifact       `json:"artifacts"`
 	Unsupported    []Artifact       `json:"unsupported,omitempty"`
-	FallbackLeases []FallbackLease  `json:"fallback_leases,omitempty"`
 	Repositories   []registry.Entry `json:"-"`
-}
-
-type FallbackLease struct {
-	Path        string `json:"path"`
-	IssueNumber int    `json:"issue_number"`
-	RunID       string `json:"run_id"`
-	Resource    string `json:"resource"`
 }
 
 type Result struct {
@@ -154,24 +145,11 @@ func Inspect(l layout.Layout) (Report, error) {
 			}
 			if exists {
 				report.Artifacts = append(report.Artifacts, Artifact{Kind: item.kind, Path: path, Version: version})
-				if version == schemaversion.Previous && (item.kind == "state" || item.kind == "transaction") {
-					fallbacks, fallbackErr := inspectFallbackLeases(path, item.kind)
-					if fallbackErr != nil {
-						return Report{}, fmt.Errorf("inspect fallback leases %s: %w", path, fallbackErr)
-					}
-					report.FallbackLeases = append(report.FallbackLeases, fallbacks...)
-				}
 			}
 		}
 	}
 
 	sort.Slice(report.Artifacts, func(i, j int) bool { return report.Artifacts[i].Path < report.Artifacts[j].Path })
-	sort.Slice(report.FallbackLeases, func(i, j int) bool {
-		if report.FallbackLeases[i].Path != report.FallbackLeases[j].Path {
-			return report.FallbackLeases[i].Path < report.FallbackLeases[j].Path
-		}
-		return report.FallbackLeases[i].IssueNumber < report.FallbackLeases[j].IssueNumber
-	})
 	for _, artifact := range report.Artifacts {
 		switch artifact.Version {
 		case 0: // Empty event logs do not yet contain a versioned record.
@@ -240,7 +218,7 @@ func (m Migrator) Apply() (Result, error) {
 		if artifact.Version != schemaversion.Previous {
 			continue
 		}
-		if err := migrateArtifact(artifact, m.now()); err != nil {
+		if err := migrateArtifact(artifact); err != nil {
 			return Result{}, err
 		}
 		changed++
@@ -471,16 +449,16 @@ func eventVersion(path string) (int, bool, error) {
 	return version, true, nil
 }
 
-func migrateArtifact(artifact Artifact, now time.Time) error {
+func migrateArtifact(artifact Artifact) error {
 	switch artifact.Kind {
 	case "config":
 		return migrateYAML(artifact.Path)
 	case "events":
 		return migrateEvents(artifact.Path)
 	case "transaction":
-		return migrateTransaction(artifact.Path, now)
+		return migrateTransaction(artifact.Path)
 	case "state":
-		return migrateState(artifact.Path, now)
+		return migrateState(artifact.Path)
 	case "registry":
 		return migrateJSONObject(artifact.Path)
 	default:
@@ -502,12 +480,16 @@ func migrateYAML(path string) error {
 	}
 	mapping := node.Content[0]
 	found := false
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
+	for index := 0; index+1 < len(mapping.Content); {
+		if mapping.Content[index].Value == "notifications" {
+			mapping.Content = append(mapping.Content[:index], mapping.Content[index+2:]...)
+			continue
+		}
 		if mapping.Content[index].Value == "version" {
 			mapping.Content[index+1].Value = fmt.Sprint(CurrentVersion)
 			found = true
-			break
 		}
+		index += 2
 	}
 	if !found {
 		return fmt.Errorf("config version is missing")
@@ -528,7 +510,7 @@ func migrateJSONObject(path string) error {
 	return writeRawObject(path, object)
 }
 
-func migrateTransaction(path string, now time.Time) error {
+func migrateTransaction(path string) error {
 	object, err := readRawObject(path)
 	if err != nil {
 		return err
@@ -541,9 +523,9 @@ func migrateTransaction(path string, now time.Time) error {
 		}
 		nested["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
 		if key == "snapshot" {
-			if err := addFallbackLeases(nested, now); err != nil {
-				return err
-			}
+			delete(nested, "notifications")
+		} else {
+			removeLegacyDeliveryEvent(nested)
 		}
 		encoded, err := json.Marshal(nested)
 		if err != nil {
@@ -554,110 +536,14 @@ func migrateTransaction(path string, now time.Time) error {
 	return writeRawObject(path, object)
 }
 
-func migrateState(path string, now time.Time) error {
+func migrateState(path string) error {
 	object, err := readRawObject(path)
 	if err != nil {
 		return err
 	}
 	object["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
-	if err := addFallbackLeases(object, now); err != nil {
-		return err
-	}
+	delete(object, "notifications")
 	return writeRawObject(path, object)
-}
-
-var leaseHoldingStatuses = map[string]bool{
-	"claiming": true, "claimed": true, "running": true, "retry_wait": true,
-	"resume_pending": true, "needs_input": true, "awaiting_checks": true,
-	"awaiting_merge": true, "resolving_conflict": true,
-}
-
-func addFallbackLeases(snapshot map[string]json.RawMessage, now time.Time) error {
-	var issues map[string]map[string]json.RawMessage
-	if len(snapshot["issues"]) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(snapshot["issues"], &issues); err != nil {
-		return fmt.Errorf("decode snapshot issues: %w", err)
-	}
-	active := 0
-	for key, issue := range issues {
-		var status, runID string
-		_ = json.Unmarshal(issue["status"], &status)
-		if !leaseHoldingStatuses[status] {
-			continue
-		}
-		active++
-		if active > 1 {
-			return fmt.Errorf("v2 concurrency-1 state contains more than one active Issue")
-		}
-		var number int
-		_ = json.Unmarshal(issue["number"], &number)
-		if number < 1 {
-			number, _ = strconv.Atoi(key)
-		}
-		_ = json.Unmarshal(issue["run_id"], &runID)
-		if runID == "" {
-			runID = fmt.Sprintf("migration_v2_issue_%d", number)
-			encoded, _ := json.Marshal(runID)
-			issue["run_id"] = encoded
-		}
-		reservedAt := now.UTC()
-		if value := issue["updated_at"]; len(value) > 0 {
-			var updated time.Time
-			if json.Unmarshal(value, &updated) == nil && !updated.IsZero() {
-				reservedAt = updated.UTC()
-			}
-		}
-		issue["lease_generation"] = json.RawMessage("1")
-		lease, err := json.Marshal(map[string]any{
-			"owner": map[string]any{"run_id": runID, "generation": 1},
-			"slot":  0, "declared_resources": []string{}, "resolved_resources": []string{"repo:*"},
-			"reserved_at": reservedAt,
-		})
-		if err != nil {
-			return err
-		}
-		issue["lease"] = lease
-	}
-	encoded, err := json.Marshal(issues)
-	if err != nil {
-		return err
-	}
-	snapshot["issues"] = encoded
-	return nil
-}
-
-func inspectFallbackLeases(path, kind string) ([]FallbackLease, error) {
-	object, err := readRawObject(path)
-	if err != nil {
-		return nil, err
-	}
-	if kind == "transaction" {
-		if err := json.Unmarshal(object["snapshot"], &object); err != nil {
-			return nil, err
-		}
-	}
-	var issues map[string]struct {
-		Number int    `json:"number"`
-		Status string `json:"status"`
-		RunID  string `json:"run_id"`
-	}
-	if err := json.Unmarshal(object["issues"], &issues); err != nil {
-		return nil, err
-	}
-	result := []FallbackLease{}
-	for _, issue := range issues {
-		if leaseHoldingStatuses[issue.Status] {
-			runID := issue.RunID
-			if runID == "" {
-				runID = fmt.Sprintf("migration_v2_issue_%d", issue.Number)
-			}
-			result = append(result, FallbackLease{Path: path, IssueNumber: issue.Number, RunID: runID, Resource: "repo:*"})
-		}
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].IssueNumber < result[j].IssueNumber })
-	return result, nil
 }
 
 func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
@@ -708,6 +594,7 @@ func migrateEvents(path string) error {
 			return err
 		}
 		object["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
+		removeLegacyDeliveryEvent(object)
 		encoded, err := json.Marshal(object)
 		if err != nil {
 			return err
@@ -716,6 +603,16 @@ func migrateEvents(path string) error {
 		output = append(output, '\n')
 	}
 	return fsutil.WriteFile(path, output, 0o600)
+}
+
+func removeLegacyDeliveryEvent(object map[string]json.RawMessage) {
+	var eventType string
+	_ = json.Unmarshal(object["type"], &eventType)
+	if !strings.HasPrefix(eventType, "notification_") {
+		return
+	}
+	object["type"] = json.RawMessage(`"legacy_external_delivery_removed"`)
+	delete(object, "payload")
 }
 
 func readRawObject(path string) (map[string]json.RawMessage, error) {

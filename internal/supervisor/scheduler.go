@@ -98,7 +98,7 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 	}
 	pollCandidates := !s.pollAt.After(l.now())
 	for {
-		dispatched, scheduleErr := s.schedule(ctx, pollCandidates)
+		_, scheduleErr := s.schedule(ctx, pollCandidates)
 		pollCandidates = false
 		if scheduleErr != nil {
 			kind := failure.KindOf(scheduleErr)
@@ -125,10 +125,6 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 			}
 			consecutiveFailures = 0
 		}
-		if dispatched {
-			l.dispatchNotifications(ctx)
-		}
-
 		pollTimer := l.newSchedulerTimer(until(l.now(), s.pollAt))
 		retryTimer := l.newSchedulerTimer(s.nextRetryDelay())
 		select {
@@ -154,7 +150,6 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 			// waiting for the regular GitHub poll interval.
 			s.pollAt = l.now()
 			pollCandidates = true
-			l.dispatchNotifications(ctx)
 		case <-pollTimer.C():
 			retryTimer.Stop()
 			pollCandidates = true

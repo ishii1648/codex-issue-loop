@@ -407,7 +407,7 @@ func TestFaultPartialEventTailIsTruncatedAndRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString(`{"version":3,"sequence":2`); err != nil {
+	if _, err := f.WriteString(`{"version":4,"sequence":2`); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
