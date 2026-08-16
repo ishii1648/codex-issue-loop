@@ -282,6 +282,22 @@ func TestUntilIdleWaitsForPullRequestLifecycle(t *testing.T) {
 	}
 }
 
+func TestAttentionReportsOneBlockedIssueWhileAnotherWorkerIsActive(t *testing.T) {
+	snapshot := Snapshot{
+		Supervisor: Supervisor{State: "running"},
+		Issues: map[string]*Issue{
+			"1": {Number: 1, Status: "running"},
+			"2": {Number: 2, Status: "blocked"},
+		},
+	}
+	if reason, ok := snapshot.Attention(false); !ok || reason != "blocked" {
+		t.Fatalf("reason=%q ok=%v", reason, ok)
+	}
+	if reason, ok := snapshot.Attention(true); !ok || reason != "blocked" {
+		t.Fatalf("until-idle reason=%q ok=%v", reason, ok)
+	}
+}
+
 func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 	for _, crashPoint := range []string{"prepared", "event_appended", "snapshot_written"} {
 		t.Run(crashPoint, func(t *testing.T) {

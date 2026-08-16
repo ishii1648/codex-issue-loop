@@ -39,6 +39,25 @@ type reconciliationDecision struct {
 }
 
 func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) error {
+	if controller, ok := l.Processes.(ProcessGroupController); ok {
+		if _, err := StopWorkers(ctx, l.Store, l.Config.Worker.TimeoutGrace.Duration, "worker recovered after supervisor restart", controller); err != nil {
+			return fmt.Errorf("reconcile orphan worker processes: %w", err)
+		}
+		var err error
+		snapshot, err = l.Store.Load()
+		if err != nil {
+			return err
+		}
+	} else if l.Processes == nil {
+		if _, err := StopWorkers(ctx, l.Store, l.Config.Worker.TimeoutGrace.Duration, "worker recovered after supervisor restart", OSProcessGroupController{}); err != nil {
+			return fmt.Errorf("reconcile orphan worker processes: %w", err)
+		}
+		var err error
+		snapshot, err = l.Store.Load()
+		if err != nil {
+			return err
+		}
+	}
 	numbers := make([]int, 0, len(snapshot.Issues))
 	for _, item := range snapshot.Issues {
 		if item.Status == "completed" && item.GitHubSync == "" && (item.PullRequestURL == "" || item.PullRequestMerged) {

@@ -59,9 +59,10 @@ type installManifest struct {
 }
 
 type App struct {
-	In  io.Reader
-	Out io.Writer
-	Err io.Writer
+	In                io.Reader
+	Out               io.Writer
+	Err               io.Writer
+	ProcessController supervisor.ProcessGroupController
 }
 
 type exitError struct {
@@ -341,7 +342,7 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 	if err != nil {
 		return fmt.Errorf("backup current installation: %w", err)
 	}
-	if err := stopEntries(ctx, l, loaded); err != nil {
+	if err := stopEntries(ctx, l, loaded, a.ProcessController); err != nil {
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
@@ -409,7 +410,7 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 			return err
 		}
 	}
-	if err := stopEntries(ctx, l, loaded); err != nil {
+	if err := stopEntries(ctx, l, loaded, a.ProcessController); err != nil {
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
@@ -632,13 +633,25 @@ func loadedEntries(ctx context.Context, l layout.Layout) ([]registry.Entry, erro
 	return loaded, nil
 }
 
-func stopEntries(ctx context.Context, l layout.Layout, entries []registry.Entry) error {
+func stopEntries(ctx context.Context, l layout.Layout, entries []registry.Entry, controller supervisor.ProcessGroupController) error {
 	for _, entry := range entries {
 		if err := (launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}).Stop(ctx, entry); err != nil {
 			return err
 		}
+		if _, err := stopEntryWorkers(ctx, l, entry, "worker canceled for installation lifecycle", controller); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func stopEntryWorkers(ctx context.Context, l layout.Layout, entry registry.Entry, reason string, controller supervisor.ProcessGroupController) (supervisor.WorkerStopReport, error) {
+	cfg, err := config.Load(entry.RepoPath)
+	if err != nil {
+		return supervisor.WorkerStopReport{}, err
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
+	return supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, reason, controller)
 }
 
 func startEntries(ctx context.Context, l layout.Layout, entries []registry.Entry) error {
@@ -759,8 +772,11 @@ func (a App) unregister(ctx context.Context, l layout.Layout, args []string) err
 	if err != nil {
 		return err
 	}
-	lm := launchd.Manager{Layout: l}
+	lm := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
 	if err := lm.Stop(ctx, entry); err != nil {
+		return err
+	}
+	if _, err := stopEntryWorkers(ctx, l, entry, "worker canceled by unregister", a.ProcessController); err != nil {
 		return err
 	}
 	if err := (registry.Store{Path: l.RegistryPath}).Remove(entry.RepoID); err != nil {
@@ -783,6 +799,7 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 	}
 	lm := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
+	stopReport := supervisor.WorkerStopReport{Workers: []supervisor.WorkerStop{}}
 	switch command {
 	case "start":
 		var launchStatus launchd.Status
@@ -795,8 +812,14 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		}
 	case "stop":
 		err = lm.Stop(ctx, entry)
+		if err == nil {
+			stopReport, err = supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, "worker canceled by explicit stop", a.ProcessController)
+		}
 	case "restart":
 		err = lm.Stop(ctx, entry)
+		if err == nil {
+			stopReport, err = supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, "worker canceled by supervisor restart", a.ProcessController)
+		}
 		if err == nil {
 			err = recordSupervisorControl(store, "starting", "restart requested")
 		}
@@ -811,13 +834,20 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		return err
 	}
 	if command == "stop" {
-		_, _ = store.Update("supervisor_stopped", 0, "", map[string]string{"reason": "explicit stop"}, func(s *state.Snapshot) error {
+		_, err = store.Update("supervisor_stopped", 0, "", map[string]string{"reason": "explicit stop"}, func(s *state.Snapshot) error {
 			s.Supervisor.State, s.Supervisor.PID, s.Supervisor.Message = "stopped", 0, "explicit stop"
 			return nil
 		})
+		if err != nil {
+			return err
+		}
 	}
 	status, _ := lm.Status(ctx, entry)
-	return a.output(jsonOut, map[string]any{"repo_id": entry.RepoID, "command": command, "launchd": status})
+	result := map[string]any{"repo_id": entry.RepoID, "command": command, "launchd": status}
+	if command == "stop" || command == "restart" {
+		result["worker_stop"] = stopReport
+	}
+	return a.output(jsonOut, result)
 }
 
 func recordSupervisorControl(store state.Store, supervisorState, message string) error {
@@ -851,7 +881,7 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.output(jsonOut, map[string]any{"launchd": launchStatus, "state": snapshot})
+	return a.output(jsonOut, buildStatus(launchStatus, snapshot, cfg.Queue.Concurrency))
 }
 
 func (a App) watch(ctx context.Context, l layout.Layout, args []string) error {
@@ -1261,10 +1291,8 @@ func (a App) output(asJSON bool, value any) error {
 	switch v := value.(type) {
 	case observe.Result:
 		fmt.Fprintf(a.Out, "%s (revision %d)\n", v.Reason, v.Snapshot.StateRevision)
-		for _, request := range v.Snapshot.PendingRequests {
-			if request.Status == "pending" {
-				fmt.Fprintf(a.Out, "%s Issue #%d: %s\n", request.ID, request.IssueNumber, request.Question)
-			}
+		for _, request := range v.PendingRequests {
+			fmt.Fprintf(a.Out, "%s Issue #%d: %s\n", request.ID, request.IssueNumber, request.Question)
 		}
 	default:
 		data, err := json.MarshalIndent(value, "", "  ")

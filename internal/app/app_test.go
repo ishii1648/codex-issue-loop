@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
@@ -19,6 +21,20 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 )
+
+type appProcessGroups struct {
+	alive   map[int]bool
+	signals map[int][]syscall.Signal
+}
+
+func (f *appProcessGroups) Alive(pid int) bool           { return f.alive[pid] }
+func (f *appProcessGroups) GroupAlive(pgid int) bool     { return f.alive[pgid] }
+func (f *appProcessGroups) OwnsGroup(pid, pgid int) bool { return pid == pgid && f.alive[pgid] }
+func (f *appProcessGroups) SignalGroup(pgid int, signal syscall.Signal) error {
+	f.signals[pgid] = append(f.signals[pgid], signal)
+	f.alive[pgid] = false
+	return nil
+}
 
 func testEnvironment(t *testing.T) (string, layout.Layout) {
 	t.Helper()
@@ -133,6 +149,94 @@ func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 	snapshot, _ := store.Load()
 	if snapshot.Issues["4"].Status != "resume_pending" || len(snapshot.Issues["4"].Answers) != 1 {
 		t.Fatalf("issue=%+v", snapshot.Issues["4"])
+	}
+}
+
+func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.Commands["launchctl"] = "/usr/bin/false"
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("workers_running", 0, "", nil, func(snapshot *state.Snapshot) error {
+		for _, number := range []int{1, 2} {
+			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
+				Number: number, RunID: fmt.Sprintf("run_%d", number), Status: "running",
+				WorkerPID: 100 + number, WorkerPGID: 100 + number,
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := &appProcessGroups{alive: map[int]bool{101: true, 102: true}, signals: map[int][]syscall.Signal{}}
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr, ProcessController: groups}
+	if code := a.Run(context.Background(), []string{"stop", "--repo", repo, "--json"}); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Supervisor.State != "stopped" || len(groups.signals) != 2 {
+		t.Fatalf("supervisor=%+v signals=%v", snapshot.Supervisor, groups.signals)
+	}
+	for _, key := range []string{"1", "2"} {
+		if issue := snapshot.Issues[key]; issue.Status != "retry_wait" || issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
+			t.Fatalf("Issue %s=%+v", key, issue)
+		}
+	}
+}
+
+func TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("input_requested", 0, "", nil, func(snapshot *state.Snapshot) error {
+		for _, number := range []int{4, 7} {
+			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{Number: number, RunID: fmt.Sprintf("run_%d", number), Status: "needs_input"}
+		}
+		snapshot.PendingRequests["req_4"] = &state.Request{ID: "req_4", IssueNumber: 4, Question: "Four?", Status: "pending"}
+		snapshot.PendingRequests["req_7"] = &state.Request{ID: "req_7", IssueNumber: 7, Question: "Seven?", Status: "pending"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	a := App{In: bytes.NewBuffer(nil), Out: &out, Err: &stderr}
+	if code := a.Run(context.Background(), []string{"answer", "--repo", repo, "--request-id", "req_7", "--message", "seven", "--json"}); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PendingRequests["req_4"].Status != "pending" || snapshot.PendingRequests["req_4"].Answer != "" || snapshot.Issues["4"].Status != "needs_input" || len(snapshot.Issues["4"].Answers) != 0 {
+		t.Fatalf("unrelated request or Issue changed: request=%+v issue=%+v", snapshot.PendingRequests["req_4"], snapshot.Issues["4"])
+	}
+	if snapshot.PendingRequests["req_7"].Status != "answered" || snapshot.Issues["7"].Status != "resume_pending" || len(snapshot.Issues["7"].Answers) != 1 {
+		t.Fatalf("target request or Issue not updated: request=%+v issue=%+v", snapshot.PendingRequests["req_7"], snapshot.Issues["7"])
 	}
 }
 

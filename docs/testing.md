@@ -20,7 +20,9 @@ make test-race
 | snapshot途中書き込みからの復旧 | `TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint`、`TestFaultPartialEventTailIsTruncatedAndRecorded` |
 | worker kill後のreconciliation | `TestFaultWorkerKillReturnsRecoverableProcessError`、`TestFaultWorkerAndGitHubStateReconciliationDecisions` |
 | timeoutの段階的終了とprocess group回収 | `TestFaultWorkerTimeoutUsesGracefulProcessGroupTermination`、`TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace`、`TestWorkerTimeoutStageIsPersistedForRetry` |
+| 複数workerのstop・orphan回収 | `TestSchedulerCancellationStopsAllWorkers`、`TestStopWorkersTerminatesAndRecordsEveryIssueIndependently`、`TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue` |
 | watchの接続、切断、複数接続 | `TestFaultDisconnectedEventChannelsFallBackToTimer`、`TestFaultMultipleWatchConnectionsObserveSameRevision`、`TestFSNotifyMultipleWatchersWakeAndCanReconnect` |
+| 複数requestの表示・個別回答 | `TestWatchReturnsEveryPendingRequestInRequestIDOrder`、`TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
 | event通知を破棄した場合のreconciliation | `TestFaultDroppedEventReconcilesAttention` |
 | watcher作成・購読失敗時のpolling-only fallback | `TestFaultWatcherSubscriptionFailureFallsBackToReconciliation` |
 | read-subscribe-read間に状態が変わるrace | `TestFaultReadSubscribeReadRace` |

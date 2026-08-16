@@ -481,6 +481,11 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 		sort.Strings(requests)
 		return "needs_input", true
 	}
+	for _, issue := range s.Issues {
+		if issue != nil && issue.Status == "blocked" {
+			return "blocked", true
+		}
+	}
 	if s.Supervisor.State == "blocked" || s.Supervisor.State == "stopped" {
 		return s.Supervisor.State, true
 	}

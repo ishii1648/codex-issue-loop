@@ -328,6 +328,10 @@ agent-loop start --repo /path/to/repo [--json]
 
 `start` 自身は常駐しない。
 
+`stop`と`restart`はLaunchAgentをunloadした後、snapshotに保存された全Issueのworker PID/PGIDを照合する。所有権を確認できたprocess groupすべてへ先に`SIGTERM`を送り、pool共通の`worker.timeout_grace`だけ待機する。残存groupだけを`SIGKILL`し、全groupの終了を確認してからIssueごとに`worker_process_stopped`を記録する。worktree、session、branch、leaseは保持し、通常workerは`retry_wait`、conflict workerは`resolving_conflict`から次回起動時に再開する。PID再利用などで所有権を確認できないgroupはsignalせず停止処理を失敗させる。
+
+`status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、`limit`、`available`、Issue番号順の`issues`を返す。各active Issueは`issue_number`、`run_id`、`phase`、PID/PGID、slot、resolved resources、`(run_id, generation)` resource ownerを持つ。未回答requestは`pending_requests`へrequest ID順で返す。
+
 ### 6.4 watch
 
 ```text
@@ -337,11 +341,12 @@ agent-loop watch --repo /path/to/repo --until-attention [--json]
 `--until-attention` の終了条件:
 
 - 未回答の `needs_input`
+- いずれかのIssueが `blocked`
 - supervisorが `blocked`
 - 明示的な停止
 - `--until-idle` も指定された場合のキュー空
 
-未回答質問が既に存在する場合、待機せず即時返却する。watchはsnapshotとevent logを読み取るだけで、supervisorの親プロセスにはならない。
+未回答質問が既に存在する場合、待機せず即時返却する。複数ある場合はすべてを`pending_requests`へrequest ID順で返し、回答側はそのIDに対応するrequestとIssueだけを原子的に変更する。watchはsnapshotとevent logを読み取るだけで、supervisorの親プロセスにはならない。
 
 watchは永続snapshotを正本とし、fsnotify/kqueueによるstate directory eventを低遅延化のヒントとして扱う。event payloadだけで終了条件を判定せず、起床のたびにsnapshotを読み直す。個別fileではなくdirectoryを監視するため、`state.json`のatomic rename後も新しいfileを検出できる。watcher作成・登録失敗またはchannel終了時はpolling-onlyへ降格する。[ADR-0003](adr/0003-event-notification.md)を正本とする。
 
@@ -843,8 +848,8 @@ supervisor起動時に次を行う。
 
 1. lockを獲得し、二重supervisorを拒否する
 2. state snapshotとevent logの整合性を検証する
-3. GitHub Issue、branch、PRの現況を取得する
-4. 保存されたworker PIDが生存しているか確認する
+3. 保存された全Issueのworker PID/PGIDを確認し、残存process groupを安全に終了する
+4. GitHub Issue、branch、PRの現況を取得する
 5. worktreeとGit状態を検証する
 6. merge済みPRがあれば完了へ収束させ、旧versionでcompletedにされたopen PRはCI/merge監視へ戻す
 7. 実行途中でworkerが消えていればretryへ移す
@@ -855,7 +860,8 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 
 | 検出した状態 | 起動時の処理 |
 |---|---|
-| 保存済みworker PIDが存在するがprocessは消失 | PIDを破棄し、active Issueを即時retryへ移す |
+| 保存済みworker process groupが残存 | PID/PGID所有権を照合し、全groupをgraceful stop後にactive Issueを即時retryへ移す |
+| 保存済みworker PIDが存在するがprocessは消失 | PID/PGIDを破棄し、active Issueを即時retryへ移す |
 | write-ahead claim後に停止し、GitHubはrunningへ遷移済み | claim済みとして即時retryへ移す |
 | 保存前にpush・PR作成まで完了 | branchに紐づく単一のopen PRを保存して処理を継続する |
 | 旧versionでcompletedだがPRがopen | draftなら`awaiting_checks`、Readyなら`awaiting_merge`へ戻し、done labelを除いて監視を再開する |
@@ -865,7 +871,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 
 次の不一致は自動で上書きせず、Issueを `blocked` にして理由を保存する。
 
-- 保存済みworker PIDが現在も生存している
+- 保存済みworker PID/PGIDの所有権を確認できない
 - readyとrunning/needs-inputが同時に付与されている
 - exclusion labelが人手で付与された
 - PRがmergeされずcloseされた、または同じbranchに複数のopen PRがある
