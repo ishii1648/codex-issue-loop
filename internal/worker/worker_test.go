@@ -21,13 +21,29 @@ import (
 const testProcessReadyTimeout = 5 * time.Second
 
 func TestResultValidation(t *testing.T) {
-	valid := Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Git: &GitResult{}}
+	valid := Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Tests: []Test{}, Git: &GitResult{}}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	invalid := Result{Version: 1, Status: "needs_input", ExecutionProfile: "extended"}
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("expected missing question error")
+	}
+}
+
+func TestDecodeResultRevalidatesPublishedSchemaShape(t *testing.T) {
+	valid := []byte(`{"version":1,"status":"completed","execution_profile":"standard","summary":"done","question":null,"tests":[],"git":null,"retry":null}`)
+	if _, err := decodeResult(valid); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range [][]byte{
+		[]byte(`{"version":1,"status":"completed","execution_profile":"standard","summary":"done","question":null,"tests":[],"git":null}`),
+		[]byte(`{"version":1,"status":"completed","execution_profile":"standard","summary":"done","question":null,"tests":[{}],"git":null,"retry":null}`),
+		[]byte(`{"version":1,"status":"completed","execution_profile":"standard","summary":"done","question":null,"tests":[],"git":null,"retry":null,"extra":true}`),
+	} {
+		if _, err := decodeResult(invalid); err == nil {
+			t.Fatalf("invalid schema shape accepted: %s", invalid)
+		}
 	}
 }
 

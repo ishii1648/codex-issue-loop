@@ -44,6 +44,9 @@ watch:
 	if cfg.Worker.TimeoutGrace.Duration != 30*time.Second {
 		t.Fatalf("timeout grace = %s", cfg.Worker.TimeoutGrace.Duration)
 	}
+	if cfg.Worker.Backend != "codex" || cfg.Worker.EffectiveCommand() != "codex" {
+		t.Fatalf("legacy worker defaults changed: %+v", cfg.Worker)
+	}
 	if cfg.Completion.AutoMerge {
 		t.Fatal("auto merge must be opt-in")
 	}
@@ -56,6 +59,30 @@ watch:
 	if cfg.Worktrees.CompletedMaxAge.Duration != 7*24*time.Hour || cfg.Worktrees.FailedMaxAge.Duration != 30*24*time.Hour ||
 		cfg.Worktrees.BlockedMaxAge.Duration != 0 || cfg.Worktrees.NeedsInputMaxAge.Duration != 0 {
 		t.Fatalf("unexpected worktree retention defaults: %+v", cfg.Worktrees)
+	}
+}
+
+func TestLoadWorkerBackendsModelsAndVariants(t *testing.T) {
+	tests := []struct{ backend, model, variant, command string }{
+		{backend: "codex", model: "gpt-test", command: "codex"},
+		{backend: "claude-code", model: "claude-sonnet-test", variant: "high", command: "claude"},
+		{backend: "opencode", model: "opencode-go/kimi-k2.7-code", variant: "high", command: "opencode"},
+	}
+	for _, test := range tests {
+		dir := writeConfig(t, fmt.Sprintf("version: 2\ngithub:\n  repo: owner/repo\nworker:\n  backend: %s\n  model: %s\n  variant: %s\n", test.backend, test.model, test.variant))
+		cfg, err := Load(dir)
+		if err != nil || cfg.Worker.EffectiveCommand() != test.command {
+			t.Fatalf("backend=%s cfg=%+v err=%v", test.backend, cfg.Worker, err)
+		}
+	}
+}
+
+func TestLoadRejectsUnknownBackendAndInvalidOpenCodeModel(t *testing.T) {
+	for _, fragment := range []string{"backend: shell", "backend: opencode\n  model: missing-provider"} {
+		dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nworker:\n  "+fragment+"\n")
+		if _, err := Load(dir); err == nil {
+			t.Fatalf("invalid worker accepted: %s", fragment)
+		}
 	}
 }
 

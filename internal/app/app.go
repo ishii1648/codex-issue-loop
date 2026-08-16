@@ -953,9 +953,33 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	if err != nil {
 		return err
 	}
-	codexCompatibility := compat.ProbeCodex(ctx, entry.Commands["codex"])
-	if !codexCompatibility.OK() {
-		return fmt.Errorf("unsupported Codex CLI: %s", compatibilityDetail(codexCompatibility))
+	backendID := cfg.Worker.Backend
+	if backendID == "" {
+		backendID = "codex"
+	}
+	registeredBackend := entry.WorkerBackend
+	if registeredBackend == "" {
+		registeredBackend = "codex"
+	}
+	if registeredBackend != backendID {
+		return fmt.Errorf("worker backend changed from %s to %s; re-run agent-loop register --repo %q", registeredBackend, backendID, entry.RepoPath)
+	}
+	workerPath := entry.Commands[backendID]
+	if workerPath == "" {
+		return fmt.Errorf("registered worker command for backend %s is missing; re-run agent-loop register --repo %q", backendID, entry.RepoPath)
+	}
+	if currentPath, resolveErr := exec.LookPath(cfg.Worker.EffectiveCommand()); resolveErr == nil {
+		absolute, _ := filepath.Abs(currentPath)
+		if absolute != workerPath {
+			return fmt.Errorf("worker command path drift detected for %s (registered=%s current=%s); re-run agent-loop register --repo %q", backendID, workerPath, absolute, entry.RepoPath)
+		}
+	}
+	workerCompatibility := compat.ProbeBackend(ctx, backendID, workerPath)
+	if !workerCompatibility.OK() {
+		return fmt.Errorf("unsupported %s worker runtime: %s", backendID, compatibilityDetail(workerCompatibility))
+	}
+	if entry.WorkerVersion != "" && entry.WorkerVersion != workerCompatibility.Version {
+		return fmt.Errorf("worker runtime version drift detected for %s (registered=%s current=%s); run doctor and re-register after compatibility review", backendID, entry.WorkerVersion, workerCompatibility.Version)
 	}
 	ghCompatibility := compat.ProbeGH(ctx, entry.Commands["gh"])
 	if !ghCompatibility.OK() {
@@ -985,16 +1009,28 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath,
 		Secrets: secrets, EventRetention: logPolicy, NotificationsEnabled: cfg.Notifications.Enabled,
 	}
-	cfg.Worker.Command = entry.Commands["codex"]
+	cfg.Worker.Command = workerPath
+	backend, err := worker.NewBackend(cfg, worker.FactoryOptions{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets,
+		RuntimeVersion: workerCompatibility.Version, ResumeSupported: boolPointer(workerCompatibility.Has("session_resume"))})
+	if err != nil {
+		return err
+	}
+	provider := ""
+	if backendID == "opencode" {
+		provider, _, _ = strings.Cut(cfg.Worker.Model, "/")
+	}
+	identity := worker.Identity{Backend: backendID, RuntimeVersion: workerCompatibility.Version, Provider: provider,
+		RequestedModel: cfg.Worker.Model, ResolvedModel: cfg.Worker.Model, Variant: cfg.Worker.Variant}
 	safeLog := redact.NewLineWriterWithSecrets(supervisorLog, secrets)
 	defer safeLog.Flush()
 	loop := &supervisor.Loop{
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
-		Worktrees:     worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
-		Worker:        worker.Codex{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets, ResumeSupported: boolPointer(codexCompatibility.Has("session_resume"))},
-		Publisher:     publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
-		Logger:        log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
-		Notifications: notify.NewDispatcher(cfg, store, notificationToken),
+		Worktrees:      worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
+		Worker:         backend,
+		WorkerIdentity: identity,
+		Publisher:      publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
+		Logger:         log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
+		Notifications:  notify.NewDispatcher(cfg, store, notificationToken),
 	}
 	err = loop.Run(ctx)
 	var blocked supervisor.BlockedError

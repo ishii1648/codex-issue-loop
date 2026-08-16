@@ -78,6 +78,37 @@ func TestRegistryRejectsSymbolicLink(t *testing.T) {
 	}
 }
 
+func TestRegistryResolvesSelectedBackendCommand(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "gh", "opencode", "launchctl"} {
+		body := "#!/bin/sh\nexit 0\n"
+		if name == "opencode" {
+			body = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'opencode 1.1.1'; fi\n"
+		}
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testRegistryConfig(t, repo, "owner/repo")
+	cfg.Worker.Backend, cfg.Worker.Model = "opencode", "opencode-go/test"
+	entry, err := (Store{Path: filepath.Join(root, "registry.json")}).Add(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.WorkerBackend != "opencode" || entry.Commands["opencode"] != filepath.Join(binDir, "opencode") || entry.Commands["codex"] != "" {
+		t.Fatalf("entry=%+v", entry)
+	}
+}
+
 func TestRegistryRejectsLegacyAndFutureSchemaWithActionableErrors(t *testing.T) {
 	for _, test := range []struct {
 		version int

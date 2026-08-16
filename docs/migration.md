@@ -2,6 +2,12 @@
 
 現行binaryが扱うconfig、registry、state、active event log、prepared transactionのschemaはv2である。v1からv2だけをforward migrationとしてサポートし、未知versionは変更しない。worker resultとdoctor JSONのschema versionは別契約であり、本runbookの対象ではない。
 
+## worker backend追加時のv2後方互換
+
+`worker.backend`を持たない既存v2 manifestは`codex`として読み込む。既存stateの`session_id`はCodexだけが生成していたため、load時に`session: {"backend":"codex","id":"..."}`へin-memory正規化し、次のstate更新で併記する。この変更にschema versionの更新や一括書換えは不要である。
+
+backendを変更する場合はloopを停止し、manifest更新後に`agent-loop register --repo <path>`を再実行する。active Issueに別backendのsessionが残っていても、そのIDを新backendへ渡さず、既存worktree・run state・回答履歴からfresh sessionを開始する。
+
 ## Read-only preflight
 
 新しい検証済みartifactからpreviewする。既定の`migrate`はfileを変更しない。
