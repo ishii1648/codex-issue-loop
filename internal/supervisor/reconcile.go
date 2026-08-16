@@ -32,6 +32,7 @@ type reconciliationDecision struct {
 	githubSync  string
 	retryAt     *time.Time
 	workerPID   int
+	prMerged    bool
 	markRunning bool
 	reason      string
 }
@@ -39,7 +40,7 @@ type reconciliationDecision struct {
 func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) error {
 	numbers := make([]int, 0, len(snapshot.Issues))
 	for _, item := range snapshot.Issues {
-		if item.Status == "completed" && item.GitHubSync == "" {
+		if item.Status == "completed" && item.GitHubSync == "" && (item.PullRequestURL == "" || item.PullRequestMerged) {
 			continue
 		}
 		numbers = append(numbers, item.Number)
@@ -82,6 +83,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			item.LastError = decision.lastError
 			item.Branch = decision.branch
 			item.PullRequestURL = decision.pullRequest
+			item.PullRequestMerged = decision.prMerged
 			item.GitHubSync = decision.githubSync
 			item.RetryAfter = decision.retryAt
 			item.WorkerPID = decision.workerPID
@@ -99,7 +101,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 	decision := reconciliationDecision{
 		status: current.Status, lastError: current.LastError, branch: current.Branch,
 		pullRequest: current.PullRequestURL, githubSync: current.GitHubSync,
-		retryAt: current.RetryAfter, workerPID: current.WorkerPID,
+		retryAt: current.RetryAfter, workerPID: current.WorkerPID, prMerged: current.PullRequestMerged,
 		reason: "state already converged",
 	}
 	labels := labelSet(remote.Issue.Labels)
@@ -109,9 +111,38 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 	done := labels[l.Config.GitHub.DoneLabel]
 	failed := labels[l.Config.GitHub.FailedLabel]
 	excluded := hasAnyLabel(labels, l.Config.GitHub.ExcludeLabels)
+	if current.Status == "completed" && strings.EqualFold(remote.Issue.State, "open") {
+		open := []gh.PullRequest{}
+		for _, pr := range remote.PullRequests {
+			if pr.MergedAt == nil && strings.EqualFold(pr.State, "open") {
+				open = append(open, pr)
+			}
+		}
+		if len(open) == 1 {
+			decision.status = "awaiting_merge"
+			if open[0].IsDraft {
+				decision.status = "awaiting_checks"
+			}
+			decision.pullRequest = open[0].URL
+			decision.prMerged = false
+			decision.githubSync = ""
+			decision.retryAt = nil
+			decision.workerPID = 0
+			decision.markRunning = true
+			decision.reason = "legacy completed Issue with open Pull Request returned to lifecycle monitoring"
+			return decision
+		}
+	}
 
 	if done {
 		decision.status, decision.lastError = "completed", ""
+		for _, pr := range remote.PullRequests {
+			if pr.MergedAt != nil {
+				decision.pullRequest = pr.URL
+				decision.prMerged = true
+				break
+			}
+		}
 		if current.GitHubSync == "done" && !hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->") {
 			decision.githubSync = "done"
 		} else {
@@ -164,6 +195,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 	}
 	if mergedPR != nil {
 		decision.status, decision.lastError, decision.pullRequest = "completed", "", mergedPR.URL
+		decision.prMerged = true
 		decision.workerPID, decision.retryAt, decision.reason = 0, nil, "merged Pull Request discovered"
 		if hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->") && done {
 			decision.githubSync = ""

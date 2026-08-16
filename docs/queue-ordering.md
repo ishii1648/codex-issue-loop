@@ -34,7 +34,7 @@ queue:
 
 GitHub CLIが内部で複数pageを取得した後の一つの候補集合に対してsortする。各pageの返却順やpage境界は選択結果に影響しない。現在の取得上限は1 pollあたり1000件であり、eligible Issueが上限を超える運用ではキュー分割または上限拡張を別途検討する。
 
-`queue.order`を変更しても、`claiming`、`claimed`、`running`、`needs_input`、`completed`、`blocked`のIssueを取消・再配置しない。次回pollで、まだclaimされていない候補だけに新しいstrategyを適用する。設定変更時は通常どおりloopをrestartし、`doctor`で設定とpriority labelを確認する。
+`queue.order`を変更しても、`claiming`、`claimed`、`running`、`needs_input`、`awaiting_checks`、`awaiting_merge`、`completed`、`blocked`のIssueを取消・再配置しない。次回pollで、まだclaimされていない候補だけに新しいstrategyを適用する。設定変更時は通常どおりloopをrestartし、`doctor`で設定とpriority labelを確認する。
 
 ## Priority labelの準備
 

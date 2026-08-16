@@ -43,7 +43,10 @@ git:
 
 completion:
   create_draft_pr: true
-  close_issue: false
+  # false: CI成功後にReady for reviewへ移し、人手のmergeを待つ。
+  # true: CI成功後にsquash mergeまで実行する。
+  auto_merge: false
+  close_issue: true
 
 # 0s means that worktrees in the status are retained indefinitely.
 worktrees:

@@ -52,24 +52,25 @@ type AnswerRecord struct {
 }
 
 type Issue struct {
-	Number           int            `json:"number"`
-	Title            string         `json:"title"`
-	Status           string         `json:"status"`
-	RunID            string         `json:"run_id,omitempty"`
-	Branch           string         `json:"branch,omitempty"`
-	Worktree         string         `json:"worktree,omitempty"`
-	Attempts         int            `json:"attempts"`
-	Continuations    int            `json:"continuations"`
-	ExecutionProfile string         `json:"execution_profile,omitempty"`
-	SessionID        string         `json:"session_id,omitempty"`
-	WorkerPID        int            `json:"worker_pid,omitempty"`
-	PullRequestURL   string         `json:"pull_request_url,omitempty"`
-	GitHubSync       string         `json:"github_sync,omitempty"`
-	FailureKind      string         `json:"failure_kind,omitempty"`
-	LastError        string         `json:"last_error,omitempty"`
-	RetryAfter       *time.Time     `json:"retry_after,omitempty"`
-	Answers          []AnswerRecord `json:"answers,omitempty"`
-	UpdatedAt        time.Time      `json:"updated_at"`
+	Number            int            `json:"number"`
+	Title             string         `json:"title"`
+	Status            string         `json:"status"`
+	RunID             string         `json:"run_id,omitempty"`
+	Branch            string         `json:"branch,omitempty"`
+	Worktree          string         `json:"worktree,omitempty"`
+	Attempts          int            `json:"attempts"`
+	Continuations     int            `json:"continuations"`
+	ExecutionProfile  string         `json:"execution_profile,omitempty"`
+	SessionID         string         `json:"session_id,omitempty"`
+	WorkerPID         int            `json:"worker_pid,omitempty"`
+	PullRequestURL    string         `json:"pull_request_url,omitempty"`
+	PullRequestMerged bool           `json:"pull_request_merged,omitempty"`
+	GitHubSync        string         `json:"github_sync,omitempty"`
+	FailureKind       string         `json:"failure_kind,omitempty"`
+	LastError         string         `json:"last_error,omitempty"`
+	RetryAfter        *time.Time     `json:"retry_after,omitempty"`
+	Answers           []AnswerRecord `json:"answers,omitempty"`
+	UpdatedAt         time.Time      `json:"updated_at"`
 }
 
 type Option struct {
@@ -401,7 +402,7 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "retry_wait" {
+			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" {
 				return "", false
 			}
 		}

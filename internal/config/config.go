@@ -134,6 +134,7 @@ type Git struct {
 
 type Completion struct {
 	CreateDraftPR bool `yaml:"create_draft_pr" json:"create_draft_pr"`
+	AutoMerge     bool `yaml:"auto_merge" json:"auto_merge"`
 	CloseIssue    bool `yaml:"close_issue" json:"close_issue"`
 }
 
@@ -211,7 +212,7 @@ func Defaults() Config {
 			BranchPrefix: "codex/issue-",
 			BaseBranch:   "main",
 		},
-		Completion: Completion{CreateDraftPR: true},
+		Completion: Completion{CreateDraftPR: true, AutoMerge: false, CloseIssue: true},
 		Worktrees: Worktrees{
 			CompletedMaxAge:  Duration{7 * 24 * time.Hour},
 			FailedMaxAge:     Duration{30 * 24 * time.Hour},
@@ -366,6 +367,9 @@ func (c Config) Validate() error {
 	}
 	if c.Git.WorktreeRoot != "" && !filepath.IsAbs(c.Git.WorktreeRoot) {
 		return fmt.Errorf("git.worktree_root must be an absolute path")
+	}
+	if c.Completion.AutoMerge && !c.Completion.CreateDraftPR {
+		return fmt.Errorf("completion.auto_merge requires completion.create_draft_pr")
 	}
 	if !safeRefFragment(c.Git.BranchPrefix) || !safeRefFragment(c.Git.BaseBranch) {
 		return fmt.Errorf("git.branch_prefix and git.base_branch must be safe Git ref fragments")

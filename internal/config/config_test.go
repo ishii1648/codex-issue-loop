@@ -44,6 +44,12 @@ watch:
 	if cfg.Worker.TimeoutGrace.Duration != 30*time.Second {
 		t.Fatalf("timeout grace = %s", cfg.Worker.TimeoutGrace.Duration)
 	}
+	if cfg.Completion.AutoMerge {
+		t.Fatal("auto merge must be opt-in")
+	}
+	if !cfg.Completion.CreateDraftPR || !cfg.Completion.CloseIssue {
+		t.Fatalf("unexpected completion defaults: %+v", cfg.Completion)
+	}
 	if cfg.Logs.RotateBytes != 16*1024*1024 || cfg.Logs.Generations != 7 || cfg.Logs.WorkerRunMaxCount != 100 {
 		t.Fatalf("unexpected log defaults: %+v", cfg.Logs)
 	}
@@ -57,6 +63,18 @@ func TestLoadRejectsNegativeWorktreeRetention(t *testing.T) {
 	dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nworktrees:\n  completed_max_age: -1h\n")
 	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "worktree retention") {
 		t.Fatalf("negative retention accepted: %v", err)
+	}
+}
+
+func TestLoadAutoMergePolicy(t *testing.T) {
+	dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\ncompletion:\n  create_draft_pr: true\n  auto_merge: true\n  close_issue: true\n")
+	cfg, err := Load(dir)
+	if err != nil || !cfg.Completion.AutoMerge || !cfg.Completion.CloseIssue {
+		t.Fatalf("completion=%+v err=%v", cfg.Completion, err)
+	}
+	dir = writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\ncompletion:\n  create_draft_pr: false\n  auto_merge: true\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "auto_merge") {
+		t.Fatalf("auto merge without Pull Request was accepted: %v", err)
 	}
 }
 
