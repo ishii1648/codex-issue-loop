@@ -111,8 +111,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 1. ワーカーが自律的に決められない事項を検出する
 2. ワーカーが構造化された `needs_input` 結果を返す
 3. ループが質問、選択肢、作業状態を永続化する
-4. 監視コマンドが終了し、監視用 Codex task がユーザーへ質問する
-5. Codex の通知と task 状態により、ユーザーがスマートフォンで検知する
+4. 監視コマンドが終了し、監視用 Codex task がrequest ID、推奨案、選択肢を保持してユーザーへ質問する
+5. Codex Desktopの質問通知とActivityの回答待ちにより、ユーザーが検知する
 6. ユーザー回答を `agent-loop answer` で保存する
 7. 新しい Codex ワーカーが、既存 worktree と回答を引き継いで処理を再開する
 
@@ -198,6 +198,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-059-B**: 外部pushはrequest/event単位で重複を抑止し、上限付きbackoffとrate limitを持ち、adapter障害でsupervisor本体を停止しないこと。
 - **FR-059-C**: 通知credentialは設定file・plist・repository・logへ保存せず、repository別のprivate管理fileから読み込むこと。通知本文の詳細は明示opt-inとすること。
 - **FR-059-D**: macOSのevent wakeはfsnotify/kqueueでstate directoryを監視し、watcher作成・登録失敗またはchannel終了時はpolling-onlyへ降格すること。
+- **FR-059-E**: 接続中のCodex Desktop監視taskは`needs_input`をユーザー回答待ちの質問として表示し、OSの質問通知を閉じてもActivityから再発見できること。
+- **FR-059-F**: Codex Desktop監視taskが切断中の新規Activity投入は保証せず、再接続時に永続snapshotの未回答requestを即時再表示すること。
 
 ### 6.7 Codex Skill
 
@@ -206,6 +208,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-062**: Skill は開始後に監視へ接続し、入力待ちになったらユーザーへ質問し、回答後に監視へ戻ること。
 - **FR-063**: stop、reset、claim解除など影響の大きい操作では、対象と影響を明示すること。
 - **FR-064**: 既存の未回答質問がある場合は、新規 watch より先にその質問を表示すること。
+- **FR-065**: Desktopではrepositoryごとに専用監視taskを命名・pinし、対象path、request ID、回答先をrepository間で混在させないこと。
+- **FR-066**: 質問表示はrequest ID、Issue番号、質問、理由、推奨案、全選択肢、自由記述可否を欠落させないこと。
 
 ### 6.8 Worktreeライフサイクル
 
@@ -364,11 +368,11 @@ GitHub UI、CLI/API、automation、または別ホストのCodexから作成し�
 
 ## 11. OpenAI公式仕様への依存
 
-本要件は、2026-08-16時点の以下の公式OpenAIドキュメントを前提とする。利用可否の詳細とlocal schema確認は[Codex公式仕様確認](codex-capability-review.md)を正本とする。
+本要件は、2026-08-17時点の以下の公式OpenAIドキュメントを前提とする。利用可否の詳細とlocal schema確認は[Codex公式仕様確認](codex-capability-review.md)を正本とする。
 
 - [Remote connections](https://learn.chatgpt.com/docs/remote-connections): 接続済みコンピューター上のchatをスマートフォンから開始・監視・指示・承認できる
 - [Projects and chats](https://learn.chatgpt.com/docs/projects): 同一ローカルプロジェクトで複数taskを整理し、頻繁に使うtaskをピン留めできる
-- [Notifications](https://learn.chatgpt.com/docs/notifications): task の `Running`、`Needs input`、`Ready`、`Blocked` 状態を確認できる
+- [Notifications](https://learn.chatgpt.com/docs/notifications): Desktopでpermission/question notificationsを設定でき、Activityからunread、running、回答待ちのchatを確認できる
 - [Long-running work](https://learn.chatgpt.com/docs/long-running-work): Goalは明確な成果、制約、完了条件を持つ長時間作業に使う
 - [Codex App Server](https://learn.chatgpt.com/docs/app-server): thread Goal、resume、turn start、token usageのprogrammatic interface
 - [Integrated terminal](https://learn.chatgpt.com/docs/integrated-terminal): Codex taskから実行中のterminal出力を確認できる

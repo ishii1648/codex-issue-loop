@@ -8,15 +8,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
+	"github.com/ishii1648/codex-issue-loop/internal/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
@@ -150,6 +153,134 @@ func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 	if snapshot.Issues["4"].Status != "resume_pending" || len(snapshot.Issues["4"].Answers) != 1 {
 		t.Fatalf("issue=%+v", snapshot.Issues["4"])
 	}
+}
+
+func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Date(2026, 8, 17, 1, 2, 3, 0, time.UTC)
+	firstRequest := &state.Request{
+		ID: "req_desktop_1", IssueNumber: 89, Question: "Which behavior should be used?",
+		Reason: "The choice changes user-visible behavior.", Recommended: "safe",
+		Options:       []state.Option{{ID: "safe", Label: "Keep durable state"}, {ID: "fast", Label: "Use notification only"}},
+		AllowFreeText: true, Status: "pending", CreatedAt: createdAt,
+	}
+	_, err = store.Update("input_requested", 89, "run_89", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "running"
+		snapshot.Issues["89"] = &state.Issue{Number: 89, RunID: "run_89", Status: "needs_input"}
+		snapshot.PendingRequests[firstRequest.ID] = firstRequest
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runWatch := func(ctx context.Context) (observe.Result, int, string) {
+		t.Helper()
+		var out, stderr bytes.Buffer
+		app := App{In: bytes.NewBuffer(nil), Out: &out, Err: &stderr}
+		code := app.Run(ctx, []string{"watch", "--repo", repo, "--until-attention", "--json"})
+		var result observe.Result
+		if code == 0 {
+			if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+				t.Fatalf("decode watch output: %v; output=%s", err, out.String())
+			}
+		}
+		return result, code, stderr.String()
+	}
+	assertRequest := func(result observe.Result, expected *state.Request) {
+		t.Helper()
+		if result.Reason != "needs_input" || len(result.PendingRequests) != 1 {
+			t.Fatalf("watch result=%+v", result)
+		}
+		if !reflect.DeepEqual(result.PendingRequests[0], expected) {
+			t.Fatalf("request changed across watch: got=%+v want=%+v", result.PendingRequests[0], expected)
+		}
+	}
+
+	// A newly connected Desktop monitor and a reconnected monitor must both
+	// receive the complete pending request immediately from durable state.
+	for attempt := 0; attempt < 2; attempt++ {
+		result, code, stderr := runWatch(context.Background())
+		if code != 0 {
+			t.Fatalf("watch attempt %d code=%d stderr=%s", attempt, code, stderr)
+		}
+		assertRequest(result, firstRequest)
+	}
+
+	// Repeating the same answer is safe and creates only one durable answer.
+	var firstAnswerRevision uint64
+	for attempt := 0; attempt < 2; attempt++ {
+		var out, stderr bytes.Buffer
+		app := App{In: strings.NewReader("safe\n"), Out: &out, Err: &stderr}
+		code := app.Run(context.Background(), []string{"answer", "--repo", repo, "--request-id", firstRequest.ID, "--message-file", "-", "--json"})
+		if code != 0 {
+			t.Fatalf("answer attempt %d code=%d stderr=%s", attempt, code, stderr.String())
+		}
+		if attempt == 0 {
+			snapshot, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstAnswerRevision = snapshot.StateRevision
+		}
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request := snapshot.PendingRequests[firstRequest.ID]; request.Status != "answered" || request.Answer != "safe" {
+		t.Fatalf("answered request=%+v", request)
+	}
+	if issue := snapshot.Issues["89"]; issue.Status != "resume_pending" || len(issue.Answers) != 1 || issue.Answers[0].RequestID != firstRequest.ID {
+		t.Fatalf("issue after answer=%+v", issue)
+	}
+	if snapshot.StateRevision != firstAnswerRevision {
+		t.Fatalf("idempotent answer created a second durable revision: first=%d final=%d", firstAnswerRevision, snapshot.StateRevision)
+	}
+
+	// The same monitor can return to one blocking watch. A later durable
+	// request wakes it without any caller-side polling.
+	type watchOutcome struct {
+		result observe.Result
+		code   int
+		stderr string
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	outcomeCh := make(chan watchOutcome, 1)
+	go func() {
+		result, code, stderr := runWatch(ctx)
+		outcomeCh <- watchOutcome{result: result, code: code, stderr: stderr}
+	}()
+	secondRequest := &state.Request{
+		ID: "req_desktop_2", IssueNumber: 90, Question: "Continue?", Recommended: "continue",
+		Options: []state.Option{{ID: "continue", Label: "Continue"}, {ID: "stop", Label: "Stop"}},
+		Status:  "pending", CreatedAt: createdAt.Add(time.Minute),
+	}
+	_, err = store.Update("input_requested", 90, "run_90", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["90"] = &state.Issue{Number: 90, RunID: "run_90", Status: "needs_input"}
+		snapshot.PendingRequests[secondRequest.ID] = secondRequest
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome := <-outcomeCh
+	if outcome.code != 0 {
+		t.Fatalf("blocking watch code=%d stderr=%s", outcome.code, outcome.stderr)
+	}
+	assertRequest(outcome.result, secondRequest)
 }
 
 func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {

@@ -158,7 +158,7 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 | supervisorが異常終了 | snapshot、event log、GitHub状態 | launchd再起動後にreconciliation |
 | Macがスリープ | 実行は停止し得る | macOSの「ディスプレイoff時もスリープさせない」を有効化 |
 
-App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できるが、外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。監視taskが接続されていない期間は、opt-inのntfy adapterが`needs_input`とsupervisor blockedを永続outboxから通知する。詳細は[公式仕様確認](codex-capability-review.md)と[スマートフォン直接push通知](notifications.md)を参照する。
+App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できるが、外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。通常はrepositoryごとにpinしたDesktop監視taskがblocking watchから戻った後に質問し、question notificationとActivityの回答待ちへ残す。監視taskが接続されていない期間は、opt-inのntfy adapterが`needs_input`とsupervisor blockedを永続outboxから通知する。詳細は[Codex Desktop監視task運用](codex-desktop-monitoring.md)、[公式仕様確認](codex-capability-review.md)、[スマートフォン直接push通知](notifications.md)を参照する。
 
 ## 10. 設計上の不変条件
 
