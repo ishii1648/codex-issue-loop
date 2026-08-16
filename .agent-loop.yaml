@@ -11,11 +11,31 @@ github:
 
 queue:
   poll_interval: 60s
-  concurrency: 1
+  concurrency: 2
   order: issue_number_asc
   priority_labels: []
   max_attempts: 3
   continue_after_needs_input: true
+
+resources:
+  metadata_version: 1
+  definitions:
+    - name: config
+      paths: [.agent-loop*.yaml, internal/config/**, docs/resource-admission.md, docs/specification.md]
+    - name: scheduler
+      paths: [internal/supervisor/**, internal/state/**, internal/schema/**, internal/failure/**, internal/fsutil/**]
+    - name: github
+      paths: [internal/github/**, internal/publish/**]
+    - name: worker
+      paths: [internal/worker/**, schemas/**]
+    - name: host
+      paths: [cmd/**, internal/app/**, internal/launchd/**, internal/registry/**, internal/layout/**, internal/lifecycle/**, internal/worktree/**]
+    - name: operations
+      paths: [internal/observe/**, internal/notify/**, internal/retention/**, internal/redact/**, docs/*runbook.md]
+    - name: release
+      paths: [.github/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/compat/**, internal/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
+    - name: docs
+      paths: [.gitignore, README.md, AGENTS.md, docs/**]
 
 worker:
   command: codex

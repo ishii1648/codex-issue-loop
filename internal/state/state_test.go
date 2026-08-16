@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,6 +121,54 @@ func TestLeaseReservationAndExpansionAreExclusive(t *testing.T) {
 	}
 	if _, err := store.ExpandLease(1, first, []string{"docs"}); err == nil {
 		t.Fatal("lease expanded across another active lease")
+	}
+}
+
+func TestFaultConcurrentLeaseReservationsNeverOverlapResources(t *testing.T) {
+	store := newStore(t)
+	const contenders = 16
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(contenders)
+	results := make(chan error, contenders)
+	for number := 1; number <= contenders; number++ {
+		go func(number int) {
+			defer wait.Done()
+			<-start
+			_, _, err := store.ReserveLease(LeaseReservation{
+				IssueNumber: number, RunID: fmt.Sprintf("run_%d", number), Slot: number - 1,
+				ResolvedResources: []string{"scheduler"}, ReservedAt: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
+			})
+			results <- err
+		}(number)
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful reservations=%d want=1", successes)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases := 0
+	for _, issue := range snapshot.Issues {
+		if issue != nil && issue.Lease != nil {
+			leases++
+			if !reflect.DeepEqual(issue.Lease.ResolvedResources, []string{"scheduler"}) {
+				t.Fatalf("unexpected lease=%+v", issue.Lease)
+			}
+		}
+	}
+	if leases != 1 {
+		t.Fatalf("active leases=%d want=1", leases)
 	}
 }
 

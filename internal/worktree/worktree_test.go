@@ -25,6 +25,7 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 	gitRun(t, "clone", "-q", remote, repo)
 	gitRun(t, "-C", repo, "config", "user.name", "Test")
 	gitRun(t, "-C", repo, "config", "user.email", "test@example.test")
+	gitRun(t, "-C", repo, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

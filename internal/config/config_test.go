@@ -208,6 +208,40 @@ resources:
 	}
 }
 
+func TestSelfHostingCanaryAndConcurrencyOneFallbackConfigurations(t *testing.T) {
+	repositoryRoot := filepath.Clean(filepath.Join("..", ".."))
+	data, err := os.ReadFile(filepath.Join(repositoryRoot, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(repositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResources := []string{"config", "scheduler", "github", "worker", "host", "operations", "release", "docs"}
+	if cfg.Queue.Concurrency != 2 || cfg.Resources.MetadataVersion != 1 || len(cfg.Resources.Definitions) != len(wantResources) {
+		t.Fatalf("self-hosting canary config=%+v", cfg)
+	}
+	for index, name := range wantResources {
+		if cfg.Resources.Definitions[index].Name != name {
+			t.Fatalf("resource %d=%q want=%q", index, cfg.Resources.Definitions[index].Name, name)
+		}
+	}
+
+	fallback := strings.Replace(string(data), "  concurrency: 2\n", "  concurrency: 1\n", 1)
+	if fallback == string(data) {
+		t.Fatal("self-hosting concurrency setting was not found")
+	}
+	fallbackDir := writeConfig(t, fallback)
+	fallbackConfig, err := Load(fallbackDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallbackConfig.Queue.Concurrency != 1 || len(fallbackConfig.Resources.Definitions) != len(wantResources) {
+		t.Fatalf("concurrency 1 fallback changed taxonomy: %+v", fallbackConfig)
+	}
+}
+
 func TestLoadRejectsConcurrentQueueWithoutValidResourceDefinitions(t *testing.T) {
 	fragments := []string{
 		"queue:\n  concurrency: 2\n",

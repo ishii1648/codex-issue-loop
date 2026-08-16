@@ -175,6 +175,7 @@ func lifecycleRepository(t *testing.T) (config.Config, string) {
 	gitCommand(t, "", "init", "-q", "-b", "main", repo)
 	gitRun(t, repo, "config", "user.email", "loop@example.test")
 	gitRun(t, repo, "config", "user.name", "Loop Test")
+	gitRun(t, repo, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

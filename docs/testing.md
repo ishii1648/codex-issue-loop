@@ -21,6 +21,9 @@ make test-race
 | worker kill後のreconciliation | `TestFaultWorkerKillReturnsRecoverableProcessError`、`TestFaultWorkerAndGitHubStateReconciliationDecisions` |
 | timeoutの段階的終了とprocess group回収 | `TestFaultWorkerTimeoutUsesGracefulProcessGroupTermination`、`TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace`、`TestWorkerTimeoutStageIsPersistedForRetry` |
 | 複数workerのstop・orphan回収 | `TestSchedulerCancellationStopsAllWorkers`、`TestStopWorkersTerminatesAndRecordsEveryIssueIndependently`、`TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue` |
+| concurrency 2の同時result barrier | `TestFaultSchedulerConcurrentResultBarrier` |
+| same-resourceの同時予約競合 | `TestFaultConcurrentLeaseReservationsNeverOverlapResources` |
+| 実processのstop・restart・orphan回収 | `TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases` |
 | watchの接続、切断、複数接続 | `TestFaultDisconnectedEventChannelsFallBackToTimer`、`TestFaultMultipleWatchConnectionsObserveSameRevision`、`TestFSNotifyMultipleWatchersWakeAndCanReconnect` |
 | 複数requestの表示・個別回答 | `TestWatchReturnsEveryPendingRequestInRequestIDOrder`、`TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
 | event通知を破棄した場合のreconciliation | `TestFaultDroppedEventReconcilesAttention` |
@@ -55,6 +58,8 @@ make test-race
 | push通知のoutbox・重複抑止・再送・本体分離 | `TestDispatcherDeduplicatesRetriesAndRedactsFailures`、`TestDispatcherCancelsAnsweredRequestBeforeDelivery`、`TestNotificationFailureDoesNotStopSupervisor` |
 
 障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
+
+concurrency 2のfault matrix、self-hosting canary、resource計測、concurrency 1 rollbackは[concurrency 2 rollout・rollback runbook](concurrency-rollout.md)を正本とする。
 
 ## セキュリティ負テスト
 
