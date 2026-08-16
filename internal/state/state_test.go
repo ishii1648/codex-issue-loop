@@ -109,6 +109,37 @@ func TestLeaseReservationAndExpansionAreExclusive(t *testing.T) {
 	}
 }
 
+func TestRetainedLeaseReleasesWorkerSlotButKeepsResourceConflict(t *testing.T) {
+	store := newStore(t)
+	reservedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	_, owner, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 1, RunID: "run_1", Slot: 0,
+		ResolvedResources: []string{"docs"}, ReservedAt: reservedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("input_requested", 1, owner.RunID, nil, func(snapshot *Snapshot) error {
+		snapshot.Issues["1"].Status = "needs_input"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 2, RunID: "run_2", Slot: 0,
+		ResolvedResources: []string{"scheduler"}, ReservedAt: reservedAt,
+	}); err != nil {
+		t.Fatalf("released worker slot was not reusable: %v", err)
+	}
+	if _, _, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 3, RunID: "run_3", Slot: 1,
+		ResolvedResources: []string{"docs"}, ReservedAt: reservedAt,
+	}); err == nil {
+		t.Fatal("retained resource lease stopped conflicting")
+	}
+}
+
 func TestCrashPointsReplayPreparedLeaseTransaction(t *testing.T) {
 	for _, appendEvent := range []bool{false, true} {
 		t.Run(fmt.Sprintf("event_appended_%v", appendEvent), func(t *testing.T) {

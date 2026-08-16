@@ -32,6 +32,7 @@ type reconciliationDecision struct {
 	githubSync  string
 	retryAt     *time.Time
 	workerPID   int
+	workerPGID  int
 	prMerged    bool
 	markRunning bool
 	reason      string
@@ -63,6 +64,9 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			}
 		}
 		decision := l.decideReconciliation(snapshot, *current, remote, inspection)
+		if decision.workerPID == 0 {
+			decision.workerPGID = 0
+		}
 		if decision.markRunning {
 			if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
 				return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
@@ -97,6 +101,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			item.GitHubSync = decision.githubSync
 			item.RetryAfter = decision.retryAt
 			item.WorkerPID = decision.workerPID
+			item.WorkerPGID = decision.workerPGID
 			item.UpdatedAt = l.now()
 			return nil
 		})
@@ -111,7 +116,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 	decision := reconciliationDecision{
 		status: current.Status, lastError: current.LastError, branch: current.Branch,
 		pullRequest: current.PullRequestURL, githubSync: current.GitHubSync,
-		retryAt: current.RetryAfter, workerPID: current.WorkerPID, prMerged: current.PullRequestMerged,
+		retryAt: current.RetryAfter, workerPID: current.WorkerPID, workerPGID: current.WorkerPGID, prMerged: current.PullRequestMerged,
 		reason: "state already converged",
 	}
 	labels := labelSet(remote.Issue.Labels)
@@ -258,6 +263,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		return blockDecision(decision, fmt.Sprintf("saved worker PID %d is still alive", current.WorkerPID))
 	}
 	decision.workerPID = 0
+	decision.workerPGID = 0
 
 	if current.GitHubSync == "needs_input" {
 		if request := pendingRequest(snapshot, current.Number); request != nil && needsInput && hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:request:"+request.ID+" -->") {
@@ -320,6 +326,7 @@ func blockDecision(decision reconciliationDecision, reason string) reconciliatio
 	decision.githubSync = ""
 	decision.retryAt = nil
 	decision.workerPID = 0
+	decision.workerPGID = 0
 	decision.reason = reason
 	return decision
 }

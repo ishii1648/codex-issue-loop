@@ -141,6 +141,7 @@ type Issue struct {
 	Session           *WorkerSession    `json:"session,omitempty"`
 	WorkerIdentity    WorkerIdentity    `json:"worker_identity,omitempty"`
 	WorkerPID         int               `json:"worker_pid,omitempty"`
+	WorkerPGID        int               `json:"worker_pgid,omitempty"`
 	PullRequestURL    string            `json:"pull_request_url,omitempty"`
 	PullRequestMerged bool              `json:"pull_request_merged,omitempty"`
 	GitHubSync        string            `json:"github_sync,omitempty"`

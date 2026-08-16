@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -46,20 +47,22 @@ type NotificationDispatcher interface {
 }
 
 type Loop struct {
-	Config         config.Config
-	Store          state.Store
-	GitHub         gh.Client
-	Worktrees      WorktreeManager
-	Worker         worker.Runner
-	WorkerIdentity worker.Identity
-	Publisher      Publisher
-	Conflicts      ConflictResolver
-	Processes      ProcessInspector
-	Clock          Clock
-	Random         RandomSource
-	Logger         *log.Logger
-	DiskAvailable  func(string) (uint64, error)
-	Notifications  NotificationDispatcher
+	Config          config.Config
+	Store           state.Store
+	GitHub          gh.Client
+	Worktrees       WorktreeManager
+	Worker          worker.Runner
+	WorkerIdentity  worker.Identity
+	Publisher       Publisher
+	Conflicts       ConflictResolver
+	Processes       ProcessInspector
+	Clock           Clock
+	SchedulerTimers SchedulerTimerSource
+	Random          RandomSource
+	Logger          *log.Logger
+	DiskAvailable   func(string) (uint64, error)
+	Notifications   NotificationDispatcher
+	publicationMu   sync.Mutex
 }
 
 type BlockedError struct{ Err error }
@@ -111,58 +114,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Persisted failures survive launchd restarts. Only a successful cycle resets
-	// the counter, so repeatedly crashing between retries cannot avoid the limit.
-	consecutiveFailures := snapshot.Supervisor.ConsecutiveFailures
-	if consecutiveFailures > 0 && snapshot.Supervisor.RetryAfter != nil && snapshot.Supervisor.RetryAfter.After(l.now()) {
-		l.waitForDelay(ctx, snapshot.Supervisor.RetryAfter.Sub(l.now()))
-	}
-	for {
-		if err := ctx.Err(); err != nil {
-			_, _ = l.Store.Update("supervisor_stopped", 0, "", map[string]string{"reason": err.Error()}, func(s *state.Snapshot) error {
-				s.Supervisor.State = "stopped"
-				s.Supervisor.PID = 0
-				s.Supervisor.Message = err.Error()
-				return nil
-			})
-			return nil
-		}
-		l.dispatchNotifications(ctx)
-		worked, err := l.RunOnce(ctx)
-		l.dispatchNotifications(ctx)
-		if err != nil {
-			kind := failure.KindOf(err)
-			if kind == failure.Supervisor {
-				return l.blockSupervisor(err, kind, consecutiveFailures+1)
-			}
-			consecutiveFailures++
-			l.Logger.Printf("cycle failed (%d, %s): %v", consecutiveFailures, kind, err)
-			if consecutiveFailures >= 5 {
-				return l.blockSupervisor(err, kind, consecutiveFailures)
-			}
-			delay := l.retryDelay(consecutiveFailures)
-			if recordErr := l.recordSupervisorRetry(err, kind, consecutiveFailures, delay); recordErr != nil {
-				return BlockedError{Err: failure.Wrap(failure.Supervisor, "persist supervisor retry", recordErr)}
-			}
-			// State files written while recording the retry are not a reason to
-			// bypass backoff. Retry waits are timer-only and remain cancellable.
-			l.waitForDelay(ctx, delay)
-			continue
-		} else {
-			if consecutiveFailures > 0 {
-				if resetErr := l.resetSupervisorFailures(consecutiveFailures); resetErr != nil {
-					return BlockedError{Err: failure.Wrap(failure.Supervisor, "reset supervisor failure counter", resetErr)}
-				}
-			}
-			consecutiveFailures = 0
-		}
-
-		delay := l.pollDelay(l.Config.Queue.PollInterval.Duration)
-		if worked {
-			delay = time.Second
-		}
-		l.waitForWork(ctx, delay, watcher)
-	}
+	return l.runScheduler(ctx, watcher)
 }
 
 func (l *Loop) waitForDelay(ctx context.Context, delay time.Duration) {
@@ -305,6 +257,10 @@ func queueBlockedByPullRequest(snapshot state.Snapshot, autoMerge bool) bool {
 }
 
 func (l *Loop) startIssue(ctx context.Context, issue gh.Issue) error {
+	return l.startIssueAtSlot(ctx, issue, state.NewID("run"), 0)
+}
+
+func (l *Loop) startIssueAtSlot(ctx context.Context, issue gh.Issue, runID string, slot int) error {
 	latest, err := l.GitHub.Get(ctx, l.Config, issue.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh GitHub Issue before claim", err)
@@ -313,10 +269,9 @@ func (l *Loop) startIssue(ctx context.Context, issue gh.Issue) error {
 		return nil
 	}
 	issue = latest
-	runID := state.NewID("run")
 	now := l.now()
 	_, _, err = l.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: 0,
+		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: slot,
 		ResolvedResources: []string{state.RepositoryResource}, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
 	})
 	if err != nil {
@@ -373,7 +328,7 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 	}
 	workerCfg := l.Config
 	workerCfg.RepoPath = wt.Path
-	result, runErr := l.Worker.Run(ctx, workerCfg, issue, current, "", l.recordWorkerPID(issue.Number, current.RunID))
+	result, runErr := l.runWorker(ctx, workerCfg, issue, current, "", l.recordWorkerPID(issue.Number, current.RunID))
 	return l.handleResult(ctx, issue, current, result, runErr)
 }
 
@@ -415,12 +370,12 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		instruction := "Continue after the user's recorded answer. Implement the decision, verify the work, and return the schema-conforming result."
 		var result worker.Result
 		if l.canResume(current) {
-			result, err = l.Worker.Resume(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current.Number, current.RunID))
+			result, err = l.resumeWorker(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current.Number, current.RunID))
 		} else {
 			if current.SessionID != "" {
 				instruction = "The saved session belongs to a different worker backend. Start a fresh session in the existing worktree and use durable state.\n\n" + instruction
 			}
-			result, err = l.Worker.Run(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
@@ -446,7 +401,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if current.LastError != "" {
 			instruction += " Retry reason: " + current.LastError
 		}
-		result, err = l.Worker.Resume(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+		result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 	} else {
 		previousOwner := state.LeaseOwner{}
 		if current.Lease != nil {
@@ -482,7 +437,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if current.LastError != "" {
 			instruction += " Retry reason: " + current.LastError
 		}
-		result, err = l.Worker.Run(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 	}
 	return l.handleResult(ctx, issue, current, result, err)
 }
@@ -499,6 +454,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		item := s.Issues[strconv.Itoa(issue.Number)]
 		item.ExecutionProfile = profile
 		item.WorkerPID = 0
+		item.WorkerPGID = 0
 		if result.SessionID != "" {
 			item.SessionID = result.SessionID
 			backend := result.Identity.Backend
@@ -531,7 +487,9 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	switch result.Status {
 	case "completed":
 		if l.Publisher != nil {
+			l.publicationMu.Lock()
 			published, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, result.Summary)
+			l.publicationMu.Unlock()
 			if publishErr != nil {
 				return l.scheduleRetry(ctx, current, "publish completed work: "+publishErr.Error())
 			}
@@ -828,7 +786,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		if owner != (state.LeaseOwner{}) {
 			payload["lease_owner"] = owner
 		}
-		item.Status, item.RunID, item.WorkerPID = "resolving_conflict", runID, 0
+		item.Status, item.RunID, item.WorkerPID, item.WorkerPGID = "resolving_conflict", runID, 0, 0
 		item.SessionID, item.Session = "", nil
 		item.RetryAfter = nil
 		item.WorkerIdentity = stateIdentity(l.WorkerIdentity)
@@ -850,7 +808,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 	}
 	workerCfg := l.Config
 	workerCfg.RepoPath = current.Worktree
-	result, runErr := l.Worker.Run(ctx, workerCfg, issue, current, worker.BuildConflictPrompt(current), l.recordWorkerPID(current.Number, runID))
+	result, runErr := l.runWorker(ctx, workerCfg, issue, current, worker.BuildConflictPrompt(current), l.recordWorkerPID(current.Number, runID))
 	return l.handleConflictResult(ctx, issue, current, result, runErr)
 }
 
@@ -864,6 +822,7 @@ func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
 		item.WorkerPID = 0
+		item.WorkerPGID = 0
 		item.ExecutionProfile = profile
 		if result.Status == "completed" && item.ConflictRecovery != nil {
 			item.ConflictRecovery.Verification = make([]state.ConflictVerification, 0, len(result.Tests))
@@ -926,7 +885,9 @@ func (l *Loop) publishConflictRecovery(ctx context.Context, issue gh.Issue, curr
 	if l.Conflicts == nil || current.ConflictRecovery == nil {
 		return l.failConflictRecovery(ctx, current, "conflict recovery publisher is unavailable")
 	}
+	l.publicationMu.Lock()
 	published, err := l.Conflicts.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, *current.ConflictRecovery, tests)
+	l.publicationMu.Unlock()
 	if err != nil {
 		var fatal conflict.NonRecoverableError
 		if errors.As(err, &fatal) {
@@ -1132,12 +1093,21 @@ func deadlinePointer(value time.Time) *time.Time { return &value }
 
 func (l *Loop) recordWorkerPID(number int, runID string) worker.Started {
 	return func(pid int) error {
-		_, err := l.Store.Update("worker_process_started", number, runID, map[string]int{"pid": pid}, func(s *state.Snapshot) error {
+		if pid <= 0 {
+			return fmt.Errorf("Issue #%d run %s reported invalid worker PID %d", number, runID, pid)
+		}
+		_, err := l.Store.Update("worker_process_started", number, runID, map[string]int{"pid": pid, "pgid": pid}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(number)]
 			if item == nil || item.RunID != runID {
 				return fmt.Errorf("Issue #%d run %s is no longer active", number, runID)
 			}
+			if item.Lease != nil && item.Lease.Owner.RunID != runID {
+				return fmt.Errorf("Issue #%d run %s does not own its resource lease", number, runID)
+			}
 			item.WorkerPID = pid
+			// All worker backends start their command with Setpgid=true, making
+			// the process PID the process-group ID used for cancellation.
+			item.WorkerPGID = pid
 			item.UpdatedAt = l.now()
 			return nil
 		})
