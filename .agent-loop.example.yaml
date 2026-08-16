@@ -29,6 +29,12 @@ resources:
 worker:
   command: codex
   model: null
+  # Experimental opt-in for extended continuations. Initial and standard runs
+  # continue to use `codex exec` even when enabled.
+  app_server:
+    enabled: false
+    goal_token_budget: 200000
+    goal_time_budget: 2h
   sandbox: workspace-write
   session_mode: resumable
   timeout: 2h

@@ -181,6 +181,10 @@ worker:
   backend: codex
   command: codex
   model: null
+  app_server:
+    enabled: false
+    goal_token_budget: 200000
+    goal_time_budget: 2h
   sandbox: workspace-write
   session_mode: resumable
   timeout: 2h
@@ -239,6 +243,7 @@ security:
 - `worker.backend`は`codex`、`claude-code`、`opencode`のいずれかとし、省略時は`codex`とする。任意shell templateは許可しない。
 - `worker.command`省略時は順に`codex`、`claude`、`opencode`を使い、登録時に絶対pathへ解決する。
 - `worker.model`はinitial runとresumeの両方へ渡す。OpenCodeでは必須の`provider/model`形式で、最初の`/`だけを分割する。
+- `worker.app_server.enabled`はCodex backendのoptionalな検証機能である。最初のrunと`standard`は常に`codex exec`を使い、初回結果ですでに`extended`と確定した後のcontinuationまたはfresh retryだけApp Server Goalを利用する。`goal_token_budget`と`goal_time_budget`は有効時に正数を必須とする。
 - `worker.variant`はClaude Codeの`--effort`またはOpenCode messageのprovider variantとしてinitial runとresumeの両方へ渡す。
 - `worker.sandbox` の既定値は `workspace-write` とする。
 - `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。terminal状態へ到達したIssueのsession IDはactive stateから外す。
@@ -552,7 +557,7 @@ preflightは別プロセスではなく、初回worker promptに含める論理�
 
 初回workerはpreflight結果を実行ログへ構造化eventとして出力するが、preflightだけで終了しない。したがって `extended` の判定だけを理由に2つのworkerが必ず動くわけではない。初回runで完了しなかった場合に限り、supervisorが保存されたsession ID、worktree、検証結果を使って `codex exec resume` を起動する。ユーザー回答後の再開は自動continuation budgetとは別に扱う。
 
-MVPではnative Goalをheadless workerの実行機構にしない。Goalは監視task内の単一目的の復旧作業等に利用できるが、Issueキュー、process lifetime、永続状態を所有しない。App Serverの`thread/goal/set|get|clear`、`thread/resume`、`turn/start`は公式提供済みであり、`extended` profileのoptional adapterをIssue #53で検証する。導入までは`codex exec resume`を維持する。[Codex公式仕様確認](codex-capability-review.md)を正本とする。
+App Server Goal adapterはopt-inの検証実装であり、Goalは監視task内の単一目的または1 Issue内の`extended` continuationだけを管理する。Issueキュー、worktree、lease、GitHub公開、LaunchAgentとprocess lifetimeの正本は引き続きGo supervisorである。capability非対応時とturn開始前の接続失敗は`codex exec resume`へfallbackし、turn開始後の切断は重複workerを起動せず同じworktreeとsession IDを保持して永続retryへ移す。protocol、failure model、rollbackは[App Server Goal adapter](app-server-goal-adapter.md)を正本とする。
 
 ### 11.3 ワーカープロンプト
 

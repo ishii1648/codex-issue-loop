@@ -3,7 +3,9 @@ package compat
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -64,6 +66,7 @@ func ProbeCodex(ctx context.Context, path string) Report {
 	report.Capabilities["exec_structured"] = base
 	report.Capabilities["session_resume"] = resume
 	report.Capabilities["session_event_thread_id"] = true // Accepted by the tolerant JSONL parser.
+	report.Capabilities["app_server_goal"] = probeCodexAppServerGoal(ctx, path)
 	if !base {
 		report.Missing = append(report.Missing, "exec_structured")
 	}
@@ -74,6 +77,36 @@ func ProbeCodex(ctx context.Context, path string) Report {
 		report.Detail = safeDetail(append(execHelp, resumeHelp...), firstError(execErr, resumeErr))
 	}
 	return report
+}
+
+func probeCodexAppServerGoal(ctx context.Context, path string) bool {
+	help, err := exec.CommandContext(ctx, path, "app-server", "generate-json-schema", "--help").CombinedOutput()
+	if err != nil || !containsAll(string(help), "--out", "--experimental") {
+		return false
+	}
+	dir, err := os.MkdirTemp("", "agent-loop-codex-app-server-schema-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+	if _, err := exec.CommandContext(ctx, path, "app-server", "generate-json-schema", "--experimental", "--out", dir).CombinedOutput(); err != nil {
+		return false
+	}
+	client, err := os.ReadFile(filepath.Join(dir, "ClientRequest.json"))
+	if err != nil {
+		return false
+	}
+	serverRequests, err := os.ReadFile(filepath.Join(dir, "ServerRequest.json"))
+	if err != nil {
+		return false
+	}
+	notifications, err := os.ReadFile(filepath.Join(dir, "ServerNotification.json"))
+	if err != nil {
+		return false
+	}
+	return containsAll(string(client), "thread/start", "thread/resume", "thread/goal/set", "thread/goal/get", "thread/goal/clear", "turn/start", "turn/steer") &&
+		containsAll(string(serverRequests), "item/tool/requestUserInput", "item/commandExecution/requestApproval", "item/fileChange/requestApproval") &&
+		containsAll(string(notifications), "thread/tokenUsage/updated", "turn/completed")
 }
 
 func ProbeClaudeCode(ctx context.Context, path string) Report {

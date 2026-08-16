@@ -86,12 +86,22 @@ type Worker struct {
 	Command          string             `yaml:"command" json:"command"`
 	Model            string             `yaml:"model" json:"model,omitempty"`
 	Variant          string             `yaml:"variant" json:"variant,omitempty"`
+	AppServer        AppServer          `yaml:"app_server" json:"app_server"`
 	Sandbox          string             `yaml:"sandbox" json:"sandbox"`
 	SessionMode      string             `yaml:"session_mode" json:"session_mode"`
 	Timeout          Duration           `yaml:"timeout" json:"timeout"`
 	TimeoutGrace     Duration           `yaml:"timeout_grace" json:"timeout_grace"`
 	AmbiguousProfile string             `yaml:"ambiguous_profile" json:"ambiguous_profile"`
 	Profiles         map[string]Profile `yaml:"profiles" json:"profiles"`
+}
+
+// AppServer controls the opt-in Codex App Server Goal adapter. It is only
+// eligible for continuations already classified as extended; initial and
+// standard executions keep using the codex exec adapter.
+type AppServer struct {
+	Enabled         bool     `yaml:"enabled" json:"enabled"`
+	GoalTokenBudget int64    `yaml:"goal_token_budget" json:"goal_token_budget"`
+	GoalTimeBudget  Duration `yaml:"goal_time_budget" json:"goal_time_budget"`
 }
 
 type Profile struct {
@@ -214,7 +224,11 @@ func Defaults() Config {
 		},
 		Resources: Resources{MetadataVersion: 1},
 		Worker: Worker{
-			Backend:          "codex",
+			Backend: "codex",
+			AppServer: AppServer{
+				GoalTokenBudget: 200000,
+				GoalTimeBudget:  Duration{2 * time.Hour},
+			},
 			Sandbox:          "workspace-write",
 			SessionMode:      "resumable",
 			Timeout:          Duration{2 * time.Hour},
@@ -378,6 +392,12 @@ func (c Config) Validate() error {
 	}
 	if c.Worker.Backend != "opencode" && c.Worker.Variant != "" && c.Worker.Backend != "claude-code" {
 		return fmt.Errorf("worker.variant is supported by claude-code and opencode only")
+	}
+	if c.Worker.AppServer.Enabled && c.Worker.Backend != "codex" {
+		return fmt.Errorf("worker.app_server is supported by the codex backend only")
+	}
+	if c.Worker.AppServer.Enabled && (c.Worker.AppServer.GoalTokenBudget <= 0 || c.Worker.AppServer.GoalTimeBudget.Duration <= 0) {
+		return fmt.Errorf("worker.app_server requires positive goal_token_budget and goal_time_budget")
 	}
 	if c.Logs.RotateBytes < 1024 || c.Logs.RotateInterval.Duration <= 0 || c.Logs.Generations < 1 {
 		return fmt.Errorf("logs rotation requires rotate_bytes >= 1024, positive rotate_interval, and generations >= 1")

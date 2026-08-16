@@ -435,6 +435,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			}
 			item.Status, item.RunID, item.Attempts, item.SessionID = "running", current.RunID, current.Attempts, ""
 			item.Session = nil
+			item.Goal = nil
 			item.RetryAfter = nil
 			return nil
 		})
@@ -483,6 +484,9 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			identity = l.WorkerIdentity
 		}
 		item.WorkerIdentity = stateIdentity(identity)
+		if result.Goal != nil {
+			item.Goal = stateGoal(result.Goal)
+		}
 		item.UpdatedAt = l.now()
 		return nil
 	})
@@ -588,6 +592,19 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "worker blocked", errors.New(result.Summary)), true)
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
+	}
+}
+
+func stateGoal(goal *worker.Goal) *state.WorkerGoal {
+	if goal == nil {
+		return nil
+	}
+	return &state.WorkerGoal{
+		ThreadID: goal.ThreadID, Objective: goal.Objective, Status: goal.Status,
+		TokenBudget: goal.TokenBudget, TimeBudgetSeconds: goal.TimeBudgetSeconds,
+		TokensUsed: goal.TokensUsed, TimeUsedSeconds: goal.TimeUsedSeconds,
+		InputTokens: goal.InputTokens, CachedInputTokens: goal.CachedInputTokens,
+		OutputTokens: goal.OutputTokens, UpdatedAt: goal.UpdatedAt,
 	}
 }
 

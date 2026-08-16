@@ -1,6 +1,6 @@
 # CLI互換性マトリクス
 
-最終確認日: 2026-08-16
+最終確認日: 2026-08-17
 
 `agent-loop`はversion番号だけでCLIの挙動を推測せず、起動時と`doctor`で実際のhelp出力から必要なcapabilityを検査する。minimum versionは継続的に検証する下限であり、capability検査を省略する条件ではない。
 
@@ -8,12 +8,14 @@
 
 | CLI | minimum supported | 実環境で確認したversion | 必須capability |
 | --- | --- | --- | --- |
-| Codex CLI | 0.136.0 | 0.136.0 / macOS arm64 | `codex exec`の`--json`、`--output-schema`、`--output-last-message`、`--sandbox`、`--cd` |
+| Codex CLI | 0.136.0 | 0.136.0、0.147.0 / macOS arm64 | `codex exec`の`--json`、`--output-schema`、`--output-last-message`、`--sandbox`、`--cd` |
 | Claude Code | 2.1.119 | fake runtime conformance | print mode、stream JSON、JSON Schema、resume、model、effort、`dontAsk`、OS sandbox hard-fail設定 |
 | OpenCode | 1.1.1 | fake Server API conformance | loopback `serve`、session/message/abort API、JSON Schema output、provider/model、variant、inline permission policy |
 | GitHub CLI | 2.69.0 | 2.69.0 / macOS arm64 | Issue listの`--json`、`--limit`、`--label`、`--assignee`、`--milestone`、label追加・削除、comment追加 |
 
 Codexの`exec resume`と、その`--json`、`--output-schema`、`--output-last-message`は任意capabilityとして扱う。利用できる場合は保存したsession IDを再開し、利用できない場合は同じIssue worktree、run ID、回答履歴をpromptへ再構成して新規sessionを起動する。新規sessionでもsandboxと承認禁止の制約は変えない。
+
+Codex App Server Goalも任意capabilityである。`generate-json-schema --experimental`が生成するschemaから`thread/start|resume`、`thread/goal/set|get|clear`、`turn/start|steer`、`item/tool/requestUserInput`、approval request、`thread/tokenUsage/updated`、`turn/completed`をすべて検出した場合だけoptional adapterを選択する。設定が有効でもcapabilityが不足するversionでは起動を拒否せず既存`codex exec` adapterへfallbackする。詳細は[App Server Goal adapter](app-server-goal-adapter.md)を参照する。
 
 Claude Codeは`claude -p`へpromptをstdinで渡し、`--json-schema`の`structured_output`と`session_id`を正規化する。OpenCodeはrunごとにloopback serverをprocess group内で起動し、promptをmessage API bodyへ渡す。timeout/cancel時はsession abortを試行してからserver process groupを終了する。OpenCode CLIのprompt argv fallbackは実装しない。
 
@@ -34,6 +36,7 @@ Claude Codeは`claude -p`へpromptをstdinで渡し、`--json-schema`の`structu
 codex --version
 codex exec --help
 codex exec resume --help
+codex app-server generate-json-schema --help
 claude --version
 claude --help
 opencode --version

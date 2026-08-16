@@ -33,6 +33,8 @@ make test-race
 | attention状態と`state_revision`の永続化 | `TestFaultAttentionRevisionPersistsSnapshotAndEvent`、`TestFaultAttentionRemainsStickyUntilAnswered` |
 | standard workerが追加runなしで完了 | `TestFaultStandardWorkerCompletesWithoutAdditionalRun` |
 | extended workerだけが設定上限内でresume | `TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit` |
+| fake App ServerのGoal・approval・token・time budget・input・steer契約 | `TestCodexAppServerExtendedContract`、`TestCodexAppServerGoalTimeBudgetIsPersistedAsTerminal`、`TestCodexAppServerConvertsRequestUserInput`、`TestCodexAppServerUsesSteerForRejoinedActiveTurn` |
+| App Server切断時のstate保全と非対応fallback | `TestCodexAppServerDisconnectAfterTurnStartDoesNotFallback`、`TestCodexAppServerConnectionFailureFallsBackToExecResume`、`TestBackendFactoryEnablesGoalOnlyWhenConfiguredAndSupported` |
 | event rotation後のsequence復旧 | `TestFaultEventRotationKeepsCheckpointAndRecoverySequence` |
 | disk容量reserveでのblocked化 | `TestFaultDiskSafetyReserveBlocksSupervisor` |
 

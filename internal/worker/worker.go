@@ -59,6 +59,21 @@ type Result struct {
 	Retry            *Retry     `json:"retry"`
 	SessionID        string     `json:"-"`
 	Identity         Identity   `json:"-"`
+	Goal             *Goal      `json:"-"`
+}
+
+type Goal struct {
+	ThreadID          string `json:"thread_id"`
+	Objective         string `json:"objective"`
+	Status            string `json:"status"`
+	TokenBudget       *int64 `json:"token_budget,omitempty"`
+	TimeBudgetSeconds int64  `json:"time_budget_seconds,omitempty"`
+	TokensUsed        int64  `json:"tokens_used"`
+	TimeUsedSeconds   int64  `json:"time_used_seconds"`
+	InputTokens       int64  `json:"input_tokens,omitempty"`
+	CachedInputTokens int64  `json:"cached_input_tokens,omitempty"`
+	OutputTokens      int64  `json:"output_tokens,omitempty"`
+	UpdatedAt         int64  `json:"updated_at,omitempty"`
 }
 
 type Runner interface {
@@ -81,6 +96,7 @@ type Capabilities struct {
 	VariantSelection     bool `json:"variant_selection"`
 	NonInteractivePolicy bool `json:"non_interactive_permission_policy"`
 	WorkspaceIsolation   bool `json:"workspace_isolation"`
+	ThreadGoal           bool `json:"thread_goal"`
 }
 
 type Identity struct {

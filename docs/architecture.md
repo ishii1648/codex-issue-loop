@@ -28,7 +28,7 @@
 | agent-loop CLI | Goの短命プロセス | start、stop、status、watch、answer |
 | launchd | macOS | supervisorの起動と異常終了時の再起動 |
 | supervisor | Goの常駐プロセス | Issue選択、claim、worker起動、状態遷移、復旧 |
-| Codex worker | `codex exec` | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
+| Codex worker | `codex exec`、optional App Server | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
 | publisher | supervisor内の決定論的処理 | 差分検査、commit、push、draft PR作成・既存PR再利用 |
 | PR lifecycle controller | supervisor内の決定論的処理 | CI監視、Ready化、任意のbranch更新・squash merge、merge確認 |
 | GitHub | 外部共有状態 | Issueキュー、ラベル、コメント、Pull Request |
@@ -91,10 +91,10 @@ Codex Goalは、一つの具体的な目的と検証可能な完了条件を追�
 このため、次の境界を設ける。
 
 - Goalを外側のIssueループ、プロセス監視、永続状態の正本にはしない。
-- 現行のheadless workerは `standard` / `extended` profileと`codex exec`で制御する。
-- `extended` の継続はsupervisorが `codex exec resume` を管理する。
+- headless workerは `standard` / `extended` profileと`codex exec`を既定経路にする。
+- `extended` の継続はsupervisorが管理し、opt-in時だけApp Server Goal、非対応・無効時は`codex exec resume`を使う。
 - 監視taskで「この障害を復旧する」など単一目的を追う場合は、ユーザーがGoalを利用してよい。
-- App ServerのGoal APIは公式提供済みである。`extended` profileのoptional adapterとしてIssue #53で検証し、導入までは現行workerを維持する。
+- App ServerのGoal APIは公式提供済みであり、`extended` profileのoptional adapterとして実装する。Goalは1 Issueの内側だけを管理し、queueやLaunchAgentを所有しない。
 
 したがってGoalは排除せず、適用範囲を単一目的の内側に限定する。
 

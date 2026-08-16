@@ -65,6 +65,22 @@ type WorkerIdentity struct {
 	Variant        string `json:"variant,omitempty"`
 }
 
+// WorkerGoal is a durable snapshot of the App Server thread-local Goal. The
+// supervisor still owns Issue selection, queueing, leases, and process lifetime.
+type WorkerGoal struct {
+	ThreadID          string `json:"thread_id"`
+	Objective         string `json:"objective"`
+	Status            string `json:"status"`
+	TokenBudget       *int64 `json:"token_budget,omitempty"`
+	TimeBudgetSeconds int64  `json:"time_budget_seconds,omitempty"`
+	TokensUsed        int64  `json:"tokens_used"`
+	TimeUsedSeconds   int64  `json:"time_used_seconds"`
+	InputTokens       int64  `json:"input_tokens,omitempty"`
+	CachedInputTokens int64  `json:"cached_input_tokens,omitempty"`
+	OutputTokens      int64  `json:"output_tokens,omitempty"`
+	UpdatedAt         int64  `json:"updated_at,omitempty"`
+}
+
 // LeaseOwner fences lease mutations to one Issue run and one monotonically
 // increasing generation. Run IDs alone are not sufficient because restored or
 // retried state may reuse durable Issue records.
@@ -143,6 +159,7 @@ type Issue struct {
 	SessionID         string            `json:"session_id,omitempty"`
 	Session           *WorkerSession    `json:"session,omitempty"`
 	WorkerIdentity    WorkerIdentity    `json:"worker_identity,omitempty"`
+	Goal              *WorkerGoal       `json:"goal,omitempty"`
 	WorkerPID         int               `json:"worker_pid,omitempty"`
 	WorkerPGID        int               `json:"worker_pgid,omitempty"`
 	PullRequestURL    string            `json:"pull_request_url,omitempty"`
