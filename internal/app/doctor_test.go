@@ -14,6 +14,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 )
 
 func diagnosticByCode(t *testing.T, diagnostics []diagnostic, code string) diagnostic {
@@ -50,6 +51,42 @@ func TestDoctorOutputHasStableSchemaCodesAndSafeRemediations(t *testing.T) {
 	for _, expected := range []string{"doctor: FAILED", "[FAIL] SUPERVISOR_BLOCKED", "next: inspect", "agent-loop status --json"} {
 		if !strings.Contains(human.String(), expected) {
 			t.Fatalf("human output missing %q: %s", expected, human.String())
+		}
+	}
+}
+
+func TestDoctorReportsInitAsAdvisoryUserRuleRemediation(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	t.Setenv("AGENT_LOOP_HOME", filepath.Join(root, "agent-loop"))
+	diagnostics := diagnoseUserRules()
+	for _, code := range []string{"USER_RULE_CODEX_MISSING", "USER_RULE_CLAUDE_MISSING"} {
+		item := diagnosticByCode(t, diagnostics, code)
+		if item.OK || len(item.Remediations) != 2 || !strings.Contains(item.Remediations[0].Command, "agent-loop init") {
+			t.Fatalf("diagnostic=%+v", item)
+		}
+		for _, remediation := range item.Remediations {
+			if remediation.Automatic || remediation.Destructive {
+				t.Fatalf("unsafe remediation=%+v", remediation)
+			}
+		}
+	}
+	config, err := userrules.ConfigFromEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := userrules.Plan(config, []userrules.Agent{userrules.AgentCodex, userrules.AgentClaude})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := userrules.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics = diagnoseUserRules()
+	for _, code := range []string{"USER_RULE_CODEX_CURRENT", "USER_RULE_CLAUDE_CURRENT"} {
+		if item := diagnosticByCode(t, diagnostics, code); !item.OK {
+			t.Fatalf("diagnostic=%+v", item)
 		}
 	}
 }
