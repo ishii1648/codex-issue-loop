@@ -144,15 +144,28 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 
 ### 1. Issueをキューへ投入する
 
-着手可能なopen Issueへready labelを付けます。既定例では次のとおりです。
+Codexが作成したlocal proposalをread-onlyで検証し、確認後にmetadataとready labelを適用します。
 
 ```sh
-gh issue edit 123 --add-label codex-loop:ready
+"$agent_loop_bin" prepare-issue \
+  --repo "$PWD" \
+  --issue 123 \
+  --proposal /private/local/issue-123-proposal.json \
+  --json
+
+"$agent_loop_bin" prepare-issue \
+  --repo "$PWD" \
+  --issue 123 \
+  --proposal /private/local/issue-123-proposal.json \
+  --apply \
+  --json
 ```
+
+`codex-loop:ready`を`gh issue edit`で直接付けないでください。`prepare-issue --apply`が本文とresource labelを永続化して同じparserで再検証した後、最後にreadyを付けます。
 
 PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
 
-同一repository内並列実行で使う`resources.definitions`、`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。publisherは保存済みbase SHAからtracked/untracked変更pathを検査し、actual resourceが宣言claimを超える場合はcommit・pushせず`needs_input`へ移します。
+同一repository内並列実行で使う`resources.definitions`、`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。Codexによるproposal、dry-run、既存Issue監査、検証後だけreadyを付ける手順は[Issue metadata producer runbook](docs/resource-producer.md)にあります。publisherは保存済みbase SHAからtracked/untracked変更pathを検査し、actual resourceが宣言claimを超える場合はcommit・pushせず`needs_input`へ移します。
 
 ### 2. 状態を確認・監視する
 

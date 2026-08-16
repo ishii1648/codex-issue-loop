@@ -73,6 +73,7 @@
 - Codex CLI 0.136.0以降とGitHub CLI 2.69.0以降を対応下限とし、起動時に必須capabilityを検査する。resume非対応時は既存worktreeと永続状態を使う新規sessionへfallbackする。詳細は`docs/compatibility.md`を正本とする。
 - worker timeout、stop、restart時はIssue別の独立process groupへSIGTERMを送り、既定30秒のgrace period後も親子processが残る場合だけSIGKILLへ進む。複数workerのstopは全groupを先にcancelし、終了段階をIssue別eventへ残す。worktreeと途中成果は削除しない。
 - `bootstrap-labels`は必須GitHubラベルのpreviewと冪等な不足分作成を提供する。既存metadataは保持し、部分成功後の再実行を安全にする。
+- `prepare-issue`はCodex producerの構造化resource/dependency/exclusive proposalをstrictに検証し、dry-run、既存Issue audit、ready-lastの永続化を提供する。supervisor retry経路からは呼び出さない。
 
 ## テスト
 

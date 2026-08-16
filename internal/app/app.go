@@ -169,6 +169,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.doctor(ctx, l, args)
 	case "bootstrap-labels":
 		return a.bootstrapLabels(ctx, args)
+	case "prepare-issue":
+		return a.prepareIssue(ctx, args)
 	case "run":
 		return a.supervise(ctx, l, args)
 	case "help", "--help", "-h":
@@ -204,6 +206,7 @@ Commands:
   purge         Force-remove one explicitly confirmed worktree
   doctor        Validate dependencies, auth, config, and registration
   bootstrap-labels  Preview or create required GitHub labels
+  prepare-issue  Validate, audit, or persist Issue admission metadata
   run           Run the supervisor (used by launchd)`)
 }
 

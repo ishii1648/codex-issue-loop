@@ -21,7 +21,7 @@ resources:
   metadata_version: 1
   definitions:
     - name: config
-      paths: [.agent-loop*.yaml, internal/config/**, docs/resource-admission.md, docs/specification.md]
+      paths: [.agent-loop*.yaml, internal/config/**, internal/producer/**, docs/resource-admission.md, docs/resource-producer.md, docs/specification.md]
     - name: scheduler
       paths: [internal/supervisor/**, internal/state/**, internal/schema/**, internal/failure/**, internal/fsutil/**]
     - name: github
@@ -33,7 +33,7 @@ resources:
     - name: operations
       paths: [internal/observe/**, internal/notify/**, internal/retention/**, internal/redact/**, docs/*runbook.md]
     - name: release
-      paths: [.github/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/compat/**, internal/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
+      paths: [.github/**, skill/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/compat/**, internal/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
     - name: docs
       paths: [.gitignore, README.md, AGENTS.md, docs/**]
 

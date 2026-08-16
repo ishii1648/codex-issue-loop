@@ -36,7 +36,7 @@ Codex notificationは、`watch`がattention状態を返した監視taskからCha
 
 | コンポーネント | 責務 | 保持しないもの |
 | --- | --- | --- |
-| Issue producer | GitHub Issue作成、要望・完了条件の記載、着手可能ラベル付与 | ループ制御、Mac mini上の状態 |
+| Issue producer | GitHub Issue作成、要望・完了条件の記載、resource/dependency proposal、検証後の着手可能ラベル付与 | ループ制御、Mac mini上の状態 |
 | Codex監視task | ユーザーとの会話、CLI操作、質問表示 | ループの正本状態 |
 | agent-loop Skill | 自然言語からCLIへの安全な操作手順 | 常駐プロセス、Issue選択ロジック |
 | agent-loop CLI | 設定、プロセス制御、監視、回答登録 | 実装判断、監視状態の正本 |
@@ -304,9 +304,12 @@ agent-loop <command> [options]
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
 | `doctor` | 依存関係、認証、設定、電源条件、状態整合性を検査する |
 | `bootstrap-labels --repo PATH [--apply]` | 必須GitHubラベルの変更計画を表示し、明示時だけ不足分を作成する |
+| `prepare-issue --repo PATH --issue N (--proposal FILE [--apply] | --audit)` | producer proposalを検証・永続化するか、既存metadataをread-only監査する |
 | `run` | launchd専用の内部supervisorエントリーポイント |
 
 `bootstrap-labels`は`--apply`なしではread-onlyのplanを返す。`--apply`時も不足ラベルの`gh label create`だけを実行し、既存ラベルに`--force`を指定せず、更新・削除を行わない。部分成功は成功分を保持してlabel別のfailureを返し、再実行で不足分だけを処理する。`doctor`が不足ラベルを検出した場合はこの修復コマンドを表示する。
+
+`prepare-issue`はstrict JSON proposalを決定的に検証し、未知resource、taxonomy外path、低confidence、曖昧scopeを`repo:*` exclusiveへ縮退する。`--apply`なしのproposal previewと`--audit`はGitHubを変更しない。`--apply`はreadyを外して本文・`area:` labelを更新し、GitHubから再取得したmetadataをadmission parserで検証した後だけreadyを付ける。proposalの根拠はlocalに留め、GitHubへはscheduler入力となるmetadataだけを永続化する。詳細は[Issue metadata producer runbook](resource-producer.md)を正本とする。
 
 `init`は`--apply`なしではuser設定もagent-loop内部ディレクトリも変更しない。release binaryに埋め込んだrule versionと本文を、Codexの有効なuser-level `AGENTS.md`系file内の管理block、およびfrontmatterなしのClaude Code専用ruleへ反映する。競合は上書きせず、symlinkの解決先、予定action、適用結果、backup pathをJSONへ出力する。詳細と復旧手順は[user-scope Issue作成ルール](user-rules.md)を参照する。install manifestのSkill整合性とは分離し、`install`、`update`、`doctor`、`uninstall`はこの設定を暗黙に変更しない。
 
