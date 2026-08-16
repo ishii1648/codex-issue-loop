@@ -265,7 +265,7 @@ func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	}
 	snapshot, _ := loop.Store.Load()
 	issue := snapshot.Issues["1"]
-	if issue.Status != "awaiting_checks" || issue.PullRequestURL == "" || issue.SessionID == "" {
+	if issue.Status != "awaiting_checks" || issue.PullRequestURL == "" || issue.SessionID == "" || issue.Lease == nil {
 		t.Fatalf("unexpected Issue: %+v", issue)
 	}
 	if scripted.runs != 1 || scripted.resumes != 0 {
@@ -582,7 +582,7 @@ func TestRunOncePersistsQuestion(t *testing.T) {
 		t.Fatal("GitHub was not marked needs-input")
 	}
 	snapshot, _ := loop.Store.Load()
-	if snapshot.Issues["1"].Status != "needs_input" {
+	if snapshot.Issues["1"].Status != "needs_input" || snapshot.Issues["1"].Lease == nil {
 		t.Fatalf("status=%s", snapshot.Issues["1"].Status)
 	}
 	if len(snapshot.PendingRequests) != 1 {
@@ -604,7 +604,7 @@ func TestRunOnceDefaultsAmbiguousFailureToExtended(t *testing.T) {
 	}
 	snapshot, _ := loop.Store.Load()
 	issue := snapshot.Issues["1"]
-	if issue.ExecutionProfile != "extended" || issue.Status != "retry_wait" {
+	if issue.ExecutionProfile != "extended" || issue.Status != "retry_wait" || issue.Lease == nil {
 		t.Fatalf("issue=%+v", issue)
 	}
 }
@@ -658,14 +658,14 @@ func TestFaultInterruptedClaimIsRecovered(t *testing.T) {
 		t.Fatal("expected claim error")
 	}
 	snapshot, _ := loop.Store.Load()
-	if snapshot.Issues["1"].Status != "claiming" {
+	if snapshot.Issues["1"].Status != "claiming" || snapshot.Issues["1"].Lease == nil {
 		t.Fatalf("status=%s", snapshot.Issues["1"].Status)
 	}
 	if _, err := loop.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ = loop.Store.Load()
-	if snapshot.Issues["1"].Status != "completed" || !github.claimed {
+	if snapshot.Issues["1"].Status != "completed" || snapshot.Issues["1"].Lease != nil || !github.claimed {
 		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
 	}
 }
@@ -776,7 +776,7 @@ func TestFaultSupervisorStopsBeforeRecoveryBlockedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString("{\"version\":2,\"event_id\":\"evt_gap\",\"sequence\":99,\"repo_id\":\"repo-deadbeef\",\"type\":\"gap\"}\n"); err != nil {
+	if _, err := f.WriteString(fmt.Sprintf("{\"version\":%d,\"event_id\":\"evt_gap\",\"sequence\":99,\"repo_id\":\"repo-deadbeef\",\"type\":\"gap\"}\n", state.CurrentVersion)); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {

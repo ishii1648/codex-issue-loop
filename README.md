@@ -152,7 +152,7 @@ gh issue edit 123 --add-label codex-loop:ready
 
 PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
 
-将来の同一repository内並列実行で使う`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。現行schema v2は引き続き`queue.concurrency: 1`だけを受理します。
+同一repository内並列実行で使う`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。現行schema v3はdurable resource leaseを導入済みですが、queueは引き続き`concurrency: 1`だけを受理します。
 
 ### 2. 状態を確認・監視する
 

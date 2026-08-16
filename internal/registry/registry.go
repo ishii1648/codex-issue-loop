@@ -64,7 +64,7 @@ func (s Store) Load() (Registry, error) {
 	}
 	if r.Version != CurrentVersion {
 		if r.Version == schemaversion.Previous {
-			return Registry{}, fmt.Errorf("registry schema migration required from version 1 to %d; stop loops and run agent-loop migrate --apply", CurrentVersion)
+			return Registry{}, fmt.Errorf("registry schema migration required from version %d to %d; stop loops and run agent-loop migrate --apply", schemaversion.Previous, CurrentVersion)
 		}
 		return Registry{}, fmt.Errorf("unsupported registry version %d; this binary supports version %d", r.Version, CurrentVersion)
 	}

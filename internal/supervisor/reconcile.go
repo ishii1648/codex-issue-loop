@@ -79,6 +79,16 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			if item == nil {
 				return fmt.Errorf("Issue #%d disappeared during startup reconciliation", number)
 			}
+			if decision.status == "completed" && item.Lease != nil {
+				if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
+					return err
+				}
+			}
+			if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+				if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
+					return err
+				}
+			}
 			item.Status = decision.status
 			item.LastError = decision.lastError
 			item.Branch = decision.branch

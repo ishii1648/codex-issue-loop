@@ -296,7 +296,7 @@ func (s Store) validateConsistency(snapshot Snapshot, events []Event) error {
 	if snapshot.StateRevision != last {
 		return fmt.Errorf("state revision %d does not match last event sequence %d", snapshot.StateRevision, last)
 	}
-	return nil
+	return validateResourceLeases(snapshot)
 }
 
 func sameEvent(left, right Event) bool {

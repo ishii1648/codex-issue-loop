@@ -48,6 +48,101 @@ func TestStateAndEventsNeverPersistSecrets(t *testing.T) {
 	}
 }
 
+func TestLeaseReservationSurvivesRestartAndFencesStaleOwners(t *testing.T) {
+	store := newStore(t)
+	reservedAt := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
+	snapshot, owner, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 7, Title: "durable", RunID: "run_7", Slot: 0,
+		DeclaredResources: []string{"state", "docs"}, ResolvedResources: []string{"state", "docs"},
+		BaseSHA: "abc123", ReservedAt: reservedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := snapshot.Issues["7"].Lease
+	if owner != (LeaseOwner{RunID: "run_7", Generation: 1}) || lease == nil || lease.BaseSHA != "abc123" || lease.ReservedAt != reservedAt {
+		t.Fatalf("owner=%+v lease=%+v", owner, lease)
+	}
+	loaded, err := (Store{Dir: store.Dir, RepoID: store.RepoID, RepoPath: store.RepoPath}).Load()
+	if err != nil || loaded.Issues["7"].Lease == nil || loaded.Issues["7"].Lease.Owner != owner {
+		t.Fatalf("loaded=%+v err=%v", loaded.Issues["7"], err)
+	}
+	if _, err := store.ReleaseLease(7, LeaseOwner{RunID: "run_other", Generation: 1}, "stale"); err == nil {
+		t.Fatal("stale run released another run's lease")
+	}
+	if _, err := store.ReleaseLease(8, owner, "wrong Issue"); err == nil {
+		t.Fatal("owner released another Issue's lease")
+	}
+	loaded, err = store.Load()
+	if err != nil || loaded.Issues["7"].Lease == nil {
+		t.Fatalf("stale release changed lease: issue=%+v err=%v", loaded.Issues["7"], err)
+	}
+	if _, err := store.ReleaseLease(7, owner, "completed"); err != nil {
+		t.Fatal(err)
+	}
+	second, nextOwner, err := store.ReserveLease(LeaseReservation{IssueNumber: 7, RunID: "run_8", Slot: 0, ResolvedResources: []string{"state"}, ReservedAt: reservedAt.Add(time.Hour)})
+	if err != nil || nextOwner.Generation != 2 || second.Issues["7"].LeaseGeneration != 2 {
+		t.Fatalf("owner=%+v issue=%+v err=%v", nextOwner, second.Issues["7"], err)
+	}
+	if _, err := store.ReleaseLease(7, owner, "old generation"); err == nil {
+		t.Fatal("old generation released replacement lease")
+	}
+}
+
+func TestLeaseReservationAndExpansionAreExclusive(t *testing.T) {
+	store := newStore(t)
+	_, first, err := store.ReserveLease(LeaseReservation{IssueNumber: 1, RunID: "run_1", Slot: 0, ResolvedResources: []string{"state"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveLease(LeaseReservation{IssueNumber: 2, RunID: "run_2", Slot: 0, ResolvedResources: []string{"docs"}}); err == nil {
+		t.Fatal("occupied slot was reserved twice")
+	}
+	if _, _, err := store.ReserveLease(LeaseReservation{IssueNumber: 2, RunID: "run_2", Slot: 1, ResolvedResources: []string{"state"}}); err == nil {
+		t.Fatal("conflicting resource was reserved twice")
+	}
+	if _, _, err := store.ReserveLease(LeaseReservation{IssueNumber: 2, RunID: "run_2", Slot: 1, ResolvedResources: []string{"docs"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ExpandLease(1, first, []string{"docs"}); err == nil {
+		t.Fatal("lease expanded across another active lease")
+	}
+}
+
+func TestCrashPointsReplayPreparedLeaseTransaction(t *testing.T) {
+	for _, appendEvent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("event_appended_%v", appendEvent), func(t *testing.T) {
+			store := newStore(t)
+			base, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reservedAt := time.Date(2026, 8, 16, 11, 0, 0, 0, time.UTC)
+			base.StateRevision++
+			base.Issues["9"] = &Issue{
+				Number: 9, Status: "claiming", RunID: "run_9", Attempts: 1, LeaseGeneration: 1, UpdatedAt: reservedAt,
+				Lease: &ResourceLease{Owner: LeaseOwner{RunID: "run_9", Generation: 1}, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{RepositoryResource}, ReservedAt: reservedAt},
+			}
+			event := Event{Version: CurrentVersion, EventID: "evt_lease", Sequence: base.StateRevision, Timestamp: reservedAt, RepoID: store.RepoID, IssueNumber: 9, RunID: "run_9", Type: "lease_reserved"}
+			if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: base, Event: event}, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if appendEvent {
+				if err := store.appendEventUnlocked(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			loaded, err := store.Load()
+			if err != nil || loaded.Issues["9"] == nil || loaded.Issues["9"].Lease == nil {
+				t.Fatalf("loaded=%+v err=%v", loaded, err)
+			}
+			if _, err := os.Stat(store.TransactionPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("prepared transaction remains: %v", err)
+			}
+		})
+	}
+}
+
 func newStore(t *testing.T) Store {
 	t.Helper()
 	store := Store{Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo"}
@@ -202,7 +297,7 @@ func TestFaultPartialEventTailIsTruncatedAndRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString(`{"version":2,"sequence":2`); err != nil {
+	if _, err := f.WriteString(`{"version":3,"sequence":2`); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
@@ -271,7 +366,7 @@ func TestFaultCorruptSnapshotIsQuarantined(t *testing.T) {
 }
 
 func TestUnsupportedSchemaVersionIsRejectedWithoutQuarantine(t *testing.T) {
-	for _, version := range []int{1, CurrentVersion + 1} {
+	for _, version := range []int{CurrentVersion - 1, CurrentVersion + 1} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			store := newStore(t)
 			data, err := os.ReadFile(store.StatePath())

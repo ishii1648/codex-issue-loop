@@ -294,7 +294,7 @@ func CanonicalRepoPath(path string) (string, error) {
 func (c Config) Validate() error {
 	if c.Version != CurrentVersion {
 		if c.Version == schemaversion.Previous {
-			return fmt.Errorf("config schema migration required from version 1 to %d; stop loops and run agent-loop migrate --apply", CurrentVersion)
+			return fmt.Errorf("config schema migration required from version %d to %d; stop loops and run agent-loop migrate --apply", schemaversion.Previous, CurrentVersion)
 		}
 		return fmt.Errorf("unsupported config version %d; this binary supports version %d", c.Version, CurrentVersion)
 	}

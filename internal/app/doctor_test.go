@@ -103,9 +103,9 @@ func TestDiagnoseSchemasDistinguishesSupportedRequiredAndUnsupported(t *testing.
 		code    string
 		ready   bool
 	}{
-		{name: "supported", version: 2, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
-		{name: "migration-required", version: 1, code: "SCHEMA_MIGRATION_REQUIRED"},
-		{name: "unsupported", version: 3, code: "SCHEMA_VERSION_UNSUPPORTED"},
+		{name: "supported", version: 3, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
+		{name: "migration-required", version: 2, code: "SCHEMA_MIGRATION_REQUIRED"},
+		{name: "unsupported", version: 4, code: "SCHEMA_VERSION_UNSUPPORTED"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := os.WriteFile(l.RegistryPath, []byte(fmt.Sprintf("{\"version\":%d,\"repos\":{}}\n", test.version)), 0o600); err != nil {

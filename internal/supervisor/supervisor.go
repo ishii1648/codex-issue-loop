@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -314,18 +315,24 @@ func (l *Loop) startIssue(ctx context.Context, issue gh.Issue) error {
 	issue = latest
 	runID := state.NewID("run")
 	now := l.now()
-	_, err = l.Store.Update("claim_started", issue.Number, runID, map[string]any{"title": issue.Title}, func(s *state.Snapshot) error {
-		s.Supervisor.State = "running"
-		s.Issues[strconv.Itoa(issue.Number)] = &state.Issue{
-			Number: issue.Number, Title: issue.Title, Status: "claiming", RunID: runID,
-			Attempts: 1, UpdatedAt: now,
-		}
-		return nil
+	_, _, err = l.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
 	})
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "persist claim start", err)
 	}
 	return l.claimAndRun(ctx, issue, runID)
+}
+
+func localBaseSHA(ctx context.Context, cfg config.Config) string {
+	for _, ref := range []string{"refs/remotes/origin/" + cfg.Git.BaseBranch, "HEAD"} {
+		out, err := exec.CommandContext(ctx, "git", "-C", cfg.RepoPath, "rev-parse", "--verify", ref+"^{commit}").Output()
+		if err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	return ""
 }
 
 func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) error {
@@ -441,12 +448,24 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		result, err = l.Worker.Resume(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 	} else {
+		previousOwner := state.LeaseOwner{}
+		if current.Lease != nil {
+			previousOwner = current.Lease.Owner
+		}
 		current.Attempts++
 		current.RunID = state.NewID("run")
 		current.SessionID = ""
 		current.Session = nil
-		_, err = l.Store.Update("worker_started", current.Number, current.RunID, map[string]int{"attempt": current.Attempts}, func(s *state.Snapshot) error {
+		payload := map[string]any{"attempt": current.Attempts}
+		_, err = l.Store.Update("worker_started", current.Number, current.RunID, payload, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
+			owner, transferErr := state.TransferIssueLease(item, previousOwner, current.RunID)
+			if transferErr != nil {
+				return transferErr
+			}
+			if owner != (state.LeaseOwner{}) {
+				payload["lease_owner"] = owner
+			}
 			item.Status, item.RunID, item.Attempts, item.SessionID = "running", current.RunID, current.Attempts, ""
 			item.Session = nil
 			item.RetryAfter = nil
@@ -454,6 +473,10 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		})
 		if err != nil {
 			return failure.Wrap(failure.Supervisor, "persist worker retry start", err)
+		}
+		current, err = l.issueState(current.Number)
+		if err != nil {
+			return err
 		}
 		instruction := "Retry the Issue after the previous recoverable failure. Inspect the existing worktree first and preserve valid work."
 		if current.LastError != "" {
@@ -787,12 +810,24 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		return failure.Wrap(failure.Transient, "refresh Issue for conflict recovery", err)
 	}
 	runID := state.NewID("conflict")
+	previousOwner := state.LeaseOwner{}
+	if current.Lease != nil {
+		previousOwner = current.Lease.Owner
+	}
 	attemptNumber := len(current.ConflictRecovery.History) + 1
-	_, err = l.Store.Update("conflict_recovery_attempt_started", current.Number, runID, map[string]any{
+	payload := map[string]any{
 		"attempt": current.ConflictRecovery.Attempts + 1, "base_sha": current.ConflictRecovery.TargetBaseSHA,
 		"conflict_files": current.ConflictRecovery.ConflictFiles,
-	}, func(s *state.Snapshot) error {
+	}
+	_, err = l.Store.Update("conflict_recovery_attempt_started", current.Number, runID, payload, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
+		owner, transferErr := state.TransferIssueLease(item, previousOwner, runID)
+		if transferErr != nil {
+			return transferErr
+		}
+		if owner != (state.LeaseOwner{}) {
+			payload["lease_owner"] = owner
+		}
 		item.Status, item.RunID, item.WorkerPID = "resolving_conflict", runID, 0
 		item.SessionID, item.Session = "", nil
 		item.RetryAfter = nil
@@ -1066,8 +1101,15 @@ func (l *Loop) schedulePullRequestPoll(current state.Issue, reason string) error
 }
 
 func (l *Loop) completeIssue(ctx context.Context, current state.Issue, prURL string, payload any) error {
+	owner := state.LeaseOwner{}
+	if current.Lease != nil {
+		owner = current.Lease.Owner
+	}
 	_, err := l.Store.Update("issue_completed", current.Number, current.RunID, payload, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
+		if err := state.ReleaseIssueLease(item, owner); err != nil {
+			return err
+		}
 		item.Status, item.PullRequestURL, item.LastError, item.SessionID = "completed", prURL, "", ""
 		item.Session = nil
 		item.PullRequestMerged = prURL != ""
@@ -1129,12 +1171,23 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 		status = "blocked"
 	}
 	current, _ := l.issueState(number)
+	owner := state.LeaseOwner{}
+	if current.Lease != nil {
+		owner = current.Lease.Owner
+	}
 	kind := failure.KindOf(cause)
 	_, err := l.Store.Update("issue_"+status, number, current.RunID, map[string]string{"error": cause.Error(), "failure_kind": string(kind)}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(number)]
 		if item == nil {
 			item = &state.Issue{Number: number}
 			s.Issues[strconv.Itoa(number)] = item
+		}
+		// An open or previously published Pull Request keeps the lease until
+		// reconciliation confirms merge or explicit abandonment.
+		if item.PullRequestURL == "" {
+			if err := state.ReleaseIssueLease(item, owner); err != nil {
+				return err
+			}
 		}
 		item.Status, item.LastError, item.SessionID = status, cause.Error(), ""
 		item.Session = nil

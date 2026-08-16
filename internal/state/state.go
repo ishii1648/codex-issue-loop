@@ -28,7 +28,7 @@ type SchemaVersionError struct {
 
 func (e SchemaVersionError) Error() string {
 	if e.Version == schemaversion.Previous {
-		return fmt.Sprintf("%s schema migration required from version 1 to %d; stop loops and run agent-loop migrate --apply", e.Kind, CurrentVersion)
+		return fmt.Sprintf("%s schema migration required from version %d to %d; stop loops and run agent-loop migrate --apply", e.Kind, schemaversion.Previous, CurrentVersion)
 	}
 	return fmt.Sprintf("unsupported %s version %d; this binary supports version %d", e.Kind, e.Version, CurrentVersion)
 }
@@ -63,6 +63,25 @@ type WorkerIdentity struct {
 	RequestedModel string `json:"requested_model,omitempty"`
 	ResolvedModel  string `json:"resolved_model,omitempty"`
 	Variant        string `json:"variant,omitempty"`
+}
+
+// LeaseOwner fences lease mutations to one Issue run and one monotonically
+// increasing generation. Run IDs alone are not sufficient because restored or
+// retried state may reuse durable Issue records.
+type LeaseOwner struct {
+	RunID      string `json:"run_id"`
+	Generation uint64 `json:"generation"`
+}
+
+// ResourceLease is the write-ahead reservation that must exist before a worker
+// is started. A lease has no wall-clock expiry; ReservedAt is audit metadata.
+type ResourceLease struct {
+	Owner             LeaseOwner `json:"owner"`
+	Slot              int        `json:"slot"`
+	DeclaredResources []string   `json:"declared_resources"`
+	ResolvedResources []string   `json:"resolved_resources"`
+	BaseSHA           string     `json:"base_sha,omitempty"`
+	ReservedAt        time.Time  `json:"reserved_at"`
 }
 
 // ConflictAttempt is an append-only audit record for one autonomous conflict
@@ -111,6 +130,8 @@ type Issue struct {
 	Title             string            `json:"title"`
 	Status            string            `json:"status"`
 	RunID             string            `json:"run_id,omitempty"`
+	LeaseGeneration   uint64            `json:"lease_generation,omitempty"`
+	Lease             *ResourceLease    `json:"lease,omitempty"`
 	Branch            string            `json:"branch,omitempty"`
 	Worktree          string            `json:"worktree,omitempty"`
 	Attempts          int               `json:"attempts"`
@@ -252,6 +273,9 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, fmt.Errorf("rotate event log: %w", err)
 	}
 	if err := mutate(&snapshot); err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateResourceLeases(snapshot); err != nil {
 		return Snapshot{}, err
 	}
 	snapshot.StateRevision++
