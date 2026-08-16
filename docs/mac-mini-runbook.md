@@ -219,13 +219,17 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 `retry`は無関係なblocked原因を初期化せず、保存済みbranchとPRが一致する場合だけ`resolving_conflict`へ戻す。新しいbranch/PRやforce pushは作らない。
 
-workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。導入前のworker blockだけは`failure_kind=issue`とsupervisor生成の`worker blocked` errorからCLIがprovenanceを正規化し、失われたleaseを`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource leaseとGitHub label/PRが一致するときだけ次を使う。
+workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。導入前のworker blockだけは`failure_kind=issue`とsupervisor生成の`worker blocked` errorからCLIがprovenanceを正規化し、失われたleaseを`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource leaseとGitHub label/PRが一致するときだけ次を使う。v0.6.0以前のlegacy recordでは`lease`または`lease.base_sha`がないことがあるが、stateを手編集しない。
 
 ```sh
 agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
 ```
 
-この操作はdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。GitHub sync失敗時はstateを手編集せず、network復旧後にsupervisorを起動して収束させる。`conflict_recovery`がある場合は`retry`、手動`blocked`/`do-not-automate`、security block、running/completed、closed-without-merge、PR不整合は修復・再開せず原因別runbookへ戻る。
+この操作はconfigured base branchのremote-tracking commitを検証し、leaseを補う場合は非空の`base_sha`も同じtransactionで保存する。`resolve configured base branch`で拒否された場合はGitHub labelとdurable stateは未変更なので、`git -C <saved-worktree> fetch origin <base-branch>`で正しいremote-tracking commitを取得し、`status --json`でblocked状態を再確認して同じコマンドを再実行する。既存の非空`base_sha`は上書きしない。
+
+resumeはdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`lease.base_sha`が非空であることを確認する。GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動して収束させる。`conflict_recovery`がある場合は`retry`、手動`blocked`/`do-not-automate`、security block、running/completed、closed-without-merge、PR不整合は修復・再開せず原因別runbookへ戻る。
+
+v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。
 
 ### Git transportまたはcommit署名で停止する
 

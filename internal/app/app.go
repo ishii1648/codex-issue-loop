@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1179,9 +1180,13 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				return err
 			}
 		}
+		baseSHA := ""
+		if current.Lease != nil {
+			baseSHA = current.Lease.BaseSHA
+		}
 		return a.output(*jsonOut, map[string]any{
 			"issue": *issueNumber, "status": current.Status, "resume_id": current.EnvironmentResume.ID,
-			"branch": current.Branch, "worktree": current.Worktree, "idempotent": true,
+			"branch": current.Branch, "worktree": current.Worktree, "base_sha": baseSHA, "idempotent": true,
 		})
 	}
 	if current.Status != "blocked" || current.GitHubSync != "" {
@@ -1220,6 +1225,10 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	}
 	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists {
 		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to resume: %+v", inspection)}
+	}
+	baseSHA, err := environmentResumeBaseSHA(ctx, entry.Commands["git"], cfg, current, inspection)
+	if err != nil {
+		return exitError{4, err}
 	}
 	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
 	remote, err := client.Inspect(ctx, cfg, *issueNumber, current.Branch)
@@ -1268,11 +1277,14 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		previousReason = current.BlockedCause.Reason
 	}
 	_, err = store.Update("environment_resume_requested", *issueNumber, current.RunID, map[string]any{
-		"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock,
+		"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock, "base_sha": baseSHA,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(*issueNumber)]
 		if item == nil || item.RunID != current.RunID || item.Status != "blocked" || item.GitHubSync != "" {
 			return fmt.Errorf("Issue #%d changed while environment resume was being prepared", *issueNumber)
+		}
+		if item.Worktree != current.Worktree || item.Branch != current.Branch || item.PullRequestURL != current.PullRequestURL || !reflect.DeepEqual(item.Lease, current.Lease) {
+			return fmt.Errorf("Issue #%d worktree, branch, Pull Request, or resource lease changed while environment resume was being prepared", *issueNumber)
 		}
 		item.Status = "environment_resume_pending"
 		item.GitHubSync = "environment_resume"
@@ -1287,8 +1299,10 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			owner := state.LeaseOwner{RunID: item.RunID, Generation: item.LeaseGeneration}
 			item.Lease = &state.ResourceLease{
 				Owner: owner, Slot: 0, DeclaredResources: []string{},
-				ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now,
+				ResolvedResources: []string{state.RepositoryResource}, BaseSHA: baseSHA, ReservedAt: now,
 			}
+		} else if item.Lease != nil && item.Lease.BaseSHA == "" {
+			item.Lease.BaseSHA = baseSHA
 		}
 		item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: item.LastError}
 		item.RetryAfter = nil
@@ -1320,8 +1334,47 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	return a.output(*jsonOut, map[string]any{
 		"issue": *issueNumber, "status": status, "resume_id": resumeID,
 		"branch": current.Branch, "worktree": current.Worktree, "session_id": current.SessionID,
-		"dirty": inspection.Dirty, "unpushed_commits": inspection.UnpushedCommits,
+		"base_sha": baseSHA,
+		"dirty":    inspection.Dirty, "unpushed_commits": inspection.UnpushedCommits,
 	})
+}
+
+func environmentResumeBaseSHA(ctx context.Context, git string, cfg config.Config, current *state.Issue, inspection worktree.Inspection) (string, error) {
+	if git == "" {
+		git = "git"
+	}
+	baseSHA := ""
+	if current.Lease != nil {
+		baseSHA = current.Lease.BaseSHA
+		if baseSHA != strings.TrimSpace(baseSHA) {
+			return "", fmt.Errorf("saved publication base SHA is not canonical; state was not changed")
+		}
+	}
+	if baseSHA == "" {
+		ref := "refs/remotes/origin/" + cfg.Git.BaseBranch
+		out, err := exec.CommandContext(ctx, git, "-C", current.Worktree, "rev-parse", "--verify", ref+"^{commit}").Output()
+		if err != nil {
+			return "", fmt.Errorf("resolve configured base branch %q for environment resume: %w; fetch origin/%s and retry without editing durable state", cfg.Git.BaseBranch, err, cfg.Git.BaseBranch)
+		}
+		baseSHA = strings.TrimSpace(string(out))
+		if baseSHA == "" {
+			return "", fmt.Errorf("resolve configured base branch %q for environment resume: git returned an empty commit SHA; state was not changed", cfg.Git.BaseBranch)
+		}
+	}
+	verified, err := exec.CommandContext(ctx, git, "-C", current.Worktree, "rev-parse", "--verify", baseSHA+"^{commit}").Output()
+	if err != nil {
+		return "", fmt.Errorf("verify publication base SHA %q for environment resume: %w; state was not changed", baseSHA, err)
+	}
+	if strings.TrimSpace(string(verified)) != baseSHA {
+		return "", fmt.Errorf("verify publication base SHA %q for environment resume: value is not a full canonical commit SHA; state was not changed", baseSHA)
+	}
+	if inspection.Head == "" {
+		return "", fmt.Errorf("verify publication base SHA for environment resume: saved worktree HEAD is empty; state was not changed")
+	}
+	if err := exec.CommandContext(ctx, git, "-C", current.Worktree, "merge-base", "--is-ancestor", baseSHA, inspection.Head).Run(); err != nil {
+		return "", fmt.Errorf("verify publication base SHA %s for environment resume: it is not an ancestor of worktree HEAD %s; state was not changed", baseSHA, inspection.Head)
+	}
+	return baseSHA, nil
 }
 
 func (a App) logs(l layout.Layout, args []string) error {

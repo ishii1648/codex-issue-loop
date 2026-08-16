@@ -119,6 +119,8 @@ workerが外部環境前提を理由に返した`blocked`は、前提をoperator
 "$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
 ```
 
+legacy stateでleaseが欠けている場合も、configured base branchの検証済みcommit SHAと保守的な`repo:*` leaseを同じtransactionで補います。base SHAを検証できない場合はstateとGitHub labelを変更せず拒否するため、state fileを編集せずremote-tracking branchを復旧して再実行します。
+
 local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_network` localhost-only policyへopt-inできます。既定はnetwork無効です。設定と残余リスクは[localhost-only command network](docs/localhost-network.md)を参照してください。
 
 ### 4. 複数リポジトリを並列実行する
