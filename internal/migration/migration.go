@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,7 +38,15 @@ type Report struct {
 	NeedsMigration bool             `json:"needs_migration"`
 	Artifacts      []Artifact       `json:"artifacts"`
 	Unsupported    []Artifact       `json:"unsupported,omitempty"`
+	FallbackLeases []FallbackLease  `json:"fallback_leases,omitempty"`
 	Repositories   []registry.Entry `json:"-"`
+}
+
+type FallbackLease struct {
+	Path        string `json:"path"`
+	IssueNumber int    `json:"issue_number"`
+	RunID       string `json:"run_id"`
+	Resource    string `json:"resource"`
 }
 
 type Result struct {
@@ -145,11 +154,24 @@ func Inspect(l layout.Layout) (Report, error) {
 			}
 			if exists {
 				report.Artifacts = append(report.Artifacts, Artifact{Kind: item.kind, Path: path, Version: version})
+				if version == schemaversion.Previous && (item.kind == "state" || item.kind == "transaction") {
+					fallbacks, fallbackErr := inspectFallbackLeases(path, item.kind)
+					if fallbackErr != nil {
+						return Report{}, fmt.Errorf("inspect fallback leases %s: %w", path, fallbackErr)
+					}
+					report.FallbackLeases = append(report.FallbackLeases, fallbacks...)
+				}
 			}
 		}
 	}
 
 	sort.Slice(report.Artifacts, func(i, j int) bool { return report.Artifacts[i].Path < report.Artifacts[j].Path })
+	sort.Slice(report.FallbackLeases, func(i, j int) bool {
+		if report.FallbackLeases[i].Path != report.FallbackLeases[j].Path {
+			return report.FallbackLeases[i].Path < report.FallbackLeases[j].Path
+		}
+		return report.FallbackLeases[i].IssueNumber < report.FallbackLeases[j].IssueNumber
+	})
 	for _, artifact := range report.Artifacts {
 		switch artifact.Version {
 		case 0: // Empty event logs do not yet contain a versioned record.
@@ -218,7 +240,7 @@ func (m Migrator) Apply() (Result, error) {
 		if artifact.Version != schemaversion.Previous {
 			continue
 		}
-		if err := migrateArtifact(artifact); err != nil {
+		if err := migrateArtifact(artifact, m.now()); err != nil {
 			return Result{}, err
 		}
 		changed++
@@ -252,6 +274,9 @@ func (m Migrator) Restore(backup string) (Result, error) {
 
 	resolved, manifest, err := m.verifyBackup(backup)
 	if err != nil {
+		return Result{}, err
+	}
+	if err := ensureRollbackHasNoActiveLeases(manifest); err != nil {
 		return Result{}, err
 	}
 	for _, entry := range manifest.Entries {
@@ -319,7 +344,7 @@ func (m Migrator) createBackup(report Report) (string, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
 	}
-	backup := filepath.Join(root, m.now().UTC().Format("20060102T150405.000000000Z")+"-v1-to-v2")
+	backup := filepath.Join(root, m.now().UTC().Format("20060102T150405.000000000Z")+fmt.Sprintf("-v%d-to-v%d", schemaversion.Previous, CurrentVersion))
 	if err := os.Mkdir(backup, 0o700); err != nil {
 		return "", err
 	}
@@ -446,15 +471,17 @@ func eventVersion(path string) (int, bool, error) {
 	return version, true, nil
 }
 
-func migrateArtifact(artifact Artifact) error {
+func migrateArtifact(artifact Artifact, now time.Time) error {
 	switch artifact.Kind {
 	case "config":
 		return migrateYAML(artifact.Path)
 	case "events":
 		return migrateEvents(artifact.Path)
 	case "transaction":
-		return migrateTransaction(artifact.Path)
-	case "registry", "state":
+		return migrateTransaction(artifact.Path, now)
+	case "state":
+		return migrateState(artifact.Path, now)
+	case "registry":
 		return migrateJSONObject(artifact.Path)
 	default:
 		return fmt.Errorf("unsupported migration artifact kind %q", artifact.Kind)
@@ -501,7 +528,7 @@ func migrateJSONObject(path string) error {
 	return writeRawObject(path, object)
 }
 
-func migrateTransaction(path string) error {
+func migrateTransaction(path string, now time.Time) error {
 	object, err := readRawObject(path)
 	if err != nil {
 		return err
@@ -513,6 +540,11 @@ func migrateTransaction(path string) error {
 			return fmt.Errorf("decode transaction %s: %w", key, err)
 		}
 		nested["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
+		if key == "snapshot" {
+			if err := addFallbackLeases(nested, now); err != nil {
+				return err
+			}
+		}
 		encoded, err := json.Marshal(nested)
 		if err != nil {
 			return err
@@ -520,6 +552,144 @@ func migrateTransaction(path string) error {
 		object[key] = encoded
 	}
 	return writeRawObject(path, object)
+}
+
+func migrateState(path string, now time.Time) error {
+	object, err := readRawObject(path)
+	if err != nil {
+		return err
+	}
+	object["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
+	if err := addFallbackLeases(object, now); err != nil {
+		return err
+	}
+	return writeRawObject(path, object)
+}
+
+var leaseHoldingStatuses = map[string]bool{
+	"claiming": true, "claimed": true, "running": true, "retry_wait": true,
+	"resume_pending": true, "needs_input": true, "awaiting_checks": true,
+	"awaiting_merge": true, "resolving_conflict": true,
+}
+
+func addFallbackLeases(snapshot map[string]json.RawMessage, now time.Time) error {
+	var issues map[string]map[string]json.RawMessage
+	if len(snapshot["issues"]) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(snapshot["issues"], &issues); err != nil {
+		return fmt.Errorf("decode snapshot issues: %w", err)
+	}
+	active := 0
+	for key, issue := range issues {
+		var status, runID string
+		_ = json.Unmarshal(issue["status"], &status)
+		if !leaseHoldingStatuses[status] {
+			continue
+		}
+		active++
+		if active > 1 {
+			return fmt.Errorf("v2 concurrency-1 state contains more than one active Issue")
+		}
+		var number int
+		_ = json.Unmarshal(issue["number"], &number)
+		if number < 1 {
+			number, _ = strconv.Atoi(key)
+		}
+		_ = json.Unmarshal(issue["run_id"], &runID)
+		if runID == "" {
+			runID = fmt.Sprintf("migration_v2_issue_%d", number)
+			encoded, _ := json.Marshal(runID)
+			issue["run_id"] = encoded
+		}
+		reservedAt := now.UTC()
+		if value := issue["updated_at"]; len(value) > 0 {
+			var updated time.Time
+			if json.Unmarshal(value, &updated) == nil && !updated.IsZero() {
+				reservedAt = updated.UTC()
+			}
+		}
+		issue["lease_generation"] = json.RawMessage("1")
+		lease, err := json.Marshal(map[string]any{
+			"owner": map[string]any{"run_id": runID, "generation": 1},
+			"slot":  0, "declared_resources": []string{}, "resolved_resources": []string{"repo:*"},
+			"reserved_at": reservedAt,
+		})
+		if err != nil {
+			return err
+		}
+		issue["lease"] = lease
+	}
+	encoded, err := json.Marshal(issues)
+	if err != nil {
+		return err
+	}
+	snapshot["issues"] = encoded
+	return nil
+}
+
+func inspectFallbackLeases(path, kind string) ([]FallbackLease, error) {
+	object, err := readRawObject(path)
+	if err != nil {
+		return nil, err
+	}
+	if kind == "transaction" {
+		if err := json.Unmarshal(object["snapshot"], &object); err != nil {
+			return nil, err
+		}
+	}
+	var issues map[string]struct {
+		Number int    `json:"number"`
+		Status string `json:"status"`
+		RunID  string `json:"run_id"`
+	}
+	if err := json.Unmarshal(object["issues"], &issues); err != nil {
+		return nil, err
+	}
+	result := []FallbackLease{}
+	for _, issue := range issues {
+		if leaseHoldingStatuses[issue.Status] {
+			runID := issue.RunID
+			if runID == "" {
+				runID = fmt.Sprintf("migration_v2_issue_%d", issue.Number)
+			}
+			result = append(result, FallbackLease{Path: path, IssueNumber: issue.Number, RunID: runID, Resource: "repo:*"})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].IssueNumber < result[j].IssueNumber })
+	return result, nil
+}
+
+func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
+	for _, entry := range manifest.Entries {
+		if filepath.Base(entry.Source) != "state.json" && filepath.Base(entry.Source) != "state.txn.json" {
+			continue
+		}
+		object, err := readRawObject(entry.Source)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if filepath.Base(entry.Source) == "state.txn.json" {
+			if err := json.Unmarshal(object["snapshot"], &object); err != nil {
+				return err
+			}
+		}
+		var issues map[string]struct {
+			Lease json.RawMessage `json:"lease"`
+		}
+		if err := json.Unmarshal(object["issues"], &issues); err != nil {
+			return err
+		}
+		for number, issue := range issues {
+			if len(issue.Lease) > 0 && string(issue.Lease) != "null" {
+				return fmt.Errorf("rollback blocked: active resource lease for Issue #%s in %s", number, entry.Source)
+			}
+		}
+	}
+	return nil
 }
 
 func migrateEvents(path string) error {
@@ -662,7 +832,7 @@ func unsupportedError(artifacts []Artifact) error {
 	for _, artifact := range artifacts {
 		parts = append(parts, fmt.Sprintf("%s=%d", artifact.Path, artifact.Version))
 	}
-	return fmt.Errorf("unsupported schema version; supported migration is v1 to v%d: %s", CurrentVersion, strings.Join(parts, ", "))
+	return fmt.Errorf("unsupported schema version; supported migration is v%d to v%d: %s", schemaversion.Previous, CurrentVersion, strings.Join(parts, ", "))
 }
 
 func hashBytes(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }

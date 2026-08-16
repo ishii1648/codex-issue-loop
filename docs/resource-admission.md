@@ -1,6 +1,6 @@
 # Resource claim・依存metadata・admission契約
 
-この文書は、同一repository内で複数Issueを並列実行するschedulerが使用するresource claim、Issue依存関係、resource leaseの正本仕様である。現行のconfig/state schema v2と`queue.concurrency: 1`の実装は変更しない。この契約を実装するreleaseで、明示migrationによりschema v3を導入する。
+この文書は、同一repository内で複数Issueを並列実行するschedulerが使用するresource claim、Issue依存関係、resource leaseの正本仕様である。schema v3ではdurable leaseとv2 migrationを先に導入し、現行queueは`concurrency: 1`のまま`repo:*`を予約する。resource definitionと複数worker admissionは後続段階で有効化する。
 
 単一host並列化と複数host冗長化の責務分離は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。本書のleaseは、特記しない限り1つのsupervisorがlocal stateに保持する単一host用の論理leaseを指す。
 
@@ -85,7 +85,7 @@ configのvalidation規則は次のとおりである。
 - pathとglobはUnicode code pointを変更せず、case-sensitiveに比較する。実在fileだけでなく、新規fileにも同じ規則を適用する。
 - 未知keyと未知versionはsupervisor開始前にconfig errorとして拒否する。
 
-schema v3の`bootstrap-labels`は各definitionに対応する`area:<name>`も不足分だけ作成する。現行schema v2の`bootstrap-labels`はresource definitionを持たないため、resource labelを作成しない。
+resource definitionを有効化したschema v3の`bootstrap-labels`は各definitionに対応する`area:<name>`も不足分だけ作成する。definition未導入のconcurrency 1 configではresource labelを作成しない。
 
 1つの変更pathが複数definitionに一致する場合、そのpathは一致したresourceをすべて必要とする。どのdefinitionにも一致しないpathは`repo:*`を必要とする。publisherはworker結果の変更pathを正規化したclaim集合で覆えない場合、公開せず、固定reason code `resource_claim_mismatch`で`needs_input`へ遷移させる。この監査は過少claimを検出する最後の防壁であり、実行中のlease集合を後から拡張しない。
 
@@ -237,6 +237,8 @@ supervisorは1つだけとし、次の処理を直列に行う。
 
 単一host leaseにはwall-clock TTLを設けない。supervisor停止、process crash、Mac再起動、worker slot解放だけでは期限切れにならない。再起動時は新規admissionより先に永続leaseとGitHub/PRをreconcileする。
 
+lease ownerは`(Issue number, run_id, generation)`で識別する。`generation`はIssueごとに1から単調増加し、release後もIssue stateの`lease_generation`へ保持する。同じIssueの新runが予約すると次generationになり、release/expandはIssue numberを含むowner tupleの完全一致を必須とする。したがって、旧run ID、旧generation、別Issue向けownerのいずれも現在のleaseを変更できない。
+
 | Issue状態・event | Lease | 規則 |
 | --- | --- | --- |
 | ready/queued、dependency待ち | なし | admission前はresourceを予約しない |
@@ -272,7 +274,7 @@ claim途中のGitHub API失敗ではleaseを保持して同じrun IDでreconcile
 
 migrationは全loop停止、checksum付きbackup、read-only preview、明示`--apply`、doctor、1 repositoryずつの再開を必須とする。既存v2 config/stateはconcurrency 1のまま動作し、v3への自動migration、並列化の自動有効化、既存Issue本文/labelの自動書換えを行わない。
 
-v2からv3へ移行する際、active Issueがないことを確認する。既存の未処理Issueは本文やlabelを変更せず受理し、metadataが揃うまでは`repo:*`へ縮退する。state migrationは空のlease mapを作るだけで、過去Issueからresourceを推測しない。
+v2からv3へ移行する際、既存のactive Issueは宣言resourceを推測せず、slot 0と`repo:*`のexclusive leaseへ安全側に移行する。既存の未処理Issueは本文やlabelを変更せず受理し、metadataが揃うまでは`repo:*`へ縮退する。active Issueが複数あるなどconcurrency 1の前提と矛盾するv2 stateは自動修復せずmigrationを拒否する。
 
 未知のconfig/state/metadata versionは推測で読み替えない。config/stateの未知versionは起動を拒否し、Issue metadataだけが未知versionの場合はそのIssueを`repo:*`へ縮退させる。rollbackは全loop停止、active leaseなし、v3 backupとの対応確認を必須とし、v3のactive leaseをv2 stateへ捨てて戻してはならない。
 

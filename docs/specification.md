@@ -119,7 +119,7 @@ target-repository/
 ├─ install.json
 ├─ backups/<timestamp>-<version>/
 ├─ migration.json
-├─ migrations/<timestamp>-v1-to-v2/
+├─ migrations/<timestamp>-v2-to-v3/
 ├─ registry.json
 ├─ worktrees/<repo-id>/issue-<number>/
 └─ repos/<repo-id>/
@@ -150,7 +150,7 @@ target-repository/
 設定ファイル名は対象リポジトリ直下の `.agent-loop.yaml` とする。
 
 ```yaml
-version: 2
+version: 3
 
 github:
   repo: ishii1648/example
@@ -250,7 +250,7 @@ security:
 - worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、その他の非terminal状態は期間にかかわらず保持する。
 - event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
 
-同一repository内並列化で追加するresource definition、`area:` label、Issue本文の`depends_on`、決定論的admission、lease lifecycleは[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。これらは将来のconfig/state schema v3で明示migrationにより導入し、現行v2へ先行してkeyを追加しない。
+同一repository内並列化で追加するresource definition、`area:` label、Issue本文の`depends_on`、決定論的admission、lease lifecycleは[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。schema v3ではdurable leaseとmigrationを導入済みで、resource definitionと複数worker admissionは後続段階で有効化する。
 
 ### 5.2 log rotationと容量保護
 
@@ -649,7 +649,7 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "repo_id": "example-a1b2c3d4",
   "state_revision": 42,
   "supervisor": {
@@ -667,7 +667,7 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 
 `state_revision` は有効な状態更新ごとに単調増加させる。event通知を取りこぼしたwatchも、最後に確認したrevisionとの差分から状態変化を検出できる。
 
-Issue状態にはbranch、worktree、session ID、PR URLに加えてmerge確認済みフラグを保持する。これにより起動時は未確認の旧`completed` PRだけを一度照合し、merge確認済みの履歴へ毎回GitHub APIを呼ばない。
+Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフラグに加え、active時はslot、declared/resolved resources、base SHA、reserved timestamp、`(run_id, generation)` ownerを持つleaseを保持する。これによりworker起動前のwrite-ahead予約と再起動後の排他復元を行う。
 
 ### 12.2 events.jsonl
 
@@ -723,19 +723,19 @@ transactionなしでsnapshotとevent logが食い違う場合、途中に壊れ�
 
 ### 12.4 永続schema migration
 
-config、registry、state、active event log、prepared transactionの現行schemaはv2とする。v1を検出したbinaryはsupervisor開始、status、通常update後の自動再開を拒否し、`migrate --json`と`doctor`で`SCHEMA_MIGRATION_REQUIRED`を返す。v3以上やversion欠落は自動変換しない。
+config、registry、state、active event log、prepared transactionの現行schemaはv3とする。v2を検出したbinaryはsupervisor開始、status、通常update後の自動再開を拒否し、`migrate --json`と`doctor`で`SCHEMA_MIGRATION_REQUIRED`を返す。v1、v4以上、version欠落は自動変換しない。
 
-v1からv2へのforward migrationは次の順序で行う。
+v2からv3へのforward migrationは次の順序で行う。
 
 1. 全登録LaunchAgentが停止中であることを確認する
 2. config、registry、state、active event、transactionをchecksum付きmigration backupへcopyする
 3. `migration.json`へ`prepared` journalを原子的に保存する
 4. 各fileを個別に原子的置換する
-5. 全対象がv2へ収束したことを再検査し、journalを`completed`にする
+5. 全対象がv3へ収束したことを再検査し、journalを`completed`にする
 
-process停止でv1/v2が混在しても、再実行は同じjournalとbackupを使い、v1のfileだけを変換する。active event logはfile全体を一度に置換し、同一log内のversion混在を許可しない。rotation済みgzip archiveはruntime復旧入力ではないためimmutableな監査履歴として保持する。
+process停止でv2/v3が混在しても、再実行は同じjournalとbackupを使い、v2のfileだけを変換する。v2 active Issueはslot 0と`repo:*`のexclusive leaseへ変換し、concurrency 1 stateを保持する。active event logはfile全体を一度に置換し、同一log内のversion混在を許可しない。rotation済みgzip archiveはruntime復旧入力ではないためimmutableな監査履歴として保持する。
 
-rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。schema v1対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。
+rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active v3 leaseがある間はrollbackを拒否する。schema v2対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。
 
 ## 13. 監視とCodex task連携
 

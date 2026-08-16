@@ -46,7 +46,7 @@ func testEnvironment(t *testing.T) (string, layout.Layout) {
 	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
-	config := `version: 2
+	config := `version: 3
 github:
   repo: owner/repo
 watch:
@@ -459,14 +459,14 @@ func TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback(t *testin
 		t.Fatal(err)
 	}
 	oldSource := filepath.Join(t.TempDir(), "old-agent-loop")
-	if err := os.WriteFile(oldSource, []byte("old-v1-release"), 0o700); err != nil {
+	if err := os.WriteFile(oldSource, []byte("old-v2-release"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	oldManifest, _, err := installArtifacts(l, oldSource, "v0.1.0", "old")
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldManifest.SchemaVersion = 1
+	oldManifest.SchemaVersion = 2
 	writeJSONFixture(t, filepath.Join(l.Root, "install.json"), oldManifest)
 	writeLegacySchemas(t, repo, l)
 
@@ -501,26 +501,26 @@ func TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback(t *testin
 		t.Fatalf("paired installation rollback: %v", err)
 	}
 	restored, err := readInstallManifest(filepath.Join(l.Root, "install.json"))
-	if err != nil || restored.Version != "v0.1.0" || restored.SchemaVersion != 1 {
+	if err != nil || restored.Version != "v0.1.0" || restored.SchemaVersion != 2 {
 		t.Fatalf("restored=%+v err=%v", restored, err)
 	}
 }
 
 func writeLegacySchemas(t *testing.T, repo string, l layout.Layout) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte("version: 1\ngithub:\n  repo: owner/repo\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte("version: 2\ngithub:\n  repo: owner/repo\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	entry := registry.Entry{
-		RepoID: "repo-v1", RepoPath: repo, GitHubRepo: "owner/repo",
+		RepoID: "repo-v2", RepoPath: repo, GitHubRepo: "owner/repo",
 		Commands: map[string]string{"launchctl": "/usr/bin/false"},
 	}
-	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: 1, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: 2, Repos: map[string]registry.Entry{entry.RepoID: entry}})
 	if err := os.MkdirAll(l.RepoDir(entry.RepoID), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeJSONFixture(t, filepath.Join(l.RepoDir(entry.RepoID), "state.json"), state.Snapshot{
-		Version: 1, RepoID: entry.RepoID, RepoPath: repo,
+		Version: 2, RepoID: entry.RepoID, RepoPath: repo,
 		Supervisor: state.Supervisor{State: "stopped"}, Issues: map[string]*state.Issue{}, PendingRequests: map[string]*state.Request{},
 	})
 }
