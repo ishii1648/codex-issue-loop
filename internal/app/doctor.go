@@ -131,7 +131,7 @@ func diagnoseHost(ctx context.Context, l layout.Layout) []diagnostic {
 	diagnostics := diagnoseInstallation(l)
 	diagnostics = append(diagnostics, diagnoseUserRules()...)
 	paths := map[string]string{}
-	for _, name := range []string{"git", "gh", "codex", "launchctl", "pmset"} {
+	for _, name := range []string{"git", "gh", "launchctl", "pmset"} {
 		path, err := exec.LookPath(name)
 		code := "DEPENDENCY_" + strings.ToUpper(name) + "_AVAILABLE"
 		if err != nil {
@@ -141,6 +141,12 @@ func diagnoseHost(ctx context.Context, l layout.Layout) []diagnostic {
 		}
 		paths[name] = path
 		diagnostics = append(diagnostics, passedDiagnostic(code, "host", "", name+" commandを利用できます", path))
+	}
+	// Codex is an optional host check here; the selected repository backend is
+	// diagnosed separately below.
+	if path, err := exec.LookPath("codex"); err == nil {
+		paths["codex"] = path
+		diagnostics = append(diagnostics, passedDiagnostic("DEPENDENCY_CODEX_AVAILABLE", "host", "", "codex commandを利用できます", path))
 	}
 
 	if path := paths["gh"]; path != "" {
@@ -292,6 +298,7 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	}
 	diagnostics = append(diagnostics, passedDiagnostic("CONFIG_VALID", "repository", entry.RepoID, ".agent-loop.yamlを読み込めます", cfg.GitHub.Repo))
 	diagnostics = append(diagnostics, diagnoseNotificationCredential(l, entry, cfg)...)
+	diagnostics = append(diagnostics, diagnoseWorkerBackend(ctx, entry, cfg)...)
 
 	if len(entry.Commands) > 0 {
 		missing := []string{}
@@ -351,6 +358,90 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 
 	diagnostics = append(diagnostics, diagnoseDurableState(l, entry, cfg)...)
 	return diagnostics
+}
+
+func diagnoseWorkerBackend(ctx context.Context, entry registry.Entry, cfg config.Config) []diagnostic {
+	backend := cfg.Worker.Backend
+	if backend == "" {
+		backend = "codex"
+	}
+	registered := entry.WorkerBackend
+	if registered == "" {
+		registered = "codex"
+	}
+	codePrefix := strings.ToUpper(strings.ReplaceAll(backend, "-", "_"))
+	if len(entry.Commands) > 0 && registered != backend {
+		return []diagnostic{failedDiagnostic("WORKER_BACKEND_REGISTRATION_DRIFT", "repository", entry.RepoID, "manifestと登録済みworker backendが一致しません",
+			fmt.Sprintf("manifest=%s registered=%s", backend, registered), command("選択backendのcommand pathを登録し直します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+	}
+	path := entry.Commands[backend]
+	if path == "" {
+		if len(entry.Commands) > 0 {
+			return []diagnostic{failedDiagnostic("WORKER_COMMAND_NOT_REGISTERED", "repository", entry.RepoID, "選択backendのcommand pathが登録されていません", backend,
+				command("repositoryを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+		}
+		resolved, err := exec.LookPath(cfg.Worker.EffectiveCommand())
+		if err != nil {
+			return []diagnostic{failedDiagnostic(codePrefix+"_BINARY_MISSING", "repository", entry.RepoID, "worker runtimeが見つかりません", err.Error(), instruction("選択したruntimeをインストールしてrepositoryを再登録してください"))}
+		}
+		path = resolved
+	}
+	diagnostics := []diagnostic{}
+	if current, err := exec.LookPath(cfg.Worker.EffectiveCommand()); err == nil {
+		absolute, _ := filepath.Abs(current)
+		if len(entry.Commands) > 0 && absolute != path {
+			diagnostics = append(diagnostics, failedDiagnostic("WORKER_COMMAND_PATH_DRIFT", "repository", entry.RepoID, "登録後にworker command pathが変化しました", fmt.Sprintf("registered=%s current=%s", path, absolute),
+				command("確認後にcommand pathを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath))))
+		}
+	}
+	report := compat.ProbeBackend(ctx, backend, path)
+	if report.OK() {
+		diagnostics = append(diagnostics, passedDiagnostic(codePrefix+"_RUNTIME_COMPATIBLE", "repository", entry.RepoID, "選択worker runtimeの必須capabilityを利用できます", compatibilityDetail(report)))
+	} else {
+		diagnostics = append(diagnostics, failedDiagnostic(codePrefix+"_RUNTIME_INCOMPATIBLE", "repository", entry.RepoID, "選択worker runtimeのversionまたはcapabilityが非対応です", compatibilityDetail(report), instruction("runtimeを対応versionへ更新してdoctorを再実行してください")))
+		return diagnostics
+	}
+	if entry.WorkerVersion != "" && entry.WorkerVersion != report.Version {
+		diagnostics = append(diagnostics, failedDiagnostic("WORKER_RUNTIME_VERSION_DRIFT", "repository", entry.RepoID, "登録後にworker runtime versionが変化しました", fmt.Sprintf("registered=%s current=%s", entry.WorkerVersion, report.Version),
+			command("互換性確認後にrepositoryを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath))))
+	}
+	switch backend {
+	case "codex":
+		out, err := exec.CommandContext(ctx, path, "login", "status").CombinedOutput()
+		if err != nil {
+			diagnostics = append(diagnostics, failedDiagnostic("CODEX_AUTH_INVALID", "repository", entry.RepoID, "Codex CLIの認証を確認できません", truncateTail(strings.TrimSpace(string(out)), 500), command("Codex CLIへログインします", "codex login")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("CODEX_AUTH_VALID", "repository", entry.RepoID, "Codex CLIは認証済みです", "login status succeeded"))
+		}
+	case "claude-code":
+		out, err := exec.CommandContext(ctx, path, "auth", "status").CombinedOutput()
+		if err != nil {
+			diagnostics = append(diagnostics, failedDiagnostic("CLAUDE_CODE_AUTH_INVALID", "repository", entry.RepoID, "Claude Codeの認証を確認できません", truncateTail(strings.TrimSpace(string(out)), 500), instruction("Claude Codeの既存ユーザー認証領域でログインしてください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("CLAUDE_CODE_AUTH_VALID", "repository", entry.RepoID, "Claude Codeは認証済みです", "auth status succeeded"))
+		}
+	case "opencode":
+		out, err := exec.CommandContext(ctx, path, "models").CombinedOutput()
+		if err != nil {
+			diagnostics = append(diagnostics, failedDiagnostic("OPENCODE_PROVIDER_UNAVAILABLE", "repository", entry.RepoID, "OpenCode provider/model一覧を取得できません", truncateTail(strings.TrimSpace(string(out)), 500), instruction("OpenCodeの既存ユーザー認証領域でproviderを設定してください")))
+		} else if cfg.Worker.Model != "" && !containsModelLine(string(out), cfg.Worker.Model) {
+			diagnostics = append(diagnostics, failedDiagnostic("OPENCODE_MODEL_NOT_FOUND", "repository", entry.RepoID, "指定modelが設定済みOpenCode catalogにありません", cfg.Worker.Model,
+				instruction("doctorは課金を伴う実runを行いません。opencode modelsでprovider/model IDと認証を確認してください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("OPENCODE_MODEL_AVAILABLE", "repository", entry.RepoID, "指定OpenCode provider/modelをcatalogで確認できました", cfg.Worker.Model))
+		}
+		diagnostics = append(diagnostics, passedDiagnostic("OPENCODE_APPLICATION_ISOLATION", "repository", entry.RepoID, "OpenCode adapterは非対話deny policyを強制します", "external_directory、git commit、git push、PR publishを拒否します。これはOS sandboxではなくapplication-level enforcementです"))
+	}
+	return diagnostics
+}
+
+func containsModelLine(output, model string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == model || strings.HasPrefix(strings.TrimSpace(line), model+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 func diagnoseNotificationCredential(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {

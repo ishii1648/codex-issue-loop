@@ -39,18 +39,19 @@ type NotificationDispatcher interface {
 }
 
 type Loop struct {
-	Config        config.Config
-	Store         state.Store
-	GitHub        gh.Client
-	Worktrees     WorktreeManager
-	Worker        worker.Runner
-	Publisher     Publisher
-	Processes     ProcessInspector
-	Clock         Clock
-	Random        RandomSource
-	Logger        *log.Logger
-	DiskAvailable func(string) (uint64, error)
-	Notifications NotificationDispatcher
+	Config         config.Config
+	Store          state.Store
+	GitHub         gh.Client
+	Worktrees      WorktreeManager
+	Worker         worker.Runner
+	WorkerIdentity worker.Identity
+	Publisher      Publisher
+	Processes      ProcessInspector
+	Clock          Clock
+	Random         RandomSource
+	Logger         *log.Logger
+	DiskAvailable  func(string) (uint64, error)
+	Notifications  NotificationDispatcher
 }
 
 type BlockedError struct{ Err error }
@@ -343,9 +344,10 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 	if err != nil {
 		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "prepare Issue worktree", err), false)
 	}
-	_, err = l.Store.Update("worker_started", issue.Number, runID, map[string]string{"worktree": wt.Path, "branch": wt.Branch}, func(s *state.Snapshot) error {
+	_, err = l.Store.Update("worker_started", issue.Number, runID, map[string]any{"worktree": wt.Path, "branch": wt.Branch, "identity": l.WorkerIdentity}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
 		item.Status, item.Worktree, item.Branch, item.UpdatedAt = "running", wt.Path, wt.Branch, l.now()
+		item.WorkerIdentity = stateIdentity(l.WorkerIdentity)
 		return nil
 	})
 	if err != nil {
@@ -395,9 +397,12 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		workerCfg.RepoPath = current.Worktree
 		instruction := "Continue after the user's recorded answer. Implement the decision, verify the work, and return the schema-conforming result."
 		var result worker.Result
-		if current.SessionID != "" {
+		if l.canResume(current) {
 			result, err = l.Worker.Resume(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current.Number, current.RunID))
 		} else {
+			if current.SessionID != "" {
+				instruction = "The saved session belongs to a different worker backend. Start a fresh session in the existing worktree and use durable state.\n\n" + instruction
+			}
 			result, err = l.Worker.Run(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 		}
 		return l.handleResult(ctx, issue, current, result, err)
@@ -408,7 +413,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	workerCfg := l.Config
 	workerCfg.RepoPath = current.Worktree
 	var result worker.Result
-	if current.ExecutionProfile == "extended" && current.SessionID != "" && current.Continuations < l.maxContinuations() {
+	if current.ExecutionProfile == "extended" && l.canResume(current) && current.Continuations < l.maxContinuations() {
 		current.Continuations++
 		_, err = l.Store.Update("worker_continuation_started", current.Number, current.RunID, map[string]int{"continuation": current.Continuations}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
@@ -429,9 +434,11 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		current.Attempts++
 		current.RunID = state.NewID("run")
 		current.SessionID = ""
+		current.Session = nil
 		_, err = l.Store.Update("worker_started", current.Number, current.RunID, map[string]int{"attempt": current.Attempts}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
 			item.Status, item.RunID, item.Attempts, item.SessionID = "running", current.RunID, current.Attempts, ""
+			item.Session = nil
 			item.RetryAfter = nil
 			return nil
 		})
@@ -461,7 +468,20 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		item.WorkerPID = 0
 		if result.SessionID != "" {
 			item.SessionID = result.SessionID
+			backend := result.Identity.Backend
+			if backend == "" {
+				backend = l.Config.Worker.Backend
+			}
+			if backend == "" {
+				backend = "codex"
+			}
+			item.Session = &state.WorkerSession{Backend: backend, ID: result.SessionID}
 		}
+		identity := result.Identity
+		if identity.Backend == "" {
+			identity = l.WorkerIdentity
+		}
+		item.WorkerIdentity = stateIdentity(identity)
 		item.UpdatedAt = l.now()
 		return nil
 	})
@@ -541,6 +561,25 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
 	}
+}
+
+func (l *Loop) canResume(current state.Issue) bool {
+	if current.SessionID == "" {
+		return false
+	}
+	backend := l.Config.Worker.Backend
+	if backend == "" {
+		backend = "codex"
+	}
+	if current.Session == nil {
+		return backend == "codex"
+	}
+	return current.Session.ID == current.SessionID && current.Session.Backend == backend
+}
+
+func stateIdentity(identity worker.Identity) state.WorkerIdentity {
+	return state.WorkerIdentity{Backend: identity.Backend, RuntimeVersion: identity.RuntimeVersion, Provider: identity.Provider,
+		RequestedModel: identity.RequestedModel, ResolvedModel: identity.ResolvedModel, Variant: identity.Variant}
 }
 
 func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) error {
@@ -629,6 +668,7 @@ func (l *Loop) completeIssue(ctx context.Context, current state.Issue, prURL str
 	_, err := l.Store.Update("issue_completed", current.Number, current.RunID, payload, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
 		item.Status, item.PullRequestURL, item.LastError, item.SessionID = "completed", prURL, "", ""
+		item.Session = nil
 		item.PullRequestMerged = prURL != ""
 		item.FailureKind = ""
 		item.GitHubSync = "done"
@@ -663,7 +703,7 @@ func (l *Loop) recordWorkerPID(number int, runID string) worker.Started {
 }
 
 func (l *Loop) scheduleRetry(ctx context.Context, issue state.Issue, reason string) error {
-	canContinue := issue.ExecutionProfile == "extended" && issue.SessionID != "" && issue.Continuations < l.maxContinuations()
+	canContinue := issue.ExecutionProfile == "extended" && l.canResume(issue) && issue.Continuations < l.maxContinuations()
 	canRetry := issue.Attempts < l.Config.Queue.MaxAttempts
 	if !canContinue && !canRetry {
 		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "worker retry limit reached", errors.New(reason)), false)
@@ -696,6 +736,7 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 			s.Issues[strconv.Itoa(number)] = item
 		}
 		item.Status, item.LastError, item.SessionID = status, cause.Error(), ""
+		item.Session = nil
 		item.FailureKind = string(kind)
 		item.GitHubSync = status
 		item.RetryAfter, item.UpdatedAt = nil, l.now()

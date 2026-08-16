@@ -85,6 +85,25 @@ func TestFaultAttentionRevisionPersistsSnapshotAndEvent(t *testing.T) {
 	}
 }
 
+func TestLegacySessionIDIsNamespacedAsCodex(t *testing.T) {
+	store := newStore(t)
+	_, err := store.Update("legacy", 1, "run", nil, func(snapshot *Snapshot) error {
+		snapshot.Issues["1"] = &Issue{Number: 1, SessionID: "legacy-session"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := loaded.Issues["1"].Session
+	if session == nil || session.Backend != "codex" || session.ID != "legacy-session" {
+		t.Fatalf("session=%+v", session)
+	}
+}
+
 func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 	store := newStore(t)
 	_, err := store.Update("input_requested", 7, "run", nil, func(s *Snapshot) error {

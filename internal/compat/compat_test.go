@@ -60,6 +60,29 @@ exit 2
 	}
 }
 
+func TestBuiltInBackendCapabilityProbes(t *testing.T) {
+	dir := t.TempDir()
+	claude := filepath.Join(dir, "claude")
+	opencode := filepath.Join(dir, "opencode")
+	writeExecutable(t, claude, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo '2.1.119'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--output-format --json-schema --resume --model --effort --permission-mode --settings --disallowedTools --strict-mcp-config --mcp-config'; exit 0; fi
+exit 2
+`)
+	writeExecutable(t, opencode, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'opencode 1.1.1'; exit 0; fi
+if [ "$1" = "--help" ]; then echo '--pure'; exit 0; fi
+if [ "$1 $2" = "serve --help" ]; then echo '--hostname --port'; exit 0; fi
+if [ "$1 $2" = "models --help" ]; then exit 0; fi
+exit 2
+`)
+	for backend, path := range map[string]string{"claude-code": claude, "opencode": opencode} {
+		if report := ProbeBackend(context.Background(), backend, path); !report.OK() || !report.Has("structured_output") || !report.Has("session_resume") {
+			t.Fatalf("backend=%s report=%+v", backend, report)
+		}
+	}
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
