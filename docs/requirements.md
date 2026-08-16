@@ -380,4 +380,4 @@ GitHub UI、CLI/API、automation、または別ホストのCodexから作成し�
 
 外部製品の未公開APIや、外部プロセスからCodex taskの表示状態を直接変更する機能には依存しない。Codex taskが `watch` を実行し、そのコマンドが入力待ちイベントを返すことで、Codexがユーザーへ質問する。
 
-Goalは外側のIssueキューsupervisorの代替には使わない。App Serverのheadless Goal interfaceは利用可能になったため、Issue #53で`extended` profileのoptional adapterを検証する。導入までは非対話workerの長時間継続をsupervisor管理のexecution profileと`codex exec resume`で実現する。待機中のtool callに対する製品全体の厳密なゼロトークン保証は公式文書にないため要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。
+Goalは外側のIssueキューsupervisorの代替には使わない。App Serverのheadless Goal interfaceは、`extended` continuation限定のoptional adapterとして検証実装する。既定およびcapability非対応時は、supervisor管理のexecution profileと`codex exec resume`を維持する。待機中のtool callに対する製品全体の厳密なゼロトークン保証は公式文書にないため要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。

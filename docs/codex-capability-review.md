@@ -10,7 +10,7 @@
 | 項目 | 判定 | `agent-loop`での扱い |
 | --- | --- | --- |
 | 対話surfaceのGoal | 利用可能 | 単一目的の監視・復旧taskで利用できる |
-| headless Goal | App Server経由で利用可能 | optional `extended` worker adapterをIssue #53で検証する。現行workerは変更しない |
+| headless Goal | App Server経由で利用可能 | optional `extended` worker adapterとして検証実装済み。既定の`codex exec`経路は維持する |
 | `codex exec --goal`相当 | 利用不可 | 公式non-interactive interfaceにGoal optionはないため推測で呼ばない |
 | App Server所有threadのprogrammatic resume/start | 利用可能 | `thread/resume`と`turn/start`を将来adapterで利用できる |
 | Desktopのquestion notifications | 利用可能 | 接続中の監視taskが質問した際の通常OS通知に使う |
@@ -48,7 +48,7 @@ Goalを利用しても責務境界は変えない。
 - Goal stateをqueueの正本やLaunchAgentの代替にしない。
 - App Server adapterが失敗しても、現行worktreeと永続stateを失わない。
 
-実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)へ切り出した。
+実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)で行い、責務・failure model・rollbackは[App Server Goal adapter](app-server-goal-adapter.md)へ記録した。
 
 ## External wakeとNeeds input
 

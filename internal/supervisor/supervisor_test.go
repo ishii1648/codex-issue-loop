@@ -677,7 +677,11 @@ func TestMergedPullRequestCompletesAndClosesIssue(t *testing.T) {
 }
 
 func TestRunOncePersistsQuestion(t *testing.T) {
-	result := worker.Result{Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "decision", SessionID: "session", Question: &worker.Question{Text: "Choose?", Reason: "public API", AllowFreeText: true}}
+	budget := int64(4321)
+	result := worker.Result{Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "decision", SessionID: "session", Question: &worker.Question{Text: "Choose?", Reason: "public API", AllowFreeText: true}, Goal: &worker.Goal{
+		ThreadID: "session", Objective: "Complete Issue", Status: "blocked", TokenBudget: &budget,
+		TimeBudgetSeconds: 3600, TokensUsed: 123, TimeUsedSeconds: 17,
+	}}
 	loop, github := testLoop(t, result)
 	_, err := loop.RunOnce(context.Background())
 	if err != nil {
@@ -689,6 +693,9 @@ func TestRunOncePersistsQuestion(t *testing.T) {
 	snapshot, _ := loop.Store.Load()
 	if snapshot.Issues["1"].Status != "needs_input" || snapshot.Issues["1"].Lease == nil {
 		t.Fatalf("status=%s", snapshot.Issues["1"].Status)
+	}
+	if goal := snapshot.Issues["1"].Goal; goal == nil || goal.Status != "blocked" || goal.TokensUsed != 123 || goal.TimeBudgetSeconds != 3600 {
+		t.Fatalf("goal=%+v", goal)
 	}
 	if len(snapshot.PendingRequests) != 1 {
 		t.Fatalf("requests=%d", len(snapshot.PendingRequests))

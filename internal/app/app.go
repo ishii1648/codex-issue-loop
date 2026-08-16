@@ -1220,7 +1220,8 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	}
 	cfg.Worker.Command = workerPath
 	backend, err := worker.NewBackend(cfg, worker.FactoryOptions{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets,
-		RuntimeVersion: workerCompatibility.Version, ResumeSupported: boolPointer(workerCompatibility.Has("session_resume"))})
+		RuntimeVersion: workerCompatibility.Version, ResumeSupported: boolPointer(workerCompatibility.Has("session_resume")),
+		AppServerGoalSupported: boolPointer(workerCompatibility.Has("app_server_goal"))})
 	if err != nil {
 		return err
 	}

@@ -47,6 +47,9 @@ watch:
 	if cfg.Worker.Backend != "codex" || cfg.Worker.EffectiveCommand() != "codex" {
 		t.Fatalf("legacy worker defaults changed: %+v", cfg.Worker)
 	}
+	if cfg.Worker.AppServer.Enabled || cfg.Worker.AppServer.GoalTokenBudget != 200000 || cfg.Worker.AppServer.GoalTimeBudget.Duration != 2*time.Hour {
+		t.Fatalf("unexpected opt-in App Server defaults: %+v", cfg.Worker.AppServer)
+	}
 	if cfg.Completion.AutoMerge {
 		t.Fatal("auto merge must be opt-in")
 	}
@@ -62,6 +65,24 @@ watch:
 	if cfg.Worktrees.CompletedMaxAge.Duration != 7*24*time.Hour || cfg.Worktrees.FailedMaxAge.Duration != 30*24*time.Hour ||
 		cfg.Worktrees.BlockedMaxAge.Duration != 0 || cfg.Worktrees.NeedsInputMaxAge.Duration != 0 {
 		t.Fatalf("unexpected worktree retention defaults: %+v", cfg.Worktrees)
+	}
+}
+
+func TestLoadAppServerGoalOptInAndRejectsUnsafeBudgets(t *testing.T) {
+	dir := writeConfig(t, "version: 3\ngithub:\n  repo: owner/repo\nworker:\n  backend: codex\n  app_server:\n    enabled: true\n    goal_token_budget: 50000\n    goal_time_budget: 45m\n")
+	cfg, err := Load(dir)
+	if err != nil || !cfg.Worker.AppServer.Enabled || cfg.Worker.AppServer.GoalTokenBudget != 50000 || cfg.Worker.AppServer.GoalTimeBudget.Duration != 45*time.Minute {
+		t.Fatalf("app_server=%+v err=%v", cfg.Worker.AppServer, err)
+	}
+	for _, fragment := range []string{
+		"backend: claude-code\n  app_server:\n    enabled: true",
+		"backend: codex\n  app_server:\n    enabled: true\n    goal_token_budget: 0",
+		"backend: codex\n  app_server:\n    enabled: true\n    goal_time_budget: 0s",
+	} {
+		dir := writeConfig(t, "version: 3\ngithub:\n  repo: owner/repo\nworker:\n  "+fragment+"\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "app_server") {
+			t.Fatalf("unsafe App Server config accepted: %s: %v", fragment, err)
+		}
 	}
 }
 

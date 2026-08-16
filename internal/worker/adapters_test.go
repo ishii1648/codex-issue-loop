@@ -31,6 +31,26 @@ func TestBackendFactoryAndCapabilities(t *testing.T) {
 	}
 }
 
+func TestBackendFactoryEnablesGoalOnlyWhenConfiguredAndSupported(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Worker.AppServer.Enabled = true
+	supported, unsupported := true, false
+	backend, err := NewBackend(cfg, FactoryOptions{AppServerGoalSupported: &unsupported})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(Codex); !ok || backend.Capabilities().ThreadGoal {
+		t.Fatalf("unsupported capability did not fall back to codex exec: %T %+v", backend, backend.Capabilities())
+	}
+	backend, err = NewBackend(cfg, FactoryOptions{AppServerGoalSupported: &supported})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(CodexAppServer); !ok || !backend.Capabilities().ThreadGoal {
+		t.Fatalf("supported capability did not select App Server: %T %+v", backend, backend.Capabilities())
+	}
+}
+
 func TestClaudeCodeInitialAndResumePassModelAndEffortWithoutPromptArgv(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "claude")
