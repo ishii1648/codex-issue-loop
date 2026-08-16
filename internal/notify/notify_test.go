@@ -55,7 +55,6 @@ func (a *sequenceAdapter) Send(_ context.Context, message Message) error {
 }
 
 func TestDispatcherDeduplicatesRetriesAndRedactsFailures(t *testing.T) {
-	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
 	cfg := notificationConfig()
 	store := state.Store{Dir: t.TempDir(), RepoID: "repo-id", RepoPath: "/repo", Secrets: []string{"secret-token"}, NotificationsEnabled: true}
 	if err := store.Initialize(); err != nil {
@@ -75,13 +74,15 @@ func TestDispatcherDeduplicatesRetriesAndRedactsFailures(t *testing.T) {
 	if len(snapshot.Notifications) != 1 {
 		t.Fatalf("duplicate outbox entries: %+v", snapshot.Notifications)
 	}
+	delivery := snapshot.Notifications["needs_input:req-1"]
+	now := delivery.NextAttempt
 	adapter := &sequenceAdapter{errors: []error{errors.New("provider rejected secret-token"), nil}}
 	dispatcher := &Dispatcher{Config: cfg, Store: store, Adapter: adapter, Now: func() time.Time { return now }}
 	if err := dispatcher.Dispatch(context.Background()); err == nil {
 		t.Fatal("provider failure was not reported to the supervisor logger")
 	}
 	snapshot, _ = store.Load()
-	delivery := snapshot.Notifications["needs_input:req-1"]
+	delivery = snapshot.Notifications["needs_input:req-1"]
 	if delivery.Attempts != 1 || delivery.Status != "pending" || delivery.LastError == "" || strings.Contains(delivery.LastError, "secret-token") {
 		t.Fatalf("retry state=%+v", delivery)
 	}
