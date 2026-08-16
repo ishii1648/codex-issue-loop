@@ -56,8 +56,13 @@ chmod 0755 agent-loop_Darwin_arm64
 ./agent-loop_Darwin_arm64 install --json
 
 agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loop"
+"$agent_loop_bin" init --json
+"$agent_loop_bin" init --apply --json
+"$agent_loop_bin" init --json
 "$agent_loop_bin" doctor --json
 ```
+
+`init`はCodexとClaude Codeのuser scopeへ、`.agent-loop.yaml`があるrepositoryの変更依頼をIssueへ委譲するルールを設定します。preview、対象agentの限定、競合、backupと復旧は[user-scope Issue作成ルール](docs/user-rules.md)を参照してください。`install`、`update`、`doctor`、`uninstall`がこの設定を暗黙に変更することはありません。
 
 更新・rollbackを含む詳細は[Release・install・update](docs/release.md)を参照してください。
 
@@ -191,6 +196,6 @@ schema migrationが必要な場合はloopを開始せず、[migration runbook](d
 
 ## 詳細ドキュメント
 
-- 運用: [Mac mini常駐運用](docs/mac-mini-runbook.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[通知](docs/notifications.md)、[worktree](docs/worktree-lifecycle.md)
+- 運用: [Mac mini常駐運用](docs/mac-mini-runbook.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[通知](docs/notifications.md)、[worktree](docs/worktree-lifecycle.md)
 - 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
 - 開発: [Build・test](Makefile)、[実装状況](docs/implementation.md)、[脅威モデル](docs/threat-model.md)、[セキュリティ運用](docs/security-runbook.md)、[CLI互換性](docs/compatibility.md)

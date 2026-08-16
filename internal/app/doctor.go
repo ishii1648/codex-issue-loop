@@ -22,6 +22,7 @@ import (
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 )
 
 const doctorSchemaVersion = 1
@@ -128,6 +129,7 @@ func diagnoseSchemas(l layout.Layout) ([]diagnostic, bool) {
 
 func diagnoseHost(ctx context.Context, l layout.Layout) []diagnostic {
 	diagnostics := diagnoseInstallation(l)
+	diagnostics = append(diagnostics, diagnoseUserRules()...)
 	paths := map[string]string{}
 	for _, name := range []string{"git", "gh", "launchctl", "pmset"} {
 		path, err := exec.LookPath(name)
@@ -197,6 +199,46 @@ func diagnoseHost(ctx context.Context, l layout.Layout) []diagnostic {
 		}
 	}
 	return diagnostics
+}
+
+func diagnoseUserRules() []diagnostic {
+	config, err := userrules.ConfigFromEnvironment()
+	if err != nil {
+		return []diagnostic{failedDiagnostic("USER_RULES_INSPECTION_FAILED", "host", "", "user-scope Issue作成ルールを検査できません", err.Error(),
+			command("変更計画を確認します", "agent-loop init --json"))}
+	}
+	report, err := userrules.Plan(config, []userrules.Agent{userrules.AgentCodex, userrules.AgentClaude})
+	if err != nil {
+		return []diagnostic{failedDiagnostic("USER_RULES_INSPECTION_FAILED", "host", "", "user-scope Issue作成ルールを検査できません", err.Error(),
+			command("変更計画を確認します", "agent-loop init --json"))}
+	}
+	diagnostics := make([]diagnostic, 0, len(report.Targets))
+	for _, target := range report.Targets {
+		name := strings.ToUpper(string(target.Agent))
+		if target.Status == userrules.StatusCurrent {
+			diagnostics = append(diagnostics, passedDiagnostic("USER_RULE_"+name+"_CURRENT", "host", "", string(target.Agent)+"のuser-scope Issue作成ルールは最新です", target.ResolvedPath))
+			continue
+		}
+		code := "USER_RULE_" + name + "_" + strings.ToUpper(string(target.Status))
+		remediations := []remediation{command("変更計画を確認します", "agent-loop init --agents "+string(target.Agent)+" --json")}
+		if target.Status != userrules.StatusConflict {
+			remediations = append(remediations, command("確認したuser-scope ruleを適用します", "agent-loop init --agents "+string(target.Agent)+" --apply --json"))
+		} else {
+			remediations = append(remediations, instruction("競合内容を手動で確認してください。agent-loopは管理外の内容を上書きしません"))
+		}
+		diagnostics = append(diagnostics, failedDiagnostic(code, "host", "", string(target.Agent)+"のuser-scope Issue作成ルールを初期化する必要があります", joinNonEmpty(target.ResolvedPath, target.Detail), remediations...))
+	}
+	return diagnostics
+}
+
+func joinNonEmpty(values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, ": ")
 }
 
 func diagnoseInstallation(l layout.Layout) []diagnostic {
