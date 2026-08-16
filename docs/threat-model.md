@@ -17,7 +17,7 @@
 1. `gh`がIssueを取得する。タイトル512 bytes、本文64 KiB、最新20コメント・各8 KiBに制限し、NULを含む制御文字を除去する。
 2. IssueはJSON化して明示的なuntrusted data境界内へ置く。Issue内の命令、権限拡張、資格情報要求、prompt境界の上書きを実行しないようworkerの優先順位を固定する。
 3. worktree名はIssue番号と限定文字のslugから生成する。リポジトリID、Issue番号、Git ref、絶対worktree rootを検証し、root外への逸脱とworktreeパスのsymbolic linkを拒否する。
-4. Codexは`workspace-write`または`read-only` sandbox、`approval_policy=never`相当で実行する。`danger-full-access`と承認による実行範囲拡張は設定で拒否する。
+4. Codexは`workspace-write`または`read-only` sandbox、`approval_policy=never`相当で実行する。`danger-full-access`と承認による実行範囲拡張は設定で拒否する。command networkは既定無効で、localhost-only opt-in時も固定network proxy、user config隔離、hosted network tool無効化を同時に強制する。
 5. stdout/stderr、worker result、state snapshot、transaction、event payload、GitHubへ投稿する質問・失敗理由は、既知token形式と`security.redact_env`で指定した環境変数の値をマスクする。
 6. stateディレクトリとrunディレクトリは0700、plist・registry・state・event・transaction・ログは0600とする。壊れた永続状態のquarantineも同じprivate tree内に保持する。
 
@@ -30,6 +30,7 @@
 | 引数・path injection | `../`、悪意あるref、symlinkによるroot逸脱 | shell不使用、argv分離、ref検証、canonical path、root内判定、symlink拒否 | 検査後のTOCTOU。0700と専用macOSユーザーで他プロセスを制限する |
 | 資格情報漏えい | tokenがログ、state、Issueコメントに混入 | 多層redaction、秘密を回答として拒否、0600/0700 | 未登録形式や4文字未満の値、redaction前に外部CLI自身が送るデータ |
 | 過大権限 | GitHub tokenやmacOSユーザーが管理者 | 最小権限runbook、sandbox固定、承認なし | Codexはworktree内のソースを変更・pushできる。branch protectionとレビューが必要 |
+| command network bypass | `network_access=true`だけを有効化、upstream proxy、Web Search/MCP/app経由で外部送信 | 固定localhost allowlist、Codex network proxy必須、strict config、user config無視、hosted tool無効化、capability fail-closed | localhostは全port許可のため別loopback service探索が可能。専用標準ユーザー、firewall、brokerを下位境界にする |
 | 永続データ漏えい | Time Machineやサポートbundleがログを収集 | private mode、秘密を保存前にredact、backup手順 | 既存のM2以前のstate/logには遡及redactionしない |
 | 依存関係の脆弱性 | 到達可能な脆弱関数 | CIの`govulncheck`、`go.sum`、Dependabot等の更新PR | 未公開脆弱性と静的解析で到達性を判定できない呼び出し |
 

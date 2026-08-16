@@ -113,6 +113,14 @@ sleep 3
 "$agent_loop_bin" retry --repo "$PWD" --issue 123 --json
 ```
 
+workerが外部環境前提を理由に返した`blocked`は、前提をoperatorが解消し、active processがないことを確認した後だけ、別の明示操作で同じworktree・branch・sessionから再開します。PR conflict、手動exclusion、security block、completed/closed Issueには適用されません。
+
+```sh
+"$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
+```
+
+local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_network` localhost-only policyへopt-inできます。既定はnetwork無効です。設定と残余リスクは[localhost-only command network](docs/localhost-network.md)を参照してください。
+
 ### 4. 複数リポジトリを並列実行する
 
 CLIのinstallはMacごとに1回だけ行います。各リポジトリへ`.agent-loop.yaml`とラベルを用意し、それぞれを`register`、`start`します。

@@ -169,6 +169,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-038**: preflightは初回worker内の論理フェーズとして実行し、そのまま実装へ進めること。profile判定だけを目的とする別workerを必須にしないこと。
 - **FR-039**: profile判定が曖昧な場合は、ユーザーへ質問せず `extended` を選択すること。`extended` は必要に応じてsupervisor管理のcontinuationを許可すること。
 - **FR-039-A**: worker timeout時はprocess groupへ穏当な終了要求を送り、設定可能なgrace periodを超えた場合だけ強制終了すること。子processを残さず、既存worktreeと有効な作業を保持すること。
+- **FR-039-B**: command networkは既定無効とし、Codex localhost-only opt-inではcommand/child processのnetworkを必須proxy経由のexact `localhost` / `127.0.0.1`へ限定し、capability・設定・proxy初期化失敗時はworker開始前にfail closedすること。
+- **FR-039-C**: command proxyが保護しないWeb Search、Browser/Computer Use、MCP、apps/plugins等をlocalhost-only workerで無効化し、proxyの保証範囲を越えて保護済みと扱わないこと。
 
 ### 6.5 GitHubへの反映
 
@@ -180,6 +182,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-045**: 対象リポジトリのmanifestでauto mergeを選択でき、既定は無効とすること。有効時はbase branchへの追随とCI再確認を行い、conflict時は既存worktree・branch・Pull Requestを維持した永続的な自動復旧を開始すること。
 - **FR-045-A**: conflict recoveryはimmutableなbase SHA、競合file、試行履歴を永続化し、workerへIssue・元PR差分・base追加commit・競合内容・検証要件を渡すこと。workerはGit公開操作を行わず、supervisorが未解消entry、marker、base SHA、path scope、検証結果を確認して通常pushすること。
 - **FR-045-B**: `blocked`はbase単位の復旧budget超過または非回復障害の最終escalationに限定し、明示的な`agent-loop retry --repo <path> --issue <number>`でdurable stateとGitHubを監査付きで再同期できること。
+- **FR-045-C**: worker起因の環境`blocked`だけを、operatorの前提解消確認とactive process不在、run/worktree/branch/resource/PR整合性検査後に、明示的なIssue番号を持つ別CLI操作で同一成果物から再開できること。conflict、手動/security block、running/completed/closed-without-mergeは拒否すること。
 - **FR-046**: Issueを完了扱いにし、設定に応じてcloseするのは対応Pull Requestのmergeを確認した後とすること。
 
 ### 6.6 監視と質問

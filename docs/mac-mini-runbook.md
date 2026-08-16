@@ -219,6 +219,14 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 `retry`は無関係なblocked原因を初期化せず、保存済みbranchとPRが一致する場合だけ`resolving_conflict`へ戻す。新しいbranch/PRやforce pushは作らない。
 
+workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。導入前のworker blockだけは`failure_kind=issue`とsupervisor生成の`worker blocked` errorからCLIがprovenanceを正規化し、失われたleaseを`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource leaseとGitHub label/PRが一致するときだけ次を使う。
+
+```sh
+agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
+```
+
+この操作はdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。GitHub sync失敗時はstateを手編集せず、network復旧後にsupervisorを起動して収束させる。`conflict_recovery`がある場合は`retry`、手動`blocked`/`do-not-automate`、security block、running/completed、closed-without-merge、PR不整合は修復・再開せず原因別runbookへ戻る。
+
 ### Git transportまたはcommit署名で停止する
 
 `git config --global --get-regexp '^url\..*\.insteadof$'`でHTTPS URLがSSHへ書き換えられていないか確認する。LaunchAgentでSSH agentに依存しない運用では、対象repositoryのremoteをcredential helperで扱えるHTTPS URLに直す。URLやtokenをlogへ出さない。

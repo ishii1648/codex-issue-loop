@@ -172,9 +172,10 @@ func (f *fakePublisher) Publish(_ context.Context, _ config.Config, _ gh.Issue, 
 }
 
 type recordingWorker struct {
-	result        worker.Result
-	runPrompts    []string
-	resumePrompts []string
+	result            worker.Result
+	runPrompts        []string
+	resumePrompts     []string
+	resumeConfigPaths []string
 }
 
 type scriptedWorker struct {
@@ -214,8 +215,9 @@ func (f *recordingWorker) Run(_ context.Context, _ config.Config, _ gh.Issue, _ 
 	return f.result, nil
 }
 
-func (f *recordingWorker) Resume(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
+func (f *recordingWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
 	f.resumePrompts = append(f.resumePrompts, prompt)
+	f.resumeConfigPaths = append(f.resumeConfigPaths, cfg.RepoPath)
 	return f.result, nil
 }
 
@@ -263,6 +265,96 @@ func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	}
 	if scripted.runs != 1 || scripted.resumes != 0 {
 		t.Fatalf("runs=%d resumes=%d", scripted.runs, scripted.resumes)
+	}
+}
+
+func TestWorkerEnvironmentBlockPreservesContinuationAndResourceState(t *testing.T) {
+	result := worker.Result{
+		Version: 1, Status: "blocked", ExecutionProfile: "extended",
+		Summary: "local HTTP binding is unavailable", SessionID: "session-blocked",
+	}
+	loop, _ := testLoop(t, result)
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := snapshot.Issues["1"]
+	if issue.Status != "blocked" || issue.SessionID != "session-blocked" || issue.Session == nil || issue.Lease == nil {
+		t.Fatalf("continuation state was not preserved: %+v", issue)
+	}
+	if issue.BlockedCause == nil || issue.BlockedCause.Origin != "worker" || issue.BlockedCause.Kind != "environment" || !issue.BlockedCause.Resumable {
+		t.Fatalf("blocked provenance=%+v", issue.BlockedCause)
+	}
+	if len(issue.DeclaredResources) == 0 || len(issue.Lease.ResolvedResources) == 0 {
+		t.Fatalf("resource metadata was not preserved: %+v", issue.Lease)
+	}
+}
+
+func TestEnvironmentResumeContinuesSameSessionAndWorktree(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "verification pending", Retry: &worker.Retry{Reason: "verification pending"}}
+	loop, _ := testLoop(t, result)
+	worktreePath := loop.Config.RepoPath
+	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run_environment", Slot: 0,
+		DeclaredResources: []string{"repo:*"}, ResolvedResources: []string{"repo:*"}, ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("environment_resume_requested", 1, "run_environment", nil, func(s *state.Snapshot) error {
+		item := s.Issues["1"]
+		item.Status = "environment_resume_pending"
+		item.Worktree = worktreePath
+		item.Branch = "codex/issue-1-test"
+		item.ExecutionProfile = "extended"
+		item.SessionID = "session-blocked"
+		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-blocked"}
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "CDP unavailable", BlockedAt: time.Now().UTC()}
+		item.EnvironmentResume = &state.EnvironmentResume{ID: "resume_1", Status: "github_synced", ConfirmedAt: time.Now().UTC()}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &recordingWorker{result: result}
+	loop.Worker = recorder
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	if len(recorder.resumePrompts) != 1 || len(recorder.runPrompts) != 0 || recorder.resumeConfigPaths[0] != worktreePath {
+		t.Fatalf("run=%d resume=%d paths=%v", len(recorder.runPrompts), len(recorder.resumePrompts), recorder.resumeConfigPaths)
+	}
+	if !strings.Contains(recorder.resumePrompts[0], "CDP unavailable") {
+		t.Fatalf("resume prompt=%q", recorder.resumePrompts[0])
+	}
+	snapshot, _ := loop.Store.Load()
+	if item := snapshot.Issues["1"]; item.RunID != "run_environment" || item.Worktree != worktreePath || item.SessionID != "session-blocked" || item.Lease == nil {
+		t.Fatalf("resume replaced durable state: %+v", item)
+	}
+}
+
+func TestEnvironmentResumeGitHubSyncConvergesBeforeWorkerStarts(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	_, err := loop.Store.Update("environment_resume_requested", 1, "run_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{
+			Number: 1, Status: "environment_resume_pending", RunID: "run_1", GitHubSync: "environment_resume",
+			EnvironmentResume: &state.EnvironmentResume{ID: "resume_1", Status: "requested", ConfirmedAt: time.Now().UTC()},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	snapshot, _ := loop.Store.Load()
+	item := snapshot.Issues["1"]
+	if !github.markedRunning || item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.EnvironmentResume.Status != "github_synced" {
+		t.Fatalf("github=%+v item=%+v", github, item)
 	}
 }
 

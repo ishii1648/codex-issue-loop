@@ -42,6 +42,8 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | `REGISTRATION_MISSING` | repositoryが未登録 | `agent-loop register --repo PATH` |
 | `REGISTERED_BINARY_MISSING` | 登録時の絶対command pathが移動 | install/update後に同じrepositoryを再register |
 | `FORMATTER_GO_NOT_REGISTERED` / `FORMATTER_GO_UNAVAILABLE` / `FORMATTER_GO_CAPABILITY_MISSING` | 有効なbuilt-in Go formatterの固定pathが未登録、実行不能、またはstdin整形capability不一致 | loop停止中にGo toolchainとPATHを確認し、同じrepositoryを再registerしてdoctorを再実行 |
+| `CODEX_LOCALHOST_NETWORK_PROXY_READY` | opt-in localhost-only workerに必要なstrict config、user config isolation、network proxy、hosted tool disable capabilityを確認済み | なし。実機E2Eは別途実行する |
+| `CODEX_LOCALHOST_NETWORK_PROXY_UNAVAILABLE` | 設定はlocalhost-onlyだがCodex runtimeに必須capabilityがない | loopを開始せずCodex CLIを更新し、再register後にdoctorを再実行 |
 | `FORMATTER_GO_AVAILABLE` / `FORMATTER_GO_DISABLED` | Go formatter capabilityが利用可能、または明示的に無効 | 対応不要 |
 | `LAUNCH_AGENT_MISSING` / `LAUNCH_AGENT_UNREADABLE` | plistがない、または読めない | 再register、所有者・permission確認 |
 | `GITHUB_REPOSITORY_INACCESSIBLE` | repository参照権限または認証不足 | `gh auth status`とtoken/GitHub App権限を確認 |

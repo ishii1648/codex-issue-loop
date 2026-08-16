@@ -156,6 +156,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.answer(l, args)
 	case "retry":
 		return a.retryConflict(ctx, l, args)
+	case "resume-blocked":
+		return a.resumeBlocked(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -195,6 +197,7 @@ Commands:
   watch         Wait for needs_input, blocked, stopped, or optional idle
   answer        Record an answer for a pending request
   retry         Explicitly resume a blocked Pull Request conflict recovery
+  resume-blocked  Explicitly resume a worker environment-blocked Issue
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree
@@ -1124,6 +1127,203 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 	})
 }
 
+func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("resume-blocked", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	repo := fs.String("repo", "", "repository path")
+	issueNumber := fs.Int("issue", 0, "environment-blocked Issue number")
+	confirmed := fs.Bool("confirm-prerequisite-resolved", false, "confirm the external environment prerequisite is resolved")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if *issueNumber <= 0 {
+		return exitError{2, fmt.Errorf("--issue must be a positive Issue number")}
+	}
+	if !*confirmed {
+		return exitError{2, fmt.Errorf("--confirm-prerequisite-resolved is required")}
+	}
+	entry, err := a.resolvePath(l, *repo)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(entry.RepoPath)
+	if err != nil {
+		return err
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
+	snapshot, err := store.Load()
+	if err != nil {
+		return err
+	}
+	current := snapshot.Issues[strconv.Itoa(*issueNumber)]
+	if current == nil {
+		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
+	}
+	if current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" && current.Status != "blocked" {
+		if current.Status == "environment_resume_pending" && current.GitHubSync == "environment_resume" {
+			client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
+			if err := client.MarkEnvironmentResume(ctx, cfg, *issueNumber, current.EnvironmentResume.ID); err != nil {
+				return fmt.Errorf("sync pending environment resume to GitHub: %w", err)
+			}
+			_, err = store.Update("github_state_synced", *issueNumber, current.RunID, map[string]string{"state": "environment_resume", "resume_id": current.EnvironmentResume.ID}, func(s *state.Snapshot) error {
+				item := s.Issues[strconv.Itoa(*issueNumber)]
+				if item != nil && item.GitHubSync == "environment_resume" && item.EnvironmentResume != nil && item.EnvironmentResume.ID == current.EnvironmentResume.ID {
+					item.GitHubSync = ""
+					item.EnvironmentResume.Status = "github_synced"
+					item.UpdatedAt = time.Now().UTC()
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return a.output(*jsonOut, map[string]any{
+			"issue": *issueNumber, "status": current.Status, "resume_id": current.EnvironmentResume.ID,
+			"branch": current.Branch, "worktree": current.Worktree, "idempotent": true,
+		})
+	}
+	if current.Status != "blocked" || current.GitHubSync != "" {
+		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before environment resume (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
+	}
+	legacyWorkerBlock := current.BlockedCause == nil && current.FailureKind == "issue" && strings.Contains(current.LastError, "worker blocked")
+	if !legacyWorkerBlock && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
+		return exitError{4, fmt.Errorf("Issue #%d is not a resumable worker environment block", *issueNumber)}
+	}
+	if current.ConflictRecovery != nil {
+		return exitError{4, fmt.Errorf("Issue #%d is a Pull Request conflict block; use agent-loop retry", *issueNumber)}
+	}
+	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && !legacyWorkerBlock) {
+		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
+	}
+	controller := a.ProcessController
+	if controller == nil {
+		controller = supervisor.OSProcessGroupController{}
+	}
+	pgid := current.WorkerPGID
+	if pgid <= 1 {
+		pgid = current.WorkerPID
+	}
+	if controller.Alive(current.WorkerPID) || controller.GroupAlive(pgid) {
+		return exitError{4, fmt.Errorf("Issue #%d still has an active worker process", *issueNumber)}
+	}
+	for _, request := range snapshot.PendingRequests {
+		if request != nil && request.IssueNumber == *issueNumber && request.Status == "pending" {
+			return exitError{4, fmt.Errorf("Issue #%d has a pending manual answer request and is not an environment-blocked resume candidate", *issueNumber)}
+		}
+	}
+	manager := worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]}
+	inspection, err := manager.Inspect(ctx, cfg, current.Worktree, current.Branch)
+	if err != nil {
+		return fmt.Errorf("inspect environment resume worktree: %w", err)
+	}
+	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists {
+		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to resume: %+v", inspection)}
+	}
+	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
+	remote, err := client.Inspect(ctx, cfg, *issueNumber, current.Branch)
+	if err != nil {
+		return fmt.Errorf("inspect environment-blocked Issue: %w", err)
+	}
+	if !strings.EqualFold(remote.Issue.State, "open") {
+		return exitError{4, fmt.Errorf("Issue #%d is not open", *issueNumber)}
+	}
+	labels := map[string]bool{}
+	for _, label := range remote.Issue.Labels {
+		labels[strings.ToLower(label)] = true
+	}
+	blockedLabel := ""
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			blockedLabel = strings.ToLower(label)
+			continue
+		}
+		if labels[strings.ToLower(label)] {
+			return exitError{4, fmt.Errorf("Issue #%d has manual exclusion label %q", *issueNumber, label)}
+		}
+	}
+	if blockedLabel == "" || !labels[blockedLabel] {
+		return exitError{4, fmt.Errorf("Issue #%d does not have the supervisor-owned blocked label", *issueNumber)}
+	}
+	if labels[strings.ToLower(cfg.GitHub.DoneLabel)] || labels[strings.ToLower(cfg.GitHub.FailedLabel)] || labels[strings.ToLower(cfg.GitHub.NeedsInputLabel)] {
+		return exitError{4, fmt.Errorf("Issue #%d has an incompatible terminal or needs-input label", *issueNumber)}
+	}
+	if current.PullRequestURL == "" {
+		if len(remote.PullRequests) != 0 {
+			return exitError{4, fmt.Errorf("Issue #%d has a Pull Request not recorded in durable state", *issueNumber)}
+		}
+	} else {
+		matched := len(remote.PullRequests) == 1 && remote.PullRequests[0].URL == current.PullRequestURL &&
+			strings.EqualFold(remote.PullRequests[0].State, "open") && remote.PullRequests[0].HeadRefName == current.Branch
+		if !matched {
+			return exitError{4, fmt.Errorf("Issue #%d saved Pull Request is inconsistent with GitHub", *issueNumber)}
+		}
+	}
+
+	resumeID := state.NewID("resume")
+	now := time.Now().UTC()
+	previousReason := current.LastError
+	if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
+		previousReason = current.BlockedCause.Reason
+	}
+	_, err = store.Update("environment_resume_requested", *issueNumber, current.RunID, map[string]any{
+		"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(*issueNumber)]
+		if item == nil || item.RunID != current.RunID || item.Status != "blocked" || item.GitHubSync != "" {
+			return fmt.Errorf("Issue #%d changed while environment resume was being prepared", *issueNumber)
+		}
+		item.Status = "environment_resume_pending"
+		item.GitHubSync = "environment_resume"
+		if item.BlockedCause == nil && legacyWorkerBlock {
+			item.BlockedCause = &state.BlockedCause{
+				Origin: "worker", Kind: "environment", Resumable: true,
+				Reason: item.LastError, BlockedAt: item.UpdatedAt,
+			}
+		}
+		if item.Lease == nil && legacyWorkerBlock {
+			item.LeaseGeneration++
+			owner := state.LeaseOwner{RunID: item.RunID, Generation: item.LeaseGeneration}
+			item.Lease = &state.ResourceLease{
+				Owner: owner, Slot: 0, DeclaredResources: []string{},
+				ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now,
+			}
+		}
+		item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: item.LastError}
+		item.RetryAfter = nil
+		item.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if err := client.MarkEnvironmentResume(ctx, cfg, *issueNumber, resumeID); err != nil {
+		return fmt.Errorf("sync environment resume to GitHub (durable resume remains pending): %w", err)
+	}
+	updated, err := store.Update("github_state_synced", *issueNumber, current.RunID, map[string]string{"state": "environment_resume", "resume_id": resumeID}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(*issueNumber)]
+		if item != nil && item.GitHubSync == "environment_resume" && item.EnvironmentResume != nil && item.EnvironmentResume.ID == resumeID {
+			item.GitHubSync = ""
+			item.EnvironmentResume.Status = "github_synced"
+			item.UpdatedAt = time.Now().UTC()
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	status := "environment_resume_pending"
+	if item := updated.Issues[strconv.Itoa(*issueNumber)]; item != nil {
+		status = item.Status
+	}
+	return a.output(*jsonOut, map[string]any{
+		"issue": *issueNumber, "status": status, "resume_id": resumeID,
+		"branch": current.Branch, "worktree": current.Worktree, "session_id": current.SessionID,
+		"dirty": inspection.Dirty, "unpushed_commits": inspection.UnpushedCommits,
+	})
+}
+
 func (a App) logs(l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
@@ -1182,6 +1382,9 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	workerCompatibility := compat.ProbeBackend(ctx, backendID, workerPath)
 	if !workerCompatibility.OK() {
 		return fmt.Errorf("unsupported %s worker runtime: %s", backendID, compatibilityDetail(workerCompatibility))
+	}
+	if cfg.Worker.CommandNetwork.LocalhostOnly() && !workerCompatibility.Has("localhost_network_proxy") {
+		return fmt.Errorf("Codex runtime does not provide the required localhost network proxy capability; worker was not started")
 	}
 	if entry.WorkerVersion != "" && entry.WorkerVersion != workerCompatibility.Version {
 		return fmt.Errorf("worker runtime version drift detected for %s (registered=%s current=%s); run doctor and re-register after compatibility review", backendID, entry.WorkerVersion, workerCompatibility.Version)

@@ -189,7 +189,7 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 
 	ctx, cancel := context.WithTimeout(parent, cfg.Worker.Timeout.Duration)
 	defer cancel()
-	args := []string{"exec", "--sandbox", cfg.Worker.Sandbox, "--config", `approval_policy="never"`}
+	args := codexExecBaseArgs(cfg)
 	if sessionID != "" {
 		args = append(args, "resume", "--json", "--output-schema", schemaPath, "--output-last-message", resultPath)
 		if cfg.Worker.Model != "" {
@@ -264,6 +264,39 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 		return result, fmt.Errorf("codex worker exited unsuccessfully: %w", runErr)
 	}
 	return result, nil
+}
+
+func codexExecBaseArgs(cfg config.Config) []string {
+	args := []string{"exec", "--sandbox", cfg.Worker.Sandbox, "--config", `approval_policy="never"`}
+	if !cfg.Worker.CommandNetwork.LocalhostOnly() {
+		return args
+	}
+	// This is a closed policy assembled by the adapter, not arbitrary config
+	// passthrough. --ignore-user-config removes user MCP/plugin expansion while
+	// auth remains available, and --strict-config makes an older Codex fail
+	// before a model turn or command can start.
+	args = append(args,
+		"--ignore-user-config", "--strict-config",
+		"--config", `sandbox_workspace_write.network_access=true`,
+		"--config", `features.network_proxy.enabled=true`,
+		"--config", `features.network_proxy.domains={localhost="allow","127.0.0.1"="allow"}`,
+		"--config", `features.network_proxy.allow_local_binding=false`,
+		"--config", `features.network_proxy.allow_upstream_proxy=false`,
+		"--config", `features.network_proxy.dangerously_allow_all_unix_sockets=false`,
+		"--config", `features.network_proxy.dangerously_allow_non_loopback_proxy=false`,
+		"--config", `features.network_proxy.enable_socks5_udp=false`,
+		"--config", `features.network_proxy.unix_sockets={}`,
+		"--config", `tools.web_search=false`,
+		"--config", `mcp_servers={}`,
+	)
+	for _, feature := range []string{
+		"apps", "browser_use", "browser_use_external", "computer_use",
+		"in_app_browser", "image_generation", "multi_agent", "plugins",
+		"remote_plugin", "skill_mcp_dependency_install", "skill_search", "tool_suggest",
+	} {
+		args = append(args, "--disable", feature)
+	}
+	return args
 }
 
 func waitForProcess(ctx context.Context, cmd *exec.Cmd, timeout, grace time.Duration) error {
