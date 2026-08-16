@@ -129,7 +129,7 @@ func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 }
 
 func TestUntilIdleWaitsForPullRequestLifecycle(t *testing.T) {
-	for _, status := range []string{"awaiting_checks", "awaiting_merge"} {
+	for _, status := range []string{"awaiting_checks", "awaiting_merge", "resolving_conflict"} {
 		t.Run(status, func(t *testing.T) {
 			snapshot := Snapshot{
 				Supervisor: Supervisor{State: "polling"},

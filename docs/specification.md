@@ -198,6 +198,10 @@ completion:
   auto_merge: false
   close_issue: true
 
+conflict_recovery:
+  max_attempts_per_base: 3
+  max_base_updates: 3
+
 worktrees:
   completed_max_age: 168h
   failed_max_age: 720h
@@ -241,6 +245,7 @@ security:
 - `git.worktree_root`を指定する場合は絶対pathとし、branch prefix、base branch、GitHub repository名はargv/refとして安全な形式だけを許可する。
 - `completion.create_draft_pr`の既定は`true`とする。`completion.auto_merge`の既定は`false`であり、`true`はdraft PR作成を前提とする。
 - `completion.auto_merge: false`ではCI成功後にPRをReady for reviewへ移し、人手のmergeを待つ。`true`ではbase branchへの追随とCI再確認後にsquash mergeする。
+- `conflict_recovery.max_attempts_per_base`は同じimmutable base SHAに対するworker試行上限、`max_base_updates`は1つのPRが自律追随するbase SHA世代数の上限とし、既定はいずれも3とする。
 - `completion.close_issue`はPRのmerge確認後にだけ適用し、既定は`true`とする。
 - worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、その他の非terminal状態は期間にかかわらず保持する。
 - event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
@@ -282,6 +287,7 @@ agent-loop <command> [options]
 | `status` | snapshot、launchd状態、GitHub状態の要約を返す |
 | `watch` | イベントを追跡する |
 | `answer` | 未回答requestへ回答を登録する |
+| `retry` | PR conflictで最終blockedになったIssueを監査付きで`resolving_conflict`へ戻す |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -358,6 +364,14 @@ agent-loop answer --request-id req_... --message-file -
 1. request IDと未回答状態を検証する
 2. 回答を原子的に保存する
 3. `answer_recorded` イベントを追記する
+
+### 6.6 retry
+
+```sh
+agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
+```
+
+対象Issueが非activeな`blocked`で、原因がPR conflictであることを確認する。保存済みworktree、branch、open PRの対応をGitHubとGitで検査し、整合する場合だけ試行budgetを明示的に再開する。先にdurable stateへ`conflict_recovery_retry_requested`とGitHub同期intentを書き、blocked labelの除去、running label、idempotency marker付きcommentを同期する。無関係なblocked原因、missing branch/PR、別branchのPRは拒否し、新しいbranch/PRやforce pushは作らない。
 4. supervisorをwakeする
 5. 既に同一回答が登録済みなら成功、異なる回答ならconflictとする
 
@@ -408,7 +422,10 @@ starting ──► polling ◄──────────────┐
         ▼        ▼         ▼        │
  awaiting_checks needs_input retry_wait
         │        │         │         │
-  CI成功│        │ answer  └─────────┘
+ PR dirty├─► resolving_conflict      │
+        │         │ worker/publish   │
+  CI成功│         └─► awaiting_checks│
+        │        │ answer  └─────────┘
         ▼        ▼
  awaiting_merge running
         │ merge確認
@@ -416,6 +433,7 @@ starting ──► polling ◄──────────────┐
    completed ───────────────────────► polling
 
 running ──fatal/nonrecoverable──► blocked
+resolving_conflict ──budget超過/nonrecoverable──► blocked
 ```
 
 `needs_input` はIssue単位の状態であり、`continue_after_needs_input: true` の場合、supervisor全体は別Issueのpollingを続けてよい。ただし同一worktreeは回答まで変更しない。
@@ -428,6 +446,7 @@ running ──fatal/nonrecoverable──► blocked
 - `retry_wait`
 - `awaiting_checks`
 - `awaiting_merge`
+- `resolving_conflict`
 - `completed`
 - `failed`
 - `blocked`
@@ -546,7 +565,11 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 5. `gh`が警告文を併記しても出力内の有効なPR URLを抽出し、異なるURLが複数なら拒否する。
 6. `statusCheckRollup`を定期的に確認し、未完了ならモデルを呼ばず待機、失敗なら同じworktreeと失敗理由をworkerへ返す。
 7. CI成功後にdraftをReady for reviewへ移す。`auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。
-8. `auto_merge: true`ではbase branchより遅れているPRを更新してCIを再確認し、conflictがなければsquash mergeする。merge確認後だけIssueを完了扱いにする。
+8. `auto_merge: true`ではbase branchより遅れているcleanなPRを既存のUpdate branch経路で更新する。`dirty`なら`resolving_conflict`へ移し、最新baseをfetchしてSHAを固定し、既存PR branchのworktreeへ`--no-commit` mergeする。
+9. conflict workerにはIssue本文・コメント、元PR diff、前回baseから対象baseまでのcommit、競合fileと内容、許可path、検証要件を渡す。workerは`git add`、commit、push、force push、branch/PR作成を行わない。
+10. supervisorは解消後に未解消indexが0件、markerなし、`MERGE_HEAD`と保存base SHAの一致、変更path scope、workerの検証証跡を確認する。supervisorだけがmerge commitと通常pushを行い、同じPRを`awaiting_checks`へ戻す。
+11. 再起動時は保存済みmergeを再準備せず、未解消状態、local commit済み、push済みを識別して再開する。push済みcommitを検出した場合はworker、commit、push、コメントを重複させない。
+12. workerの仕様選択は`needs_input`へ移し、回答後は同じ`resolving_conflict`へ戻る。同一base SHAの試行またはbase世代数が設定上限に達した場合と非回復障害だけを`blocked`にする。
 
 この境界により、モデルのsandboxをremote操作のために広げず、公開処理の引数、順序、冪等性をGo側で固定する。
 

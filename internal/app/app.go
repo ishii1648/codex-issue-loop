@@ -13,12 +13,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	assets "github.com/ishii1648/codex-issue-loop"
 	"github.com/ishii1648/codex-issue-loop/internal/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
@@ -152,6 +154,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.watch(ctx, l, args)
 	case "answer":
 		return a.answer(l, args)
+	case "retry":
+		return a.retryConflict(ctx, l, args)
 	case "notification-token":
 		return a.notificationToken(ctx, l, args)
 	case "logs":
@@ -192,6 +196,7 @@ Commands:
   status        Show durable and launchd state
   watch         Wait for needs_input, blocked, stopped, or optional idle
   answer        Record an answer for a pending request
+  retry         Explicitly resume a blocked Pull Request conflict recovery
   notification-token  Configure or clear a managed notification credential
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
@@ -959,7 +964,14 @@ func (a App) answer(l layout.Layout, args []string) error {
 		if issue == nil {
 			return fmt.Errorf("Issue #%d is missing from state", request.IssueNumber)
 		}
-		issue.Status, issue.RetryAfter, issue.UpdatedAt = "resume_pending", nil, now
+		resumeStatus := request.ResumeStatus
+		if resumeStatus == "" {
+			resumeStatus = "resume_pending"
+		}
+		issue.Status, issue.RetryAfter, issue.UpdatedAt = resumeStatus, nil, now
+		if resumeStatus == "resolving_conflict" {
+			issue.GitHubSync = "conflict_retry"
+		}
 		issue.Answers = append(issue.Answers, state.AnswerRecord{RequestID: request.ID, Question: request.Question, Answer: answer, AnsweredAt: now})
 		return nil
 	})
@@ -967,6 +979,117 @@ func (a App) answer(l layout.Layout, args []string) error {
 		return err
 	}
 	return a.output(*jsonOut, map[string]any{"request_id": *requestID, "recorded": true})
+}
+
+func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("retry", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	repo := fs.String("repo", "", "repository path")
+	issueNumber := fs.Int("issue", 0, "blocked Issue number")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if *issueNumber <= 0 {
+		return exitError{2, fmt.Errorf("--issue must be a positive Issue number")}
+	}
+	entry, err := a.resolvePath(l, *repo)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(entry.RepoPath)
+	if err != nil {
+		return err
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
+	snapshot, err := store.Load()
+	if err != nil {
+		return err
+	}
+	current := snapshot.Issues[strconv.Itoa(*issueNumber)]
+	if current == nil {
+		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
+	}
+	if current.Status != "blocked" || current.GitHubSync != "" {
+		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before retry (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
+	}
+	reason := strings.ToLower(current.LastError)
+	if current.ConflictRecovery == nil && !strings.Contains(reason, "merge conflict") && !strings.Contains(reason, "conflict recovery") {
+		return exitError{4, fmt.Errorf("Issue #%d was not blocked by a Pull Request conflict", *issueNumber)}
+	}
+	if current.Worktree == "" || current.Branch == "" || current.PullRequestURL == "" {
+		return exitError{4, fmt.Errorf("Issue #%d does not retain the worktree, branch, and Pull Request required for retry", *issueNumber)}
+	}
+	manager := worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]}
+	inspection, err := manager.Inspect(ctx, cfg, current.Worktree, current.Branch)
+	if err != nil {
+		return fmt.Errorf("inspect retry worktree: %w", err)
+	}
+	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists || !inspection.RemoteBranchExists {
+		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to retry: %+v", inspection)}
+	}
+	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
+	remote, err := client.Inspect(ctx, cfg, *issueNumber, current.Branch)
+	if err != nil {
+		return fmt.Errorf("inspect retry Pull Request: %w", err)
+	}
+	matched := false
+	for _, pr := range remote.PullRequests {
+		if pr.URL == current.PullRequestURL && strings.EqualFold(pr.State, "open") && pr.HeadRefName == current.Branch {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return exitError{4, fmt.Errorf("saved Pull Request is not open on branch %s: %s", current.Branch, current.PullRequestURL)}
+	}
+	retryID := state.NewID("retry")
+	_, err = store.Update("conflict_recovery_retry_requested", *issueNumber, current.RunID, map[string]any{
+		"retry_id": retryID, "pull_request_url": current.PullRequestURL, "previous_reason": current.LastError,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(*issueNumber)]
+		if item.Status != "blocked" || item.GitHubSync != "" {
+			return fmt.Errorf("Issue #%d changed while retry was being prepared", *issueNumber)
+		}
+		if item.ConflictRecovery == nil {
+			item.ConflictRecovery = &state.ConflictRecovery{
+				PullRequestURL: item.PullRequestURL, StartedAt: time.Now().UTC(),
+			}
+		}
+		item.Status = "resolving_conflict"
+		item.GitHubSync = "conflict_retry"
+		item.FailureKind = ""
+		item.LastError = "explicit conflict recovery retry requested"
+		item.RetryAfter = nil
+		item.ConflictRecovery.Attempts = 0
+		item.ConflictRecovery.BaseUpdates = 0
+		item.ConflictRecovery.RetryID = retryID
+		item.ConflictRecovery.LastReason = "explicit retry " + retryID
+		item.ConflictRecovery.UpdatedAt = time.Now().UTC()
+		item.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if err := client.MarkConflictRetry(ctx, cfg, *issueNumber, retryID); err != nil {
+		return fmt.Errorf("sync explicit conflict retry to GitHub (durable retry remains pending): %w", err)
+	}
+	_, err = store.Update("github_state_synced", *issueNumber, current.RunID, map[string]string{"state": "conflict_retry", "retry_id": retryID}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(*issueNumber)]
+		if item.GitHubSync == "conflict_retry" {
+			item.GitHubSync = ""
+		}
+		item.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return a.output(*jsonOut, map[string]any{
+		"issue": *issueNumber, "status": "resolving_conflict", "retry_id": retryID,
+		"branch": current.Branch, "pull_request_url": current.PullRequestURL,
+	})
 }
 
 func (a App) logs(l layout.Layout, args []string) error {
@@ -1079,6 +1202,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		Worker:         backend,
 		WorkerIdentity: identity,
 		Publisher:      publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
+		Conflicts:      conflict.Manager{GitPath: entry.Commands["git"]},
 		Logger:         log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
 		Notifications:  notify.NewDispatcher(cfg, store, notificationToken),
 	}

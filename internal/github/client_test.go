@@ -88,6 +88,37 @@ func TestPullRequestLifecycleCommands(t *testing.T) {
 	}
 }
 
+func TestMarkConflictRetryRemovesOnlyBlockedExclusionAndWritesIdempotencyMarker(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	logPath := filepath.Join(dir, "calls.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue edit") exit 0 ;;
+  "issue view") printf '%%s\n' '' ;;
+  "issue comment") exit 0 ;;
+  *) exit 2 ;;
+esac
+`, logPath)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	if err := (CLI{Path: fake}).MarkConflictRetry(context.Background(), cfg, 7, "retry_1"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(calls)
+	if !strings.Contains(text, "--add-label codex-loop:running") || !strings.Contains(text, "--remove-label blocked") || strings.Contains(text, "--remove-label do-not-automate") || !strings.Contains(text, "codex-issue-loop:conflict-retry:retry_1") {
+		t.Fatalf("unexpected calls:\n%s", text)
+	}
+}
+
 func TestPullRequestChecksStatus(t *testing.T) {
 	tests := []struct {
 		name       string

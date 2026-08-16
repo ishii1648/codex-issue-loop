@@ -50,6 +50,9 @@ watch:
 	if cfg.Completion.AutoMerge {
 		t.Fatal("auto merge must be opt-in")
 	}
+	if cfg.ConflictRecovery.MaxAttemptsPerBase != 3 || cfg.ConflictRecovery.MaxBaseUpdates != 3 {
+		t.Fatalf("unexpected conflict recovery defaults: %+v", cfg.ConflictRecovery)
+	}
 	if !cfg.Completion.CreateDraftPR || !cfg.Completion.CloseIssue {
 		t.Fatalf("unexpected completion defaults: %+v", cfg.Completion)
 	}
@@ -102,6 +105,20 @@ func TestLoadAutoMergePolicy(t *testing.T) {
 	dir = writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\ncompletion:\n  create_draft_pr: false\n  auto_merge: true\n")
 	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "auto_merge") {
 		t.Fatalf("auto merge without Pull Request was accepted: %v", err)
+	}
+}
+
+func TestLoadConflictRecoveryBudget(t *testing.T) {
+	dir := writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nconflict_recovery:\n  max_attempts_per_base: 2\n  max_base_updates: 4\n")
+	cfg, err := Load(dir)
+	if err != nil || cfg.ConflictRecovery.MaxAttemptsPerBase != 2 || cfg.ConflictRecovery.MaxBaseUpdates != 4 {
+		t.Fatalf("conflict_recovery=%+v err=%v", cfg.ConflictRecovery, err)
+	}
+	for _, field := range []string{"max_attempts_per_base", "max_base_updates"} {
+		dir = writeConfig(t, "version: 2\ngithub:\n  repo: owner/repo\nconflict_recovery:\n  "+field+": 0\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "conflict_recovery") {
+			t.Fatalf("invalid %s accepted: %v", field, err)
+		}
 	}
 }
 

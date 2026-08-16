@@ -14,6 +14,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
@@ -110,6 +111,10 @@ func (f *fakeGitHub) MarkRunning(context.Context, config.Config, int) error {
 	f.markedRunning = true
 	return nil
 }
+func (f *fakeGitHub) MarkConflictRetry(context.Context, config.Config, int, string) error {
+	f.markedRunning = true
+	return nil
+}
 func (f *fakeGitHub) ReadyPullRequest(context.Context, config.Config, string) error {
 	f.readyPullRequest = true
 	return nil
@@ -147,6 +152,25 @@ type fakePublisher struct {
 	called bool
 	result worker.GitResult
 	err    error
+}
+
+type fakeConflictResolver struct {
+	preparation  conflict.Preparation
+	published    worker.GitResult
+	prepareErr   error
+	publishErr   error
+	prepareCalls int
+	publishCalls int
+}
+
+func (f *fakeConflictResolver) Prepare(context.Context, config.Config, string, string, *state.ConflictRecovery) (conflict.Preparation, error) {
+	f.prepareCalls++
+	return f.preparation, f.prepareErr
+}
+
+func (f *fakeConflictResolver) Publish(context.Context, config.Config, gh.Issue, string, string, state.ConflictRecovery, []worker.Test) (worker.GitResult, error) {
+	f.publishCalls++
+	return f.published, f.publishErr
 }
 
 func (f *fakePublisher) Publish(context.Context, config.Config, gh.Issue, string, string, string) (worker.GitResult, error) {
@@ -373,6 +397,157 @@ func TestAutoMergeUpdatesBehindBranchBeforeMerging(t *testing.T) {
 	snapshot, _ := loop.Store.Load()
 	if snapshot.Issues["1"].Status != "awaiting_checks" || !github.updatedPullRequest || github.readyPullRequest || github.mergedPullRequest {
 		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+}
+
+func TestDirtyPullRequestRunsDurableConflictWorkerAndReturnsToChecks(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Completion.AutoMerge = true
+	prURL := "https://example.test/pr/1"
+	_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: "awaiting_checks", RunID: "run_1",
+			Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, PullRequestURL: prURL,
+			Attempts: 1, UpdatedAt: time.Now().UTC(),
+			ConflictRecovery: &state.ConflictRecovery{
+				PullRequestURL: prURL, TargetBaseSHA: "base-old", OriginalHeadSHA: "older-head",
+				ConflictFiles: []string{"older.txt"}, AllowedPaths: []string{"older.txt"}, Attempts: 1, BaseUpdates: 1,
+				History: []state.ConflictAttempt{{Number: 1, BaseSHA: "base-old", Status: "completed"}},
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{
+		Number: 1, URL: prURL, State: "OPEN", HeadRefName: "codex/issue-1-test",
+		MergeStateStatus: "DIRTY", ChecksStatus: "success",
+	}}}
+	resolver := &fakeConflictResolver{
+		preparation: conflict.Preparation{
+			PreviousBaseSHA: "base-old", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+			ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"},
+			OriginalDiff: "+pr intent", BaseCommits: "abc base design", ConflictContent: "<<<<<<< conflict",
+		},
+		published: worker.GitResult{Branch: "codex/issue-1-test", Commit: "merge-commit", PullRequestURL: prURL},
+	}
+	recorder := &recordingWorker{result: worker.Result{
+		Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "resolved",
+		Tests: []worker.Test{{Command: "go test ./...", Result: "passed"}},
+	}}
+	loop.Conflicts, loop.Worker = resolver, recorder
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	item := snapshot.Issues["1"]
+	if item.Status != "awaiting_checks" || item.ConflictRecovery == nil || item.ConflictRecovery.Attempts != 1 || item.ConflictRecovery.BaseUpdates != 2 || len(item.ConflictRecovery.History) != 2 || item.ConflictRecovery.History[1].Status != "completed" {
+		t.Fatalf("item=%+v", item)
+	}
+	if resolver.prepareCalls != 2 || resolver.publishCalls != 1 || len(recorder.runPrompts) != 1 {
+		t.Fatalf("resolver=%+v prompts=%d", resolver, len(recorder.runPrompts))
+	}
+	prompt := recorder.runPrompts[0]
+	for _, expected := range []string{"base-new", "shared.txt", "+pr intent", "abc base design", "git add", "force push"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("conflict prompt missing %q: %s", expected, prompt)
+		}
+	}
+}
+
+func TestConflictRecoveryRestartRecognizesPublishedCommitWithoutDuplicateWorkerOrPush(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	prURL := "https://example.test/pr/1"
+	_, err := loop.Store.Update("fixture", 1, "conflict_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{
+			Number: 1, Status: "resolving_conflict", RunID: "conflict_1", Branch: "codex/issue-1-test",
+			Worktree: loop.Config.RepoPath, PullRequestURL: prURL, UpdatedAt: time.Now().UTC(),
+			ConflictRecovery: &state.ConflictRecovery{
+				PullRequestURL: prURL, TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 1, BaseUpdates: 1,
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeConflictResolver{preparation: conflict.Preparation{Published: true, Resolved: true, Commit: "merge-commit", TargetBaseSHA: "base-new"}}
+	recorder := &recordingWorker{}
+	loop.Conflicts, loop.Worker = resolver, recorder
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "awaiting_checks" || resolver.prepareCalls != 1 || resolver.publishCalls != 0 || len(recorder.runPrompts) != 0 {
+		t.Fatalf("item=%+v resolver=%+v prompts=%v", snapshot.Issues["1"], resolver, recorder.runPrompts)
+	}
+}
+
+func TestConflictRecoveryBlocksOnlyAfterPerBaseBudgetIsExhausted(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Config.ConflictRecovery.MaxAttemptsPerBase = 3
+	_, err := loop.Store.Update("fixture", 1, "conflict_3", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{
+			Number: 1, Status: "resolving_conflict", RunID: "conflict_3", Branch: "codex/issue-1-test",
+			Worktree: loop.Config.RepoPath, PullRequestURL: "https://example.test/pr/1", UpdatedAt: time.Now().UTC(),
+			ConflictRecovery: &state.ConflictRecovery{
+				PullRequestURL: "https://example.test/pr/1", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 3, BaseUpdates: 1,
+				History: []state.ConflictAttempt{{Number: 1, BaseSHA: "base-new", Status: "retryable_failure"}},
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.Conflicts = &fakeConflictResolver{preparation: conflict.Preparation{TargetBaseSHA: "base-new", ConflictFiles: []string{"shared.txt"}}}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	item := snapshot.Issues["1"]
+	if item.Status != "blocked" || !strings.Contains(item.LastError, "after 3 attempts") || !strings.Contains(item.LastError, "shared.txt") || !strings.Contains(item.LastError, "agent-loop retry") {
+		t.Fatalf("item=%+v", item)
+	}
+}
+
+func TestConflictWorkerNeedsInputKeepsConflictResumeTarget(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	_, err := loop.Store.Update("fixture", 1, "conflict_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{
+			Number: 1, Status: "resolving_conflict", RunID: "conflict_1", Branch: "codex/issue-1-test",
+			Worktree: loop.Config.RepoPath, PullRequestURL: "https://example.test/pr/1", UpdatedAt: time.Now().UTC(),
+			ConflictRecovery: &state.ConflictRecovery{
+				PullRequestURL: "https://example.test/pr/1", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, BaseUpdates: 1,
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.Conflicts = &fakeConflictResolver{preparation: conflict.Preparation{TargetBaseSHA: "base-new", ConflictFiles: []string{"shared.txt"}}}
+	loop.Worker = fakeWorker{result: worker.Result{
+		Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "choice required",
+		Question: &worker.Question{Text: "Which behavior?", Reason: "requirements choice", AllowFreeText: true}, Tests: []worker.Test{},
+	}}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != "needs_input" || len(snapshot.PendingRequests) != 1 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	for _, request := range snapshot.PendingRequests {
+		if request.ResumeStatus != "resolving_conflict" {
+			t.Fatalf("request=%+v", request)
+		}
 	}
 }
 

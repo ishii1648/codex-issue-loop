@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -132,6 +133,105 @@ func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 	snapshot, _ := store.Load()
 	if snapshot.Issues["4"].Status != "resume_pending" || len(snapshot.Issues["4"].Answers) != 1 {
 		t.Fatalf("issue=%+v", snapshot.Issues["4"])
+	}
+}
+
+func TestRetryConflictResumesLegacyBlockedIssueWithoutReplacingBranchOrPullRequest(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "config", "user.name", "Test User")
+	runGitApp(t, repo, "config", "user.email", "test@example.com")
+	runGitApp(t, repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "add", "README.md")
+	runGitApp(t, repo, "commit", "-m", "initial")
+	branch := "codex/issue-4-test"
+	runGitApp(t, repo, "checkout", "-b", branch)
+	remote := filepath.Join(filepath.Dir(repo), "remote.git")
+	runGitApp(t, filepath.Dir(repo), "init", "--bare", remote)
+	runGitApp(t, repo, "remote", "add", "origin", remote)
+	runGitApp(t, repo, "push", "-u", "origin", branch)
+
+	binDir := filepath.Join(filepath.Dir(repo), "bin")
+	fakeGH := filepath.Join(binDir, "gh")
+	logPath := filepath.Join(filepath.Dir(repo), "gh-calls.log")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$AGENT_LOOP_TEST_GH_LOG"
+case "$1 $2" in
+  "issue view")
+    if printf '%s\n' "$*" | grep -q -- '--jq'; then printf '%s\n' ''; else printf '%s\n' '{"number":4,"title":"Conflict","body":"","url":"https://example.test/issues/4","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[]}'; fi
+    ;;
+  "pr list") printf '%s\n' '[{"number":9,"url":"https://example.test/pull/9","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-4-test","mergeStateStatus":"DIRTY","statusCheckRollup":[]}]' ;;
+  "issue edit"|"issue comment") exit 0 ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_LOOP_TEST_GH_LOG", logPath)
+	configFile, err := os.OpenFile(filepath.Join(repo, config.FileName), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(configFile, "git:\n  worktree_root: %q\n", filepath.Dir(repo)); err != nil {
+		t.Fatal(err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, repo)
+	repo = cfg.RepoPath
+	entry := registry.Entry{
+		RepoID: registry.RepoID(cfg.GitHub.Repo, repo), RepoPath: repo, GitHubRepo: cfg.GitHub.Repo,
+		Commands: map[string]string{"git": "/usr/bin/git", "gh": fakeGH},
+	}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://example.test/pull/9"
+	_, err = store.Update("blocked", 4, "run_4", nil, func(s *state.Snapshot) error {
+		s.Issues["4"] = &state.Issue{
+			Number: 4, Status: "blocked", RunID: "run_4", Branch: branch, Worktree: repo,
+			PullRequestURL: prURL, LastError: "Pull Request lifecycle: Pull Request has merge conflicts",
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	if code := a.Run(context.Background(), []string{"retry", "--repo", repo, "--issue", "4", "--json"}); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["4"]
+	if item.Status != "resolving_conflict" || item.GitHubSync != "" || item.Branch != branch || item.PullRequestURL != prURL || item.ConflictRecovery == nil {
+		t.Fatalf("item=%+v", item)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calls), "--remove-label blocked") || strings.Contains(string(calls), "--remove-label do-not-automate") || !strings.Contains(string(calls), "codex-issue-loop:conflict-retry:") {
+		t.Fatalf("calls=%s", calls)
+	}
+}
+
+func runGitApp(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
 	}
 }
 

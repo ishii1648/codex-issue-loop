@@ -204,6 +204,15 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 worktreeのbranch変更、未commit変更、remote PRとの不一致がある場合は自動修復しない。対象Issueのworktreeを人が確認し、変更を保持する方針を決める。
 
+PR conflictは検出時点では`resolving_conflict`となり、base SHAごとの自動復旧とCI再確認を行う。budget超過等で最終`blocked`になった場合は、`status --json`の`conflict_recovery`にある試行履歴、base SHA、競合file、最終理由を確認する。worktree・branch・open PRの対応と停止原因を直した後だけ、次の明示操作を使う。
+
+```sh
+agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
+agent-loop status --repo /absolute/path/to/repository --json
+```
+
+`retry`は無関係なblocked原因を初期化せず、保存済みbranchとPRが一致する場合だけ`resolving_conflict`へ戻す。新しいbranch/PRやforce pushは作らない。
+
 ### Git transportまたはcommit署名で停止する
 
 `git config --global --get-regexp '^url\..*\.insteadof$'`でHTTPS URLがSSHへ書き換えられていないか確認する。LaunchAgentでSSH agentに依存しない運用では、対象repositoryのremoteをcredential helperで扱えるHTTPS URLに直す。URLやtokenをlogへ出さない。

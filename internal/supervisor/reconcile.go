@@ -152,15 +152,18 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		return decision
 	}
 	if excluded {
-		if current.GitHubSync == "blocked" {
+		if current.GitHubSync == "conflict_retry" && current.Status == "resolving_conflict" {
+			decision.reason = "explicit conflict retry is waiting for GitHub label synchronization"
+		} else if current.GitHubSync == "blocked" {
 			decision.status, decision.workerPID, decision.retryAt = "blocked", 0, nil
 			if hasComment(remote.Issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number)) {
 				decision.githubSync = ""
 			}
 			decision.reason = "partially synchronized blocked state recovered"
 			return decision
+		} else {
+			return blockDecision(decision, "GitHub exclusion label was applied manually")
 		}
-		return blockDecision(decision, "GitHub exclusion label was applied manually")
 	}
 	if failed {
 		decision.status, decision.workerPID, decision.retryAt = "failed", 0, nil
@@ -284,6 +287,15 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		decision.reason = "unanswered request remains sticky"
 		if !needsInput {
 			decision.githubSync = "needs_input"
+		}
+	case "resolving_conflict":
+		decision.reason = "durable Pull Request conflict recovery will resume in the saved worktree"
+		if decision.retryAt == nil {
+			now := l.now()
+			decision.retryAt = &now
+		}
+		if !running && inspection.Valid {
+			decision.markRunning = true
 		}
 	}
 	if len(openPRs) == 1 && (current.Status == "running" || current.Status == "claimed") {

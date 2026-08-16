@@ -107,6 +107,12 @@ sleep 3
 
 `doctor`が`ok: true`を返し、LaunchAgentとsupervisorが稼働していることを確認します。LaunchAgentのPATH、aqua利用時の登録、初回セットアップの詳細は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
 
+`completion.auto_merge: true`でPR conflictが発生した場合は、同じworktree・branch・PRを使う`resolving_conflict`へ自動遷移します。規定回数後に最終`blocked`となったconflictだけ、原因を修復したうえで次の明示操作から再開します。
+
+```sh
+"$agent_loop_bin" retry --repo "$PWD" --issue 123 --json
+```
+
 ### 4. 複数リポジトリを並列実行する
 
 CLIのinstallはMacごとに1回だけ行います。各リポジトリへ`.agent-loop.yaml`とラベルを用意し、それぞれを`register`、`start`します。

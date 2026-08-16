@@ -48,6 +48,11 @@ completion:
   auto_merge: false
   close_issue: true
 
+# A dirty Pull Request is recovered in its existing worktree and branch.
+conflict_recovery:
+  max_attempts_per_base: 3
+  max_base_updates: 3
+
 # 0s means that worktrees in the status are retained indefinitely.
 worktrees:
   completed_max_age: 168h
