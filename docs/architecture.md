@@ -46,6 +46,8 @@ GitHub         = producerとループが共有する仕事のキュー
 
 現行のownership境界は1 host・1 supervisor・1 workerである。将来の単一host並列化は同じsupervisor内のworker slotとして実装し、複数host冗長化は外部の線形化可能なcoordinatorとfenced publication gatewayを必須とする。GitHub labelを分散lockとして使わない。詳細は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
 
+単一host並列化でschedulerが評価するresource claim、Issue依存関係、local leaseの契約は[Resource admission契約](resource-admission.md)を正本とする。admissionと待機中の監視はGoコードで完結し、worker起動前の判断にLLMを使わない。
+
 ## 4. 通常の実行フロー
 
 1. 任意のproducerが着手可能ラベル付きのGitHub Issueを作成する。

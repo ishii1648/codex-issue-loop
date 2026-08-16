@@ -239,6 +239,8 @@ security:
 - worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、その他の非terminal状態は期間にかかわらず保持する。
 - event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
 
+同一repository内並列化で追加するresource definition、`area:` label、Issue本文の`depends_on`、決定論的admission、lease lifecycleは[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。これらは将来のconfig/state schema v3で明示migrationにより導入し、現行v2へ先行してkeyを追加しない。
+
 ### 5.2 log rotationと容量保護
 
 - `events.jsonl`はstate lock内で、現行logをgzip archiveへcopyした後、現在の`state_revision`を持つ`event_log_checkpoint`へ原子的に置換する。以後のsequenceはcheckpointから連続させる。

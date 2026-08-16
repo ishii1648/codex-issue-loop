@@ -34,6 +34,8 @@ v2の既定動作を`coordination.mode: local`相当として維持する。repo
 
 これはlocal state schemaをIssue map中心へ変更する将来機能であり、multi-host coordinatorを必要としない。
 
+worker slot間のresource claim、Issue本文の依存metadata、local resource leaseの取得・保持・解放は[Resource admission契約](../resource-admission.md)に従う。
+
 ### 3. 複数host冗長化
 
 最初のmulti-host modeはactive/passiveとする。別hostはstandbyとして待機し、同一repositoryのworkerを複数hostへ同時配分しない。実装にはGitHub外の**線形化可能なcoordinator**を必須とし、次のcontractを要求する。

@@ -61,6 +61,7 @@
 - 対象はmacOSのユーザーLaunchAgentのみである。
 - LaunchDaemonと自動ログインは採用せず、logout・再起動は運用時確認とする。[ADR-0001](adr/0001-macos-execution-model.md)を参照する。
 - 1 repositoryにつきconcurrencyは1である。
+- `area:` resource claim、Issue本文の`depends_on` metadata、resource leaseは[Resource admission契約](resource-admission.md)で将来のschema v3向けに仕様化済みだが、現行schema v2ではまだ評価しない。
 - 同じrepositoryを複数hostから処理しない。
 - local `flock`はhostをまたぐ排他ではない。複数hostを登録するだけでは安全にならず、[ADR-0002](adr/0002-concurrency-and-multi-host.md)のcoordinatorとpublication gatewayが実装されるまで禁止する。
 - GitHub labelは自動作成しない。
