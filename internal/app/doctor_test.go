@@ -16,6 +16,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 )
 
 func TestDoctorDiagnosesGoFormatterCapability(t *testing.T) {
@@ -42,6 +43,67 @@ func TestDoctorDiagnosesGoFormatterCapability(t *testing.T) {
 	cfg.Formatters.Go.Enabled = false
 	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_DISABLED"); !item.OK {
 		t.Fatalf("disabled gofmt failed: %+v", item)
+	}
+}
+
+func TestDoctorDistinguishesBrokerRegistrationRuntimeAndFreshness(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{
+		Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"),
+		LaunchAgents: filepath.Join(root, "launchagents"),
+	}
+	if err := os.MkdirAll(l.LaunchAgents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launchctl := filepath.Join(root, "launchctl")
+	script := `#!/bin/sh
+case "$DOCTOR_BROKER_MODE" in
+  unloaded) exit 1 ;;
+  crash) printf 'state = waiting\nlast exit code = 78\n' ;;
+  running) printf 'state = running\npid = 4321\n' ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.GitHub.RepositoryID = 1234
+	cfg.Webhook.Mode = "webhook"
+	cfg.Webhook.ListenerAddress = "127.0.0.1:8787"
+	cfg.Webhook.PublicURLIdentifier = "fixture.example/webhook"
+	cfg.Webhook.SecretSource.Env = "DOCTOR_WEBHOOK_SECRET"
+	cfg.Webhook.InstallationIDs = []int64{99}
+	t.Setenv("DOCTOR_WEBHOOK_SECRET", "fixture-secret")
+	entry := registry.Entry{RepoID: "repo", RepoPath: root, Commands: map[string]string{"launchctl": launchctl}}
+	if item := diagnosticByCode(t, diagnoseWebhook(context.Background(), l, entry, cfg), "WEBHOOK_BROKER_NOT_REGISTERED"); item.OK {
+		t.Fatalf("missing plist passed: %+v", item)
+	}
+	if err := os.WriteFile(l.BrokerPlistPath(), []byte("plist"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCTOR_BROKER_MODE", "unloaded")
+	if item := diagnosticByCode(t, diagnoseWebhook(context.Background(), l, entry, cfg), "WEBHOOK_BROKER_UNLOADED"); item.OK {
+		t.Fatalf("unloaded broker passed: %+v", item)
+	}
+	if err := os.MkdirAll(l.BrokerDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFixture(t, filepath.Join(l.BrokerDir(), "status.json"), webhook.Status{
+		Version: 1, Mode: "webhook", ListenerAddress: cfg.Webhook.ListenerAddress, UpdatedAt: time.Now().Add(-10 * time.Minute),
+	})
+	t.Setenv("DOCTOR_BROKER_MODE", "crash")
+	diagnostics := diagnoseWebhook(context.Background(), l, entry, cfg)
+	if diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_CRASH_LOOP").OK || diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_STATUS_STALE").OK {
+		t.Fatalf("crash/stale broker passed: %+v", diagnostics)
+	}
+	writeJSONFixture(t, filepath.Join(l.BrokerDir(), "status.json"), webhook.Status{
+		Version: 1, Mode: "webhook", ListenerAddress: cfg.Webhook.ListenerAddress, UpdatedAt: time.Now().UTC(),
+	})
+	t.Setenv("DOCTOR_BROKER_MODE", "running")
+	diagnostics = diagnoseWebhook(context.Background(), l, entry, cfg)
+	if !diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_RUNNING").OK || !diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_STATUS_FRESH").OK {
+		t.Fatalf("healthy broker failed: %+v", diagnostics)
 	}
 }
 

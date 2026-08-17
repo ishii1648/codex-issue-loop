@@ -99,26 +99,119 @@ func TestWebhookMailboxClaimsReadyIssueWithoutQueuePolling(t *testing.T) {
 	}
 }
 
-func TestWebhookSafetySweepPersistsValidatorsAndTreats304AsSuccess(t *testing.T) {
+func TestWebhookSchedulerNeverPerformsQueueSweep(t *testing.T) {
 	loop, baseGitHub := testLoop(t, worker.Result{})
 	loop.Config.Webhook.Mode = "webhook"
 	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
 	loop.GitHub = github
-	s := &scheduler{loop: loop}
-	issues, err := s.listReady(context.Background())
-	if err != nil || len(issues) != 1 {
-		t.Fatalf("issues=%v err=%v", issues, err)
+	s := &scheduler{
+		loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{},
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
 	}
-	issues, err = s.listReady(context.Background())
-	if err != nil || len(issues) != 0 {
-		t.Fatalf("304 issues=%v err=%v", issues, err)
+	if dispatched, err := s.schedule(context.Background(), true); err != nil || dispatched {
+		t.Fatalf("dispatched=%v err=%v", dispatched, err)
 	}
-	state, err := webhook.LoadSweepState(loop.Store.Dir)
-	if err != nil || state.ETag != `W/"queue-v1"` || state.REST200 != 1 || state.NotModified304 != 1 {
-		t.Fatalf("sweep=%+v err=%v", state, err)
+	if github.listCalls != 0 || github.conditionalCalls != 0 {
+		t.Fatalf("list=%d conditional=%d", github.listCalls, github.conditionalCalls)
 	}
-	if github.listCalls != 0 || len(github.conditionalETags) != 2 || github.conditionalETags[0] != "" || github.conditionalETags[1] != `W/"queue-v1"` {
-		t.Fatalf("list=%d validators=%v", github.listCalls, github.conditionalETags)
+}
+
+func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T) {
+	mergedAt := time.Date(2026, 8, 17, 2, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		current    state.Issue
+		delivery   webhook.Delivery
+		remote     gh.RemoteState
+		wantStatus string
+		wantMerged bool
+	}{
+		{
+			name: "completed observes merged PR",
+			current: state.Issue{Number: 1, Status: "completed", RunID: "run-1", PullRequestNumber: 7,
+				PullRequestURL: "https://example.test/owner/repo/pull/7"},
+			delivery: webhook.Delivery{DeliveryID: "terminal-merged", Event: "pull_request", Action: "closed", PullRequestNumber: 7},
+			remote: gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open"}, PullRequests: []gh.PullRequest{{
+				Number: 7, URL: "https://example.test/owner/repo/pull/7", State: "closed", MergedAt: &mergedAt,
+			}}},
+			wantStatus: "completed", wantMerged: true,
+		},
+		{
+			name: "failed observes PR closed without merge",
+			current: state.Issue{Number: 1, Status: "failed", RunID: "run-1", PullRequestNumber: 7,
+				PullRequestURL: "https://example.test/owner/repo/pull/7"},
+			delivery: webhook.Delivery{DeliveryID: "terminal-pr-closed", Event: "pull_request", Action: "closed", PullRequestNumber: 7},
+			remote: gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open"}, PullRequests: []gh.PullRequest{{
+				Number: 7, URL: "https://example.test/owner/repo/pull/7", State: "closed",
+			}}},
+			wantStatus: "blocked",
+		},
+		{
+			name:       "needs input observes Issue close",
+			current:    state.Issue{Number: 1, Status: "needs_input", RunID: "run-1"},
+			delivery:   webhook.Delivery{DeliveryID: "terminal-issue-closed", Event: "issues", Action: "closed", IssueNumber: 1},
+			remote:     gh.RemoteState{Issue: gh.Issue{Number: 1, State: "closed"}},
+			wantStatus: "blocked",
+		},
+		{
+			name:       "blocked observes done label",
+			current:    state.Issue{Number: 1, Status: "blocked", RunID: "run-1"},
+			delivery:   webhook.Delivery{DeliveryID: "terminal-done", Event: "issues", Action: "labeled", IssueNumber: 1},
+			remote:     gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open", Labels: []string{"codex-loop:done"}}},
+			wantStatus: "completed",
+		},
+		{
+			name:       "failed label removal does not resume",
+			current:    state.Issue{Number: 1, Status: "failed", RunID: "run-1"},
+			delivery:   webhook.Delivery{DeliveryID: "terminal-unlabeled", Event: "issues", Action: "unlabeled", IssueNumber: 1},
+			remote:     gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open", Labels: []string{"codex-loop:ready"}}},
+			wantStatus: "failed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loop, baseGitHub := testLoop(t, worker.Result{})
+			loop.Config.Webhook.Mode = "webhook"
+			github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
+			github.remote = &test.remote
+			github.issue = test.remote.Issue
+			loop.GitHub = github
+			_, err := loop.Store.Update("terminal_fixture", 1, test.current.RunID, nil, func(snapshot *state.Snapshot) error {
+				value := test.current
+				snapshot.Issues["1"] = &value
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.delivery.Version = webhook.InboxVersion
+			test.delivery.RepoID = loop.Store.RepoID
+			test.delivery.Repository = loop.Config.GitHub.Repo
+			test.delivery.AcceptedAt = time.Now().UTC()
+			if err := webhook.EnqueueMailbox(loop.Store.Dir, test.delivery); err != nil {
+				t.Fatal(err)
+			}
+			s := &scheduler{loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+			snapshot, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidates, acknowledged, err := s.processMailbox(context.Background(), snapshot)
+			if err != nil || len(candidates) != 0 || len(acknowledged) != 1 {
+				t.Fatalf("candidates=%v acknowledged=%v err=%v", candidates, acknowledged, err)
+			}
+			if err := webhook.AckMailbox(loop.Store.Dir, acknowledged); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err = loop.Store.Load()
+			if err != nil || snapshot.Issues["1"].Status != test.wantStatus || snapshot.Issues["1"].PullRequestMerged != test.wantMerged {
+				t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
+			}
+			remaining, err := webhook.ReadMailbox(loop.Store.Dir)
+			if err != nil || len(remaining) != 0 {
+				t.Fatalf("remaining=%v err=%v", remaining, err)
+			}
+		})
 	}
 }
 

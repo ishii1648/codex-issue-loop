@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -86,13 +85,13 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 	}
 	s := &scheduler{
 		loop: l, events: make(chan schedulerEvent, concurrency+1), active: map[int]activeJob{},
-		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, pollAt: l.now(),
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
 	}
-	if l.Config.Webhook.Enabled() {
-		s.pollAt = l.now().Add(s.pollDelay())
+	if !l.Config.Webhook.Enabled() {
+		s.pollAt = l.now()
 	}
 	consecutiveFailures := current.Supervisor.ConsecutiveFailures
-	if current.Supervisor.RetryAfter != nil && current.Supervisor.RetryAfter.After(s.pollAt) {
+	if current.Supervisor.RetryAfter != nil && (s.pollAt.IsZero() || current.Supervisor.RetryAfter.After(s.pollAt)) {
 		s.pollAt = *current.Supervisor.RetryAfter
 	}
 
@@ -101,7 +100,7 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 	if watcher != nil {
 		watchEvents, watchErrors = watcher.Events, watcher.Errors
 	}
-	pollCandidates := !s.pollAt.After(l.now())
+	pollCandidates := !l.Config.Webhook.Enabled() && !s.pollAt.After(l.now())
 	for {
 		_, scheduleErr := s.schedule(ctx, pollCandidates)
 		pollCandidates = false
@@ -129,13 +128,24 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 				return BlockedError{Err: failure.Wrap(failure.Supervisor, "reset supervisor failure counter", resetErr)}
 			}
 			consecutiveFailures = 0
+			if l.Config.Webhook.Enabled() {
+				s.pollAt = time.Time{}
+			}
 		}
-		pollTimer := l.newSchedulerTimer(until(l.now(), s.pollAt))
-		retryTimer := l.newSchedulerTimer(s.nextRetryDelay())
+		var pollTimer, retryTimer SchedulerTimer
+		var pollTimerC, retryTimerC <-chan time.Time
+		if !s.pollAt.IsZero() {
+			pollTimer = l.newSchedulerTimer(until(l.now(), s.pollAt))
+			pollTimerC = pollTimer.C()
+		}
+		if delay, ok := s.nextRetryDelay(); ok {
+			retryTimer = l.newSchedulerTimer(delay)
+			retryTimerC = retryTimer.C()
+		}
 		select {
 		case <-ctx.Done():
-			pollTimer.Stop()
-			retryTimer.Stop()
+			stopSchedulerTimer(pollTimer)
+			stopSchedulerTimer(retryTimer)
 			s.cancelAndDrain()
 			_, _ = l.Store.Update("supervisor_stopped", 0, "", map[string]string{"reason": ctx.Err().Error()}, func(snapshot *state.Snapshot) error {
 				snapshot.Supervisor.State = "stopped"
@@ -145,8 +155,8 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 			})
 			return nil
 		case event := <-s.events:
-			pollTimer.Stop()
-			retryTimer.Stop()
+			stopSchedulerTimer(pollTimer)
+			stopSchedulerTimer(retryTimer)
 			if fatal := s.handleEvent(event); fatal != nil {
 				s.cancelAndDrain()
 				return l.blockSupervisor(fatal, failure.Supervisor, consecutiveFailures+1)
@@ -157,21 +167,21 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 				s.pollAt = l.now()
 				pollCandidates = true
 			}
-		case <-pollTimer.C():
-			retryTimer.Stop()
+		case <-pollTimerC:
+			stopSchedulerTimer(retryTimer)
 			if l.Config.Webhook.Enabled() {
-				// The shared broker owns conditional queue sweeps. This timer only
-				// keeps the local scheduler failure/reconciliation loop live.
-				s.pollAt = l.now().Add(s.pollDelay())
+				// Webhook schedulers have no periodic GitHub queue timer. A non-zero
+				// pollAt in this mode is only a shared supervisor cooldown deadline.
+				s.pollAt = time.Time{}
 				pollCandidates = false
 			} else {
 				pollCandidates = true
 			}
-		case <-retryTimer.C():
-			pollTimer.Stop()
+		case <-retryTimerC:
+			stopSchedulerTimer(pollTimer)
 		case event, ok := <-watchEvents:
-			pollTimer.Stop()
-			retryTimer.Stop()
+			stopSchedulerTimer(pollTimer)
+			stopSchedulerTimer(retryTimer)
 			if !ok {
 				watchEvents, watchErrors = nil, nil
 				continue
@@ -184,10 +194,16 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 				pollCandidates = s.hasFreeSlot()
 			}
 		case <-watchErrors:
-			pollTimer.Stop()
-			retryTimer.Stop()
+			stopSchedulerTimer(pollTimer)
+			stopSchedulerTimer(retryTimer)
 			// Timers remain authoritative when fsnotify reports an error.
 		}
+	}
+}
+
+func stopSchedulerTimer(timer SchedulerTimer) {
+	if timer != nil {
+		timer.Stop()
 	}
 }
 
@@ -213,6 +229,11 @@ func until(now, deadline time.Time) time.Duration {
 }
 
 func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, error) {
+	if s.loop.Config.Webhook.Enabled() {
+		// Defense in depth: even a stale timer or direct test invocation cannot
+		// make a repository scheduler query the shared GitHub ready queue.
+		pollCandidates = false
+	}
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	snapshot, err := s.loop.Store.Load()
@@ -277,7 +298,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 			}
 		}
 	}
-	if len(mailboxBatch) > 0 && len(mailboxCandidates) == 0 {
+	if len(mailboxBatch) > 0 {
 		if err := webhook.AckMailbox(s.loop.Store.Dir, mailboxBatch); err != nil {
 			return dispatched, failure.Wrap(failure.Supervisor, "ack webhook mailbox", err)
 		}
@@ -320,66 +341,16 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 }
 
 func (s *scheduler) pollInterval() time.Duration {
-	if s.loop.Config.Webhook.Enabled() {
-		return s.loop.Config.Webhook.SafetySweepInterval.Duration
-	}
 	return s.loop.Config.Queue.PollInterval.Duration
 }
 
 func (s *scheduler) pollDelay() time.Duration {
 	interval := s.pollInterval()
-	if s.loop.Config.Webhook.Enabled() {
-		return s.loop.jitter(interval, s.loop.Config.Webhook.SafetySweepJitter, 0)
-	}
 	return s.loop.pollDelay(interval)
 }
 
 func (s *scheduler) listReady(ctx context.Context) ([]gh.Issue, error) {
-	if !s.loop.Config.Webhook.Enabled() {
-		return s.loop.GitHub.ListReady(ctx, s.loop.Config)
-	}
-	conditional, ok := s.loop.GitHub.(gh.ConditionalQueueClient)
-	if !ok {
-		return nil, errors.New("webhook mode requires conditional REST queue support")
-	}
-	sweep, err := webhook.LoadSweepState(s.loop.Store.Dir)
-	if err != nil {
-		return nil, err
-	}
-	result, err := conditional.ListReadyConditional(ctx, s.loop.Config, sweep.ETag, sweep.LastModified)
-	if err != nil {
-		return nil, err
-	}
-	sweep.LastStatus = result.StatusCode
-	sweep.LastSuccessful = s.loop.now()
-	if result.ETag != "" {
-		sweep.ETag = result.ETag
-	}
-	if result.LastModified != "" {
-		sweep.LastModified = result.LastModified
-	}
-	sweep.RateRemaining = result.RateRemaining
-	sweep.RateReset = result.RateReset
-	if result.NotModified {
-		sweep.NotModified304++
-	} else if result.StatusCode == 200 {
-		sweep.REST200++
-	}
-	if err := webhook.SaveSweepState(s.loop.Store.Dir, sweep); err != nil {
-		return nil, err
-	}
-	for _, issue := range result.Issues {
-		delivery := webhook.Delivery{
-			Version: webhook.InboxVersion, DeliveryID: fmt.Sprintf("sweep-%d-%d", s.loop.now().UnixNano(), issue.Number),
-			Event: "issues", Action: "reconciled", RepoID: s.loop.Store.RepoID,
-			RepositoryID: s.loop.Config.GitHub.RepositoryID, Repository: s.loop.Config.GitHub.Repo,
-			IssueNumber: issue.Number, AcceptedAt: s.loop.now(),
-		}
-		if err := webhook.EnqueueMailbox(s.loop.Store.Dir, delivery); err != nil {
-			return nil, err
-		}
-	}
-	return result.Issues, nil
+	return s.loop.GitHub.ListReady(ctx, s.loop.Config)
 }
 
 func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot) ([]gh.Issue, []webhook.Delivery, error) {
@@ -391,7 +362,9 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		return nil, deliveries, err
 	}
 	candidates := make([]gh.Issue, 0)
+	acknowledged := make([]webhook.Delivery, 0, len(deliveries))
 	seen := map[int]bool{}
+	processed := map[int]bool{}
 	for index := len(deliveries) - 1; index >= 0; index-- {
 		delivery := deliveries[index]
 		number := delivery.IssueNumber
@@ -415,10 +388,24 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 			continue
 		}
 		if seen[number] {
+			if processed[number] {
+				acknowledged = append(acknowledged, delivery)
+			}
 			continue
 		}
 		seen[number] = true
 		if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
+			if terminalWebhookStatus(local.Status) {
+				handled, reconcileErr := s.loop.reconcileTerminalWebhook(ctx, *local, delivery)
+				if reconcileErr != nil {
+					return nil, nil, reconcileErr
+				}
+				if handled {
+					acknowledged = append(acknowledged, delivery)
+					processed[number] = true
+				}
+				continue
+			}
 			if !webhookRoutableStatus(local.Status) && local.GitHubSync == "" {
 				continue
 			}
@@ -441,6 +428,8 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 			if updateErr != nil {
 				return nil, nil, updateErr
 			}
+			acknowledged = append(acknowledged, delivery)
+			processed[number] = true
 			continue
 		}
 		if delivery.Event != "issues" && delivery.Event != "issue_comment" {
@@ -452,9 +441,23 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		}
 		if gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
 			candidates = append(candidates, candidate)
+			// Keep the delivery until the durable local Issue exists. A crash
+			// between admission and lease reservation can then replay safely.
+		} else {
+			acknowledged = append(acknowledged, delivery)
+			processed[number] = true
 		}
 	}
-	return candidates, deliveries, nil
+	return candidates, acknowledged, nil
+}
+
+func terminalWebhookStatus(status string) bool {
+	switch status {
+	case "blocked", "failed", "needs_input", "completed":
+		return true
+	default:
+		return false
+	}
 }
 
 func webhookRoutableStatus(status string) bool {
@@ -698,7 +701,7 @@ func (s *scheduler) hasMaintenanceJob() bool {
 	return false
 }
 
-func (s *scheduler) nextRetryDelay() time.Duration {
+func (s *scheduler) nextRetryDelay() (time.Duration, bool) {
 	now := s.loop.now()
 	deadline := time.Time{}
 	for number, value := range s.issueRetry {
@@ -715,7 +718,10 @@ func (s *scheduler) nextRetryDelay() time.Duration {
 			}
 		}
 	}
-	return until(now, deadline)
+	if deadline.IsZero() {
+		return 0, false
+	}
+	return until(now, deadline), true
 }
 
 func (s *scheduler) markPollingIfIdle(snapshot state.Snapshot, message string) error {

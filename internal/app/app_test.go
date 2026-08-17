@@ -17,6 +17,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
@@ -328,6 +329,90 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 		if issue := snapshot.Issues[key]; issue.Status != "retry_wait" || issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
 			t.Fatalf("Issue %s=%+v", key, issue)
 		}
+	}
+}
+
+func TestStartRecoversOnlyUnloadedSharedBrokerWhenSupervisorIsLoaded(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "webhook-secret")
+	if err := os.WriteFile(secret, []byte("fixture-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := fmt.Sprintf(`version: 4
+github:
+  repo: owner/repo
+  repository_id: 1234
+webhook:
+  mode: webhook
+  listener_address: 127.0.0.1:8787
+  public_url_identifier: fixture.example/webhook
+  secret_source:
+    file: %q
+  installation_ids: [99]
+`, secret)
+	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	launchctl := filepath.Join(binDir, "launchctl")
+	script := `#!/bin/sh
+case "$1" in
+  print)
+    case "$2" in
+      *broker*) test -f "$START_TEST_BROKER" && printf 'state = running\npid = 222\n' ;;
+      *) test -f "$START_TEST_REPO" && printf 'state = running\npid = 111\n' ;;
+    esac
+    ;;
+  bootstrap)
+    case "$3" in
+      *broker*) : > "$START_TEST_BROKER"; printf 'bootstrap broker\n' >> "$START_TEST_LOG" ;;
+      *) : > "$START_TEST_REPO"; printf 'bootstrap repo\n' >> "$START_TEST_LOG" ;;
+    esac
+    ;;
+  bootout) printf 'bootout\n' >> "$START_TEST_LOG" ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	repoState := filepath.Join(t.TempDir(), "repo-loaded")
+	brokerState := filepath.Join(t.TempDir(), "broker-loaded")
+	logPath := filepath.Join(t.TempDir(), "launchctl.log")
+	if err := os.WriteFile(repoState, []byte("loaded"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("START_TEST_REPO", repoState)
+	t.Setenv("START_TEST_BROKER", brokerState)
+	t.Setenv("START_TEST_LOG", logPath)
+	cfg := mustConfig(t, repo)
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	manager := launchd.Manager{Layout: l, Launchctl: launchctl}
+	if err := manager.WritePlist(entry, filepath.Join(binDir, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WriteBrokerPlist(filepath.Join(binDir, "codex"), entry.EnvironmentPath); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := (App{Out: &out, Err: &out}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(brokerState); err != nil {
+		t.Fatalf("broker was not recovered: %v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil || string(logData) != "bootstrap broker\n" {
+		t.Fatalf("unexpected shared restart activity: log=%q err=%v", logData, err)
 	}
 }
 

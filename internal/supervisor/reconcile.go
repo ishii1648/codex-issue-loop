@@ -11,6 +11,7 @@ import (
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
 
@@ -147,6 +148,70 @@ func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 	default:
 		return false
 	}
+}
+
+// reconcileTerminalWebhook performs a targeted, typed remote inspection for a
+// stable local state. It deliberately accepts only terminal decisions: removal
+// of a manual exclusion or failed label can therefore never restart a worker.
+// Unsupported/non-authoritative transitions are considered safely inspected
+// while preserving the local terminal state.
+func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
+	remote, err := l.inspectIssue(ctx, current)
+	if err != nil {
+		return false, fmt.Errorf("inspect terminal Issue #%d for webhook %s: %w", current.Number, delivery.DeliveryID, err)
+	}
+	inspection := worktree.Inspection{}
+	if current.Worktree != "" {
+		inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+		if err != nil {
+			return false, fmt.Errorf("inspect terminal worktree for Issue #%d: %w", current.Number, err)
+		}
+	}
+	decision := l.decideReconciliation(state.Snapshot{}, current, remote, inspection)
+	if !terminalWebhookStatus(decision.status) {
+		// The event was read successfully, but the remote state does not carry
+		// terminal authority. Preserve manual exclusions and failed/completed
+		// states instead of turning a webhook into an implicit resume.
+		return true, nil
+	}
+	if decision.workerPID == 0 {
+		decision.workerPGID = 0
+	}
+	_, err = l.Store.Update("webhook_terminal_reconciled", current.Number, current.RunID, map[string]any{
+		"delivery_id": delivery.DeliveryID,
+		"event":       delivery.Event,
+		"action":      delivery.Action,
+		"status":      decision.status,
+		"reason":      decision.reason,
+	}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(current.Number)]
+		if item == nil {
+			return fmt.Errorf("Issue #%d disappeared during webhook reconciliation", current.Number)
+		}
+		if decision.status == "completed" && item.Lease != nil {
+			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
+				return err
+			}
+		}
+		if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
+				return err
+			}
+		}
+		item.Status = decision.status
+		item.LastError = decision.lastError
+		item.Branch = decision.branch
+		item.PullRequestURL = decision.pullRequest
+		item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
+		item.PullRequestMerged = decision.prMerged
+		item.GitHubSync = decision.githubSync
+		item.RetryAfter = decision.retryAt
+		item.WorkerPID = decision.workerPID
+		item.WorkerPGID = decision.workerPGID
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	return err == nil, err
 }
 
 func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) reconciliationDecision {

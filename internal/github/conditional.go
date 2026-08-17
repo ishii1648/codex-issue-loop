@@ -24,20 +24,36 @@ type ConditionalQueueResult struct {
 	RateRemaining string
 	RateReset     string
 	NotModified   bool
+	Page          int
+	ItemCount     int
 }
 
 type ConditionalQueueClient interface {
 	ListReadyConditional(context.Context, config.Config, string, string) (ConditionalQueueResult, error)
 }
 
+type PagedConditionalQueueClient interface {
+	ListReadyConditionalPage(context.Context, config.Config, int, string, string) (ConditionalQueueResult, error)
+}
+
 // ListReadyConditional uses a stable concrete REST collection URL. Unlike the
 // legacy gh issue list call, a warm 304 does not execute a GraphQL query.
 func (c CLI) ListReadyConditional(ctx context.Context, cfg config.Config, etag, lastModified string) (ConditionalQueueResult, error) {
+	return c.ListReadyConditionalPage(ctx, cfg, 1, etag, lastModified)
+}
+
+// ListReadyConditionalPage gives each stable REST page its own validator. The
+// broker persists the page bodies and composes 304 and 200 responses, allowing
+// queues up to the existing 1000-Issue limit without a GraphQL fallback.
+func (c CLI) ListReadyConditionalPage(ctx context.Context, cfg config.Config, page int, etag, lastModified string) (ConditionalQueueResult, error) {
 	path := c.Path
 	if path == "" {
 		path = "gh"
 	}
-	query := url.Values{"state": {"open"}, "per_page": {"100"}, "sort": {"created"}, "direction": {"asc"}}
+	if page < 1 || page > 10 {
+		return ConditionalQueueResult{}, fmt.Errorf("conditional GitHub Issue sweep page %d is outside 1..10", page)
+	}
+	query := url.Values{"state": {"open"}, "per_page": {"100"}, "page": {strconv.Itoa(page)}, "sort": {"created"}, "direction": {"asc"}}
 	if len(cfg.GitHub.ReadyLabels) > 0 {
 		query.Set("labels", strings.Join(cfg.GitHub.ReadyLabels, ","))
 	}
@@ -52,6 +68,7 @@ func (c CLI) ListReadyConditional(ctx context.Context, cfg config.Config, etag, 
 	args = append(args, endpoint)
 	out, commandErr := exec.CommandContext(ctx, path, args...).CombinedOutput()
 	result, body, parseErr := parseIncludedResponse(out)
+	result.Page = page
 	if parseErr != nil {
 		if commandErr != nil {
 			return ConditionalQueueResult{}, fmt.Errorf("conditional GitHub Issue sweep: %w: %s", commandErr, c.safe(out))
@@ -89,6 +106,7 @@ func (c CLI) ListReadyConditional(ctx context.Context, cfg config.Config, etag, 
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return ConditionalQueueResult{}, fmt.Errorf("decode conditional GitHub Issue sweep: %w", err)
 	}
+	result.ItemCount = len(raw)
 	for _, item := range raw {
 		if len(item.Pull) != 0 && string(item.Pull) != "null" {
 			continue
