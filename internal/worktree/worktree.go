@@ -2,12 +2,14 @@ package worktree
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
@@ -28,10 +30,65 @@ type Inspection struct {
 	Valid              bool
 	Branch             string
 	Head               string
+	RemoteHead         string
 	Dirty              bool
 	UnpushedCommits    bool
 	LocalBranchExists  bool
 	RemoteBranchExists bool
+	RemoteConsistent   bool
+}
+
+// ContentDigest fingerprints tracked, staged, and untracked worktree content
+// without mutating the index. It is used to fence operator validation from the
+// later publication-only supervisor attempt.
+func ContentDigest(ctx context.Context, git, path string) (string, error) {
+	if git == "" {
+		git = "git"
+	}
+	hash := sha256.New()
+	run := func(args ...string) ([]byte, error) {
+		out, err := exec.CommandContext(ctx, git, append([]string{"-C", path}, args...)...).Output()
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	for _, args := range [][]string{
+		{"status", "--porcelain=v1", "-z", "--untracked-files=all", "--"},
+		{"diff", "--binary", "HEAD", "--"},
+		{"diff", "--cached", "--binary", "HEAD", "--"},
+	} {
+		out, err := run(args...)
+		if err != nil {
+			return "", fmt.Errorf("fingerprint worktree with git %s: %w", strings.Join(args, " "), err)
+		}
+		hash.Write(out)
+		hash.Write([]byte{0})
+	}
+	untracked, err := run("ls-files", "--others", "--exclude-standard", "-z", "--")
+	if err != nil {
+		return "", fmt.Errorf("list untracked files for worktree fingerprint: %w", err)
+	}
+	paths := strings.Split(string(untracked), "\x00")
+	sort.Strings(paths)
+	for _, relative := range paths {
+		if relative == "" {
+			continue
+		}
+		blob, hashErr := run("hash-object", "--no-filters", "--", relative)
+		if hashErr != nil {
+			return "", fmt.Errorf("hash untracked worktree path %q: %w", relative, hashErr)
+		}
+		hash.Write([]byte(relative))
+		hash.Write([]byte{0})
+		hash.Write(blob)
+		hash.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func (m Manager) ContentDigest(ctx context.Context, path string) (string, error) {
+	return ContentDigest(ctx, m.GitPath, path)
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -186,6 +243,10 @@ func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch st
 		inspection.RemoteBranchExists = remoteLine != ""
 		if inspection.RemoteBranchExists {
 			remoteFields := strings.Fields(remoteLine)
+			if len(remoteFields) > 0 {
+				inspection.RemoteHead = remoteFields[0]
+				inspection.RemoteConsistent = exec.CommandContext(ctx, git, "-C", path, "merge-base", "--is-ancestor", inspection.RemoteHead, inspection.Head).Run() == nil
+			}
 			inspection.UnpushedCommits = len(remoteFields) == 0 || remoteFields[0] != inspection.Head
 		} else {
 			base := "origin/" + cfg.Git.BaseBranch

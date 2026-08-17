@@ -280,7 +280,7 @@ webhook:
 - `localhost-only`では`codex exec --ignore-user-config --strict-config`を使い、`sandbox_workspace_write.network_access=true`と`features.network_proxy.enabled=true`を同時に固定する。upstream proxy、UDP、任意Unix socketを無効化し、Web Search、Browser/Computer Use、apps/plugins、MCP、remote plugin、skill由来MCP/tool suggestionを無効化する。Codex capabilityを確認できない場合やstrict config/proxy初期化に失敗した場合はworker commandを開始せず、network無効へのfallbackも行わない。詳細は[localhost-only command network](localhost-network.md)を参照する。
 - `worker.variant`はClaude Codeの`--effort`またはOpenCode messageのprovider variantとしてinitial runとresumeの両方へ渡す。
 - `worker.sandbox` の既定値は `workspace-write` とする。
-- `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。completed/failedではsession IDをactive stateから外すが、worker起因の環境`blocked`では正式な再開に備えて保持する。
+- `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。completedと通常のfailedではsession IDをactive stateから外すが、worker起因の環境`blocked`とtyped recoverableなpre-publication failedでは正式な再開・監査に備えて保持する。
 - sessionは`{"backend":"<backend>","id":"<session-id>"}`としてnamespace付きで保存する。v3以前に作成された`session_id`もv3 migration時にCodex sessionとして正規化済みであり、v4 migrationは両fieldを保持する。backend変更時はsessionを渡さず、同じworktreeとdurable stateを使うfresh sessionへfallbackする。
 - `worker.ambiguous_profile` は `extended` 固定とし、MVPではユーザー確認へ切り替える設定を設けない。
 - `queue.poll_interval` はGitHub Issueキューの再取得間隔、`watch.reconcile_interval` はattention監視の取りこぼし修復間隔であり、別の設定として扱う。
@@ -340,6 +340,7 @@ agent-loop <command> [options]
 | `answer` | 未回答requestへ回答を登録する |
 | `retry` | PR conflictで最終blockedになったIssueを監査付きで`resolving_conflict`へ戻す |
 | `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
+| `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -509,6 +510,7 @@ starting ──► polling ◄──────────────┐
 
 running ──fatal/nonrecoverable──► blocked
 resolving_conflict ──budget超過/nonrecoverable──► blocked
+failed(typed pre-publication) ──operator確認──► publication_recovery_pending ──publish成功──► awaiting_checks
 ```
 
 `needs_input` はIssue単位の状態であり、`continue_after_needs_input: true` の場合、supervisor全体は別Issueのpollingを続けてよい。ただし同一worktreeは回答まで変更しない。
@@ -522,6 +524,7 @@ resolving_conflict ──budget超過/nonrecoverable──► blocked
 - `awaiting_checks`
 - `awaiting_merge`
 - `resolving_conflict`
+- `publication_recovery_pending`
 - `completed`
 - `failed`
 - `blocked`
@@ -778,8 +781,16 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `input_requested`
 - `answer_recorded`
 - `retry_scheduled`
+- `publication_retry_scheduled`
 - `environment_resume_requested`
 - `environment_resume_recovered`
+- `publication_failed`
+- `publication_recovery_requested`
+- `publication_recovery_attempt_started`
+- `publication_recovery_attempt_resumed`
+- `publication_recovery_attempt_failed`
+- `publication_recovery_refused`
+- `publication_recovery_succeeded`
 - `issue_completed`
 - `issue_failed`
 - `github_state_synced`

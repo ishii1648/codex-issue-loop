@@ -510,6 +510,17 @@ func TestUnsupportedSchemaVersionIsRejectedWithoutQuarantine(t *testing.T) {
 	}
 }
 
+func TestValidIDRejectsRunDirectoryTraversal(t *testing.T) {
+	if !ValidID("run_abc-123", "run_") {
+		t.Fatal("valid run ID was rejected")
+	}
+	for _, value := range []string{"run_", "../run_abc", "run_../../state", "resume_abc", "run_with space"} {
+		if ValidID(value, "run_") {
+			t.Fatalf("unsafe run ID was accepted: %q", value)
+		}
+	}
+}
+
 func TestFaultSecondSupervisorCannotAcquireLock(t *testing.T) {
 	store := newStore(t)
 	first, err := store.AcquireSupervisorLock()
