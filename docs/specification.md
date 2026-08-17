@@ -342,7 +342,7 @@ agent-loop <command> [options]
 | `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
 | `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
 | `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
-| `adopt-merged-pr` | terminal state外で手動merge済みとなった保存branchの単一PRを監査付きで採用しleaseを解放する |
+| `adopt-merged-pr` | terminal state後に外部mergeされた保存branchの単一PRを明示確認付きで完了へ採用する |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -465,11 +465,11 @@ operatorが同じPR branchへ外部commitをpushした後、run、managed worktr
 agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
 ```
 
-保存run/worktree/branchとfenced leaseを持つ、GitHub同期済みのterminal `blocked`または`failed`で、PR URL/number/merged stateが未記録のIssueだけを対象にする。`blocked`はtypedなresumable worker environment provenanceを必須とする。active PID/PGID、pending request、別のrecovery、dirtyまたはunpushed worktree、local/remote head不一致、manual/security exclusion、ready/running/needs-input/doneとの曖昧なlabel組み合わせを拒否する。GitHub failure markerとstatusに対応するsupervisor-owned terminal labelを要求する。
+保存済みPR URLが空のterminal `blocked`または`failed`で、operatorが保存branchから作成したPRをすでにmergeした場合だけを対象にする。run ID、managed worktree、local/remote branchとhead、clean/fully pushed状態、retained leaseのowner generation・resource・base SHA、baseからheadへの履歴、active PID/PGID不在、pending request不在を検証する。GitHubではsupervisor-owned terminal markerと対応label、target repo、head repository、保存branch、configured base、head SHA、merged state、merge commit SHAを検証し、PRが0件または複数なら拒否する。
 
-保存branchには同じGitHub repositoryをheadとするPRが正確に1件だけ存在し、mergedAt、branch、base branch、head SHA、merge commit SHAがすべて一致しなければならない。lease baseが保存headの祖先であること、merge commitをlocal object databaseで検証して`origin/<configured-base>`の祖先であることを確認する。コマンド自身はbranch、commit、push、PR、mergeを作成・変更しない。
+検証後はadoption ID、generation、confirmation/adoption時刻、PR URL/number、head SHA、merge SHA、base branch、GitHub同期intentをdurable event/stateへ保存する同じtransactionで`completed`へ遷移し、fenced leaseを解放する。attempt、continuation、session、Goal、回答、worktree、branch、worker historyは変更しない。GitHub同期途中で停止した場合は同じコマンドを再実行し、authoritative PRを再検証して同じadoptionへ冪等に収束する。
 
-検証済みPR URL/number、branch/head、merge commit、operator確認時刻、元status/reason、generationをtyped `merged_pull_request_adoption`とeventへ保存する。同じtransactionでfenced ownerを照合してleaseを解放し、Issueをcompleted、PR merged、`github_sync=done`にする。worker attempts、continuations、session、Goal、answers、blocked provenanceとhistoryは保持する。GitHub done同期前の停止はdurable intentとして残り、supervisor再起動または同じコマンドがauthoritative Issue/PRを再検証して冪等に完了する。
+open/closed-unmerged PR、別repo/branch/base/head、dirty/unpushed worktree、active worker、pending request、running/completed state、missing/inconsistent lease、manual/security exclusion、supervisor markerのないterminal stateは変更せずfail closedとする。コマンドはbranch、commit、push、PR、mergeを新規作成せず、state fileやlabelの手編集を代替手順にしない。
 
 ### 6.10 終了コード
 

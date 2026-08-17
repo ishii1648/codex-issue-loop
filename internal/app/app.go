@@ -211,7 +211,7 @@ Commands:
   resume-blocked  Explicitly resume a worker environment-blocked Issue
   recover-publication  Recover an eligible failed Issue at the publication boundary
   recover-checks  Return an externally repaired Pull Request to its saved lifecycle
-  adopt-merged-pr  Adopt the single merged Pull Request for a terminal saved branch
+  adopt-merged-pr  Adopt one externally merged saved branch into terminal state
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree

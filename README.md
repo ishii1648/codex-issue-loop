@@ -139,13 +139,13 @@ worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missin
 
 checksがpendingまたはgreenなら`awaiting_checks`から通常のDraft解除・auto mergeへ収束し、failureならterminal `failed`を維持します。manual/security exclusion、active worker、pending request、dirty/unpushed worktree、別branch/PR/head、closed-without-mergeでは拒否します。
 
-supervisorのterminal state保存後にoperatorが保存branchを手動bootstrapし、その唯一のPRが既にmerge済みなのにPR URL未記録のためleaseだけが残った場合は、明示確認付きの限定adoptionを使います。
+terminal `blocked` / `failed`の保存branchからoperatorがPRを作成・merge済みなのに、durable stateへPR URLが保存されずretained leaseがqueueを止めている場合は、限定adoptionを明示実行できます。
 
 ```sh
 "$agent_loop_bin" adopt-merged-pr --repo "$PWD" --issue 123 --confirm-merged-pr-adoption --json
 ```
 
-この操作はPR・branch・commit・push・mergeを作りません。cleanかつfully pushedな保存branch/head、単一のmerged PR、merge commitが`origin/<base>`の祖先であること、supervisor failure marker/terminal label、active worker・pending request・manual/security exclusion不在を再検証し、PR identityの監査記録とdone同期intentを保存するtransaction内だけでfenced leaseを解放します。同期途中で停止しても同じコマンドまたはsupervisor再起動で冪等に収束します。
+同一repo・保存branchのmerged PRがちょうど1件で、cleanかつfully pushedなworktree/head、lease owner/generation/base SHA、supervisor-owned terminal provenance、process/request不在がすべて一致する場合だけterminal stateへ採用します。新しいcommit、push、branch、PR、mergeは作成せず、attempt、continuation、session、回答を保持したままPR情報と監査metadataを保存し、leaseを1回だけ解放します。
 
 local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_network` localhost-only policyへopt-inできます。既定はnetwork無効です。設定と残余リスクは[localhost-only command network](docs/localhost-network.md)を参照してください。
 
