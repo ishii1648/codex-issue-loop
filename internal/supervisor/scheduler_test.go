@@ -89,7 +89,10 @@ func (t inertSchedulerTimer) Stop() bool          { return true }
 type inertSchedulerTimers struct{ created chan struct{} }
 
 func (t inertSchedulerTimers) NewTimer(time.Duration) SchedulerTimer {
-	t.created <- struct{}{}
+	select {
+	case t.created <- struct{}{}:
+	default:
+	}
 	return inertSchedulerTimer{ch: make(chan time.Time)}
 }
 
