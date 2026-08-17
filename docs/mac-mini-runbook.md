@@ -227,7 +227,7 @@ agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --conf
 
 この操作はconfigured base branchのremote-tracking commitを検証し、leaseを補う場合は非空の`base_sha`も同じtransactionで保存する。`resolve configured base branch`で拒否された場合はGitHub labelとdurable stateは未変更なので、`git -C <saved-worktree> fetch origin <base-branch>`で正しいremote-tracking commitを取得し、`status --json`でblocked状態を再確認して同じコマンドを再実行する。既存の非空`base_sha`は上書きしない。
 
-resumeはdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`lease.base_sha`が非空であることを確認する。GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動して収束させる。`conflict_recovery`がある場合は`retry`、手動`blocked`/`do-not-automate`、security block、running/completed、closed-without-merge、PR不整合は修復・再開せず原因別runbookへ戻る。
+resumeはdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`lease.base_sha`が非空であることを確認する。GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動するか同じ`resume-blocked`を再実行して収束させる。旧版の競合で`status=blocked`、`environment_resume.status=requested|github_synced`、`lease=null`となった場合も、修正版の同じコマンドがeventに保存したbase SHAとGitHub/worktree/run/PRを再検証し、競合のない`repo:*` leaseを再予約する。event historyからbase SHAを回復できない場合や、`conflict_recovery`、手動`blocked`/`do-not-automate`、security block、active worker、unanswered request、running/completed、closed-without-merge、worktree/branch/PR不整合がある場合は修復・再開せず原因別runbookへ戻る。
 
 v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。
 

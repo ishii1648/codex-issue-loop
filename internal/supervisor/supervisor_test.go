@@ -50,6 +50,7 @@ type fakeGitHub struct {
 	claimErr                  error
 	doneErr                   error
 	listErr                   error
+	inspectHook               func()
 }
 
 func (f *fakeGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, error) {
@@ -61,6 +62,9 @@ func (f *fakeGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, erro
 func (f *fakeGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) { return f.issue, nil }
 func (f *fakeGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
 	f.inspectCalls++
+	if f.inspectHook != nil {
+		f.inspectHook()
+	}
 	if f.remote != nil {
 		return *f.remote, nil
 	}

@@ -1367,37 +1367,35 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
+	pendingResume := false
 	if current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" && current.Status != "blocked" {
-		if current.Status == "environment_resume_pending" && current.GitHubSync == "environment_resume" {
-			client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
-			if err := client.MarkEnvironmentResume(ctx, cfg, *issueNumber, current.EnvironmentResume.ID); err != nil {
-				return fmt.Errorf("sync pending environment resume to GitHub: %w", err)
+		if current.Status != "environment_resume_pending" {
+			return exitError{4, fmt.Errorf("Issue #%d is not waiting for an environment resume (status=%s)", *issueNumber, current.Status)}
+		}
+		if current.Lease == nil || current.RunID == "" || current.Worktree == "" || current.Branch == "" {
+			return exitError{4, fmt.Errorf("Issue #%d pending environment resume does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
+		}
+		if current.GitHubSync == "environment_resume" {
+			if current.EnvironmentResume.Status != "requested" {
+				return exitError{4, fmt.Errorf("Issue #%d pending environment resume has inconsistent durable synchronization state", *issueNumber)}
 			}
-			_, err = store.Update("github_state_synced", *issueNumber, current.RunID, map[string]string{"state": "environment_resume", "resume_id": current.EnvironmentResume.ID}, func(s *state.Snapshot) error {
-				item := s.Issues[strconv.Itoa(*issueNumber)]
-				if item != nil && item.GitHubSync == "environment_resume" && item.EnvironmentResume != nil && item.EnvironmentResume.ID == current.EnvironmentResume.ID {
-					item.GitHubSync = ""
-					item.EnvironmentResume.Status = "github_synced"
-					item.UpdatedAt = time.Now().UTC()
-				}
-				return nil
+			pendingResume = true
+		} else if current.GitHubSync != "" || current.EnvironmentResume.Status != "github_synced" {
+			return exitError{4, fmt.Errorf("Issue #%d pending environment resume has inconsistent durable synchronization state", *issueNumber)}
+		} else {
+			baseSHA := current.Lease.BaseSHA
+			return a.output(*jsonOut, map[string]any{
+				"issue": *issueNumber, "status": current.Status, "resume_id": current.EnvironmentResume.ID,
+				"branch": current.Branch, "worktree": current.Worktree, "base_sha": baseSHA, "idempotent": true,
 			})
-			if err != nil {
-				return err
-			}
 		}
-		baseSHA := ""
-		if current.Lease != nil {
-			baseSHA = current.Lease.BaseSHA
-		}
-		return a.output(*jsonOut, map[string]any{
-			"issue": *issueNumber, "status": current.Status, "resume_id": current.EnvironmentResume.ID,
-			"branch": current.Branch, "worktree": current.Worktree, "base_sha": baseSHA, "idempotent": true,
-		})
 	}
-	if current.Status != "blocked" || current.GitHubSync != "" {
+	if !pendingResume && (current.Status != "blocked" || current.GitHubSync != "") {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before environment resume (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
+	interruptedResume := current.Status == "blocked" && current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" &&
+		(current.EnvironmentResume.Status == "requested" || current.EnvironmentResume.Status == "github_synced")
+	resumeIntent := interruptedResume || pendingResume
 	legacyWorkerBlock := current.BlockedCause == nil && current.FailureKind == "issue" && strings.Contains(current.LastError, "worker blocked")
 	if !legacyWorkerBlock && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
 		return exitError{4, fmt.Errorf("Issue #%d is not a resumable worker environment block", *issueNumber)}
@@ -1405,7 +1403,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if current.ConflictRecovery != nil {
 		return exitError{4, fmt.Errorf("Issue #%d is a Pull Request conflict block; use agent-loop retry", *issueNumber)}
 	}
-	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && !legacyWorkerBlock) {
+	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && !legacyWorkerBlock && !interruptedResume) {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
 	}
 	controller := a.ProcessController
@@ -1431,6 +1429,13 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	}
 	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists {
 		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to resume: %+v", inspection)}
+	}
+	if interruptedResume && current.Lease == nil && current.EnvironmentResume.BaseSHA == "" {
+		baseSHA, recoverErr := store.EnvironmentResumeBaseSHA(*issueNumber, current.RunID, current.EnvironmentResume.ID)
+		if recoverErr != nil {
+			return exitError{4, fmt.Errorf("recover publication base SHA for interrupted environment resume: %w; state was not changed", recoverErr)}
+		}
+		current.EnvironmentResume.BaseSHA = baseSHA
 	}
 	baseSHA, err := environmentResumeBaseSHA(ctx, entry.Commands["git"], cfg, current, inspection)
 	if err != nil {
@@ -1458,8 +1463,29 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			return exitError{4, fmt.Errorf("Issue #%d has manual exclusion label %q", *issueNumber, label)}
 		}
 	}
-	if blockedLabel == "" || !labels[blockedLabel] {
-		return exitError{4, fmt.Errorf("Issue #%d does not have the supervisor-owned blocked label", *issueNumber)}
+	if blockedLabel == "" {
+		return exitError{4, fmt.Errorf("GitHub exclude labels do not define the supervisor-owned blocked label")}
+	}
+	runningLabel := labels[strings.ToLower(cfg.GitHub.RunningLabel)]
+	blocked := labels[blockedLabel]
+	if resumeIntent {
+		switch current.EnvironmentResume.Status {
+		case "requested":
+			if blocked == runningLabel {
+				return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume has ambiguous GitHub blocked/running labels", *issueNumber)}
+			}
+		case "github_synced":
+			marker := "<!-- codex-issue-loop:environment-resume:" + current.EnvironmentResume.ID + " -->"
+			commented := false
+			for _, comment := range remote.Issue.Comments {
+				commented = commented || strings.Contains(comment, marker)
+			}
+			if blocked || !runningLabel || !commented {
+				return exitError{4, fmt.Errorf("Issue #%d GitHub state no longer matches the synchronized environment resume", *issueNumber)}
+			}
+		}
+	} else if !blocked || runningLabel {
+		return exitError{4, fmt.Errorf("Issue #%d does not have only the supervisor-owned blocked label", *issueNumber)}
 	}
 	if labels[strings.ToLower(cfg.GitHub.DoneLabel)] || labels[strings.ToLower(cfg.GitHub.FailedLabel)] || labels[strings.ToLower(cfg.GitHub.NeedsInputLabel)] {
 		return exitError{4, fmt.Errorf("Issue #%d has an incompatible terminal or needs-input label", *issueNumber)}
@@ -1477,46 +1503,61 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	}
 
 	resumeID := state.NewID("resume")
+	if resumeIntent {
+		resumeID = current.EnvironmentResume.ID
+	}
 	now := time.Now().UTC()
 	previousReason := current.LastError
 	if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
 		previousReason = current.BlockedCause.Reason
 	}
-	_, err = store.Update("environment_resume_requested", *issueNumber, current.RunID, map[string]any{
-		"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock, "base_sha": baseSHA,
-	}, func(s *state.Snapshot) error {
-		item := s.Issues[strconv.Itoa(*issueNumber)]
-		if item == nil || item.RunID != current.RunID || item.Status != "blocked" || item.GitHubSync != "" {
-			return fmt.Errorf("Issue #%d changed while environment resume was being prepared", *issueNumber)
+	if !pendingResume {
+		eventType := "environment_resume_requested"
+		if interruptedResume {
+			eventType = "environment_resume_recovered"
 		}
-		if item.Worktree != current.Worktree || item.Branch != current.Branch || item.PullRequestURL != current.PullRequestURL || !reflect.DeepEqual(item.Lease, current.Lease) {
-			return fmt.Errorf("Issue #%d worktree, branch, Pull Request, or resource lease changed while environment resume was being prepared", *issueNumber)
-		}
-		item.Status = "environment_resume_pending"
-		item.GitHubSync = "environment_resume"
-		if item.BlockedCause == nil && legacyWorkerBlock {
-			item.BlockedCause = &state.BlockedCause{
-				Origin: "worker", Kind: "environment", Resumable: true,
-				Reason: item.LastError, BlockedAt: item.UpdatedAt,
+		_, err = store.Update(eventType, *issueNumber, current.RunID, map[string]any{
+			"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock, "interrupted_resume": interruptedResume, "base_sha": baseSHA,
+		}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(*issueNumber)]
+			if item == nil || item.RunID != current.RunID || item.Status != "blocked" || item.GitHubSync != "" ||
+				(interruptedResume && (item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != current.EnvironmentResume.Status)) {
+				return fmt.Errorf("Issue #%d changed while environment resume was being prepared", *issueNumber)
 			}
-		}
-		if item.Lease == nil && legacyWorkerBlock {
-			item.LeaseGeneration++
-			owner := state.LeaseOwner{RunID: item.RunID, Generation: item.LeaseGeneration}
-			item.Lease = &state.ResourceLease{
-				Owner: owner, Slot: 0, DeclaredResources: []string{},
-				ResolvedResources: []string{state.RepositoryResource}, BaseSHA: baseSHA, ReservedAt: now,
+			if item.Worktree != current.Worktree || item.Branch != current.Branch || item.PullRequestURL != current.PullRequestURL || !reflect.DeepEqual(item.Lease, current.Lease) {
+				return fmt.Errorf("Issue #%d worktree, branch, Pull Request, or resource lease changed while environment resume was being prepared", *issueNumber)
 			}
-		} else if item.Lease != nil && item.Lease.BaseSHA == "" {
-			item.Lease.BaseSHA = baseSHA
+			item.Status = "environment_resume_pending"
+			item.GitHubSync = "environment_resume"
+			if item.BlockedCause == nil && legacyWorkerBlock {
+				item.BlockedCause = &state.BlockedCause{
+					Origin: "worker", Kind: "environment", Resumable: true,
+					Reason: item.LastError, BlockedAt: item.UpdatedAt,
+				}
+			}
+			if item.Lease == nil && (legacyWorkerBlock || interruptedResume) {
+				item.LeaseGeneration++
+				owner := state.LeaseOwner{RunID: item.RunID, Generation: item.LeaseGeneration}
+				item.Lease = &state.ResourceLease{
+					Owner: owner, Slot: 0, DeclaredResources: []string{},
+					ResolvedResources: []string{state.RepositoryResource}, BaseSHA: baseSHA, ReservedAt: now,
+				}
+			} else if item.Lease != nil && item.Lease.BaseSHA == "" {
+				item.Lease.BaseSHA = baseSHA
+			}
+			if interruptedResume {
+				item.EnvironmentResume.Status = "requested"
+				item.EnvironmentResume.BaseSHA = baseSHA
+			} else {
+				item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: item.LastError, BaseSHA: baseSHA}
+			}
+			item.RetryAfter = nil
+			item.UpdatedAt = now
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: item.LastError}
-		item.RetryAfter = nil
-		item.UpdatedAt = now
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 	if err := client.MarkEnvironmentResume(ctx, cfg, *issueNumber, resumeID); err != nil {
 		return fmt.Errorf("sync environment resume to GitHub (durable resume remains pending): %w", err)
@@ -1554,6 +1595,12 @@ func environmentResumeBaseSHA(ctx context.Context, git string, cfg config.Config
 		baseSHA = current.Lease.BaseSHA
 		if baseSHA != strings.TrimSpace(baseSHA) {
 			return "", fmt.Errorf("saved publication base SHA is not canonical; state was not changed")
+		}
+	}
+	if baseSHA == "" && current.EnvironmentResume != nil {
+		baseSHA = current.EnvironmentResume.BaseSHA
+		if baseSHA != strings.TrimSpace(baseSHA) {
+			return "", fmt.Errorf("saved environment resume base SHA is not canonical; state was not changed")
 		}
 	}
 	if baseSHA == "" {

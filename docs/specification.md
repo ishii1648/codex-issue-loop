@@ -436,7 +436,9 @@ agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
 agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
 ```
 
-`blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは`failure_kind=issue`とsupervisor生成の`worker blocked` errorが一致する場合だけlegacy worker blockとして同じ操作内でprovenanceを正規化し、失われたleaseは最小の`repo:*`として保守的に再予約する。他のleaseと競合すれば拒否する。operatorの明示確認、active process不在、pending request不在、run/worktree/branch/resource lease、GitHub open Issueとblocked label、保存PRの対応を検査する。leaseの`base_sha`が空の場合はconfigured base branchのremote-tracking commitを解決し、保存worktreeのHEADの祖先であることを検証する。解決・検証できなければstateとGitHubを変更せず拒否し、非空の既存`base_sha`は上書きしない。検証したSHA、legacy lease、resume ID、GitHub同期intentは1つの`environment_resume_requested` transactionで保存する。dirty changes、session/Goal、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止してもsupervisorが同じintentを再実行し、重複worker/commentを作らず収束する。
+`blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは`failure_kind=issue`とsupervisor生成の`worker blocked` errorが一致する場合だけlegacy worker blockとして同じ操作内でprovenanceを正規化し、失われたleaseは最小の`repo:*`として保守的に再予約する。他のleaseと競合すれば拒否する。operatorの明示確認、active process不在、pending request不在、run/worktree/branch/resource lease、GitHub open Issueとblocked label、保存PRの対応を検査する。leaseの`base_sha`が空の場合はconfigured base branchのremote-tracking commitを解決し、保存worktreeのHEADの祖先であることを検証する。解決・検証できなければstateとGitHubを変更せず拒否し、非空の既存`base_sha`は上書きしない。検証したSHAはlease、`environment_resume`、event payloadへ保存し、legacy lease、resume ID、GitHub同期intentとともに1つの`environment_resume_requested` transactionで確定する。dirty changes、session/Goal、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止してもsupervisorが同じintentを再実行し、重複worker/commentを作らず収束する。
+
+startup/periodic reconciliationはinspectionに使ったIssue snapshotと更新transaction内の最新Issueが一致する場合だけ判定を適用し、途中で変化した場合は再inspectionする。`environment_resume_pending`かつ`github_sync=environment_resume`では旧blocked labelを手動exclusionとして扱わず、leaseを保持する。旧実装の競合で`status=blocked`、`environment_resume.status=requested|github_synced`となった場合は、`resume-blocked`が同じresume ID、保存済み`base_sha`、worktree/branch/run、GitHub Issue/PR/label/comment、process/requestを再検証し、leaseを`repo:*`として競合なしに再予約できる場合だけ`environment_resume_recovered`で復旧する。保存済みSHAをstateまたは保持event historyから回復できない場合は、現在のbaseを推測せず拒否する。
 
 PR conflict、手動exclusion、security block、上記markerのないlegacy block、running/completed、closed Issue、missing/inconsistent worktree・branch・PRを拒否する。`retry`と`resume-blocked`は交換可能ではなく、state fileやsupervisor-owned labelの手編集を復旧手順にしない。
 
@@ -777,6 +779,7 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `answer_recorded`
 - `retry_scheduled`
 - `environment_resume_requested`
+- `environment_resume_recovered`
 - `issue_completed`
 - `issue_failed`
 - `github_state_synced`
