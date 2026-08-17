@@ -516,14 +516,18 @@ and not ip.src in {192.30.252.0/22 185.199.108.0/22 140.82.112.0/20 143.55.64.0/
 
 secret fileはrepository外へowner-onlyで作る。値をshell historyへ残さない組織のsecret provisioning手段を使い、最終状態だけ確認する。
 
+配置先はhome配下ではなくhostに依存しない固定pathにする。`.agent-loop.yaml`はrepositoryで共有され、`secret_source.file`は`~`も環境変数展開も受け付けない絶対pathのみを許す。home配下を指定すると、public repositoryではhostのuser名が公開され、他hostでは解決できない設定になる。directoryとfileはbrokerを実行するuserの所有にする。brokerはLaunchAgentとしてそのuser権限で動くため、root所有0600のfileは読めない。
+
 ```sh
-install -d -m 700 "$HOME/Library/Application Support/codex-issue-loop/credentials"
+sudo mkdir -p /usr/local/etc/codex-issue-loop
+sudo chown "$(id -un):$(id -gn)" /usr/local/etc/codex-issue-loop
+chmod 700 /usr/local/etc/codex-issue-loop
 umask 077
-touch "$HOME/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook"
-chmod 600 "$HOME/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook"
+touch /usr/local/etc/codex-issue-loop/owner-repository.webhook
+chmod 600 /usr/local/etc/codex-issue-loop/owner-repository.webhook
 ```
 
-対象repositoryのnumeric repository IDとGitHub App installation IDをGitHubの管理画面または認証済みAPIで確認し、次をdefault branchの`.agent-loop.yaml`へ追加する。`public_url_identifier`は監査用の非secret識別子であり、query tokenを含むURLを書かない。LaunchAgent運用では環境変数がログインlaunchdへ安全に注入されていることを保証しにくいため、通常は0600 file sourceを使う。
+対象repositoryのnumeric repository IDとGitHub App installation IDをGitHubの管理画面または認証済みAPIで確認し、次をdefault branchの`.agent-loop.yaml`へ追加する。`public_url_identifier`は監査用の非secret識別子であり、query tokenを含むURLを書かない。LaunchAgent運用では環境変数がログインlaunchdへ安全に注入されていることを保証しにくいため、通常は0600 file sourceを使う。`safety_sweep_jitter`は`watch.reconcile_jitter`と異なりpercent表記のcustom unmarshalerを持たないため、小数で書く。
 
 ```yaml
 github:
@@ -535,11 +539,11 @@ webhook:
   listener_address: 127.0.0.1:8787
   public_url_identifier: hooks.example.invalid/agent-loop/owner-repository
   secret_source:
-    file: /Users/example/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook
+    file: /usr/local/etc/codex-issue-loop/owner-repository.webhook
   installation_ids: [987654]
   allow_repository_webhook: false
   safety_sweep_interval: 15m
-  safety_sweep_jitter: 10%
+  safety_sweep_jitter: 0.1
   max_body_bytes: 2097152
   read_timeout: 10s
   read_header_timeout: 5s
