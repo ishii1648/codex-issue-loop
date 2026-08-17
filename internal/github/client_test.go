@@ -157,6 +157,7 @@ func TestPullRequestChecksStatus(t *testing.T) {
 		want       string
 	}{
 		{name: "no checks on clean Pull Request", mergeState: "CLEAN", want: "success"},
+		{name: "no checks on dirty Pull Request", mergeState: "DIRTY", want: "pending"},
 		{name: "no checks before mergeability is known", mergeState: "UNKNOWN", want: "pending"},
 		{name: "successful check run", checks: []checkRollup{{Status: "COMPLETED", Conclusion: "SUCCESS"}}, want: "success"},
 		{name: "pending check run", checks: []checkRollup{{Status: "IN_PROGRESS"}}, want: "pending"},
