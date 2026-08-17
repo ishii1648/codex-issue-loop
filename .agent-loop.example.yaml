@@ -101,5 +101,31 @@ security:
   redact_env: []
 
 # Explicit fallback is polling. See docs/mac-mini-runbook.md before opting in.
+# Switch to webhook only after the reverse proxy and the GitHub webhook are both
+# ready. While deliveries cannot reach the broker, the only remaining detection
+# path is the 15 minute safety sweep, which is slower than 60 second polling.
 webhook:
   mode: polling
+  # The values below are the defaults and are validated only when mode is
+  # webhook. listener_address must be a literal loopback address; the reverse
+  # proxy terminates TLS in front of it.
+  # mode: webhook
+  # listener_address: 127.0.0.1:8787
+  # Non-secret audit identifier for the public endpoint. Never write a URL that
+  # carries a query token.
+  # public_url_identifier: hooks.example.invalid/github/webhook
+  # Owner-only (0600) file outside the repository. Prefer a file source over env
+  # because LaunchAgent environments are hard to provision safely.
+  # secret_source:
+  #   file: /Users/example/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook
+  # Keep an installation allowlist for GitHub Apps. A classic repository webhook
+  # has no installation, so it requires an empty list plus the explicit opt-in.
+  # installation_ids: [987654]
+  # allow_repository_webhook: false
+  # safety_sweep_interval: 15m
+  # safety_sweep_jitter: 10%
+  # max_body_bytes: 2097152
+  # read_timeout: 10s
+  # read_header_timeout: 5s
+  # idle_timeout: 30s
+  # max_concurrent: 16

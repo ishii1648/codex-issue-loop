@@ -2,6 +2,7 @@ version: 4
 
 github:
   repo: ishii1648/codex-issue-loop
+  repository_id: 1334901081
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
   running_label: codex-loop:running
@@ -85,3 +86,27 @@ logs:
 
 security:
   redact_env: []
+
+# Cloudflare Tunnelとrepository webhookの準備が完了するまではpollingを維持する。
+# 先にmodeをwebhookへ切り替えると、deliveryが届かない間の検知が15分のsafety sweep
+# だけになり、60秒pollingより遅くなる。有効化手順は
+# docs/mac-mini-runbook.md#12-webhook-brokerとreverse-proxy を参照する。
+webhook:
+  mode: polling
+  # 有効化時は次のコメントを外し、<>のプレースホルダを実値へ置換する。
+  # public_url_identifierは監査用の非secret識別子であり、tokenを含むURLを書かない。
+  # secret_sourceはrepository外のowner-only (0600) fileを指す絶対パスにする。
+  # mode: webhook
+  # listener_address: 127.0.0.1:8787
+  # public_url_identifier: hooks.<domain>/github/webhook
+  # secret_source:
+  #   file: /Users/<mac-mini-user>/Library/Application Support/codex-issue-loop/credentials/ishii1648-codex-issue-loop.webhook
+  # installation_ids: []
+  # allow_repository_webhook: true
+  # safety_sweep_interval: 15m
+  # safety_sweep_jitter: 10%
+  # max_body_bytes: 2097152
+  # read_timeout: 10s
+  # read_header_timeout: 5s
+  # idle_timeout: 30s
+  # max_concurrent: 16
