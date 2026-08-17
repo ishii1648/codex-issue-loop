@@ -1604,6 +1604,201 @@ func runGitOutputApp(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func TestAdoptMergedPullRequestReleasesLeaseAndIsIdempotent(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	binDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	fakeGH := filepath.Join(binDir, "gh")
+	ghLog := filepath.Join(t.TempDir(), "gh.log")
+
+	runGitApp(t, repo, "config", "user.name", "Test")
+	runGitApp(t, repo, "config", "user.email", "test@example.invalid")
+	runGitApp(t, repo, "config", "commit.gpgsign", "false")
+	runGitApp(t, repo, "add", ".agent-loop.yaml")
+	runGitApp(t, repo, "commit", "-m", "base")
+	runGitApp(t, repo, "branch", "-M", "main")
+	remoteDir := filepath.Join(t.TempDir(), "remote.git")
+	if out, err := exec.Command("git", "init", "--bare", "-q", remoteDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	runGitApp(t, repo, "remote", "add", "origin", remoteDir)
+	runGitApp(t, repo, "push", "-u", "origin", "main")
+	baseSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
+
+	branch := "codex/issue-102-manual"
+	canonicalRoot, err := filepath.EvalSymlinks(l.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedWorktree := filepath.Join(canonicalRoot, "worktrees", "repo-test", "issue-102")
+	if err := os.MkdirAll(filepath.Dir(managedWorktree), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, managedWorktree).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+	fixture := filepath.Join(managedWorktree, "manual.txt")
+	if err := os.WriteFile(fixture, []byte("published outside supervisor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, managedWorktree, "add", "manual.txt")
+	runGitApp(t, managedWorktree, "commit", "-m", "manual publication")
+	runGitApp(t, managedWorktree, "push", "-u", "origin", branch)
+	headSHA := runGitOutputApp(t, managedWorktree, "rev-parse", "HEAD")
+	runGitApp(t, repo, "merge", "--no-ff", "--no-edit", branch)
+	runGitApp(t, repo, "push", "origin", "main")
+	mergeSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
+
+	issueJSON := `{"number":102,"title":"manual publication","body":"","url":"https://example.test/issues/102","state":"CLOSED","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:failed:102 -->"}]}`
+	prJSON := fmt.Sprintf(`[{"number":132,"url":"https://example.test/pr/132","state":"MERGED","isDraft":false,"mergedAt":"2026-08-18T00:00:00Z","headRefName":%q,"baseRefName":"main","headRefOid":%q,"mergeCommit":{"oid":%q},"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"},"mergeStateStatus":"CLEAN","statusCheckRollup":[]}]`, branch, headSHA, mergeSHA)
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue view") printf '%%s\n' '%s' ;;
+  "pr list") printf '%%s\n' '%s' ;;
+  "issue edit"|"issue comment"|"issue close") exit 0 ;;
+  *) exit 2 ;;
+esac
+`, ghLog, issueJSON, prJSON)
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, repo)
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	runID := "run_adopt_102"
+	_, _, err = store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 102, Title: "manual publication", RunID: runID, Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+		BaseSHA: baseSHA, ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := state.AnswerRecord{RequestID: "req-old", Question: "continue?", Answer: "yes", AnsweredAt: time.Now().UTC()}
+	_, err = store.Update("worker_blocked", 102, runID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["102"]
+		item.Status = "blocked"
+		item.Worktree = managedWorktree
+		item.Branch = branch
+		item.Attempts = 3
+		item.Continuations = 2
+		item.SessionID = "session-102"
+		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-102"}
+		item.Answers = []state.AnswerRecord{answer}
+		item.FailureKind = "issue"
+		item.LastError = "issue: worker environment blocked after manual publication"
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "legacy publication gap", BlockedAt: time.Now().UTC()}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controller := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
+	baseArgs := []string{"adopt-merged-pr", "--repo", repo, "--issue", "102", "--confirm-merged-pr-adoption", "--json"}
+	run := func(args []string) (int, string, string) {
+		t.Helper()
+		var out, stderr bytes.Buffer
+		app := App{Out: &out, Err: &stderr, ProcessController: controller}
+		return app.Run(context.Background(), args), out.String(), stderr.String()
+	}
+	if code, _, _ := run(baseArgs[:len(baseArgs)-2]); code == 0 {
+		t.Fatal("missing explicit confirmation was accepted")
+	}
+	_, err = store.Update("test_worker_alive", 102, runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["102"].WorkerPID = 4321
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.alive[4321] = true
+	if code, _, _ := run(baseArgs); code == 0 {
+		t.Fatal("active worker was accepted")
+	}
+	controller.alive[4321] = false
+	_, err = store.Update("test_pending_request", 102, runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["102"].WorkerPID = 0
+		snapshot.PendingRequests["req-pending"] = &state.Request{ID: "req-pending", IssueNumber: 102, Status: "pending"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := run(baseArgs); code == 0 {
+		t.Fatal("pending manual answer was accepted")
+	}
+	_, err = store.Update("test_request_answered", 102, runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.PendingRequests["req-pending"].Status = "answered"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirty := filepath.Join(managedWorktree, "dirty.txt")
+	if err := os.WriteFile(dirty, []byte("unsafe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := run(baseArgs); code == 0 {
+		t.Fatal("dirty worktree was accepted")
+	}
+	if err := os.Remove(dirty); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := run(baseArgs)
+	if code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	var output map[string]any
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output["status"] != "completed" || output["adoption_status"] != "synced" || output["lease_released"] != true {
+		t.Fatalf("output=%v", output)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["102"]
+	if item.Lease != nil || item.Status != "completed" || !item.PullRequestMerged || item.PullRequestNumber != 132 || item.GitHubSync != "" ||
+		item.MergedPullRequestAdoption == nil || item.MergedPullRequestAdoption.MergeSHA != mergeSHA || item.MergedPullRequestAdoption.Status != "synced" {
+		t.Fatalf("adopted Issue=%+v", item)
+	}
+	if item.Attempts != 3 || item.Continuations != 2 || item.SessionID != "session-102" || !reflect.DeepEqual(item.Answers, []state.AnswerRecord{answer}) {
+		t.Fatalf("worker history changed: %+v", item)
+	}
+	if code, stdout, stderr := run(baseArgs); code != 0 || !strings.Contains(stdout, `"idempotent": true`) {
+		t.Fatalf("idempotent rerun code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if _, _, err := store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 130, Title: "next", RunID: "run_next_130", Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: mergeSHA,
+	}); err != nil {
+		t.Fatalf("released repository lease did not unblock next Issue: %v", err)
+	}
+	logBytes, err := os.ReadFile(ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logBytes)
+	for _, command := range []string{"issue edit", "issue comment", "issue close"} {
+		if strings.Count(logText, command) != 1 {
+			t.Fatalf("%s calls were not exactly once:\n%s", command, logText)
+		}
+	}
+}
+
 func TestEvaluateSleepSettings(t *testing.T) {
 	output := `Battery Power:
  sleep 1

@@ -236,18 +236,21 @@ type PullRequestChecksRecovery struct {
 	ChecksStatus   string    `json:"checks_status"`
 }
 
-// MergedPullRequestAdoption records an explicitly confirmed, one-time adoption
-// of a Pull Request that was merged outside the supervisor after a terminal
-// worker outcome. It is durable so GitHub synchronization can be retried
-// without releasing the retained lease more than once.
+// MergedPullRequestAdoption records an operator-confirmed association between
+// a terminal Issue and the single merged Pull Request for its saved branch.
+// It exists only for publication that happened outside the supervisor after a
+// worker stopped, and is never used to infer or adopt an open Pull Request.
 type MergedPullRequestAdoption struct {
 	ID                string    `json:"id"`
 	Status            string    `json:"status"`
 	Generation        int       `json:"generation"`
 	ConfirmedAt       time.Time `json:"confirmed_at"`
 	AdoptedAt         time.Time `json:"adopted_at"`
+	PreviousStatus    string    `json:"previous_status"`
+	PreviousReason    string    `json:"previous_reason"`
 	PullRequestURL    string    `json:"pull_request_url"`
 	PullRequestNumber int       `json:"pull_request_number"`
+	Branch            string    `json:"branch"`
 	HeadSHA           string    `json:"head_sha"`
 	MergeSHA          string    `json:"merge_sha"`
 	BaseBranch        string    `json:"base_branch"`

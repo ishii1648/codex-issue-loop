@@ -39,6 +39,52 @@ func TestSessionResumeNeverCrossesBackendNamespace(t *testing.T) {
 	}
 }
 
+func TestRestartCompletesRequestedMergedPullRequestAdoption(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	mergedAt := time.Now().UTC()
+	github.remote = &gh.RemoteState{
+		Issue: gh.Issue{
+			Number: 1, State: "CLOSED", Labels: []string{"blocked"},
+			Comments: []string{"<!-- codex-issue-loop:failed:1 -->"},
+		},
+		PullRequests: []gh.PullRequest{{
+			Number: 17, URL: "https://example.test/pr/17", State: "MERGED", MergedAt: &mergedAt,
+			HeadRefName: "codex/issue-1-manual", BaseRefName: "main", HeadSHA: "head-17", MergeCommitSHA: "merge-17", HeadRepository: "owner/repo",
+		}},
+	}
+	_, err := loop.Store.Update("merged_pull_request_adopted", 1, "run_adoption_1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Status: "completed", RunID: "run_adoption_1", Branch: "codex/issue-1-manual",
+			PullRequestURL: "https://example.test/pr/17", PullRequestNumber: 17, HeadSHA: "head-17",
+			PullRequestMerged: true, GitHubSync: "done",
+			MergedPullRequestAdoption: &state.MergedPullRequestAdoption{
+				ID: "merged_pr_adoption_restart", Status: "github_sync_pending", Generation: 1,
+				PreviousStatus: "blocked", PullRequestURL: "https://example.test/pr/17", PullRequestNumber: 17,
+				Branch: "codex/issue-1-manual", BaseBranch: "main", HeadSHA: "head-17", MergeSHA: "merge-17",
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := loop.issueState(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.processExisting(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := snapshot.Issues["1"]
+	if github.doneCalls != 1 || github.inspectCalls != 1 || issue.GitHubSync != "" || issue.MergedPullRequestAdoption.Status != "synced" {
+		t.Fatalf("github=%+v issue=%+v", github, issue)
+	}
+}
+
 type fakeGitHub struct {
 	issue                     gh.Issue
 	remote                    *gh.RemoteState

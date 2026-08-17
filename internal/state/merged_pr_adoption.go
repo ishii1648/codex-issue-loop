@@ -98,6 +98,9 @@ func (f *mergedPullRequestAdoptionFinder) consume(line []byte) error {
 			HeadSHA           string     `json:"head_sha"`
 			MergeSHA          string     `json:"merge_sha"`
 			BaseBranch        string     `json:"base_branch"`
+			PreviousStatus    string     `json:"previous_status"`
+			PreviousReason    string     `json:"previous_reason"`
+			Branch            string     `json:"branch"`
 			LeaseOwner        LeaseOwner `json:"lease_owner"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -119,7 +122,8 @@ func (f *mergedPullRequestAdoptionFinder) consume(line []byte) error {
 			Adoption: MergedPullRequestAdoption{
 				ID: payload.AdoptionID, Status: "github_sync_pending", Generation: payload.Generation,
 				ConfirmedAt: confirmedAt, AdoptedAt: payload.AdoptedAt.UTC(), PullRequestURL: payload.PullRequestURL,
-				PullRequestNumber: payload.PullRequestNumber, HeadSHA: payload.HeadSHA, MergeSHA: payload.MergeSHA, BaseBranch: payload.BaseBranch,
+				PullRequestNumber: payload.PullRequestNumber, PreviousStatus: payload.PreviousStatus, PreviousReason: payload.PreviousReason,
+				Branch: payload.Branch, HeadSHA: payload.HeadSHA, MergeSHA: payload.MergeSHA, BaseBranch: payload.BaseBranch,
 			},
 			LeaseOwner: payload.LeaseOwner,
 		}
