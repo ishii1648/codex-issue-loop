@@ -17,6 +17,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
@@ -333,6 +334,90 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 	}
 }
 
+func TestStartRecoversOnlyUnloadedSharedBrokerWhenSupervisorIsLoaded(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "webhook-secret")
+	if err := os.WriteFile(secret, []byte("fixture-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := fmt.Sprintf(`version: 4
+github:
+  repo: owner/repo
+  repository_id: 1234
+webhook:
+  mode: webhook
+  listener_address: 127.0.0.1:8787
+  public_url_identifier: fixture.example/webhook
+  secret_source:
+    file: %q
+  installation_ids: [99]
+`, secret)
+	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	launchctl := filepath.Join(binDir, "launchctl")
+	script := `#!/bin/sh
+case "$1" in
+  print)
+    case "$2" in
+      *broker*) test -f "$START_TEST_BROKER" && printf 'state = running\npid = 222\n' ;;
+      *) test -f "$START_TEST_REPO" && printf 'state = running\npid = 111\n' ;;
+    esac
+    ;;
+  bootstrap)
+    case "$3" in
+      *broker*) : > "$START_TEST_BROKER"; printf 'bootstrap broker\n' >> "$START_TEST_LOG" ;;
+      *) : > "$START_TEST_REPO"; printf 'bootstrap repo\n' >> "$START_TEST_LOG" ;;
+    esac
+    ;;
+  bootout) printf 'bootout\n' >> "$START_TEST_LOG" ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	repoState := filepath.Join(t.TempDir(), "repo-loaded")
+	brokerState := filepath.Join(t.TempDir(), "broker-loaded")
+	logPath := filepath.Join(t.TempDir(), "launchctl.log")
+	if err := os.WriteFile(repoState, []byte("loaded"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("START_TEST_REPO", repoState)
+	t.Setenv("START_TEST_BROKER", brokerState)
+	t.Setenv("START_TEST_LOG", logPath)
+	cfg := mustConfig(t, repo)
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	manager := launchd.Manager{Layout: l, Launchctl: launchctl}
+	if err := manager.WritePlist(entry, filepath.Join(binDir, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WriteBrokerPlist(filepath.Join(binDir, "codex"), entry.EnvironmentPath); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := (App{Out: &out, Err: &out}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(brokerState); err != nil {
+		t.Fatalf("broker was not recovered: %v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil || string(logData) != "bootstrap broker\n" {
+		t.Fatalf("unexpected shared restart activity: log=%q err=%v", logData, err)
+	}
+}
+
 func TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
@@ -611,6 +696,151 @@ esac
 	}
 	if remoteHead := runGitOutputApp(t, repo, "rev-parse", "origin/"+branch); remoteHead != result.Commit {
 		t.Fatalf("remote branch=%s, want published commit %s", remoteHead, result.Commit)
+	}
+}
+
+func TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "config", "user.name", "Test User")
+	runGitApp(t, repo, "config", "user.email", "test@example.com")
+	runGitApp(t, repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "add", "README.md")
+	runGitApp(t, repo, "commit", "-m", "base")
+	runGitApp(t, repo, "branch", "-M", "main")
+	remotePath := filepath.Join(filepath.Dir(repo), "interrupted-resume-remote.git")
+	runGitApp(t, filepath.Dir(repo), "init", "--bare", remotePath)
+	runGitApp(t, repo, "remote", "add", "origin", remotePath)
+	runGitApp(t, repo, "push", "-u", "origin", "main")
+	baseSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
+	branch := "codex/issue-8-interrupted-resume"
+	runGitApp(t, repo, "checkout", "-b", branch)
+	runGitApp(t, repo, "push", "-u", "origin", branch)
+	if err := os.WriteFile(filepath.Join(repo, "dirty-evidence.txt"), []byte("keep interrupted work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeGH := filepath.Join(filepath.Dir(repo), "bin", "gh-interrupted-resume")
+	manualExclusion := filepath.Join(filepath.Dir(repo), "manual-exclusion")
+	if err := os.WriteFile(manualExclusion, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_LOOP_TEST_MANUAL_EXCLUSION", manualExclusion)
+	script := `#!/bin/sh
+case "$1 $2" in
+  "issue view")
+    if [ -e "$AGENT_LOOP_TEST_MANUAL_EXCLUSION" ]; then
+      printf '%s\n' '{"number":8,"title":"Interrupted resume","body":"","url":"https://example.test/issues/8","state":"OPEN","labels":[{"name":"blocked"},{"name":"do-not-automate"}],"assignees":[],"milestone":null,"comments":[]}'
+    else
+      printf '%s\n' '{"number":8,"title":"Interrupted resume","body":"","url":"https://example.test/issues/8","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[]}'
+    fi ;;
+  "pr list") printf '%s\n' '[]' ;;
+  "issue edit"|"issue comment") exit 0 ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configFile, err := os.OpenFile(filepath.Join(repo, config.FileName), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(configFile, "git:\n  worktree_root: %q\n", filepath.Dir(repo)); err != nil {
+		t.Fatal(err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, repo)
+	entry := registry.Entry{
+		RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo,
+		Commands: map[string]string{"git": "/usr/bin/git", "gh": fakeGH},
+	}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: cfg.RepoPath}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	_, owner, err := store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 8, Title: "Interrupted resume", RunID: "run_8", Slot: 0,
+		DeclaredResources: []string{"host"}, ResolvedResources: []string{"host"}, BaseSHA: baseSHA, ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeID := "resume_interrupted"
+	_, err = store.Update("environment_resume_requested", 8, owner.RunID, map[string]string{"resume_id": resumeID, "base_sha": baseSHA}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["8"]
+		item.Status = "blocked"
+		item.Branch = branch
+		item.Worktree = cfg.RepoPath
+		item.SessionID = "session-8"
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: time.Now().UTC()}
+		item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: time.Now().UTC(), PreviousReason: "network unavailable"}
+		item.LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
+		return state.ReleaseIssueLease(item, owner)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	args := []string{"resume-blocked", "--repo", cfg.RepoPath, "--issue", "8", "--confirm-prerequisite-resolved", "--json"}
+	broken, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := a.Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "manual exclusion") {
+		t.Fatalf("manual exclusion did not fail closed: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	rejected, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.StateRevision != broken.StateRevision || rejected.Issues["8"].Lease != nil || rejected.Issues["8"].Status != "blocked" {
+		t.Fatalf("manual exclusion changed interrupted state: before=%d after=%d issue=%+v", broken.StateRevision, rejected.StateRevision, rejected.Issues["8"])
+	}
+	if err := os.Remove(manualExclusion); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), args); code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := loaded.Issues["8"]
+	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.Lease == nil || item.Lease.BaseSHA != baseSHA || item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != "github_synced" || item.EnvironmentResume.BaseSHA != baseSHA {
+		t.Fatalf("interrupted resume did not converge: %+v", item)
+	}
+	if item.Lease.Owner.RunID != "run_8" || item.Lease.Owner.Generation != owner.Generation+1 || !reflect.DeepEqual(item.Lease.ResolvedResources, []string{state.RepositoryResource}) {
+		t.Fatalf("lease was not conservatively reacquired: %+v", item.Lease)
+	}
+	if data, err := os.ReadFile(filepath.Join(repo, "dirty-evidence.txt")); err != nil || string(data) != "keep interrupted work\n" {
+		t.Fatalf("dirty worktree was not preserved: data=%q err=%v", data, err)
+	}
+	revision := loaded.StateRevision
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), args); code != 0 {
+		t.Fatalf("idempotent retry code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	retried, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.StateRevision != revision || retried.Issues["8"].EnvironmentResume.ID != resumeID || retried.Issues["8"].Lease.Owner != item.Lease.Owner {
+		t.Fatalf("idempotent retry changed durable state: before=%d after=%d issue=%+v", revision, retried.StateRevision, retried.Issues["8"])
 	}
 }
 

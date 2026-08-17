@@ -107,6 +107,8 @@ sleep 3
 
 `doctor`が`ok: true`を返し、LaunchAgentとsupervisorが稼働していることを確認します。LaunchAgentのPATH、aqua利用時の登録、初回セットアップの詳細は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
 
+多数のrepositoryを常駐させる場合は、明示的な`webhook.mode: webhook`で共有localhost brokerを利用できます。公開HTTPS endpointはagent-loopが用意せず、既存のreverse proxyから`127.0.0.1`または`::1`へ配送します。署名検証、secret管理、GitHub event、rotation、15分の条件付きREST safety sweep、pollingへのrollbackは[Mac mini常駐運用runbook](docs/mac-mini-runbook.md#12-webhook-brokerとreverse-proxy)を参照してください。
+
 `completion.auto_merge: true`でPR conflictが発生した場合は、同じworktree・branch・PRを使う`resolving_conflict`へ自動遷移します。規定回数後に最終`blocked`となったconflictだけ、原因を修復したうえで次の明示操作から再開します。
 
 ```sh

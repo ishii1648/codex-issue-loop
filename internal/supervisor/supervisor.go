@@ -23,6 +23,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
@@ -91,6 +92,14 @@ func (l *Loop) Run(ctx context.Context) error {
 	watcher, watchErr := fsnotify.NewWatcher()
 	if watchErr == nil {
 		watchErr = watcher.Add(l.Store.Dir)
+		if watchErr == nil && l.Config.Webhook.Enabled() {
+			mailbox := webhook.MailboxDir(l.Store.Dir)
+			if mkdirErr := os.MkdirAll(mailbox, 0o700); mkdirErr != nil {
+				watchErr = mkdirErr
+			} else {
+				watchErr = watcher.Add(mailbox)
+			}
+		}
 	}
 	if watchErr != nil {
 		if watcher != nil {
@@ -270,11 +279,11 @@ func (l *Loop) startIssueAtSlot(ctx context.Context, issue gh.Issue, runID strin
 }
 
 func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue, runID string, slot int, declared, resolved []string) error {
-	latest, err := l.GitHub.Get(ctx, l.Config, issue.Number)
+	latest, err := l.getIssue(ctx, issue.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh GitHub Issue before claim", err)
 	}
-	if !gh.Eligible(latest.Labels, l.Config.GitHub) {
+	if !gh.EligibleIssue(latest, l.Config.GitHub) {
 		return nil
 	}
 	issue = latest
@@ -287,6 +296,41 @@ func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue
 		return failure.Wrap(failure.Supervisor, "persist claim start", err)
 	}
 	return l.claimAndRun(ctx, issue, runID)
+}
+
+func (l *Loop) getIssue(ctx context.Context, number int) (gh.Issue, error) {
+	if l.Config.Webhook.Enabled() {
+		if targeted, ok := l.GitHub.(gh.TargetedRESTClient); ok {
+			return targeted.GetREST(ctx, l.Config, number)
+		}
+	}
+	return l.GitHub.Get(ctx, l.Config, number)
+}
+
+func (l *Loop) inspectIssue(ctx context.Context, current state.Issue) (gh.RemoteState, error) {
+	if l.Config.Webhook.Enabled() {
+		if targeted, ok := l.GitHub.(gh.TargetedRESTClient); ok {
+			prNumber := current.PullRequestNumber
+			if prNumber == 0 {
+				prNumber = pullRequestNumber(current.PullRequestURL)
+			}
+			if prNumber > 0 {
+				return targeted.InspectPullRequestREST(ctx, l.Config, current.Number, prNumber, current.HeadSHA)
+			}
+			issue, err := targeted.GetREST(ctx, l.Config, current.Number)
+			return gh.RemoteState{Issue: issue}, err
+		}
+	}
+	return l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+}
+
+func pullRequestNumber(value string) int {
+	parts := strings.Split(strings.TrimRight(value, "/"), "/")
+	if len(parts) < 2 || parts[len(parts)-2] != "pull" {
+		return 0
+	}
+	number, _ := strconv.Atoi(parts[len(parts)-1])
+	return number
 }
 
 func localBaseSHA(ctx context.Context, cfg config.Config) string {
@@ -354,7 +398,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	if current.Status == "publication_recovery_pending" {
 		return l.processPublicationRecovery(ctx, current)
 	}
-	issue, err := l.GitHub.Get(ctx, l.Config, current.Number)
+	issue, err := l.getIssue(ctx, current.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh existing GitHub Issue", err)
 	}
@@ -498,6 +542,9 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	}
 	_, err := l.Store.Update("worker_preflight_completed", issue.Number, current.RunID, map[string]string{"execution_profile": profile}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
+		if item == nil || item.RunID != current.RunID || terminalWebhookStatus(item.Status) {
+			return errWorkerResultSuperseded
+		}
 		item.ExecutionProfile = profile
 		item.WorkerPID = 0
 		item.WorkerPGID = 0
@@ -527,6 +574,9 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		item.UpdatedAt = l.now()
 		return nil
 	})
+	if errors.Is(err, errWorkerResultSuperseded) {
+		return nil
+	}
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "persist worker result", err)
 	}
@@ -591,6 +641,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		_, err := l.Store.Update("pull_request_checks_pending", issue.Number, current.RunID, result, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
 			item.Status, item.PullRequestURL, item.LastError = "awaiting_checks", prURL, ""
+			item.PullRequestNumber = pullRequestNumber(prURL)
 			item.PullRequestMerged = false
 			item.FailureKind = ""
 			item.GitHubSync = ""
@@ -993,6 +1044,8 @@ func validatePublicationRecoveryRemote(cfg config.Config, current state.Issue, r
 	return nil
 }
 
+var errWorkerResultSuperseded = errors.New("worker result superseded by authoritative state")
+
 func stateGoal(goal *worker.Goal) *state.WorkerGoal {
 	if goal == nil {
 		return nil
@@ -1061,7 +1114,7 @@ func stateIdentity(identity worker.Identity) state.WorkerIdentity {
 }
 
 func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) error {
-	remote, err := l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+	remote, err := l.inspectIssue(ctx, current)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "inspect Pull Request lifecycle", err)
 	}
@@ -1094,6 +1147,18 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	}
 	if selected.MergedAt != nil {
 		return l.completeIssue(ctx, current, selected.URL, nil)
+	}
+	if selected.HeadSHA != "" && current.HeadSHA != selected.HeadSHA {
+		_, err := l.Store.Update("pull_request_head_observed", current.Number, current.RunID, map[string]string{"head_sha": selected.HeadSHA}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(current.Number)]
+			item.HeadSHA = selected.HeadSHA
+			item.UpdatedAt = l.now()
+			return nil
+		})
+		if err != nil {
+			return failure.Wrap(failure.Supervisor, "persist Pull Request head", err)
+		}
+		current.HeadSHA = selected.HeadSHA
 	}
 	if !strings.EqualFold(selected.State, "open") {
 		return l.blockPullRequestLifecycle(ctx, current, selected.URL, "Pull Request was closed without merge")
@@ -1139,9 +1204,14 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 			item := s.Issues[strconv.Itoa(current.Number)]
 			item.Status = "awaiting_merge"
 			item.PullRequestURL = selected.URL
+			item.PullRequestNumber = selected.Number
 			item.LastError = ""
 			item.FailureKind = ""
-			item.RetryAfter = deadlinePointer(l.now().Add(l.Config.Queue.PollInterval.Duration))
+			interval := l.Config.Queue.PollInterval.Duration
+			if l.Config.Webhook.Enabled() {
+				interval = l.Config.Webhook.SafetySweepInterval.Duration
+			}
+			item.RetryAfter = deadlinePointer(l.now().Add(interval))
 			item.UpdatedAt = l.now()
 			return nil
 		})
@@ -1263,7 +1333,7 @@ func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, p
 		return l.finishConflictPublication(current, preparation.Commit)
 	}
 	if preparation.Resolved {
-		issue, getErr := l.GitHub.Get(ctx, l.Config, current.Number)
+		issue, getErr := l.getIssue(ctx, current.Number)
 		if getErr != nil {
 			return failure.Wrap(failure.Transient, "refresh Issue for mechanical conflict recovery", getErr)
 		}
@@ -1291,7 +1361,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		return l.finishConflictPublication(current, preparation.Commit)
 	}
 	if preparation.Resolved && (len(current.ConflictRecovery.ConflictFiles) == 0 || conflictVerificationGreen(current.ConflictRecovery.Verification)) {
-		issue, getErr := l.GitHub.Get(ctx, l.Config, current.Number)
+		issue, getErr := l.getIssue(ctx, current.Number)
 		if getErr != nil {
 			return failure.Wrap(failure.Transient, "refresh Issue for resolved conflict publication", getErr)
 		}
@@ -1300,7 +1370,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 	if current.ConflictRecovery.Attempts >= l.Config.ConflictRecovery.MaxAttemptsPerBase {
 		return l.failConflictRecovery(ctx, current, fmt.Sprintf("recovery budget exhausted for base %s after %d attempts", current.ConflictRecovery.TargetBaseSHA, current.ConflictRecovery.Attempts))
 	}
-	issue, err := l.GitHub.Get(ctx, l.Config, current.Number)
+	issue, err := l.getIssue(ctx, current.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh Issue for conflict recovery", err)
 	}
@@ -1585,7 +1655,11 @@ func conflictVerificationGreen(values []state.ConflictVerification) bool {
 }
 
 func (l *Loop) schedulePullRequestPoll(current state.Issue, reason string) error {
-	retryAt := l.now().Add(l.Config.Queue.PollInterval.Duration)
+	interval := l.Config.Queue.PollInterval.Duration
+	if l.Config.Webhook.Enabled() {
+		interval = l.Config.Webhook.SafetySweepInterval.Duration
+	}
+	retryAt := l.now().Add(interval)
 	_, err := l.Store.Update("pull_request_poll_scheduled", current.Number, current.RunID, map[string]any{
 		"status": current.Status, "reason": reason, "retry_at": retryAt,
 	}, func(s *state.Snapshot) error {

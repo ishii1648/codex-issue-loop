@@ -134,7 +134,8 @@ target-repository/
    └─ runs/<run-id>/
 
 ~/Library/LaunchAgents/
-└─ com.codex-issue-loop.<repo-id>.plist
+├─ com.codex-issue-loop.<repo-id>.plist
+└─ com.codex-issue-loop.broker.plist
 
 ~/.codex/skills/agent-loop/
 ├─ SKILL.md
@@ -154,6 +155,8 @@ version: 4
 
 github:
   repo: ishii1648/example
+  # webhook modeだけで必須
+  repository_id: 123456789
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
   running_label: codex-loop:running
@@ -238,12 +241,32 @@ logs:
 
 security:
   redact_env: []
+
+webhook:
+  mode: polling
+  listener_address: 127.0.0.1:8787
+  public_url_identifier: ""
+  secret_source: {}
+  previous_secret_source: {}
+  installation_ids: []
+  allow_repository_webhook: false
+  safety_sweep_interval: 15m
+  safety_sweep_jitter: 10%
+  max_body_bytes: 2097152
+  read_timeout: 10s
+  read_header_timeout: 5s
+  idle_timeout: 30s
+  max_concurrent: 16
 ```
 
 ### 5.1 設定規則
 
 - `version` は必須。現行は`4`とし、v3は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
+- `webhook.mode`の既定は`polling`であり、設定を追加しただけでWebhookをsilentに有効化しない。`webhook`では`github.repository_id`、GitHub App用の1件以上の`installation_ids`、公開URLを秘密値なしで識別する`public_url_identifier`を必須とする。classic repository webhookだけは`allow_repository_webhook: true`を明示してinstallation欠落を許可でき、HMACとrepository ID/full nameは引き続き必須とする。
+- Webhook listenerはliteralな`127.0.0.1`または`::1`だけを許可する。共有brokerを使う全repositoryはlistenerとHTTP上限を一致させる。public/LAN addressやhostnameへのbindは拒否する。
+- `secret_source`は環境変数名またはrepository外の絶対file pathのどちらか一方だけを指定する。fileはruntimeでregular fileかつowner-only permissionであることを検証する。rotation中だけ`previous_secret_source`を併記できる。secret値をconfig、registry、snapshot、event、status、logへ保存しない。
+- `safety_sweep_interval`の既定は15分で、managed-root brokerだけがpage別のETag/Last-Modifiedとcache bodyを`webhook-sweep.json`へ永続化し、ready labelを含む安定したREST collection URLを最大10 page（1000件）まで条件付きrequestする。304 pageはdurable cacheと合成し、正しく認証された304は成功として記録する。broker起動直後にもoutage recovery sweepを行う。Webhook modeのrepository schedulerはqueue timerとsweep state writerを持たず、repository mailbox、Issue retry deadline、worker event、shared cooldownだけでwakeする。通常経路は対象Issue/PR/SHAだけをREST再検証し、queueまたは変化のないPRをGraphQL pollingしない。
 - `queue.concurrency` は1以上とする。`resources.definitions`未設定時は安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。2以上はresource definition、valid metadata、既知の`area:` claimを使う単一host worker poolであり、distributed modeは有効化しない。
 - `resources.metadata_version`は`1`、各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
 - `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
@@ -414,7 +437,9 @@ agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
 agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
 ```
 
-`blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは`failure_kind=issue`とsupervisor生成の`worker blocked` errorが一致する場合だけlegacy worker blockとして同じ操作内でprovenanceを正規化し、失われたleaseは最小の`repo:*`として保守的に再予約する。他のleaseと競合すれば拒否する。operatorの明示確認、active process不在、pending request不在、run/worktree/branch/resource lease、GitHub open Issueとblocked label、保存PRの対応を検査する。leaseの`base_sha`が空の場合はconfigured base branchのremote-tracking commitを解決し、保存worktreeのHEADの祖先であることを検証する。解決・検証できなければstateとGitHubを変更せず拒否し、非空の既存`base_sha`は上書きしない。検証したSHA、legacy lease、resume ID、GitHub同期intentは1つの`environment_resume_requested` transactionで保存する。dirty changes、session/Goal、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止してもsupervisorが同じintentを再実行し、重複worker/commentを作らず収束する。
+`blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは`failure_kind=issue`とsupervisor生成の`worker blocked` errorが一致する場合だけlegacy worker blockとして同じ操作内でprovenanceを正規化し、失われたleaseは最小の`repo:*`として保守的に再予約する。他のleaseと競合すれば拒否する。operatorの明示確認、active process不在、pending request不在、run/worktree/branch/resource lease、GitHub open Issueとblocked label、保存PRの対応を検査する。leaseの`base_sha`が空の場合はconfigured base branchのremote-tracking commitを解決し、保存worktreeのHEADの祖先であることを検証する。解決・検証できなければstateとGitHubを変更せず拒否し、非空の既存`base_sha`は上書きしない。検証したSHAはlease、`environment_resume`、event payloadへ保存し、legacy lease、resume ID、GitHub同期intentとともに1つの`environment_resume_requested` transactionで確定する。dirty changes、session/Goal、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止してもsupervisorが同じintentを再実行し、重複worker/commentを作らず収束する。
+
+startup/periodic reconciliationはinspectionに使ったIssue snapshotと更新transaction内の最新Issueが一致する場合だけ判定を適用し、途中で変化した場合は再inspectionする。`environment_resume_pending`かつ`github_sync=environment_resume`では旧blocked labelを手動exclusionとして扱わず、leaseを保持する。旧実装の競合で`status=blocked`、`environment_resume.status=requested|github_synced`となった場合は、`resume-blocked`が同じresume ID、保存済み`base_sha`、worktree/branch/run、GitHub Issue/PR/label/comment、process/requestを再検証し、leaseを`repo:*`として競合なしに再予約できる場合だけ`environment_resume_recovered`で復旧する。保存済みSHAをstateまたは保持event historyから回復できない場合は、現在のbaseを推測せず拒否する。
 
 PR conflict、手動exclusion、security block、上記markerのないlegacy block、running/completed、closed Issue、missing/inconsistent worktree・branch・PRを拒否する。`retry`と`resume-blocked`は交換可能ではなく、state fileやsupervisor-owned labelの手編集を復旧手順にしない。
 
@@ -433,6 +458,8 @@ PR conflict、手動exclusion、security block、上記markerのないlegacy blo
 
 登録単位は1対象リポジトリにつき1 LaunchAgentとする。
 
+Webhook modeを1件以上登録したmanaged rootには、追加でuser-scopedな`com.codex-issue-loop.broker`を1つだけ生成する。`start`はbrokerを先に起動し、repositoryの`stop`は共有brokerや他repositoryを停止しない。最後のWebhook repositoryを`unregister`した場合だけbrokerを停止してplistを削除する。broker停止や再起動はrepo別worker、state、worktree、mailboxを削除しない。
+
 主要plist設定:
 
 - `Label`: `com.codex-issue-loop.<repo-id>`
@@ -445,6 +472,12 @@ PR conflict、手動exclusion、security block、上記markerのないlegacy blo
 - `EnvironmentVariables`: 必要最小限のPATHとHOME。tokenは含めない
 
 LaunchAgentなので、ユーザーがログアウトしている間は動作保証しない。system-wideなLaunchDaemon、自動ログイン、daemon/helper分割は、ユーザーcredential、HOME、Keychain、Codex認証、worktree ownershipの境界を変え、現在の可用性要件に対して過剰なため採用しない。正式な比較と再検討条件は[ADR-0001](adr/0001-macos-execution-model.md)を正本とする。
+
+### 7.1 Webhook broker
+
+broker endpointは`POST /github/webhook`だけである。raw bodyの`X-Hub-Signature-256`をHMAC-SHA256でconstant-time検証し、`X-GitHub-Delivery`、event/action、repository ID/full name、installation IDのallowlist検証後、検証済みrouting metadataを0600のdurable inboxへO_EXCLで保存してから202を返す。raw payload、Authorization、署名、secretは保存・log出力しない。
+
+inboxはdelivery IDを正本とし、redeliveryを冪等にdedupeする。pending deliveryだけを`broker/inbox`へ置き、route後はretention付きの`broker/receipts` tombstoneへ移すため、通常replayの処理量は未route件数に比例する。mailbox write、receipt write、pending removeの途中でcrashしても同じdelivery IDの再生で収束し、deliveryを消失させない。schedulerは同一Issue/PR/SHAへのbatchをcoalesceし、active lifecycleの`RetryAfter`だけをwakeする。stable terminal stateもtargeted REST inspectionが成功してauthoritativeなmerged/closed/label stateへ収束するまでACKせず、manual exclusion解除やfailed stateからworkerを暗黙再開しない。未登録または設定不一致のrepositoryはfail closedとなり、GitHub read/mutationを開始しない。mutationとretryは既存のsupervisor lifecycleおよびcooldown gateを迂回しない。
 
 ## 8. supervisor状態機械
 
@@ -750,6 +783,7 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `retry_scheduled`
 - `publication_retry_scheduled`
 - `environment_resume_requested`
+- `environment_resume_recovered`
 - `publication_failed`
 - `publication_recovery_requested`
 - `publication_recovery_attempt_started`

@@ -2,17 +2,23 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
+
+var errReconciliationStateChanged = errors.New("durable Issue state changed during reconciliation")
 
 type osProcessInspector struct{}
 
@@ -60,75 +66,221 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 	}
 	numbers := make([]int, 0, len(snapshot.Issues))
 	for _, item := range snapshot.Issues {
-		if item.Status == "completed" && item.GitHubSync == "" && (item.PullRequestURL == "" || item.PullRequestMerged) {
+		if !startupRemoteInspectionRequired(item, l.now()) {
 			continue
 		}
 		numbers = append(numbers, item.Number)
 	}
 	sort.Ints(numbers)
 	for _, number := range numbers {
-		current := snapshot.Issues[strconv.Itoa(number)]
-		if current == nil {
-			continue
-		}
-		remote, err := l.GitHub.Inspect(ctx, l.Config, number, current.Branch)
-		if err != nil {
-			return fmt.Errorf("reconcile GitHub state for Issue #%d: %w", number, err)
-		}
-		inspection := worktree.Inspection{}
-		if current.Worktree != "" {
-			inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+		for {
+			latest, err := l.Store.Load()
 			if err != nil {
-				return fmt.Errorf("reconcile worktree for Issue #%d: %w", number, err)
+				return err
 			}
-		}
-		decision := l.decideReconciliation(snapshot, *current, remote, inspection)
-		if decision.workerPID == 0 {
-			decision.workerPGID = 0
-		}
-		if decision.markRunning {
-			if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
-				return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
+			current := latest.Issues[strconv.Itoa(number)]
+			if current == nil || !startupRemoteInspectionRequired(current, l.now()) {
+				break
 			}
-		}
-		_, err = l.Store.Update("startup_reconciled", number, current.RunID, map[string]any{
-			"previous_status": current.Status,
-			"status":          decision.status,
-			"reason":          decision.reason,
-			"worktree":        inspection,
-			"pull_requests":   remote.PullRequests,
-		}, func(s *state.Snapshot) error {
-			item := s.Issues[strconv.Itoa(number)]
-			if item == nil {
-				return fmt.Errorf("Issue #%d disappeared during startup reconciliation", number)
+			remote, err := l.inspectIssue(ctx, *current)
+			if err != nil {
+				return fmt.Errorf("reconcile GitHub state for Issue #%d: %w", number, err)
 			}
-			if decision.status == "completed" && item.Lease != nil {
-				if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
-					return err
+			inspection := worktree.Inspection{}
+			if current.Worktree != "" {
+				inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+				if err != nil {
+					return fmt.Errorf("reconcile worktree for Issue #%d: %w", number, err)
 				}
 			}
-			if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
-				if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
-					return err
+			decision := l.decideReconciliation(latest, *current, remote, inspection)
+			if decision.workerPID == 0 {
+				decision.workerPGID = 0
+			}
+			if decision.markRunning {
+				if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
+					return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
 				}
 			}
-			item.Status = decision.status
-			item.LastError = decision.lastError
-			item.Branch = decision.branch
-			item.PullRequestURL = decision.pullRequest
-			item.PullRequestMerged = decision.prMerged
-			item.GitHubSync = decision.githubSync
-			item.RetryAfter = decision.retryAt
-			item.WorkerPID = decision.workerPID
-			item.WorkerPGID = decision.workerPGID
-			item.UpdatedAt = l.now()
-			return nil
-		})
-		if err != nil {
-			return err
+			_, err = l.Store.Update("startup_reconciled", number, current.RunID, map[string]any{
+				"previous_status": current.Status,
+				"status":          decision.status,
+				"reason":          decision.reason,
+				"worktree":        inspection,
+				"pull_requests":   remote.PullRequests,
+			}, func(s *state.Snapshot) error {
+				item := s.Issues[strconv.Itoa(number)]
+				if !reflect.DeepEqual(item, current) {
+					return errReconciliationStateChanged
+				}
+				if decision.status == "completed" && item.Lease != nil {
+					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
+						return err
+					}
+				}
+				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
+						return err
+					}
+				}
+				item.Status = decision.status
+				item.LastError = decision.lastError
+				item.Branch = decision.branch
+				item.PullRequestURL = decision.pullRequest
+				item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
+				item.PullRequestMerged = decision.prMerged
+				item.GitHubSync = decision.githubSync
+				item.RetryAfter = decision.retryAt
+				item.WorkerPID = decision.workerPID
+				item.WorkerPGID = decision.workerPGID
+				item.UpdatedAt = l.now()
+				return nil
+			})
+			if errors.Is(err, errReconciliationStateChanged) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			break
 		}
 	}
 	return nil
+}
+
+func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
+	if item == nil {
+		return false
+	}
+	if item.GitHubSync != "" {
+		return true
+	}
+	switch item.Status {
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		return true
+	case "retry_wait":
+		return item.RetryAfter == nil || !item.RetryAfter.After(now)
+	default:
+		return false
+	}
+}
+
+// reconcileTerminalWebhook performs a targeted, typed remote inspection for a
+// stable local state. It deliberately accepts only terminal decisions: removal
+// of a manual exclusion or failed label can therefore never restart a worker.
+// Unsupported/non-authoritative transitions are considered safely inspected
+// while preserving the local terminal state.
+func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
+	remote, err := l.inspectIssue(ctx, current)
+	if err != nil {
+		return false, fmt.Errorf("inspect terminal Issue #%d for webhook %s: %w", current.Number, delivery.DeliveryID, err)
+	}
+	return l.applyWebhookReconciliation(ctx, current, delivery, remote, false)
+}
+
+// reconcileCollectionExit verifies a sweep-derived ready-collection departure
+// with an authoritative targeted read. A normal claim also removes the ready
+// label, so an aligned running/needs-input label is not treated as exclusion.
+func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
+	remote, err := l.inspectIssue(ctx, current)
+	if err != nil {
+		return false, fmt.Errorf("inspect collection exit for Issue #%d from webhook %s: %w", current.Number, delivery.DeliveryID, err)
+	}
+	if !terminalWebhookStatus(current.Status) && expectedActiveCollectionExit(current, remote.Issue, l.Config.GitHub) {
+		return false, nil
+	}
+	return l.applyWebhookReconciliation(ctx, current, delivery, remote, !terminalWebhookStatus(current.Status))
+}
+
+func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Issue, delivery webhook.Delivery, remote gh.RemoteState, forceTerminal bool) (bool, error) {
+	inspection := worktree.Inspection{}
+	var err error
+	if current.Worktree != "" {
+		inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+		if err != nil {
+			return false, fmt.Errorf("inspect terminal worktree for Issue #%d: %w", current.Number, err)
+		}
+	}
+	decision := l.decideReconciliation(state.Snapshot{}, current, remote, inspection)
+	if forceTerminal && !terminalWebhookStatus(decision.status) {
+		decision = blockDecision(decision, "GitHub Issue left the configured ready collection")
+	}
+	if !terminalWebhookStatus(decision.status) {
+		// The event was read successfully, but the remote state does not carry
+		// terminal authority. Preserve manual exclusions and failed/completed
+		// states instead of turning a webhook into an implicit resume.
+		return true, nil
+	}
+	if decision.workerPID == 0 {
+		decision.workerPGID = 0
+	}
+	_, err = l.Store.Update("webhook_terminal_reconciled", current.Number, current.RunID, map[string]any{
+		"delivery_id": delivery.DeliveryID,
+		"event":       delivery.Event,
+		"action":      delivery.Action,
+		"status":      decision.status,
+		"reason":      decision.reason,
+	}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(current.Number)]
+		if !reflect.DeepEqual(item, &current) {
+			return errReconciliationStateChanged
+		}
+		if decision.status == "completed" && item.Lease != nil {
+			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
+				return err
+			}
+		}
+		if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
+				return err
+			}
+		}
+		item.Status = decision.status
+		item.LastError = decision.lastError
+		item.Branch = decision.branch
+		item.PullRequestURL = decision.pullRequest
+		item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
+		item.PullRequestMerged = decision.prMerged
+		item.GitHubSync = decision.githubSync
+		item.RetryAfter = decision.retryAt
+		item.WorkerPID = decision.workerPID
+		item.WorkerPGID = decision.workerPGID
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if errors.Is(err, errReconciliationStateChanged) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg config.GitHub) bool {
+	if !strings.EqualFold(issue.State, "open") {
+		return false
+	}
+	labels := labelSet(issue.Labels)
+	if hasAnyLabel(labels, cfg.ExcludeLabels) || labels[cfg.DoneLabel] || labels[cfg.FailedLabel] {
+		return false
+	}
+	if cfg.Assignee != "" {
+		matched := false
+		for _, assignee := range issue.Assignees {
+			matched = matched || strings.EqualFold(assignee, cfg.Assignee)
+		}
+		if !matched {
+			return false
+		}
+	}
+	if cfg.Milestone != "" && issue.Milestone != cfg.Milestone {
+		return false
+	}
+	if labels[cfg.RunningLabel] {
+		switch current.Status {
+		case "claiming", "claimed", "running", "retry_wait", "resume_pending", "environment_resume_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+			return true
+		}
+	}
+	return labels[cfg.NeedsInputLabel] && current.Status == "needs_input"
 }
 
 func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) reconciliationDecision {
