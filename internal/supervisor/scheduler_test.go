@@ -178,6 +178,42 @@ func TestSchedulerCoalescesSelfGeneratedWakeBacklog(t *testing.T) {
 	}
 }
 
+func TestSchedulerIgnoresUnrelatedFsnotifyEventsWithoutRebuildingTimers(t *testing.T) {
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	client := &countingGitHub{fakeGitHub: fake, called: make(chan struct{}, 1), empty: true}
+	loop.GitHub = client
+	created := make(chan struct{}, 8)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	wakes := make(chan fsnotify.Event, 1200)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, wakes, nil) }()
+	select {
+	case <-client.called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial GitHub poll did not complete")
+	}
+	waitForTimers(t, created, 1)
+
+	for range 1100 {
+		wakes <- fsnotify.Event{Name: loop.Store.Dir, Op: fsnotify.Chmod}
+	}
+	select {
+	case <-created:
+		t.Fatal("unrelated fsnotify events rebuilt the scheduler timer")
+	case <-time.After(250 * time.Millisecond):
+	}
+	if got := client.calls(); got != 1 {
+		t.Fatalf("GitHub polls after unrelated wake events=%d, want 1", got)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchedulerSharesPrimaryRateLimitCooldownAcrossRepositories(t *testing.T) {
 	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
 	resetAt := now.Add(20 * time.Minute)

@@ -147,67 +147,72 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 			retryTimer = l.newSchedulerTimer(delay)
 			retryTimerC = retryTimer.C()
 		}
-		select {
-		case <-ctx.Done():
-			stopSchedulerTimer(pollTimer)
-			stopSchedulerTimer(retryTimer)
-			s.cancelAndDrain()
-			_, _ = l.Store.Update("supervisor_stopped", 0, "", map[string]string{"reason": ctx.Err().Error()}, func(snapshot *state.Snapshot) error {
-				snapshot.Supervisor.State = "stopped"
-				snapshot.Supervisor.PID = 0
-				snapshot.Supervisor.Message = ctx.Err().Error()
+	waitForWake:
+		for {
+			select {
+			case <-ctx.Done():
+				stopSchedulerTimer(pollTimer)
+				stopSchedulerTimer(retryTimer)
+				s.cancelAndDrain()
+				_, _ = l.Store.Update("supervisor_stopped", 0, "", map[string]string{"reason": ctx.Err().Error()}, func(snapshot *state.Snapshot) error {
+					snapshot.Supervisor.State = "stopped"
+					snapshot.Supervisor.PID = 0
+					snapshot.Supervisor.Message = ctx.Err().Error()
+					return nil
+				})
 				return nil
-			})
-			return nil
-		case event := <-s.events:
-			stopSchedulerTimer(pollTimer)
-			stopSchedulerTimer(retryTimer)
-			if eventErr := s.handleEvent(event); eventErr != nil {
-				if fatal := s.handleCycleError(eventErr); fatal != nil {
-					s.cancelAndDrain()
-					return fatal
+			case event := <-s.events:
+				stopSchedulerTimer(pollTimer)
+				stopSchedulerTimer(retryTimer)
+				if eventErr := s.handleEvent(event); eventErr != nil {
+					if fatal := s.handleCycleError(eventErr); fatal != nil {
+						s.cancelAndDrain()
+						return fatal
+					}
 				}
+				// A freed slot immediately admits the next candidate instead of
+				// waiting for the regular GitHub poll interval.
+				if !l.Config.Webhook.Enabled() {
+					s.pollAt = l.now()
+					pollCandidates = true
+				}
+				break waitForWake
+			case <-pollTimerC:
+				stopSchedulerTimer(retryTimer)
+				if l.Config.Webhook.Enabled() {
+					// Webhook schedulers have no periodic GitHub queue timer. A non-zero
+					// pollAt in this mode is only a shared supervisor cooldown deadline.
+					s.pollAt = time.Time{}
+					pollCandidates = false
+				} else {
+					pollCandidates = true
+				}
+				break waitForWake
+			case <-retryTimerC:
+				stopSchedulerTimer(pollTimer)
+				break waitForWake
+			case event, ok := <-watchEvents:
+				if !ok {
+					watchEvents, watchErrors = nil, nil
+					continue
+				}
+				base := filepath.Base(event.Name)
+				if filepath.Dir(event.Name) != webhook.MailboxDir(l.Store.Dir) && base != "state.json" && base != "events.jsonl" {
+					continue
+				}
+				stopSchedulerTimer(pollTimer)
+				stopSchedulerTimer(retryTimer)
+				watchEvents, watchErrors = coalesceWatchEvents(watchEvents, watchErrors)
+				if !l.Config.Webhook.Enabled() {
+					pollCandidates = s.hasFreeSlot()
+				}
+				break waitForWake
+			case _, ok := <-watchErrors:
+				if !ok {
+					watchErrors = nil
+				}
+				// Timers remain authoritative when fsnotify reports an error.
 			}
-			// A freed slot immediately admits the next candidate instead of
-			// waiting for the regular GitHub poll interval.
-			if !l.Config.Webhook.Enabled() {
-				s.pollAt = l.now()
-				pollCandidates = true
-			}
-		case <-pollTimerC:
-			stopSchedulerTimer(retryTimer)
-			if l.Config.Webhook.Enabled() {
-				// Webhook schedulers have no periodic GitHub queue timer. A non-zero
-				// pollAt in this mode is only a shared supervisor cooldown deadline.
-				s.pollAt = time.Time{}
-				pollCandidates = false
-			} else {
-				pollCandidates = true
-			}
-		case <-retryTimerC:
-			stopSchedulerTimer(pollTimer)
-		case event, ok := <-watchEvents:
-			stopSchedulerTimer(pollTimer)
-			stopSchedulerTimer(retryTimer)
-			if !ok {
-				watchEvents, watchErrors = nil, nil
-				continue
-			}
-			base := filepath.Base(event.Name)
-			if filepath.Dir(event.Name) != webhook.MailboxDir(l.Store.Dir) && base != "state.json" && base != "events.jsonl" {
-				continue
-			}
-			watchEvents, watchErrors = coalesceWatchEvents(watchEvents, watchErrors)
-			if !l.Config.Webhook.Enabled() {
-				pollCandidates = s.hasFreeSlot()
-			}
-		case _, ok := <-watchErrors:
-			stopSchedulerTimer(pollTimer)
-			stopSchedulerTimer(retryTimer)
-			if !ok {
-				watchErrors = nil
-			}
-			// Timers remain authoritative when fsnotify reports an error.
 		}
 	}
 }
