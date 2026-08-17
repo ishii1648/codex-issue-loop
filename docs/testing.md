@@ -53,6 +53,7 @@ make test-race
 | supervisor kill後の永続状態再利用 | `TestFaultSupervisorRestartResumesWithDurableAnswers` |
 | GitHub label/comment同期の途中停止 | `TestFaultPartialLabelCommentSyncCanBeRetried`、`TestFaultGitHubSyncPartialFailureIsRetried` |
 | environment resume保存とstartup/periodic reconciliationの競合 | `TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume`、`TestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume` |
+| checks retry exhaustion後の外部head修正・fail-closed復旧・merge時lease解放 | `TestRecoverChecksReusesExternallyFixedBranchAndIsIdempotent`、`TestRecoverChecksAuthoritativeStateValidationFailsClosed`、`TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge` |
 | push後に未記録のPR | `TestFaultStartupReconciliationPersistsDiscoveredPullRequest` |
 | registry add/resolve/remove | `TestFaultRegistryAddResolveRemoveAndAmbiguity` |
 | atomic fileとmarshal失敗 | `TestFaultAtomicWriteReplacesContentAndPreservesMode`、`TestFaultJSONMarshalFailureDoesNotCreateDestination` |

@@ -63,6 +63,7 @@ type Client interface {
 	MarkFailed(context.Context, config.Config, int, string, bool) error
 	MarkRunning(context.Context, config.Config, int) error
 	MarkConflictRetry(context.Context, config.Config, int, string) error
+	MarkPullRequestChecksRecovery(context.Context, config.Config, int, string) error
 	ReadyPullRequest(context.Context, config.Config, string) error
 	UpdatePullRequest(context.Context, config.Config, string) error
 	MergePullRequest(context.Context, config.Config, string) error
@@ -441,6 +442,18 @@ func (c CLI) MarkPublicationRecovery(ctx context.Context, cfg config.Config, num
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:publication-recovery:%s -->", recoveryID)
 	body := marker + "\nPre-publication failure recovery was explicitly resumed using the existing worktree and durable state."
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
+}
+
+// MarkPullRequestChecksRecovery returns only supervisor-owned failed state to
+// running. Manual/security exclusion labels are intentionally never removed.
+func (c CLI) MarkPullRequestChecksRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
+	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
+	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
+		return err
+	}
+	marker := fmt.Sprintf("<!-- codex-issue-loop:checks-recovery:%s -->", recoveryID)
+	body := marker + "\nExternally repaired Pull Request checks were explicitly returned to the existing lifecycle."
 	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
 }
 

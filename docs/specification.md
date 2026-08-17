@@ -341,6 +341,7 @@ agent-loop <command> [options]
 | `retry` | PR conflictで最終blockedになったIssueを監査付きで`resolving_conflict`へ戻す |
 | `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
 | `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
+| `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -445,7 +446,19 @@ startup/periodic reconciliationはinspectionに使ったIssue snapshotと更新t
 
 PR conflict、手動exclusion、security block、上記markerのないlegacy block、running/completed、closed Issue、missing/inconsistent worktree・branch・PRを拒否する。`retry`と`resume-blocked`は交換可能ではなく、state fileやsupervisor-owned labelの手編集を復旧手順にしない。
 
-### 6.8 終了コード
+### 6.8 recover-checks
+
+```sh
+agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
+```
+
+保存済みPRのrequired checksがfailureとなりworker retry budgetを使い切ったterminal `failed`だけを対象にする。失敗時のPR URL・number・branch・head SHAとretry exhaustionをimmutableなtyped provenanceへ保存し、`status --json`と`watch`はretained leaseでqueueを塞いでいる復旧可能状態を`recoverable_checks_failure`として通知する。
+
+operatorが同じPR branchへ外部commitをpushした後、run、managed worktree、branch、open PR、retained fenced lease、active process不在、pending request不在、cleanかつfully pushedなlocal/remote head、GitHub failed label、manual/security exclusion不在を再検証する。新headが失敗時headと同じ場合やchecksがfailureのままなら再開しない。pendingまたはsuccessではgeneration、confirmation時刻、old/new head SHA、checks結果とGitHub同期intentを先にdurable state/eventへ保存し、failed labelをrunningへ変えて冪等markerを残す。
+
+同期後は同じbranch/PRの`awaiting_checks`へ戻し、通常のDraft解除、auto merge、done/close、merge確認後のlease releaseを再利用する。worker attempts、continuations、run historyをresetせず、新branch、PR、push、worker実行を作らない。GitHub同期途中の停止・再起動は保存intentをauthoritative Issue/PR/head/checksと再照合してから同じmarkerへ収束する。closed-without-merge、head/branch/PR不一致、dirty/unpushed worktree、active worker、pending request、manual/security exclusionはstateとlabelを変更せずfail closedとする。
+
+### 6.9 終了コード
 
 | code | 意味 |
 | --- | --- |

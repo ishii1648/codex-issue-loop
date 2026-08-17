@@ -400,6 +400,28 @@ func TestAttentionReportsOneBlockedIssueWhileAnotherWorkerIsActive(t *testing.T)
 	}
 }
 
+func TestAttentionReportsRecoverableChecksFailureThatRetainsLease(t *testing.T) {
+	snapshot := Snapshot{Issues: map[string]*Issue{
+		"7": {
+			Number: 7, Status: "failed", FailureKind: "issue", Branch: "codex/issue-7-checks",
+			PullRequestURL: "https://example.test/pr/7", PullRequestNumber: 7,
+			Lease: &ResourceLease{Owner: LeaseOwner{RunID: "run_7", Generation: 1}},
+			PullRequestChecksFailure: &PullRequestChecksFailure{
+				Origin: ChecksFailureOriginPullRequest, Phase: ChecksFailurePhaseRequired,
+				Code: ChecksFailureCodeRetryExhausted, Recoverable: true, RetryExhausted: true,
+				PullRequestURL: "https://example.test/pr/7", PullRequestNumber: 7, Branch: "codex/issue-7-checks", HeadSHA: "old-head", ChecksStatus: "failure",
+			},
+		},
+	}}
+	if reason, ok := snapshot.Attention(false); !ok || reason != "recoverable_checks_failure" {
+		t.Fatalf("reason=%q ok=%v", reason, ok)
+	}
+	snapshot.Issues["7"].Lease = nil
+	if reason, ok := snapshot.Attention(false); ok {
+		t.Fatalf("lease-free failure incorrectly blocked watch: reason=%q", reason)
+	}
+}
+
 func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 	for _, crashPoint := range []string{"prepared", "event_appended", "snapshot_written"} {
 		t.Run(crashPoint, func(t *testing.T) {
