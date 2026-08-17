@@ -16,7 +16,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
-	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
 
 func TestAdoptMergedPullRequestReleasesLeaseOnceAndIsIdempotent(t *testing.T) {
@@ -65,14 +64,18 @@ func TestAdoptMergedPullRequestReleasesLeaseOnceAndIsIdempotent(t *testing.T) {
 	runGit(managedWorktree, "commit", "-m", "fix")
 	runGit(managedWorktree, "push", "-u", "origin", branch)
 	headSHA := runGit(managedWorktree, "rev-parse", "HEAD")
-	mergeSHA := strings.Repeat("a", 40)
+	runGit(repo, "merge", "--no-ff", "--no-edit", branch)
+	runGit(repo, "push", "origin", "main")
+	mergeSHA := runGit(repo, "rev-parse", "HEAD")
 
 	binDir := filepath.Dir(strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0] + "/unused")
 	fakeGH := filepath.Join(binDir, "gh")
 	ghLog := filepath.Join(t.TempDir(), "gh.log")
 	issueJSON := `{"number":129,"title":"bootstrap","body":"","url":"https://example.test/issues/129","state":"CLOSED","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:failed:129 -->\nAutomation stopped."}]}`
 	prJSON := fmt.Sprintf(`[{"number":132,"url":"https://example.test/pull/132","state":"MERGED","isDraft":false,"mergedAt":"2026-08-17T22:25:30Z","headRefName":%q,"baseRefName":"main","headRefOid":%q,"mergeCommit":{"oid":%q},"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"},"mergeStateStatus":"UNKNOWN","statusCheckRollup":[]}]`, branch, headSHA, mergeSHA)
-	script := fmt.Sprintf(`#!/bin/sh
+	writeFakeGH := func(issue string) {
+		t.Helper()
+		script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$1 $2" in
   "issue view") printf '%%s\n' '%s' ;;
@@ -80,10 +83,12 @@ case "$1 $2" in
   "issue edit"|"issue comment"|"issue close") exit 0 ;;
   *) exit 2 ;;
 esac
-`, ghLog, issueJSON, prJSON)
-	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
+		`, ghLog, issue, prJSON)
+		if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
+	writeFakeGH(issueJSON)
 	cfg := mustConfig(t, repo)
 	entry, err := (registry.Store{Path: l.RegistryPath}).Add(cfg)
 	if err != nil {
@@ -139,6 +144,27 @@ esac
 			t.Fatalf("second adoption was not idempotent: first=%v second=%v", firstOutput, output)
 		}
 	}
+	_, err = store.Update("old_supervisor_snapshot_write", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["129"].MergedPullRequestAdoption = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneIssueJSON := `{"number":129,"title":"bootstrap","body":"","url":"https://example.test/issues/129","state":"CLOSED","labels":[{"name":"codex-loop:done"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:done -->\nCompleted by codex-issue-loop."}]}`
+	writeFakeGH(doneIssueJSON)
+	var recoveredOut, recoveredErr bytes.Buffer
+	recoveryApp := App{Out: &recoveredOut, Err: &recoveredErr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	if code := recoveryApp.Run(context.Background(), args); code != 0 {
+		t.Fatalf("event recovery code=%d stdout=%s stderr=%s", code, recoveredOut.String(), recoveredErr.String())
+	}
+	var recoveredOutput map[string]any
+	if err := json.Unmarshal(recoveredOut.Bytes(), &recoveredOutput); err != nil {
+		t.Fatal(err)
+	}
+	if recoveredOutput["adoption_id"] != firstOutput["adoption_id"] || recoveredOutput["idempotent"] != true {
+		t.Fatalf("event recovery created a different adoption: first=%v recovered=%v", firstOutput, recoveredOutput)
+	}
 	snapshot, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -157,31 +183,37 @@ esac
 	if strings.Count(string(events), `"type":"merged_pull_request_adopted"`) != 1 {
 		t.Fatalf("lease-releasing adoption was not recorded exactly once:\n%s", events)
 	}
+	if strings.Count(string(events), `"type":"merged_pull_request_adoption_recovered"`) != 1 {
+		t.Fatalf("stripped metadata was not recovered exactly once:\n%s", events)
+	}
 }
 
 func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 	repo, _ := testEnvironment(t)
 	cfg := mustConfig(t, repo)
 	current := &state.Issue{Number: 129, Status: "blocked", Branch: "codex/issue-129-adopt"}
-	inspection := worktree.Inspection{Head: "head", RemoteHead: "head"}
 	mergedAt := time.Now().UTC()
 	baseline := github.RemoteState{
 		Issue: github.Issue{Number: 129, State: "CLOSED", Labels: []string{"blocked"}, Comments: []string{"<!-- codex-issue-loop:failed:129 -->"}},
 		PullRequests: []github.PullRequest{{Number: 132, URL: "https://example.test/pull/132", State: "MERGED", MergedAt: &mergedAt,
-			HeadRefName: current.Branch, BaseRefName: cfg.Git.BaseBranch, HeadSHA: "head", MergeSHA: "merge", HeadRepository: cfg.GitHub.Repo}},
+			HeadRefName: current.Branch, BaseRefName: cfg.Git.BaseBranch, HeadSHA: "head", MergeCommitSHA: "merge", HeadRepository: cfg.GitHub.Repo}},
 	}
-	if _, err := validateMergedPullRequestAdoption(cfg, current, baseline, inspection); err != nil {
+	expected := github.MergedPullRequestAdoptionExpectation{
+		IssueNumber: current.Number, PreviousStatus: current.Status, Branch: current.Branch,
+		BaseBranch: cfg.Git.BaseBranch, HeadSHA: "head",
+	}
+	if _, err := github.ValidateMergedPullRequestAdoption(cfg, baseline, expected); err != nil {
 		t.Fatalf("safe adoption was rejected: %v", err)
 	}
 	unsafe := baseline
 	unsafe.Issue.Labels = []string{"blocked", "do-not-automate"}
-	if _, err := validateMergedPullRequestAdoption(cfg, current, unsafe, inspection); err == nil {
+	if _, err := github.ValidateMergedPullRequestAdoption(cfg, unsafe, expected); err == nil {
 		t.Fatal("manual exclusion was accepted")
 	}
 	unsafe = baseline
 	unsafe.PullRequests = append([]github.PullRequest(nil), baseline.PullRequests...)
-	unsafe.PullRequests[0].MergeSHA = ""
-	if _, err := validateMergedPullRequestAdoption(cfg, current, unsafe, inspection); err == nil {
+	unsafe.PullRequests[0].MergeCommitSHA = ""
+	if _, err := github.ValidateMergedPullRequestAdoption(cfg, unsafe, expected); err == nil {
 		t.Fatal("missing authoritative merge SHA was accepted")
 	}
 }

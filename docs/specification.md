@@ -467,7 +467,7 @@ agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --con
 
 保存済みPR URLが空のterminal `blocked`または`failed`で、operatorが保存branchから作成したPRをすでにmergeした場合だけを対象にする。run ID、managed worktree、local/remote branchとhead、clean/fully pushed状態、retained leaseのowner generation・resource・base SHA、baseからheadへの履歴、active PID/PGID不在、pending request不在を検証する。GitHubではsupervisor-owned terminal markerと対応label、target repo、head repository、保存branch、configured base、head SHA、merged state、merge commit SHAを検証し、PRが0件または複数なら拒否する。
 
-検証後はadoption ID、generation、confirmation/adoption時刻、PR URL/number、head SHA、merge SHA、base branch、GitHub同期intentをdurable event/stateへ保存する同じtransactionで`completed`へ遷移し、fenced leaseを解放する。attempt、continuation、session、Goal、回答、worktree、branch、worker historyは変更しない。GitHub同期途中で停止した場合は同じコマンドを再実行し、authoritative PRを再検証して同じadoptionへ冪等に収束する。
+検証後はadoption ID、generation、confirmation/adoption時刻、PR URL/number、head SHA、merge SHA、base branch、GitHub同期intentをdurable event/stateへ保存する同じtransactionで`completed`へ遷移し、fenced leaseを解放する。attempt、continuation、session、Goal、回答、worktree、branch、worker historyは変更しない。GitHub同期途中で停止した場合は同じコマンドを再実行し、authoritative PRを再検証して同じadoptionへ冪等に収束する。並行稼働中の旧supervisorが未知のoptional snapshot fieldを落とした場合も、一意なadoption/sync event、completed snapshot、GitHub、worktreeを再検証してmetadataだけを復元し、lease releaseやadoption generationを繰り返さない。
 
 open/closed-unmerged PR、別repo/branch/base/head、dirty/unpushed worktree、active worker、pending request、running/completed state、missing/inconsistent lease、manual/security exclusion、supervisor markerのないterminal stateは変更せずfail closedとする。コマンドはbranch、commit、push、PR、mergeを新規作成せず、state fileやlabelの手編集を代替手順にしない。
 

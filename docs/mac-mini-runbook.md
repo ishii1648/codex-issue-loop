@@ -255,9 +255,17 @@ terminal state後にoperatorが保存branchからPRを作成・merge済みで、
 agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
 ```
 
-この操作は保存run/worktree/branch、lease owner generationとbase SHA、clean/fully pushedなlocal/remote head、supervisor-owned terminal marker、同一repo・configured baseの一意なmerged PRとmerge commit SHAを検証する。成功するとPR auditをdurable stateへ保存し、同じtransactionでcompleted化とlease解放を行う。worker attempt、continuation、session、回答は保持される。0件/複数PR、openまたはunmerged、別repo/branch/base/head、dirty/unpushed、active worker、pending request、manual/security exclusionでは拒否する。CLIはcommit、push、PR、mergeを作成しない。GitHub同期途中で止まった場合もstate/labelを編集せず、同じコマンドで収束させる。
+この操作は保存run/worktree/branch、lease owner generationとbase SHA、clean/fully pushedなlocal/remote head、supervisor-owned terminal marker、同一repo・configured baseの一意なmerged PRとmerge commit SHAを検証する。成功するとPR auditをdurable stateへ保存し、同じtransactionでcompleted化とlease解放を行う。worker attempt、continuation、session、回答は保持される。0件/複数PR、openまたはunmerged、別repo/branch/base/head、dirty/unpushed、active worker、pending request、manual/security exclusionでは拒否する。CLIはcommit、push、PR、mergeを作成しない。GitHub同期途中で止まった場合や、並行稼働中の旧supervisorが新しいsnapshot metadataを落とした場合もstate/labelを編集せず、同じコマンドでdurable eventから収束させる。
 
 実例では、target repositoryがCIでDeno 2.7.14を固定していた一方、worker環境のDeno 2.9.5で3 fileをformatしたため正準形が異なりchecks retryを使い切った。同じbranchへCI固定版Deno 2.7.14のformatter結果をcommit・pushしてgreenを確認し、この限定復旧を使う。再発防止にはworker verificationもrepositoryのpinned toolchainから起動し、host側の新しいformatterを直接使わない。
+
+terminal `blocked`/`failed`保存後、operatorが保存branchから手動でPRを作成してmergeしたため、durable stateにPR URLがなくleaseだけが残った場合は、Issue番号・保存run/worktree/branch/lease、GitHub failure markerとterminal label、merge済みPRのbranch/base/head/merge commitを確認する。active worker、pending request、dirty/unpushed worktree、manual/security exclusion、複数PRがないことを確認し、次を明示実行する。
+
+```sh
+agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
+```
+
+`lease_released=true`、`status=completed`、`adoption_status=completed`、期待したPR URL/number/head/merge commitを確認する。コマンドは新しいbranch/PR/commit/push/mergeを作らず、worker attempts、continuations、session、answers、元のblock provenanceを保持する。GitHub done同期で停止した場合はstateやlabelを編集せず、同じコマンドまたはsupervisor再起動で収束させる。PRがopen/closed-without-merge、保存headと不一致、merge commitが`origin/<base>`の祖先でない、terminal provenanceが曖昧な場合は使わない。#129を手動PR #132でbootstrapした事例では、この限定操作でretained `repo:*` leaseを解放してから次のready Issueを実行する。
 
 v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。
 

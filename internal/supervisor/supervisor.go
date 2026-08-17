@@ -2030,6 +2030,23 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 	var err error
 	switch issue.GitHubSync {
 	case "done":
+		if adoption := issue.MergedPullRequestAdoption; adoption != nil && adoption.Status == "github_sync_pending" {
+			branch := adoption.Branch
+			if branch == "" {
+				branch = issue.Branch
+			}
+			remote, inspectErr := l.GitHub.Inspect(ctx, l.Config, issue.Number, branch)
+			if inspectErr != nil {
+				return failure.Wrap(failure.Transient, "reinspect adopted merged Pull Request", inspectErr)
+			}
+			if _, validateErr := gh.ValidateMergedPullRequestAdoption(l.Config, remote, gh.MergedPullRequestAdoptionExpectation{
+				IssueNumber: issue.Number, PreviousStatus: adoption.PreviousStatus, Branch: branch,
+				BaseBranch: adoption.BaseBranch, HeadSHA: adoption.HeadSHA, PullRequestURL: adoption.PullRequestURL,
+				PullRequestNumber: adoption.PullRequestNumber, MergeCommitSHA: adoption.MergeSHA, AllowDone: true,
+			}); validateErr != nil {
+				return validateErr
+			}
+		}
 		err = l.GitHub.MarkDone(ctx, l.Config, issue.Number, issue.PullRequestURL)
 	case "needs_input":
 		snapshot, loadErr := l.Store.Load()
@@ -2108,6 +2125,9 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		}
 		if item.GitHubSync == issue.GitHubSync {
 			item.GitHubSync = ""
+			if issue.GitHubSync == "done" && item.MergedPullRequestAdoption != nil && item.MergedPullRequestAdoption.Status == "github_sync_pending" {
+				item.MergedPullRequestAdoption.Status = "synced"
+			}
 			if issue.GitHubSync == "environment_resume" && item.EnvironmentResume != nil {
 				item.EnvironmentResume.Status = "github_synced"
 			}

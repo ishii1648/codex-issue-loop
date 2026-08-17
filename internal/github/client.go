@@ -41,6 +41,7 @@ type PullRequest struct {
 	ChecksStatus     string
 	HeadSHA          string
 	MergeSHA         string
+	MergeCommitSHA   string
 	HeadRepository   string
 }
 
@@ -237,9 +238,9 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		return RemoteState{}, fmt.Errorf("decode Pull Requests for branch %s: %w", branch, err)
 	}
 	for _, item := range raw {
-		mergeSHA, headRepository := "", ""
+		mergeCommitSHA, headRepository := "", ""
 		if item.MergeCommit != nil {
-			mergeSHA = item.MergeCommit.OID
+			mergeCommitSHA = item.MergeCommit.OID
 		}
 		if item.HeadRepository != nil {
 			headRepository = item.HeadRepository.NameWithOwner
@@ -252,10 +253,11 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 			MergedAt: item.MergedAt, HeadRefName: item.HeadRefName,
 			BaseRefName:      item.BaseRefName,
 			HeadSHA:          item.HeadRefOID,
-			MergeSHA:         mergeSHA,
-			HeadRepository:   headRepository,
 			MergeStateStatus: item.MergeStateStatus,
 			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
+			MergeSHA:         mergeCommitSHA,
+			MergeCommitSHA:   mergeCommitSHA,
+			HeadRepository:   headRepository,
 		})
 	}
 	sort.Slice(state.PullRequests, func(i, j int) bool { return state.PullRequests[i].Number > state.PullRequests[j].Number })
