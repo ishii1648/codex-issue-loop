@@ -13,12 +13,112 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 )
+
+type fakePagedSweepClient struct {
+	pages map[int]gh.ConditionalQueueResult
+	calls []int
+}
+
+type fakeSweepClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []*fakeSweepTimer
+}
+
+type fakeSweepTimer struct {
+	clock    *fakeSweepClock
+	deadline time.Time
+	channel  chan time.Time
+	fired    bool
+	stopped  bool
+}
+
+func (c *fakeSweepClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeSweepClock) NewTimer(delay time.Duration) SweepTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	timer := &fakeSweepTimer{clock: c, deadline: c.now.Add(delay), channel: make(chan time.Time, 1)}
+	c.timers = append(c.timers, timer)
+	return timer
+}
+
+func (c *fakeSweepClock) Advance(duration time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(duration)
+	for _, timer := range c.timers {
+		if !timer.fired && !timer.stopped && !timer.deadline.After(c.now) {
+			timer.fired = true
+			timer.channel <- c.now
+		}
+	}
+	c.mu.Unlock()
+}
+
+func (c *fakeSweepClock) timerCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
+}
+
+func (t *fakeSweepTimer) C() <-chan time.Time { return t.channel }
+
+func (t *fakeSweepTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	wasActive := !t.fired && !t.stopped
+	t.stopped = true
+	return wasActive
+}
+
+type repositoryCountingSweepClient struct {
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (c *repositoryCountingSweepClient) ListReadyConditionalPage(_ context.Context, cfg config.Config, _ int, _, _ string) (gh.ConditionalQueueResult, error) {
+	c.mu.Lock()
+	c.calls[cfg.GitHub.Repo]++
+	c.mu.Unlock()
+	return gh.ConditionalQueueResult{StatusCode: http.StatusNotModified, NotModified: true, ETag: `"stable"`, RateRemaining: "4999"}, nil
+}
+
+func (c *repositoryCountingSweepClient) count(repo string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls[repo]
+}
+
+func (f *fakePagedSweepClient) ListReadyConditionalPage(_ context.Context, _ config.Config, page int, _, _ string) (gh.ConditionalQueueResult, error) {
+	f.calls = append(f.calls, page)
+	return f.pages[page], nil
+}
+
+func sweepIssues(first, last int) []gh.Issue {
+	issues := make([]gh.Issue, 0, last-first+1)
+	for number := first; number <= last; number++ {
+		issues = append(issues, gh.Issue{Number: number, State: "open", Labels: []string{"codex-loop:ready"}})
+	}
+	return issues
+}
+
+func sweepPage(issues []gh.Issue, etag string) gh.ConditionalQueueResult {
+	return gh.ConditionalQueueResult{Issues: issues, ItemCount: len(issues), StatusCode: http.StatusOK, ETag: etag, RateRemaining: "4999"}
+}
 
 func testBroker(t *testing.T) (*Broker, []byte) {
 	t.Helper()
@@ -193,6 +293,70 @@ func TestSharedBrokerSafetySweepPersists304(t *testing.T) {
 	}
 }
 
+func TestTwoRepositorySafetySweepsStayWithinConfiguredRateAcrossFakeHour(t *testing.T) {
+	base := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	clock := &fakeSweepClock{now: base}
+	client := &repositoryCountingSweepClient{calls: map[string]int{}}
+	registrations := make([]Registration, 0, 2)
+	for index, interval := range []time.Duration{10 * time.Minute, 15 * time.Minute} {
+		cfg := config.Defaults()
+		cfg.RepoPath = filepath.Join(t.TempDir(), fmt.Sprintf("repo-%d", index+1))
+		cfg.GitHub.Repo = fmt.Sprintf("owner/repo-%d", index+1)
+		cfg.GitHub.RepositoryID = int64(100 + index)
+		cfg.Webhook.Mode = "webhook"
+		cfg.Webhook.ListenerAddress = "127.0.0.1:0"
+		cfg.Webhook.PublicURLIdentifier = "fixture.example/webhook"
+		cfg.Webhook.SecretSource.Env = "TEST_WEBHOOK_SECRET"
+		cfg.Webhook.SafetySweepInterval.Duration = interval
+		cfg.Webhook.SafetySweepJitter = 0
+		registrations = append(registrations, Registration{
+			Entry: registry.Entry{RepoID: fmt.Sprintf("repo-%d", index+1), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo}, Config: cfg,
+		})
+	}
+	t.Setenv("TEST_WEBHOOK_SECRET", "fixture-secret-value")
+	b := &Broker{
+		Root: t.TempDir(), Registrations: registrations, Now: clock.Now, SweepTimers: clock,
+		SweepClient: func(Registration) gh.PagedConditionalQueueClient { return client },
+	}
+	if err := b.initialize(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.startSafetySweeps(ctx)
+	defer cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for clock.timerCount() < len(registrations) {
+		if time.Now().After(deadline) {
+			t.Fatal("safety sweep timers were not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for minute := 1; minute <= 60; minute++ {
+		clock.Advance(time.Minute)
+		wantFirst := 1 + (minute-1)/10
+		wantSecond := 1 + (minute-1)/15
+		deadline := time.Now().Add(2 * time.Second)
+		for client.count("owner/repo-1") < wantFirst || client.count("owner/repo-2") < wantSecond {
+			if time.Now().After(deadline) {
+				t.Fatalf("minute=%d calls=%v,%v want_at_least=%d,%d", minute, client.count("owner/repo-1"), client.count("owner/repo-2"), wantFirst, wantSecond)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		wantTimers := len(registrations) + client.count("owner/repo-1") + client.count("owner/repo-2")
+		for clock.timerCount() < wantTimers {
+			if time.Now().After(deadline) {
+				t.Fatalf("minute=%d next sweep timers were not registered: got=%d want=%d", minute, clock.timerCount(), wantTimers)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	first := client.count("owner/repo-1")
+	second := client.count("owner/repo-2")
+	if first > 1+60/10 || second > 1+60/15 {
+		t.Fatalf("sweep rate exceeded: repo-1=%d repo-2=%d", first, second)
+	}
+}
+
 func TestSharedBrokerSafetySweepPaginatesAndWarmsWith304(t *testing.T) {
 	b, _ := testBroker(t)
 	dir := t.TempDir()
@@ -249,6 +413,102 @@ printf 'HTTP/2 200 OK\r\nETag: "page-%s"\r\nX-RateLimit-Remaining: 4999\r\n\r\n'
 	state, err := LoadSweepState(filepath.Join(b.Root, "repos", registration.Entry.RepoID))
 	if err != nil || len(entries) != 250 || len(state.Pages) != 3 || state.REST200 != 3 || state.NotModified304 != 3 {
 		t.Fatalf("entries=%d state=%+v err=%v", len(entries), state, err)
+	}
+}
+
+func TestSafetySweepDiffsComposedRepositoryCollectionAcrossPageMovement(t *testing.T) {
+	b, _ := testBroker(t)
+	registration := b.Registrations[0]
+	repoDir := filepath.Join(b.Root, "repos", registration.Entry.RepoID)
+	previous := SweepState{Version: InboxVersion, Pages: map[int]SweepPageState{
+		1: {ETag: `"old-1"`, ItemCount: 100, Issues: sweepIssues(1, 100)},
+		2: {ETag: `"old-2"`, ItemCount: 50, Issues: sweepIssues(101, 150)},
+	}}
+	if err := SaveSweepState(repoDir, previous); err != nil {
+		t.Fatal(err)
+	}
+	page1 := append(sweepIssues(1, 99), sweepIssues(101, 101)...)
+	page2 := append(sweepIssues(100, 100), sweepIssues(102, 150)...)
+	client := &fakePagedSweepClient{pages: map[int]gh.ConditionalQueueResult{
+		1: sweepPage(page1, `"new-1"`),
+		2: sweepPage(page2, `"new-2"`),
+	}}
+	b.SweepClient = func(Registration) gh.PagedConditionalQueueClient { return client }
+	if _, err := b.sweepOnce(context.Background(), registration); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := ReadMailbox(repoDir)
+	if err != nil || len(deliveries) != 150 {
+		t.Fatalf("deliveries=%d err=%v", len(deliveries), err)
+	}
+	for _, delivery := range deliveries {
+		if delivery.Action == "collection_exited" {
+			t.Fatalf("Issue #%d was falsely treated as exiting after a page move", delivery.IssueNumber)
+		}
+	}
+}
+
+func TestSafetySweepComposes304And200BeforeShrinkingPages(t *testing.T) {
+	b, _ := testBroker(t)
+	registration := b.Registrations[0]
+	repoDir := filepath.Join(b.Root, "repos", registration.Entry.RepoID)
+	previous := SweepState{Version: InboxVersion, Pages: map[int]SweepPageState{
+		1: {ETag: `"page-1"`, ItemCount: 100, Issues: sweepIssues(1, 100)},
+		2: {ETag: `"page-2"`, ItemCount: 100, Issues: sweepIssues(101, 200)},
+		3: {ETag: `"page-3"`, ItemCount: 50, Issues: sweepIssues(201, 250)},
+	}}
+	if err := SaveSweepState(repoDir, previous); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakePagedSweepClient{pages: map[int]gh.ConditionalQueueResult{
+		1: {StatusCode: http.StatusNotModified, NotModified: true, ETag: `"page-1"`, RateRemaining: "4999"},
+		2: sweepPage(sweepIssues(101, 150), `"page-2-short"`),
+	}}
+	b.SweepClient = func(Registration) gh.PagedConditionalQueueClient { return client }
+	if _, err := b.sweepOnce(context.Background(), registration); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := ReadMailbox(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := make([]int, 0)
+	for _, delivery := range deliveries {
+		if delivery.Action == "collection_exited" {
+			exited = append(exited, delivery.IssueNumber)
+		}
+	}
+	sort.Ints(exited)
+	if len(exited) != 100 || exited[0] != 151 || exited[len(exited)-1] != 250 {
+		t.Fatalf("exited=%v", exited)
+	}
+	state, err := LoadSweepState(repoDir)
+	if err != nil || len(state.Pages) != 2 || len(composeSweepIssues(state.Pages)) != 150 || state.NotModified304 != 1 || state.REST200 != 1 {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+}
+
+func TestSafetySweepDoesNotAdvanceCacheBeforeExitIntentIsDurable(t *testing.T) {
+	b, _ := testBroker(t)
+	registration := b.Registrations[0]
+	repoDir := filepath.Join(b.Root, "repos", registration.Entry.RepoID)
+	previous := SweepState{Version: InboxVersion, Pages: map[int]SweepPageState{
+		1: {ETag: `"old"`, ItemCount: 1, Issues: sweepIssues(1, 1)},
+	}}
+	if err := SaveSweepState(repoDir, previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(MailboxDir(repoDir), []byte("not-a-directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakePagedSweepClient{pages: map[int]gh.ConditionalQueueResult{1: sweepPage(nil, `"empty"`)}}
+	b.SweepClient = func(Registration) gh.PagedConditionalQueueClient { return client }
+	if _, err := b.sweepOnce(context.Background(), registration); err == nil {
+		t.Fatal("sweep succeeded without a durable collection-exit intent")
+	}
+	state, err := LoadSweepState(repoDir)
+	if err != nil || len(composeSweepIssues(state.Pages)) != 1 || state.Pages[1].ETag != `"old"` {
+		t.Fatalf("cache advanced before mailbox durability: state=%+v err=%v", state, err)
 	}
 }
 
@@ -311,5 +571,50 @@ func TestReceiptCompactionAppliesRetentionWithoutReadingReceiptBodies(t *testing
 	}
 	if _, err := os.Stat(recentPath); err != nil {
 		t.Fatalf("recent receipt removed: %v", err)
+	}
+}
+
+type logicalDirEntry struct{ name string }
+
+func (e logicalDirEntry) Name() string      { return e.name }
+func (e logicalDirEntry) IsDir() bool       { return false }
+func (e logicalDirEntry) Type() os.FileMode { return 0 }
+func (e logicalDirEntry) Info() (os.FileInfo, error) {
+	return nil, errors.New("body metadata must not be read")
+}
+
+func TestReplayWorkIsProportionalToPendingWithOneHundredThousandLogicalReceipts(t *testing.T) {
+	b, _ := testBroker(t)
+	b.work = make(chan string, 10)
+	for _, name := range []string{"invalid.json", "unreadable.json"} {
+		if err := os.WriteFile(filepath.Join(b.receiptDir(), name), []byte("not-json"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receiptReads := 0
+	b.ReadDir = func(path string) ([]os.DirEntry, error) {
+		switch path {
+		case b.inboxDir():
+			return []os.DirEntry{logicalDirEntry{"pending-1.json"}, logicalDirEntry{"ignored.tmp"}, logicalDirEntry{"pending-2.json"}}, nil
+		case b.receiptDir():
+			receiptReads++
+			entries := make([]os.DirEntry, 100000)
+			for index := range entries {
+				entries[index] = logicalDirEntry{fmt.Sprintf("receipt-%06d.json", index)}
+			}
+			return entries, nil
+		default:
+			return nil, fmt.Errorf("unexpected directory read: %s", path)
+		}
+	}
+	if err := b.replayOnce(); err != nil {
+		t.Fatal(err)
+	}
+	if receiptReads != 0 || len(b.work) != 2 {
+		t.Fatalf("receipt_reads=%d queued_pending=%d", receiptReads, len(b.work))
+	}
+	queued := []string{<-b.work, <-b.work}
+	if strings.Join(queued, ",") != "pending-1,pending-2" {
+		t.Fatalf("queued=%v", queued)
 	}
 }

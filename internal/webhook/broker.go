@@ -95,6 +95,9 @@ type Broker struct {
 	Registrations []Registration
 	Logger        *log.Logger
 	Now           func() time.Time
+	SweepClient   func(Registration) gh.PagedConditionalQueueClient
+	SweepTimers   SweepTimerSource
+	ReadDir       func(string) ([]os.DirEntry, error)
 
 	mu         sync.Mutex
 	deliveryMu sync.Mutex
@@ -105,6 +108,26 @@ type Broker struct {
 	requests   chan struct{}
 	sweeps     chan struct{}
 	server     *http.Server
+}
+
+type SweepTimer interface {
+	C() <-chan time.Time
+	Stop() bool
+}
+
+type SweepTimerSource interface {
+	NewTimer(time.Duration) SweepTimer
+}
+
+type systemSweepTimer struct{ timer *time.Timer }
+
+func (t systemSweepTimer) C() <-chan time.Time { return t.timer.C }
+func (t systemSweepTimer) Stop() bool          { return t.timer.Stop() }
+
+type systemSweepTimers struct{}
+
+func (systemSweepTimers) NewTimer(delay time.Duration) SweepTimer {
+	return systemSweepTimer{timer: time.NewTimer(delay)}
 }
 
 func (b *Broker) Run(ctx context.Context) error {
@@ -232,12 +255,12 @@ func (b *Broker) runSafetySweep(ctx context.Context, registration Registration) 
 	}
 	delay := jitterDuration(recoveryDelay, registration.Config.Webhook.SafetySweepJitter)
 	for {
-		timer := time.NewTimer(delay)
+		timer := b.newSweepTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-timer.C:
+		case <-timer.C():
 		}
 		select {
 		case b.sweeps <- struct{}{}:
@@ -267,9 +290,13 @@ func (b *Broker) sweepOnce(ctx context.Context, registration Registration) (time
 	if err != nil {
 		return 0, err
 	}
-	client := gh.CLI{Path: registration.Entry.Commands["gh"], Secrets: registration.Config.RedactionValues()}
+	var client gh.PagedConditionalQueueClient = gh.CLI{Path: registration.Entry.Commands["gh"], Secrets: registration.Config.RedactionValues()}
+	if b.SweepClient != nil {
+		client = b.SweepClient(registration)
+	}
 	now := b.Now()
-	changed := make([]gh.Issue, 0)
+	previous := composeSweepIssues(state.Pages)
+	targets := make(map[int]Delivery)
 	notModified := uint64(0)
 	for page := 1; page <= 10; page++ {
 		cached := state.Pages[page]
@@ -297,7 +324,9 @@ func (b *Broker) sweepOnce(ctx context.Context, registration Registration) (time
 				ItemCount: result.ItemCount, Issues: append([]gh.Issue(nil), result.Issues...),
 			}
 			state.Pages[page] = cached
-			changed = append(changed, result.Issues...)
+			for _, issue := range result.Issues {
+				targets[issue.Number] = b.sweepDelivery(registration, issue.Number, "reconciled", now)
+			}
 		}
 		if page == 1 {
 			state.ETag = cached.ETag
@@ -310,20 +339,27 @@ func (b *Broker) sweepOnce(ctx context.Context, registration Registration) (time
 			break
 		}
 	}
-	state.LastSuccessful = now
-	if err := SaveSweepState(repoDir, state); err != nil {
-		return 0, err
-	}
-	for _, issue := range changed {
-		delivery := Delivery{
-			Version: InboxVersion, DeliveryID: fmt.Sprintf("sweep-%d-%d", now.UnixNano(), issue.Number),
-			Event: "issues", Action: "reconciled", RepoID: registration.Entry.RepoID,
-			RepositoryID: registration.Config.GitHub.RepositoryID, Repository: registration.Config.GitHub.Repo,
-			IssueNumber: issue.Number, AcceptedAt: now,
+	current := composeSweepIssues(state.Pages)
+	for number := range previous {
+		if _, exists := current[number]; !exists {
+			targets[number] = b.sweepDelivery(registration, number, "collection_exited", now)
 		}
-		if err := EnqueueMailbox(repoDir, delivery); err != nil {
+	}
+	state.LastSuccessful = now
+	numbers := make([]int, 0, len(targets))
+	for number := range targets {
+		numbers = append(numbers, number)
+	}
+	sort.Ints(numbers)
+	// The mailbox is the recovery intent. Persist it before advancing the cache
+	// so a crash can only replay an idempotent target, never lose the diff.
+	for _, number := range numbers {
+		if err := EnqueueMailbox(repoDir, targets[number]); err != nil {
 			return 0, err
 		}
+	}
+	if err := SaveSweepState(repoDir, state); err != nil {
+		return 0, err
 	}
 	b.mu.Lock()
 	b.status.LastSuccessfulSafetySweep = now
@@ -340,6 +376,32 @@ func (b *Broker) sweepOnce(ctx context.Context, registration Registration) (time
 		}
 	}
 	return 0, nil
+}
+
+func composeSweepIssues(pages map[int]SweepPageState) map[int]gh.Issue {
+	result := make(map[int]gh.Issue)
+	for _, page := range pages {
+		for _, issue := range page.Issues {
+			result[issue.Number] = issue
+		}
+	}
+	return result
+}
+
+func (b *Broker) sweepDelivery(registration Registration, number int, action string, now time.Time) Delivery {
+	return Delivery{
+		Version: InboxVersion, DeliveryID: fmt.Sprintf("sweep-%d-%d-%s", now.UnixNano(), number, action),
+		Event: "issues", Action: action, RepoID: registration.Entry.RepoID,
+		RepositoryID: registration.Config.GitHub.RepositoryID, Repository: registration.Config.GitHub.Repo,
+		IssueNumber: number, AcceptedAt: now,
+	}
+}
+
+func (b *Broker) newSweepTimer(delay time.Duration) SweepTimer {
+	if b.SweepTimers != nil {
+		return b.SweepTimers.NewTimer(delay)
+	}
+	return systemSweepTimers{}.NewTimer(delay)
 }
 
 func jitterDuration(base time.Duration, ratio float64) time.Duration {
@@ -642,16 +704,7 @@ func (b *Broker) replay(ctx context.Context) {
 	cleanup := time.NewTicker(time.Hour)
 	defer cleanup.Stop()
 	for {
-		entries, _ := os.ReadDir(b.inboxDir())
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-				id := strings.TrimSuffix(entry.Name(), ".json")
-				select {
-				case b.work <- id:
-				default:
-				}
-			}
-		}
+		_ = b.replayOnce()
 		select {
 		case <-ctx.Done():
 			return
@@ -662,6 +715,27 @@ func (b *Broker) replay(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (b *Broker) replayOnce() error {
+	readDir := b.ReadDir
+	if readDir == nil {
+		readDir = os.ReadDir
+	}
+	entries, err := readDir(b.inboxDir())
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			id := strings.TrimSuffix(entry.Name(), ".json")
+			select {
+			case b.work <- id:
+			default:
+			}
+		}
+	}
+	return nil
 }
 
 func (b *Broker) route(id string) error {

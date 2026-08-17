@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
@@ -160,7 +161,26 @@ func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue
 	if err != nil {
 		return false, fmt.Errorf("inspect terminal Issue #%d for webhook %s: %w", current.Number, delivery.DeliveryID, err)
 	}
+	return l.applyWebhookReconciliation(ctx, current, delivery, remote, false)
+}
+
+// reconcileCollectionExit verifies a sweep-derived ready-collection departure
+// with an authoritative targeted read. A normal claim also removes the ready
+// label, so an aligned running/needs-input label is not treated as exclusion.
+func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
+	remote, err := l.inspectIssue(ctx, current)
+	if err != nil {
+		return false, fmt.Errorf("inspect collection exit for Issue #%d from webhook %s: %w", current.Number, delivery.DeliveryID, err)
+	}
+	if !terminalWebhookStatus(current.Status) && expectedActiveCollectionExit(current, remote.Issue, l.Config.GitHub) {
+		return false, nil
+	}
+	return l.applyWebhookReconciliation(ctx, current, delivery, remote, !terminalWebhookStatus(current.Status))
+}
+
+func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Issue, delivery webhook.Delivery, remote gh.RemoteState, forceTerminal bool) (bool, error) {
 	inspection := worktree.Inspection{}
+	var err error
 	if current.Worktree != "" {
 		inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
 		if err != nil {
@@ -168,6 +188,9 @@ func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue
 		}
 	}
 	decision := l.decideReconciliation(state.Snapshot{}, current, remote, inspection)
+	if forceTerminal && !terminalWebhookStatus(decision.status) {
+		decision = blockDecision(decision, "GitHub Issue left the configured ready collection")
+	}
 	if !terminalWebhookStatus(decision.status) {
 		// The event was read successfully, but the remote state does not carry
 		// terminal authority. Preserve manual exclusions and failed/completed
@@ -212,6 +235,35 @@ func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue
 		return nil
 	})
 	return err == nil, err
+}
+
+func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg config.GitHub) bool {
+	if !strings.EqualFold(issue.State, "open") {
+		return false
+	}
+	labels := labelSet(issue.Labels)
+	if hasAnyLabel(labels, cfg.ExcludeLabels) || labels[cfg.DoneLabel] || labels[cfg.FailedLabel] {
+		return false
+	}
+	if cfg.Assignee != "" {
+		matched := false
+		for _, assignee := range issue.Assignees {
+			matched = matched || strings.EqualFold(assignee, cfg.Assignee)
+		}
+		if !matched {
+			return false
+		}
+	}
+	if cfg.Milestone != "" && issue.Milestone != cfg.Milestone {
+		return false
+	}
+	if labels[cfg.RunningLabel] {
+		switch current.Status {
+		case "claiming", "claimed", "running", "retry_wait", "resume_pending", "environment_resume_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+			return true
+		}
+	}
+	return labels[cfg.NeedsInputLabel] && current.Status == "needs_input"
 }
 
 func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) reconciliationDecision {

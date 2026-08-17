@@ -537,6 +537,9 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	}
 	_, err := l.Store.Update("worker_preflight_completed", issue.Number, current.RunID, map[string]string{"execution_profile": profile}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
+		if item == nil || item.RunID != current.RunID || terminalWebhookStatus(item.Status) {
+			return errWorkerResultSuperseded
+		}
 		item.ExecutionProfile = profile
 		item.WorkerPID = 0
 		item.WorkerPGID = 0
@@ -562,6 +565,9 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		item.UpdatedAt = l.now()
 		return nil
 	})
+	if errors.Is(err, errWorkerResultSuperseded) {
+		return nil
+	}
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "persist worker result", err)
 	}
@@ -669,6 +675,8 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
 	}
 }
+
+var errWorkerResultSuperseded = errors.New("worker result superseded by authoritative state")
 
 func stateGoal(goal *worker.Goal) *state.WorkerGoal {
 	if goal == nil {

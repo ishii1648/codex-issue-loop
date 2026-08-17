@@ -116,6 +116,40 @@ func TestWebhookSchedulerNeverPerformsQueueSweep(t *testing.T) {
 	}
 }
 
+func TestTwoWebhookRepositorySchedulersMakeZeroQueueRequestsAcrossFakeHour(t *testing.T) {
+	base := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	loops := make([]*Loop, 0, 2)
+	schedulers := make([]*scheduler, 0, 2)
+	clients := make([]*webhookFakeGitHub, 0, 2)
+	for _, interval := range []time.Duration{10 * time.Minute, 15 * time.Minute} {
+		loop, baseGitHub := testLoop(t, worker.Result{})
+		loop.Config.Webhook.Mode = "webhook"
+		loop.Config.Webhook.SafetySweepInterval.Duration = interval
+		loop.Clock = fixedClock{value: base}
+		github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
+		loop.GitHub = github
+		loops = append(loops, loop)
+		clients = append(clients, github)
+		schedulers = append(schedulers, &scheduler{
+			loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{},
+			issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+		})
+	}
+	for minute := 0; minute <= 60; minute++ {
+		for index, loop := range loops {
+			loop.Clock = fixedClock{value: base.Add(time.Duration(minute) * time.Minute)}
+			if dispatched, err := schedulers[index].schedule(context.Background(), true); err != nil || dispatched {
+				t.Fatalf("minute=%d repo=%d dispatched=%v err=%v", minute, index+1, dispatched, err)
+			}
+		}
+	}
+	for index, github := range clients {
+		if github.listCalls != 0 || github.conditionalCalls != 0 {
+			t.Fatalf("repo=%d list=%d conditional=%d", index+1, github.listCalls, github.conditionalCalls)
+		}
+	}
+}
+
 func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T) {
 	mergedAt := time.Date(2026, 8, 17, 2, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -212,6 +246,135 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 				t.Fatalf("remaining=%v err=%v", remaining, err)
 			}
 		})
+	}
+}
+
+func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *testing.T) {
+	loop, baseGitHub := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
+	github.issue = gh.Issue{
+		Number: 1, State: "open",
+		Labels: []string{loop.Config.GitHub.ReadyLabels[0], loop.Config.GitHub.ExcludeLabels[0]},
+	}
+	loop.GitHub = github
+	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run-1", Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].Status = "running"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := webhook.Delivery{
+		Version: webhook.InboxVersion, DeliveryID: "sweep-exit-1", Event: "issues", Action: "collection_exited",
+		RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: loop.now(),
+	}
+	if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, acknowledged, err := s.processMailbox(context.Background(), snapshot)
+	if err != nil || len(candidates) != 0 || len(acknowledged) != 1 || github.restGets != 1 {
+		t.Fatalf("candidates=%v acknowledged=%v rest_gets=%d err=%v", candidates, acknowledged, github.restGets, err)
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil || snapshot.Issues["1"].Status != "blocked" || snapshot.Issues["1"].Lease != nil {
+		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
+	}
+}
+
+func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testing.T) {
+	loop, baseGitHub := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
+	github.issue = gh.Issue{Number: 1, State: "open", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	loop.GitHub = github
+	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run-1", Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].Status = "running"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := webhook.Delivery{
+		Version: webhook.InboxVersion, DeliveryID: "sweep-claimed-1", Event: "issues", Action: "collection_exited",
+		RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: loop.now(),
+	}
+	if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	snapshot, _ := loop.Store.Load()
+	_, acknowledged, err := s.processMailbox(context.Background(), snapshot)
+	if err != nil || len(acknowledged) != 1 || github.restGets != 1 {
+		t.Fatalf("acknowledged=%v rest_gets=%d err=%v", acknowledged, github.restGets, err)
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil || snapshot.Issues["1"].Status != "running" || snapshot.Issues["1"].Lease == nil {
+		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
+	}
+}
+
+func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run-1", Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].Status = "running"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerState := *snapshot.Issues["1"]
+	_, err = loop.Store.Update("webhook_terminal_reconciled", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
+			return err
+		}
+		item.Status = "blocked"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := worker.Result{
+		Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "late completion",
+		Tests: []worker.Test{}, Git: &worker.GitResult{},
+	}
+	if err := loop.handleResult(context.Background(), gh.Issue{Number: 1}, workerState, result, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil || snapshot.Issues["1"].Status != "blocked" || snapshot.Issues["1"].Lease != nil {
+		t.Fatalf("late worker result changed authoritative state: issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
 
