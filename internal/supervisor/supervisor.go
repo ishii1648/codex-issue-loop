@@ -85,7 +85,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
 		return BlockedError{Err: fmt.Errorf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)}
 	}
-	if err := l.reconcileStartup(ctx, snapshot); err != nil {
+	if err := l.reconcileStartupWithRateLimit(ctx, snapshot); err != nil {
 		return err
 	}
 	watcher, watchErr := fsnotify.NewWatcher()
@@ -117,11 +117,74 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 func (l *Loop) waitForDelay(ctx context.Context, delay time.Duration) {
-	timer := time.NewTimer(delay)
+	timer := l.newSchedulerTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-	case <-timer.C:
+	case <-timer.C():
+	}
+}
+
+// reconcileStartupWithRateLimit keeps launchd from turning a primary quota
+// exhaustion during startup reconciliation into a process restart loop. The
+// same managed-root cooldown is shared with the scheduler and every registered
+// repository, so only the first observed failure reaches GitHub before reset.
+func (l *Loop) reconcileStartupWithRateLimit(ctx context.Context, snapshot state.Snapshot) error {
+	l.enableRateLimitGate()
+	consecutive := snapshot.Supervisor.ConsecutiveFailures
+	for {
+		now := l.now()
+		cooldown, active, err := l.RateLimits.Current(now)
+		if err != nil {
+			return failure.Wrap(failure.Supervisor, "load startup GitHub rate-limit cooldown", err)
+		}
+		if active {
+			updated, stillActive, suppressErr := l.RateLimits.Suppress(now)
+			if suppressErr != nil {
+				return failure.Wrap(failure.Supervisor, "record startup GitHub rate-limit suppression", suppressErr)
+			}
+			if stillActive {
+				if err := l.recordRateLimitSuppressed(updated); err != nil {
+					return failure.Wrap(failure.Supervisor, "persist startup GitHub rate-limit suppression", err)
+				}
+				l.Logger.Printf("startup reconciliation suppressed by shared GitHub %s cooldown until %s (source=%s)", updated.Resource, updated.ResetAt.Format(time.RFC3339), updated.Source)
+				l.waitForDelay(ctx, until(now, updated.ResetAt))
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				snapshot, err = l.Store.Load()
+				if err != nil {
+					return failure.Wrap(failure.Supervisor, "reload startup reconciliation state", err)
+				}
+				continue
+			}
+		}
+
+		reconcileErr := l.reconcileStartup(ctx, snapshot)
+		if reconcileErr == nil {
+			return nil
+		}
+		observed, limited := cooldownFromError(reconcileErr, now)
+		if !limited {
+			return reconcileErr
+		}
+		cooldown, err = l.RateLimits.Observe(observed, now)
+		if err != nil {
+			return failure.Wrap(failure.Supervisor, "persist startup GitHub rate-limit cooldown", err)
+		}
+		consecutive++
+		if err := l.recordSupervisorRateLimit(reconcileErr, consecutive, cooldown); err != nil {
+			return failure.Wrap(failure.Supervisor, "persist startup supervisor rate-limit cooldown", err)
+		}
+		l.Logger.Printf("GitHub %s primary rate limit reached during startup reconciliation; suppressing requests until %s (source=%s)", cooldown.Resource, cooldown.ResetAt.Format(time.RFC3339), cooldown.Source)
+		l.waitForDelay(ctx, until(now, cooldown.ResetAt))
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		snapshot, err = l.Store.Load()
+		if err != nil {
+			return failure.Wrap(failure.Supervisor, "reload startup reconciliation state", err)
+		}
 	}
 }
 

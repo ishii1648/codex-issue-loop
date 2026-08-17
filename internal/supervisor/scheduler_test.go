@@ -34,6 +34,19 @@ type countingGitHub struct {
 	empty     bool
 }
 
+type startupRateLimitGitHub struct {
+	*fakeGitHub
+	inspectErr error
+}
+
+func (f *startupRateLimitGitHub) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (gh.RemoteState, error) {
+	f.inspectCalls++
+	if f.inspectErr != nil {
+		return gh.RemoteState{}, f.inspectErr
+	}
+	return f.fakeGitHub.Inspect(ctx, cfg, number, branch)
+}
+
 func (f *countingGitHub) ListReady(ctx context.Context, cfg config.Config) ([]gh.Issue, error) {
 	f.mu.Lock()
 	f.listCalls++
@@ -204,6 +217,99 @@ func TestSchedulerSharesPrimaryRateLimitCooldownAcrossRepositories(t *testing.T)
 	}
 	if got := secondClient.calls(); got != 1 {
 		t.Fatalf("post-reset GitHub calls=%d, want 1", got)
+	}
+}
+
+func TestStartupReconciliationObservesRateLimitWithoutExiting(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	resetAt := now.Add(20 * time.Minute)
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: now}
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "github-rate-limit.json")}
+	client := &startupRateLimitGitHub{
+		fakeGitHub: fake,
+		inspectErr: &gh.RateLimitError{
+			Resource: "graphql", ResetAt: resetAt, Source: "rest-rate-limit", Err: errors.New("GraphQL: API rate limit exceeded"),
+		},
+	}
+	loop.GitHub = client
+	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "blocked", RunID: "run_7"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 2)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.reconcileStartupWithRateLimit(ctx, snapshot) }()
+	waitForTimers(t, created, 1)
+	if client.inspectCalls != 1 {
+		t.Fatalf("startup GitHub calls=%d, want 1", client.inspectCalls)
+	}
+	cooldown, active, err := loop.RateLimits.Current(now)
+	if err != nil || !active || !cooldown.ResetAt.Equal(resetAt) {
+		t.Fatalf("shared cooldown=%+v active=%v err=%v", cooldown, active, err)
+	}
+	loaded, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Supervisor.RateLimit == nil || loaded.Supervisor.RetryAfter == nil || !loaded.Supervisor.RetryAfter.Equal(resetAt) {
+		t.Fatalf("startup rate-limit state=%+v", loaded.Supervisor)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup reconciliation exit=%v, want context canceled", err)
+	}
+}
+
+func TestStartupReconciliationUsesSharedCooldownBeforeGitHub(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	resetAt := now.Add(20 * time.Minute)
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: now}
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "github-rate-limit.json")}
+	if _, err := loop.RateLimits.Observe(ratelimit.Cooldown{Resource: "graphql", ResetAt: resetAt, Source: "rest-rate-limit"}, now); err != nil {
+		t.Fatal(err)
+	}
+	client := &startupRateLimitGitHub{fakeGitHub: fake}
+	loop.GitHub = client
+	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "blocked", RunID: "run_7"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 2)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.reconcileStartupWithRateLimit(ctx, snapshot) }()
+	waitForTimers(t, created, 1)
+	if client.inspectCalls != 0 {
+		t.Fatalf("startup called GitHub during shared cooldown: %d", client.inspectCalls)
+	}
+	cooldown, active, err := loop.RateLimits.Current(now)
+	if err != nil || !active || cooldown.SuppressedRetryCount != 1 {
+		t.Fatalf("shared cooldown=%+v active=%v err=%v", cooldown, active, err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup reconciliation exit=%v, want context canceled", err)
 	}
 }
 
