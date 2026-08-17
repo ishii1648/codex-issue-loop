@@ -19,7 +19,7 @@ func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 		Issue: Issue{Number: 7, State: "CLOSED", Labels: []string{"blocked"}, Comments: []string{"<!-- codex-issue-loop:failed:7 -->"}},
 		PullRequests: []PullRequest{{
 			Number: 11, URL: "https://example.test/pr/11", State: "MERGED", MergedAt: &mergedAt,
-			HeadRefName: expected.Branch, BaseRefName: expected.BaseBranch, HeadSHA: expected.HeadSHA, MergeCommitSHA: "merge-11",
+			HeadRefName: expected.Branch, BaseRefName: expected.BaseBranch, HeadSHA: expected.HeadSHA, MergeCommitSHA: "merge-11", HeadRepository: cfg.GitHub.Repo,
 		}},
 	}
 	clone := func() RemoteState {
@@ -54,6 +54,7 @@ func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 		{name: "different head", mutate: func(remote *RemoteState) { remote.PullRequests[0].HeadSHA = "other" }},
 		{name: "different base", mutate: func(remote *RemoteState) { remote.PullRequests[0].BaseRefName = "release" }},
 		{name: "missing merge commit", mutate: func(remote *RemoteState) { remote.PullRequests[0].MergeCommitSHA = "" }},
+		{name: "different head repository", mutate: func(remote *RemoteState) { remote.PullRequests[0].HeadRepository = "attacker/repo" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

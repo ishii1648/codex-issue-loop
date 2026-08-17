@@ -1652,7 +1652,7 @@ func TestAdoptMergedPullRequestReleasesLeaseAndIsIdempotent(t *testing.T) {
 	mergeSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
 
 	issueJSON := `{"number":102,"title":"manual publication","body":"","url":"https://example.test/issues/102","state":"CLOSED","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:failed:102 -->"}]}`
-	prJSON := fmt.Sprintf(`[{"number":132,"url":"https://example.test/pr/132","state":"MERGED","isDraft":false,"mergedAt":"2026-08-18T00:00:00Z","headRefName":%q,"baseRefName":"main","headRefOid":%q,"mergeCommit":{"oid":%q},"mergeStateStatus":"CLEAN","statusCheckRollup":[]}]`, branch, headSHA, mergeSHA)
+	prJSON := fmt.Sprintf(`[{"number":132,"url":"https://example.test/pr/132","state":"MERGED","isDraft":false,"mergedAt":"2026-08-18T00:00:00Z","headRefName":%q,"baseRefName":"main","headRefOid":%q,"mergeCommit":{"oid":%q},"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"},"mergeStateStatus":"CLEAN","statusCheckRollup":[]}]`, branch, headSHA, mergeSHA)
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$1 $2" in

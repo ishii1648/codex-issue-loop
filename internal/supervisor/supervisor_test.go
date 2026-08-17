@@ -49,7 +49,7 @@ func TestRestartCompletesRequestedMergedPullRequestAdoption(t *testing.T) {
 		},
 		PullRequests: []gh.PullRequest{{
 			Number: 17, URL: "https://example.test/pr/17", State: "MERGED", MergedAt: &mergedAt,
-			HeadRefName: "codex/issue-1-manual", BaseRefName: "main", HeadSHA: "head-17", MergeCommitSHA: "merge-17",
+			HeadRefName: "codex/issue-1-manual", BaseRefName: "main", HeadSHA: "head-17", MergeCommitSHA: "merge-17", HeadRepository: "owner/repo",
 		}},
 	}
 	_, err := loop.Store.Update("merged_pull_request_adopted", 1, "run_adoption_1", nil, func(snapshot *state.Snapshot) error {

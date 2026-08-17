@@ -121,7 +121,7 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	if err != nil {
 		return exitError{4, err}
 	}
-	if err := verifyAdoptedMergeCommit(ctx, entry.Commands["git"], current.Worktree, cfg.Git.BaseBranch, pr.MergeCommitSHA); err != nil {
+	if err := verifyAdoptedGitHistory(ctx, entry.Commands["git"], current.Worktree, cfg.Git.BaseBranch, current.Lease.BaseSHA, inspection.Head, pr.MergeCommitSHA); err != nil {
 		return exitError{4, err}
 	}
 	now := time.Now().UTC()
@@ -180,12 +180,12 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	return a.output(*jsonOut, mergedPullRequestAdoptionOutput(current, false))
 }
 
-func verifyAdoptedMergeCommit(ctx context.Context, gitPath, worktreePath, baseBranch, mergeCommitSHA string) error {
+func verifyAdoptedGitHistory(ctx context.Context, gitPath, worktreePath, baseBranch, leaseBaseSHA, headSHA, mergeCommitSHA string) error {
 	if gitPath == "" {
 		gitPath = "git"
 	}
-	if baseBranch == "" || mergeCommitSHA == "" {
-		return fmt.Errorf("merged Pull Request base or merge commit is missing")
+	if baseBranch == "" || leaseBaseSHA == "" || headSHA == "" || mergeCommitSHA == "" {
+		return fmt.Errorf("merged Pull Request Git history boundary is incomplete")
 	}
 	run := func(args ...string) error {
 		out, err := exec.CommandContext(ctx, gitPath, append([]string{"-C", worktreePath}, args...)...).CombinedOutput()
@@ -193,6 +193,12 @@ func verifyAdoptedMergeCommit(ctx context.Context, gitPath, worktreePath, baseBr
 			return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
 		return nil
+	}
+	if err := run("cat-file", "-e", leaseBaseSHA+"^{commit}"); err != nil {
+		return fmt.Errorf("saved lease base commit is not present in the saved repository: %w", err)
+	}
+	if err := run("merge-base", "--is-ancestor", leaseBaseSHA, headSHA); err != nil {
+		return fmt.Errorf("saved lease base is not an ancestor of the saved branch head: %w", err)
 	}
 	if err := run("cat-file", "-e", mergeCommitSHA+"^{commit}"); err != nil {
 		return fmt.Errorf("merged Pull Request commit is not present in the saved repository: %w", err)

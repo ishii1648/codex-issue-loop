@@ -90,7 +90,8 @@ func ValidateMergedPullRequestAdoption(cfg config.Config, remote RemoteState, ex
 	}
 	pr := remote.PullRequests[0]
 	if pr.Number <= 0 || pr.URL == "" || pr.MergedAt == nil || !strings.EqualFold(pr.State, "merged") ||
-		pr.HeadRefName != expected.Branch || pr.BaseRefName != expected.BaseBranch || pr.HeadSHA != expected.HeadSHA || pr.MergeCommitSHA == "" {
+		pr.HeadRefName != expected.Branch || pr.BaseRefName != expected.BaseBranch || pr.HeadSHA != expected.HeadSHA || pr.MergeCommitSHA == "" ||
+		!strings.EqualFold(pr.HeadRepository, cfg.GitHub.Repo) {
 		return PullRequest{}, fmt.Errorf("Issue #%d Pull Request is not the authoritative merged publication for the saved branch and head", expected.IssueNumber)
 	}
 	if expected.PullRequestURL != "" && pr.URL != expected.PullRequestURL {
