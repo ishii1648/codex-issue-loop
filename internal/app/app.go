@@ -35,6 +35,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
@@ -171,6 +172,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.bootstrapLabels(ctx, args)
 	case "run":
 		return a.supervise(ctx, l, args)
+	case "broker":
+		return a.runBroker(ctx, l, args)
 	case "help", "--help", "-h":
 		a.usage()
 		return nil
@@ -205,6 +208,8 @@ Commands:
   doctor        Validate dependencies, auth, config, and registration
   bootstrap-labels  Preview or create required GitHub labels
   run           Run the supervisor (used by launchd)`)
+	// broker is intentionally omitted from the primary operator workflow; it is
+	// the shared LaunchAgent entrypoint managed by register/start/unregister.
 }
 
 func (a App) initUserRules(args []string) error {
@@ -277,6 +282,11 @@ func (a App) install(ctx context.Context, l layout.Layout, args []string) error 
 	if len(loaded) > 0 {
 		return fmt.Errorf("cannot install over running supervisors; use agent-loop update")
 	}
+	if _, brokerLoaded, brokerErr := loadedWebhookBroker(ctx, l); brokerErr != nil {
+		return brokerErr
+	} else if brokerLoaded {
+		return fmt.Errorf("cannot install over a running webhook broker; use agent-loop update")
+	}
 	source, err := os.Executable()
 	if err != nil {
 		return err
@@ -338,6 +348,14 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 			return err
 		}
 	}
+	brokerManager := launchd.Manager{Layout: l}
+	brokerLoaded := false
+	if !migrationNeeded {
+		brokerManager, brokerLoaded, err = loadedWebhookBroker(ctx, l)
+		if err != nil {
+			return err
+		}
+	}
 	backup, err := backupInstallation(l)
 	if err != nil {
 		return fmt.Errorf("backup current installation: %w", err)
@@ -346,9 +364,20 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
+	if brokerLoaded {
+		if err := brokerManager.StopBroker(ctx); err != nil {
+			_ = startEntries(ctx, l, loaded)
+			return err
+		}
+	}
 	manifest, _, updateErr := installArtifacts(l, source, Version, Commit)
 	if updateErr == nil && !migrationNeeded {
 		updateErr = rewritePlists(l)
+	}
+	if updateErr == nil {
+		if brokerLoaded {
+			updateErr = brokerManager.StartBroker(ctx)
+		}
 	}
 	if updateErr == nil {
 		updateErr = startEntries(ctx, l, loaded)
@@ -356,6 +385,9 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 	if updateErr != nil {
 		rollbackErr := restoreInstallation(l, backup)
 		_ = rewritePlists(l)
+		if brokerLoaded {
+			_ = brokerManager.StartBroker(ctx)
+		}
 		_ = startEntries(ctx, l, loaded)
 		if rollbackErr != nil {
 			return fmt.Errorf("update failed: %v; automatic rollback failed: %w", updateErr, rollbackErr)
@@ -410,17 +442,39 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 			return err
 		}
 	}
+	brokerManager := launchd.Manager{Layout: l}
+	brokerLoaded := false
+	if !legacySchemaRollback {
+		brokerManager, brokerLoaded, err = loadedWebhookBroker(ctx, l)
+		if err != nil {
+			return err
+		}
+	}
 	if err := stopEntries(ctx, l, loaded, a.ProcessController); err != nil {
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
+	if brokerLoaded {
+		if err := brokerManager.StopBroker(ctx); err != nil {
+			_ = startEntries(ctx, l, loaded)
+			return err
+		}
+	}
 	if err := restoreInstallation(l, resolved); err != nil {
+		if brokerLoaded {
+			_ = brokerManager.StartBroker(ctx)
+		}
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
 	if !legacySchemaRollback {
 		if err := rewritePlists(l); err != nil {
 			_ = startEntries(ctx, l, loaded)
+			return err
+		}
+	}
+	if brokerLoaded {
+		if err := brokerManager.StartBroker(ctx); err != nil {
 			return err
 		}
 	}
@@ -669,12 +723,46 @@ func rewritePlists(l layout.Layout) error {
 		return err
 	}
 	binary := filepath.Join(l.BinDir, "agent-loop")
+	brokerWritten := false
 	for _, entry := range registered.Repos {
 		if err := (launchd.Manager{Layout: l}).WritePlist(entry, binary); err != nil {
 			return err
 		}
+		cfg, err := config.Load(entry.RepoPath)
+		if err != nil {
+			return err
+		}
+		if cfg.Webhook.Enabled() && !brokerWritten {
+			if err := (launchd.Manager{Layout: l}).WriteBrokerPlist(binary, entry.EnvironmentPath); err != nil {
+				return err
+			}
+			brokerWritten = true
+		}
 	}
 	return nil
+}
+
+func loadedWebhookBroker(ctx context.Context, l layout.Layout) (launchd.Manager, bool, error) {
+	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
+		return launchd.Manager{}, false, err
+	}
+	for _, entry := range registered.Repos {
+		cfg, loadErr := config.Load(entry.RepoPath)
+		if loadErr != nil {
+			return launchd.Manager{}, false, loadErr
+		}
+		if !cfg.Webhook.Enabled() {
+			continue
+		}
+		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+		status, statusErr := manager.BrokerStatus(ctx)
+		if statusErr != nil {
+			return manager, false, statusErr
+		}
+		return manager, status.Loaded, nil
+	}
+	return launchd.Manager{Layout: l}, false, nil
 }
 
 func repoIDs(entries []registry.Entry) []string {
@@ -705,6 +793,11 @@ func (a App) uninstall(ctx context.Context, l layout.Layout, args []string) erro
 		if status.Loaded {
 			return fmt.Errorf("cannot uninstall while %s is loaded; stop it first", entry.RepoID)
 		}
+	}
+	if _, brokerLoaded, brokerErr := loadedWebhookBroker(ctx, l); brokerErr != nil {
+		return brokerErr
+	} else if brokerLoaded {
+		return fmt.Errorf("cannot uninstall while the shared webhook broker is loaded; stop and unregister webhook repositories first")
 	}
 	removed := []string{}
 	for _, path := range []string{
@@ -764,6 +857,11 @@ func (a App) register(l layout.Layout, args []string) error {
 	if err := (launchd.Manager{Layout: l}).WritePlist(entry, installed); err != nil {
 		return err
 	}
+	if cfg.Webhook.Enabled() {
+		if err := (launchd.Manager{Layout: l}).WriteBrokerPlist(installed, entry.EnvironmentPath); err != nil {
+			return err
+		}
+	}
 	return a.output(*jsonOut, map[string]any{"entry": entry, "plist": l.PlistPath(entry.RepoID)})
 }
 
@@ -784,6 +882,35 @@ func (a App) unregister(ctx context.Context, l layout.Layout, args []string) err
 	}
 	if err := os.Remove(l.PlistPath(entry.RepoID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	registered, loadErr := (registry.Store{Path: l.RegistryPath}).Load()
+	if loadErr != nil {
+		return loadErr
+	}
+	webhookRemaining := false
+	for _, remaining := range registered.Repos {
+		remainingConfig, configErr := config.Load(remaining.RepoPath)
+		if configErr != nil {
+			return fmt.Errorf("cannot determine shared broker ownership for %s: %w", remaining.RepoID, configErr)
+		}
+		if remainingConfig.Webhook.Enabled() {
+			webhookRemaining = true
+			break
+		}
+	}
+	if !webhookRemaining {
+		if err := lm.StopBroker(ctx); err != nil {
+			return err
+		}
+		if err := os.Remove(l.BrokerPlistPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else if brokerStatus, statusErr := lm.BrokerStatus(ctx); statusErr != nil {
+		return statusErr
+	} else if brokerStatus.Loaded {
+		if err := lm.RestartBroker(ctx); err != nil {
+			return err
+		}
 	}
 	return a.output(jsonOut, map[string]any{"unregistered": entry.RepoID, "state_preserved": true})
 }
@@ -807,6 +934,9 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		if err == nil && !launchStatus.Loaded {
 			err = recordSupervisorControl(store, "starting", "start requested")
 		}
+		if err == nil && cfg.Webhook.Enabled() && !launchStatus.Loaded {
+			err = lm.RestartBroker(ctx)
+		}
 		if err == nil {
 			err = lm.Start(ctx, entry)
 		}
@@ -822,6 +952,9 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		}
 		if err == nil {
 			err = recordSupervisorControl(store, "starting", "restart requested")
+		}
+		if err == nil && cfg.Webhook.Enabled() {
+			err = lm.RestartBroker(ctx)
 		}
 		if err == nil {
 			err = lm.Start(ctx, entry)
@@ -848,6 +981,39 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		result["worker_stop"] = stopReport
 	}
 	return a.output(jsonOut, result)
+}
+
+func (a App) runBroker(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("broker", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(registered.Repos))
+	for id := range registered.Repos {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	registrations := make([]webhook.Registration, 0, len(ids))
+	for _, id := range ids {
+		entry := registered.Repos[id]
+		cfg, loadErr := config.Load(entry.RepoPath)
+		if loadErr != nil {
+			return fmt.Errorf("load webhook repository %s: %w", entry.RepoID, loadErr)
+		}
+		if cfg.Webhook.Enabled() {
+			registrations = append(registrations, webhook.Registration{Entry: entry, Config: cfg})
+		}
+	}
+	broker := &webhook.Broker{Root: l.Root, Registrations: registrations, Logger: log.New(a.Err, "agent-loop broker: ", log.LstdFlags|log.LUTC)}
+	return broker.Run(ctx)
 }
 
 func recordSupervisorControl(store state.Store, supervisorState, message string) error {
@@ -881,7 +1047,40 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.output(jsonOut, buildStatus(launchStatus, snapshot, cfg.Queue.Concurrency))
+	result := buildStatus(launchStatus, snapshot, cfg.Queue.Concurrency)
+	if cfg.Webhook.Enabled() {
+		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+		brokerLaunchd, statusErr := manager.BrokerStatus(ctx)
+		if statusErr != nil {
+			return statusErr
+		}
+		var brokerState webhook.Status
+		data, readErr := os.ReadFile(filepath.Join(l.BrokerDir(), "status.json"))
+		if readErr == nil {
+			if err := json.Unmarshal(data, &brokerState); err != nil {
+				return fmt.Errorf("decode broker status: %w", err)
+			}
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			return readErr
+		}
+		sweep, sweepErr := webhook.LoadSweepState(l.RepoDir(entry.RepoID))
+		if sweepErr != nil {
+			return sweepErr
+		}
+		brokerState.LastSuccessfulSafetySweep = sweep.LastSuccessful
+		brokerState.NotModified304 = sweep.NotModified304
+		if mailboxEntries, mailboxErr := os.ReadDir(webhook.MailboxDir(l.RepoDir(entry.RepoID))); mailboxErr == nil {
+			for _, mailboxEntry := range mailboxEntries {
+				if !mailboxEntry.IsDir() && strings.HasSuffix(mailboxEntry.Name(), ".json") {
+					brokerState.QueueDepth++
+				}
+			}
+		} else if !errors.Is(mailboxErr, os.ErrNotExist) {
+			return mailboxErr
+		}
+		result.Broker = &brokerStatus{Launchd: brokerLaunchd, State: brokerState, Sweep: sweep}
+	}
+	return a.output(jsonOut, result)
 }
 
 func (a App) watch(ctx context.Context, l layout.Layout, args []string) error {

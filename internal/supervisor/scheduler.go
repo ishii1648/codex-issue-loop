@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 )
 
@@ -86,6 +88,9 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 		loop: l, events: make(chan schedulerEvent, concurrency+1), active: map[int]activeJob{},
 		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, pollAt: l.now(),
 	}
+	if l.Config.Webhook.Enabled() {
+		s.pollAt = l.now().Add(s.pollDelay())
+	}
 	consecutiveFailures := current.Supervisor.ConsecutiveFailures
 	if current.Supervisor.RetryAfter != nil && current.Supervisor.RetryAfter.After(s.pollAt) {
 		s.pollAt = *current.Supervisor.RetryAfter
@@ -148,11 +153,20 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 			}
 			// A freed slot immediately admits the next candidate instead of
 			// waiting for the regular GitHub poll interval.
-			s.pollAt = l.now()
-			pollCandidates = true
+			if !l.Config.Webhook.Enabled() {
+				s.pollAt = l.now()
+				pollCandidates = true
+			}
 		case <-pollTimer.C():
 			retryTimer.Stop()
-			pollCandidates = true
+			if l.Config.Webhook.Enabled() {
+				// The shared broker owns conditional queue sweeps. This timer only
+				// keeps the local scheduler failure/reconciliation loop live.
+				s.pollAt = l.now().Add(s.pollDelay())
+				pollCandidates = false
+			} else {
+				pollCandidates = true
+			}
 		case <-retryTimer.C():
 			pollTimer.Stop()
 		case event, ok := <-watchEvents:
@@ -163,10 +177,12 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 				continue
 			}
 			base := filepath.Base(event.Name)
-			if base != "state.json" && base != "events.jsonl" {
+			if filepath.Dir(event.Name) != webhook.MailboxDir(l.Store.Dir) && base != "state.json" && base != "events.jsonl" {
 				continue
 			}
-			pollCandidates = s.hasFreeSlot()
+			if !l.Config.Webhook.Enabled() {
+				pollCandidates = s.hasFreeSlot()
+			}
 		case <-watchErrors:
 			pollTimer.Stop()
 			retryTimer.Stop()
@@ -206,6 +222,17 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 	if err := s.preflight(snapshot); err != nil {
 		return false, err
 	}
+	mailboxCandidates, mailboxBatch, err := s.processMailbox(ctx, snapshot)
+	if err != nil {
+		return false, failure.Wrap(failure.Supervisor, "read webhook mailbox", err)
+	}
+	if len(mailboxBatch) > 0 {
+		// Reload RetryAfter changes made while routing active lifecycle events.
+		snapshot, err = s.loop.Store.Load()
+		if err != nil {
+			return false, failure.Wrap(failure.Supervisor, "reload webhook-routed state", err)
+		}
+	}
 
 	dispatched := false
 	for _, current := range pendingIssues(snapshot, s.loop.now()) {
@@ -234,24 +261,46 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 		dispatched = true
 	}
 
+	if len(mailboxCandidates) > 0 && s.hasFreeSlot() {
+		selected, evaluation, ok, selectErr := s.selectReady(ctx, mailboxCandidates, snapshot)
+		if selectErr != nil {
+			return dispatched, failure.Wrap(failure.Supervisor, "select webhook Issue admission", selectErr)
+		}
+		if ok {
+			slot, slotOK := s.freeSlot()
+			if slotOK {
+				runID := state.NewID("run")
+				s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
+					return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
+				})
+				dispatched = true
+			}
+		}
+	}
+	if len(mailboxBatch) > 0 && len(mailboxCandidates) == 0 {
+		if err := webhook.AckMailbox(s.loop.Store.Dir, mailboxBatch); err != nil {
+			return dispatched, failure.Wrap(failure.Supervisor, "ack webhook mailbox", err)
+		}
+	}
+
 	if !pollCandidates {
 		return dispatched, nil
 	}
 	if !s.hasFreeSlot() {
-		s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
+		s.pollAt = s.loop.now().Add(s.pollDelay())
 		return dispatched, nil
 	}
 	if !s.loop.Config.Queue.ContinueAfterNeedsInput {
 		if hasPendingRequests(snapshot) {
-			s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
+			s.pollAt = s.loop.now().Add(s.pollDelay())
 			return dispatched, s.markPollingIfIdle(snapshot, "waiting for user input")
 		}
 	}
-	issues, err := s.loop.GitHub.ListReady(ctx, s.loop.Config)
+	issues, err := s.listReady(ctx)
 	if err != nil {
 		return dispatched, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
-	s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
+	s.pollAt = s.loop.now().Add(s.pollDelay())
 	selected, evaluation, ok, selectErr := s.selectReady(ctx, issues, snapshot)
 	if selectErr != nil {
 		return dispatched, failure.Wrap(failure.Supervisor, "select Issue admission", selectErr)
@@ -268,6 +317,153 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
 	})
 	return true, nil
+}
+
+func (s *scheduler) pollInterval() time.Duration {
+	if s.loop.Config.Webhook.Enabled() {
+		return s.loop.Config.Webhook.SafetySweepInterval.Duration
+	}
+	return s.loop.Config.Queue.PollInterval.Duration
+}
+
+func (s *scheduler) pollDelay() time.Duration {
+	interval := s.pollInterval()
+	if s.loop.Config.Webhook.Enabled() {
+		return s.loop.jitter(interval, s.loop.Config.Webhook.SafetySweepJitter, 0)
+	}
+	return s.loop.pollDelay(interval)
+}
+
+func (s *scheduler) listReady(ctx context.Context) ([]gh.Issue, error) {
+	if !s.loop.Config.Webhook.Enabled() {
+		return s.loop.GitHub.ListReady(ctx, s.loop.Config)
+	}
+	conditional, ok := s.loop.GitHub.(gh.ConditionalQueueClient)
+	if !ok {
+		return nil, errors.New("webhook mode requires conditional REST queue support")
+	}
+	sweep, err := webhook.LoadSweepState(s.loop.Store.Dir)
+	if err != nil {
+		return nil, err
+	}
+	result, err := conditional.ListReadyConditional(ctx, s.loop.Config, sweep.ETag, sweep.LastModified)
+	if err != nil {
+		return nil, err
+	}
+	sweep.LastStatus = result.StatusCode
+	sweep.LastSuccessful = s.loop.now()
+	if result.ETag != "" {
+		sweep.ETag = result.ETag
+	}
+	if result.LastModified != "" {
+		sweep.LastModified = result.LastModified
+	}
+	sweep.RateRemaining = result.RateRemaining
+	sweep.RateReset = result.RateReset
+	if result.NotModified {
+		sweep.NotModified304++
+	} else if result.StatusCode == 200 {
+		sweep.REST200++
+	}
+	if err := webhook.SaveSweepState(s.loop.Store.Dir, sweep); err != nil {
+		return nil, err
+	}
+	for _, issue := range result.Issues {
+		delivery := webhook.Delivery{
+			Version: webhook.InboxVersion, DeliveryID: fmt.Sprintf("sweep-%d-%d", s.loop.now().UnixNano(), issue.Number),
+			Event: "issues", Action: "reconciled", RepoID: s.loop.Store.RepoID,
+			RepositoryID: s.loop.Config.GitHub.RepositoryID, Repository: s.loop.Config.GitHub.Repo,
+			IssueNumber: issue.Number, AcceptedAt: s.loop.now(),
+		}
+		if err := webhook.EnqueueMailbox(s.loop.Store.Dir, delivery); err != nil {
+			return nil, err
+		}
+	}
+	return result.Issues, nil
+}
+
+func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot) ([]gh.Issue, []webhook.Delivery, error) {
+	if !s.loop.Config.Webhook.Enabled() {
+		return nil, nil, nil
+	}
+	deliveries, err := webhook.ReadMailbox(s.loop.Store.Dir)
+	if err != nil || len(deliveries) == 0 {
+		return nil, deliveries, err
+	}
+	candidates := make([]gh.Issue, 0)
+	seen := map[int]bool{}
+	for index := len(deliveries) - 1; index >= 0; index-- {
+		delivery := deliveries[index]
+		number := delivery.IssueNumber
+		if number == 0 && delivery.PullRequestNumber != 0 {
+			for _, issue := range snapshot.Issues {
+				if issue != nil && (issue.PullRequestNumber == delivery.PullRequestNumber || strings.HasSuffix(issue.PullRequestURL, "/pull/"+fmt.Sprint(delivery.PullRequestNumber))) {
+					number = issue.Number
+					break
+				}
+			}
+		}
+		if number == 0 && delivery.HeadSHA != "" {
+			for _, issue := range snapshot.Issues {
+				if issue != nil && issue.HeadSHA == delivery.HeadSHA {
+					number = issue.Number
+					break
+				}
+			}
+		}
+		if number == 0 {
+			continue
+		}
+		if seen[number] {
+			continue
+		}
+		seen[number] = true
+		if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
+			if !webhookRoutableStatus(local.Status) && local.GitHubSync == "" {
+				continue
+			}
+			_, updateErr := s.loop.Store.Update("webhook_scheduler_wake", number, local.RunID, map[string]any{
+				"delivery_id": delivery.DeliveryID, "event": delivery.Event, "action": delivery.Action,
+			}, func(current *state.Snapshot) error {
+				item := current.Issues[fmt.Sprint(number)]
+				if item != nil {
+					now := s.loop.now()
+					item.RetryAfter = &now
+					if delivery.HeadSHA != "" {
+						item.HeadSHA = delivery.HeadSHA
+					}
+					if delivery.PullRequestNumber != 0 {
+						item.PullRequestNumber = delivery.PullRequestNumber
+					}
+				}
+				return nil
+			})
+			if updateErr != nil {
+				return nil, nil, updateErr
+			}
+			continue
+		}
+		if delivery.Event != "issues" && delivery.Event != "issue_comment" {
+			continue
+		}
+		candidate, getErr := s.loop.getIssue(ctx, number)
+		if getErr != nil {
+			return nil, nil, getErr
+		}
+		if gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates, deliveries, nil
+}
+
+func webhookRoutableStatus(status string) bool {
+	switch status {
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasPendingRequests(snapshot state.Snapshot) bool {
@@ -310,7 +506,7 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 				}
 				continue
 			}
-			remote, getErr := s.loop.GitHub.Get(ctx, s.loop.Config, number)
+			remote, getErr := s.loop.getIssue(ctx, number)
 			if getErr == nil {
 				dependencies[number] = admission.DependencyState{
 					Exists: true, Accessible: true, Closed: strings.EqualFold(remote.State, "closed"),

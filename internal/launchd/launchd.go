@@ -98,6 +98,60 @@ func (m Manager) WritePlist(entry registry.Entry, binary string) error {
 	return fsutil.WriteFile(m.Layout.PlistPath(entry.RepoID), []byte(plist), 0o600)
 }
 
+func (m Manager) WriteBrokerPlist(binary, pathEnv string) error {
+	if !filepath.IsAbs(binary) {
+		return fmt.Errorf("broker binary path must be absolute")
+	}
+	if pathEnv == "" {
+		pathEnv = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	}
+	if err := os.MkdirAll(m.Layout.LaunchAgents, 0o700); err != nil {
+		return err
+	}
+	brokerDir := m.Layout.BrokerDir()
+	if err := os.MkdirAll(brokerDir, 0o700); err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	stdout := filepath.Join(brokerDir, "launchd.stdout.log")
+	stderr := filepath.Join(brokerDir, "launchd.stderr.log")
+	for _, path := range []string{stdout, stderr} {
+		file, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if openErr != nil {
+			return openErr
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+	values := map[string]string{
+		"label": m.Layout.BrokerLabel(), "binary": binary, "root": m.Layout.Root,
+		"stdout": stdout, "stderr": stderr, "home": home, "path": pathEnv,
+	}
+	plist := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{{label}}</string>
+  <key>ProgramArguments</key><array><string>{{binary}}</string><string>broker</string></array>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>{{stdout}}</string><key>StandardErrorPath</key><string>{{stderr}}</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>{{home}}</string><key>PATH</key><string>{{path}}</string><key>AGENT_LOOP_HOME</key><string>{{root}}</string></dict>
+</dict></plist>
+`
+	for key, value := range values {
+		plist = strings.ReplaceAll(plist, "{{"+key+"}}", escape(value))
+	}
+	return fsutil.WriteFile(m.Layout.BrokerPlistPath(), []byte(plist), 0o600)
+}
+
 func escape(value string) string {
 	var b bytes.Buffer
 	_ = xml.EscapeText(&b, []byte(value))
@@ -191,6 +245,107 @@ func (m Manager) Status(ctx context.Context, entry registry.Entry) (Status, erro
 			return Status{Loaded: false}, nil
 		}
 		return Status{}, fmt.Errorf("launchctl print: %w", err)
+	}
+	return Status{Loaded: true, Raw: strings.TrimSpace(string(out))}, nil
+}
+
+func (m Manager) StartBroker(ctx context.Context) error {
+	status, err := m.BrokerStatus(ctx)
+	if err != nil || status.Loaded {
+		return err
+	}
+	if err := m.bootstrap(ctx, m.Layout.BrokerPlistPath(), m.Layout.BrokerLabel()); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, _ = m.BrokerStatus(ctx)
+		if status.Loaded {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("webhook broker LaunchAgent did not become loaded")
+}
+
+func (m Manager) StopBroker(ctx context.Context) error {
+	status, err := m.BrokerStatus(ctx)
+	if err != nil || !status.Loaded {
+		return err
+	}
+	if err := m.bootout(ctx, m.Layout.BrokerLabel()); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, _ = m.BrokerStatus(ctx)
+		if !status.Loaded {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("webhook broker LaunchAgent did not stop")
+}
+
+func (m Manager) RestartBroker(ctx context.Context) error {
+	if err := m.StopBroker(ctx); err != nil {
+		return err
+	}
+	return m.StartBroker(ctx)
+}
+
+func (m Manager) BrokerStatus(ctx context.Context) (Status, error) {
+	return m.serviceStatus(ctx, m.Layout.BrokerLabel())
+}
+
+func (m Manager) bootstrap(ctx context.Context, plist, label string) error {
+	path := m.Launchctl
+	if path == "" {
+		path = "launchctl"
+	}
+	target, err := guiTarget()
+	if err != nil {
+		return err
+	}
+	out, err := exec.CommandContext(ctx, path, "bootstrap", target, plist).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("launchctl bootstrap %s: %w: %s", label, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (m Manager) bootout(ctx context.Context, label string) error {
+	path := m.Launchctl
+	if path == "" {
+		path = "launchctl"
+	}
+	target, err := guiTarget()
+	if err != nil {
+		return err
+	}
+	out, err := exec.CommandContext(ctx, path, "bootout", target+"/"+label).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("launchctl bootout %s: %w: %s", label, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (m Manager) serviceStatus(ctx context.Context, label string) (Status, error) {
+	path := m.Launchctl
+	if path == "" {
+		path = "launchctl"
+	}
+	target, err := guiTarget()
+	if err != nil {
+		return Status{}, err
+	}
+	out, err := exec.CommandContext(ctx, path, "print", target+"/"+label).CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return Status{Loaded: false}, nil
+		}
+		return Status{}, err
 	}
 	return Status{Loaded: true, Raw: strings.TrimSpace(string(out))}, nil
 }

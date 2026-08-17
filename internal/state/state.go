@@ -182,6 +182,8 @@ type Issue struct {
 	WorkerPID         int                `json:"worker_pid,omitempty"`
 	WorkerPGID        int                `json:"worker_pgid,omitempty"`
 	PullRequestURL    string             `json:"pull_request_url,omitempty"`
+	PullRequestNumber int                `json:"pull_request_number,omitempty"`
+	HeadSHA           string             `json:"head_sha,omitempty"`
 	PullRequestMerged bool               `json:"pull_request_merged,omitempty"`
 	GitHubSync        string             `json:"github_sync,omitempty"`
 	FailureKind       string             `json:"failure_kind,omitempty"`

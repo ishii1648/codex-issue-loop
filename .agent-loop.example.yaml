@@ -2,6 +2,8 @@ version: 4
 
 github:
   repo: owner/repository
+  # Required only when webhook.mode is webhook.
+  # repository_id: 123456789
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
   running_label: codex-loop:running
@@ -97,3 +99,7 @@ logs:
 # secret values themselves in this file.
 security:
   redact_env: []
+
+# Explicit fallback is polling. See docs/mac-mini-runbook.md before opting in.
+webhook:
+  mode: polling

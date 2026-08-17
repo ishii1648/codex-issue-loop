@@ -38,6 +38,7 @@ type PullRequest struct {
 	HeadRefName      string
 	MergeStateStatus string
 	ChecksStatus     string
+	HeadSHA          string
 }
 
 type checkRollup struct {
@@ -192,7 +193,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName,mergeStateStatus,statusCheckRollup").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName,headRefOid,mergeStateStatus,statusCheckRollup").CombinedOutput()
 	if err != nil {
 		return RemoteState{}, fmt.Errorf("inspect Pull Requests for branch %s: %w: %s", branch, err, c.safe(out))
 	}
@@ -203,6 +204,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		IsDraft           bool          `json:"isDraft"`
 		MergedAt          *time.Time    `json:"mergedAt"`
 		HeadRefName       string        `json:"headRefName"`
+		HeadRefOID        string        `json:"headRefOid"`
 		MergeStateStatus  string        `json:"mergeStateStatus"`
 		StatusCheckRollup []checkRollup `json:"statusCheckRollup"`
 	}
@@ -213,6 +215,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		state.PullRequests = append(state.PullRequests, PullRequest{
 			Number: item.Number, URL: item.URL, State: item.State, IsDraft: item.IsDraft,
 			MergedAt: item.MergedAt, HeadRefName: item.HeadRefName,
+			HeadSHA:          item.HeadRefOID,
 			MergeStateStatus: item.MergeStateStatus,
 			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
 		})
@@ -277,6 +280,22 @@ func Eligible(labels []string, cfg config.GitHub) bool {
 		}
 	}
 	return true
+}
+
+func EligibleIssue(issue Issue, cfg config.GitHub) bool {
+	if !Eligible(issue.Labels, cfg) {
+		return false
+	}
+	if cfg.Assignee != "" {
+		matched := false
+		for _, assignee := range issue.Assignees {
+			matched = matched || strings.EqualFold(assignee, cfg.Assignee)
+		}
+		if !matched {
+			return false
+		}
+	}
+	return cfg.Milestone == "" || issue.Milestone == cfg.Milestone
 }
 
 func (c CLI) Claim(ctx context.Context, cfg config.Config, issue Issue, runID string) error {

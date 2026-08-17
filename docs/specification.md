@@ -134,7 +134,8 @@ target-repository/
    └─ runs/<run-id>/
 
 ~/Library/LaunchAgents/
-└─ com.codex-issue-loop.<repo-id>.plist
+├─ com.codex-issue-loop.<repo-id>.plist
+└─ com.codex-issue-loop.broker.plist
 
 ~/.codex/skills/agent-loop/
 ├─ SKILL.md
@@ -154,6 +155,8 @@ version: 4
 
 github:
   repo: ishii1648/example
+  # webhook modeだけで必須
+  repository_id: 123456789
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
   running_label: codex-loop:running
@@ -238,12 +241,32 @@ logs:
 
 security:
   redact_env: []
+
+webhook:
+  mode: polling
+  listener_address: 127.0.0.1:8787
+  public_url_identifier: ""
+  secret_source: {}
+  previous_secret_source: {}
+  installation_ids: []
+  allow_repository_webhook: false
+  safety_sweep_interval: 15m
+  safety_sweep_jitter: 10%
+  max_body_bytes: 2097152
+  read_timeout: 10s
+  read_header_timeout: 5s
+  idle_timeout: 30s
+  max_concurrent: 16
 ```
 
 ### 5.1 設定規則
 
 - `version` は必須。現行は`4`とし、v3は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
+- `webhook.mode`の既定は`polling`であり、設定を追加しただけでWebhookをsilentに有効化しない。`webhook`では`github.repository_id`、GitHub App用の1件以上の`installation_ids`、公開URLを秘密値なしで識別する`public_url_identifier`を必須とする。classic repository webhookだけは`allow_repository_webhook: true`を明示してinstallation欠落を許可でき、HMACとrepository ID/full nameは引き続き必須とする。
+- Webhook listenerはliteralな`127.0.0.1`または`::1`だけを許可する。共有brokerを使う全repositoryはlistenerとHTTP上限を一致させる。public/LAN addressやhostnameへのbindは拒否する。
+- `secret_source`は環境変数名またはrepository外の絶対file pathのどちらか一方だけを指定する。fileはruntimeでregular fileかつowner-only permissionであることを検証する。rotation中だけ`previous_secret_source`を併記できる。secret値をconfig、registry、snapshot、event、status、logへ保存しない。
+- `safety_sweep_interval`の既定は15分で、ETag/Last-Modifiedを`webhook-sweep.json`へ永続化し、ready labelを含む安定したREST collection URLへ条件付きrequestを送る。正しく認証された304は成功として記録する。Webhook modeの通常経路はrepository mailbox eventで対象Issue/PR/SHAだけをREST再検証し、queueまたは変化のないPRをGraphQL pollingしない。
 - `queue.concurrency` は1以上とする。`resources.definitions`未設定時は安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。2以上はresource definition、valid metadata、既知の`area:` claimを使う単一host worker poolであり、distributed modeは有効化しない。
 - `resources.metadata_version`は`1`、各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
 - `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
@@ -432,6 +455,8 @@ PR conflict、手動exclusion、security block、上記markerのないlegacy blo
 
 登録単位は1対象リポジトリにつき1 LaunchAgentとする。
 
+Webhook modeを1件以上登録したmanaged rootには、追加でuser-scopedな`com.codex-issue-loop.broker`を1つだけ生成する。`start`はbrokerを先に起動し、repositoryの`stop`は共有brokerや他repositoryを停止しない。最後のWebhook repositoryを`unregister`した場合だけbrokerを停止してplistを削除する。broker停止や再起動はrepo別worker、state、worktree、mailboxを削除しない。
+
 主要plist設定:
 
 - `Label`: `com.codex-issue-loop.<repo-id>`
@@ -444,6 +469,12 @@ PR conflict、手動exclusion、security block、上記markerのないlegacy blo
 - `EnvironmentVariables`: 必要最小限のPATHとHOME。tokenは含めない
 
 LaunchAgentなので、ユーザーがログアウトしている間は動作保証しない。system-wideなLaunchDaemon、自動ログイン、daemon/helper分割は、ユーザーcredential、HOME、Keychain、Codex認証、worktree ownershipの境界を変え、現在の可用性要件に対して過剰なため採用しない。正式な比較と再検討条件は[ADR-0001](adr/0001-macos-execution-model.md)を正本とする。
+
+### 7.1 Webhook broker
+
+broker endpointは`POST /github/webhook`だけである。raw bodyの`X-Hub-Signature-256`をHMAC-SHA256でconstant-time検証し、`X-GitHub-Delivery`、event/action、repository ID/full name、installation IDのallowlist検証後、検証済みrouting metadataを0600のdurable inboxへO_EXCLで保存してから202を返す。raw payload、Authorization、署名、secretは保存・log出力しない。
+
+inboxはdelivery IDを正本とし、redeliveryを冪等にdedupeする。ACK後にcrashした場合は再起動時に未route deliveryをrepo別`webhook-mailbox`へ再生する。schedulerは同一Issue/PR/SHAへのbatchをcoalesceし、active lifecycleの`RetryAfter`だけをwakeする。未登録または設定不一致のrepositoryはfail closedとなり、GitHub read/mutationを開始しない。mutationとretryは既存のsupervisor lifecycleおよびcooldown gateを迂回しない。
 
 ## 8. supervisor状態機械
 
