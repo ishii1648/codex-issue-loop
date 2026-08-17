@@ -1173,21 +1173,29 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	if current.Status == "awaiting_merge" && !l.Config.Completion.AutoMerge {
 		return l.schedulePullRequestPoll(current, "waiting for Pull Request merge")
 	}
+	if l.Config.Completion.AutoMerge {
+		// Merge-state mutations take precedence over checks: checks for a behind
+		// head are stale, while a dirty head may never receive a check run at all.
+		// Every mutation returns immediately so one poll cannot both update or
+		// recover a branch and also ready or merge the Pull Request.
+		switch strings.ToLower(selected.MergeStateStatus) {
+		case "behind":
+			if err := l.GitHub.UpdatePullRequest(ctx, l.Config, selected.URL); err != nil {
+				return failure.Wrap(failure.Transient, "update Pull Request branch", err)
+			}
+			return l.schedulePullRequestPoll(current, "Pull Request branch updated; waiting for checks")
+		case "dirty":
+			return l.beginConflictRecovery(ctx, current, *selected)
+		case "unknown", "unstable":
+			return l.schedulePullRequestPoll(current, "waiting for stable Pull Request merge state")
+		}
+	}
 	switch selected.ChecksStatus {
 	case "pending", "":
 		return l.schedulePullRequestPoll(current, "waiting for Pull Request checks")
 	case "failure":
 		return l.scheduleRetry(ctx, current, "Pull Request checks failed: "+selected.URL)
 	case "success":
-		if l.Config.Completion.AutoMerge && strings.EqualFold(selected.MergeStateStatus, "behind") {
-			if err := l.GitHub.UpdatePullRequest(ctx, l.Config, selected.URL); err != nil {
-				return failure.Wrap(failure.Transient, "update Pull Request branch", err)
-			}
-			return l.schedulePullRequestPoll(current, "Pull Request branch updated; waiting for checks")
-		}
-		if l.Config.Completion.AutoMerge && strings.EqualFold(selected.MergeStateStatus, "dirty") {
-			return l.beginConflictRecovery(ctx, current, *selected)
-		}
 		if selected.IsDraft {
 			if err := l.GitHub.ReadyPullRequest(ctx, l.Config, selected.URL); err != nil {
 				return failure.Wrap(failure.Transient, "mark Pull Request ready", err)

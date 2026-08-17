@@ -619,7 +619,7 @@ func TestQueueOnlyWaitsForMergeWhenAutoMergeIsEnabled(t *testing.T) {
 	}
 }
 
-func TestAutoMergeUpdatesBehindBranchBeforeMerging(t *testing.T) {
+func TestAutoMergeUpdatesBehindBranchBeforePendingChecks(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
 	loop, github := testLoop(t, result)
 	loop.Config.Completion.AutoMerge = true
@@ -628,7 +628,7 @@ func TestAutoMergeUpdatesBehindBranchBeforeMerging(t *testing.T) {
 	}
 	github.remote = &gh.RemoteState{
 		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
-		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", MergeStateStatus: "BEHIND", ChecksStatus: "success"}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", MergeStateStatus: "BEHIND", ChecksStatus: "pending"}},
 	}
 	if _, err := loop.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -636,6 +636,104 @@ func TestAutoMergeUpdatesBehindBranchBeforeMerging(t *testing.T) {
 	snapshot, _ := loop.Store.Load()
 	if snapshot.Issues["1"].Status != "awaiting_checks" || !github.updatedPullRequest || github.readyPullRequest || github.mergedPullRequest {
 		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+}
+
+func TestDirtyPullRequestStartsConflictRecoveryWithoutCheckRuns(t *testing.T) {
+	for _, checksStatus := range []string{"", "pending"} {
+		t.Run("checks_"+checksStatus, func(t *testing.T) {
+			loop, github := testLoop(t, worker.Result{})
+			loop.Config.Completion.AutoMerge = true
+			prURL := "https://example.test/pr/1"
+			_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(s *state.Snapshot) error {
+				s.Issues["1"] = &state.Issue{
+					Number: 1, Title: "Test", Status: "awaiting_checks", RunID: "run_1",
+					Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, PullRequestURL: prURL,
+					Attempts: 1, UpdatedAt: time.Now().UTC(),
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+			github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{
+				Number: 1, URL: prURL, State: "OPEN", HeadRefName: "codex/issue-1-test",
+				MergeStateStatus: "DIRTY", ChecksStatus: checksStatus,
+			}}}
+			resolver := &fakeConflictResolver{preparation: conflict.Preparation{
+				PreviousBaseSHA: "base-old", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"},
+			}}
+			loop.Conflicts = resolver
+			loop.Worker = fakeWorker{result: worker.Result{
+				Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "retry later",
+			}}
+
+			if _, err := loop.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := snapshot.Issues["1"]
+			if item.Status != "resolving_conflict" || item.ConflictRecovery == nil || item.ConflictRecovery.Attempts != 1 || resolver.prepareCalls != 2 {
+				t.Fatalf("item=%+v resolver=%+v", item, resolver)
+			}
+			if github.updatedPullRequest || github.readyPullRequest || github.mergedPullRequest {
+				t.Fatalf("unexpected additional Pull Request mutation: %+v", github)
+			}
+		})
+	}
+}
+
+func TestNonDirtyPendingChecksAndUnstableMergeStateKeepPolling(t *testing.T) {
+	tests := []struct {
+		name       string
+		mergeState string
+		checks     string
+	}{
+		{name: "clean pending checks", mergeState: "CLEAN", checks: "pending"},
+		{name: "unknown pending checks", mergeState: "UNKNOWN", checks: "pending"},
+		{name: "unstable successful checks", mergeState: "UNSTABLE", checks: "success"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loop, github := testLoop(t, worker.Result{})
+			loop.Config.Completion.AutoMerge = true
+			prURL := "https://example.test/pr/1"
+			_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(s *state.Snapshot) error {
+				s.Issues["1"] = &state.Issue{
+					Number: 1, Status: "awaiting_checks", RunID: "run_1", Branch: "codex/issue-1-test",
+					Worktree: loop.Config.RepoPath, PullRequestURL: prURL, UpdatedAt: time.Now().UTC(),
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			github.remote = &gh.RemoteState{
+				Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+				PullRequests: []gh.PullRequest{{Number: 1, URL: prURL, State: "OPEN", HeadRefName: "codex/issue-1-test", MergeStateStatus: test.mergeState, ChecksStatus: test.checks}},
+			}
+			resolver := &fakeConflictResolver{}
+			loop.Conflicts = resolver
+
+			if _, err := loop.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if item := snapshot.Issues["1"]; item.Status != "awaiting_checks" || item.RetryAfter == nil || resolver.prepareCalls != 0 {
+				t.Fatalf("item=%+v resolver=%+v", item, resolver)
+			}
+			if github.updatedPullRequest || github.readyPullRequest || github.mergedPullRequest {
+				t.Fatalf("unexpected Pull Request mutation: %+v", github)
+			}
+		})
 	}
 }
 

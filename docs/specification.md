@@ -647,7 +647,7 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 9. `gh`が警告文を併記しても出力内の有効なPR URLを抽出し、異なるURLが複数なら拒否する。
 10. `statusCheckRollup`を定期的に確認し、未完了ならモデルを呼ばず待機、失敗なら同じworktreeと失敗理由をworkerへ返す。
 11. CI成功後にdraftをReady for reviewへ移す。`auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。
-12. `auto_merge: true`ではbase branchより遅れているcleanなPRを既存のUpdate branch経路で更新する。`dirty`なら`resolving_conflict`へ移し、最新baseをfetchしてSHAを固定し、既存PR branchのworktreeへ`--no-commit` mergeする。
+12. `auto_merge: true`ではchecks判定より先にmerge stateを評価する。base branchより遅れているcleanなPRは既存のUpdate branch経路で更新し、`dirty`ならchecksが空またはpendingでも`resolving_conflict`へ移して、最新baseをfetchしてSHAを固定し、既存PR branchのworktreeへ`--no-commit` mergeする。`unknown`または`unstable`は推測せず再pollし、各pollではbranch update、conflict recovery、Ready化、mergeのmutationを1つだけ行う。
 13. conflict workerにはIssue本文・コメント、元PR diff、前回baseから対象baseまでのcommit、競合fileと内容、許可path、検証要件を渡す。workerは`git add`、commit、push、force push、branch/PR作成を行わない。
 14. supervisorは解消後に未解消indexが0件、markerなし、`MERGE_HEAD`と保存base SHAの一致、変更path scope、workerの検証証跡を確認する。supervisorだけがmerge commitと通常pushを行い、同じPRを`awaiting_checks`へ戻す。
 15. 再起動時は保存済みmergeを再準備せず、未解消状態、local commit済み、push済みを識別して再開する。push済みcommitを検出した場合はworker、commit、push、コメントを重複させない。
