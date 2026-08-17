@@ -44,7 +44,7 @@ make test-race
 | localhost-only configの閉じたallowlistと不整合拒否 | `TestLoadLocalhostOnlyCommandNetworkIsClosedAndOptIn` |
 | Codex proxy/tool隔離argvとcapability検出 | `TestCodexLocalhostNetworkArgumentsAreFailClosed`、`TestCodexProbeDetectsLocalhostNetworkProxyCapability` |
 | worker環境blockedのsession/resource保持と同一worktree resume | `TestWorkerEnvironmentBlockPreservesContinuationAndResourceState`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
-| operator resumeの冪等性・dirty保持・手動block拒否・lost lease回復 | `TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
+| operator resumeの冪等性・dirty保持・手動block拒否・typed legacy lost lease回復 | `TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestTypedLegacyWorkerBlockRecoveryFromMissingLeaseFixture`、`TestTypedLegacyWorkerBlockRequiresExactDurableCause`、`TestLegacyWorkerBlockRecoveryRequiresSameRunLeaseWorktreeAndBranch`、`TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
 
 ## 追加の部分障害と境界
 
