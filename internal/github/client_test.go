@@ -307,8 +307,30 @@ func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "--limit 1000") || !strings.Contains(string(args), "createdAt") {
+	if !strings.Contains(string(args), "--limit 1000") || !strings.Contains(string(args), "createdAt") || !strings.Contains(string(args), "--label codex-loop:ready") {
 		t.Fatalf("large queue limit missing: %s", args)
+	}
+}
+
+func TestListReadyPreservesORFilteringForMultipleReadyLabels(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	argsPath := filepath.Join(dir, "args.txt")
+	if err := os.WriteFile(fake, []byte(fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" > %q\nprintf '%%s\\n' '[]'\n", argsPath)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.GitHub.ReadyLabels = []string{"ready:a", "ready:b"}
+	if _, err := (CLI{Path: fake}).ListReady(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(args), "--label") {
+		t.Fatalf("multiple ready labels were changed from OR to GitHub CLI AND filtering: %s", args)
 	}
 }
 
