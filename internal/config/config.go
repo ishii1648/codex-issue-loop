@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -46,11 +48,13 @@ type Config struct {
 	Worktrees        Worktrees        `yaml:"worktrees" json:"worktrees"`
 	Logs             Logs             `yaml:"logs" json:"logs"`
 	Security         Security         `yaml:"security" json:"security"`
+	Webhook          Webhook          `yaml:"webhook" json:"webhook"`
 	RepoPath         string           `yaml:"-" json:"repo_path"`
 }
 
 type GitHub struct {
 	Repo            string   `yaml:"repo" json:"repo"`
+	RepositoryID    int64    `yaml:"repository_id" json:"repository_id,omitempty"`
 	ReadyLabels     []string `yaml:"ready_labels" json:"ready_labels"`
 	ExcludeLabels   []string `yaml:"exclude_labels" json:"exclude_labels"`
 	RunningLabel    string   `yaml:"running_label" json:"running_label"`
@@ -210,6 +214,32 @@ type Security struct {
 	RedactEnv []string `yaml:"redact_env" json:"redact_env,omitempty"`
 }
 
+// Webhook is deliberately opt-in. A repository remains on the legacy polling
+// path until mode is explicitly set to "webhook".
+type Webhook struct {
+	Mode                string       `yaml:"mode" json:"mode"`
+	ListenerAddress     string       `yaml:"listener_address" json:"listener_address"`
+	PublicURLIdentifier string       `yaml:"public_url_identifier" json:"public_url_identifier,omitempty"`
+	SecretSource        SecretSource `yaml:"secret_source" json:"secret_source"`
+	PreviousSecret      SecretSource `yaml:"previous_secret_source" json:"previous_secret_source,omitempty"`
+	InstallationIDs     []int64      `yaml:"installation_ids" json:"installation_ids,omitempty"`
+	AllowRepositoryHook bool         `yaml:"allow_repository_webhook" json:"allow_repository_webhook"`
+	SafetySweepInterval Duration     `yaml:"safety_sweep_interval" json:"safety_sweep_interval"`
+	SafetySweepJitter   float64      `yaml:"safety_sweep_jitter" json:"safety_sweep_jitter"`
+	MaxBodyBytes        int64        `yaml:"max_body_bytes" json:"max_body_bytes"`
+	ReadTimeout         Duration     `yaml:"read_timeout" json:"read_timeout"`
+	ReadHeaderTimeout   Duration     `yaml:"read_header_timeout" json:"read_header_timeout"`
+	IdleTimeout         Duration     `yaml:"idle_timeout" json:"idle_timeout"`
+	MaxConcurrent       int          `yaml:"max_concurrent" json:"max_concurrent"`
+}
+
+type SecretSource struct {
+	Env  string `yaml:"env" json:"env,omitempty"`
+	File string `yaml:"file" json:"file,omitempty"`
+}
+
+func (w Webhook) Enabled() bool { return w.Mode == "webhook" }
+
 var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var githubRepository = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/[A-Za-z0-9_.-]{1,100}$`)
 
@@ -273,6 +303,12 @@ func Defaults() Config {
 			WorkerRunMaxAge:   Duration{30 * 24 * time.Hour},
 			WorkerRunMaxCount: 100,
 		},
+		Webhook: Webhook{
+			Mode: "polling", ListenerAddress: "127.0.0.1:8787",
+			SafetySweepInterval: Duration{15 * time.Minute}, SafetySweepJitter: 0.10,
+			MaxBodyBytes: 2 * 1024 * 1024, ReadTimeout: Duration{10 * time.Second},
+			ReadHeaderTimeout: Duration{5 * time.Second}, IdleTimeout: Duration{30 * time.Second}, MaxConcurrent: 16,
+		},
 	}
 }
 
@@ -333,6 +369,9 @@ func (c Config) Validate() error {
 	}
 	if !githubRepository.MatchString(c.GitHub.Repo) {
 		return fmt.Errorf("github.repo must use owner/name format")
+	}
+	if err := c.Webhook.Validate(c.RepoPath, c.GitHub); err != nil {
+		return err
 	}
 	if len(c.GitHub.ReadyLabels) == 0 {
 		return fmt.Errorf("github.ready_labels must not be empty")
@@ -457,6 +496,80 @@ func (c Config) Validate() error {
 	for _, name := range c.Security.RedactEnv {
 		if !environmentName.MatchString(name) {
 			return fmt.Errorf("security.redact_env contains invalid environment variable name %q", name)
+		}
+	}
+	return nil
+}
+
+func (w Webhook) Validate(repoPath string, github GitHub) error {
+	switch w.Mode {
+	case "polling":
+		return nil
+	case "webhook":
+	default:
+		return fmt.Errorf("webhook.mode must be polling or webhook")
+	}
+	host, portValue, err := net.SplitHostPort(w.ListenerAddress)
+	if err != nil {
+		return fmt.Errorf("webhook.listener_address must be an IP host:port: %w", err)
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("webhook.listener_address must use a literal loopback address")
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("webhook.listener_address must use a concrete TCP port")
+	}
+	if github.RepositoryID <= 0 {
+		return fmt.Errorf("github.repository_id must be positive in webhook mode")
+	}
+	if strings.TrimSpace(w.PublicURLIdentifier) == "" {
+		return fmt.Errorf("webhook.public_url_identifier is required in webhook mode")
+	}
+	if len(w.PublicURLIdentifier) > 512 || strings.ContainsAny(w.PublicURLIdentifier, "?#\r\n\t") {
+		return fmt.Errorf("webhook.public_url_identifier must be a non-secret URL identifier without query or fragment")
+	}
+	if err := w.SecretSource.Validate(repoPath, "webhook.secret_source"); err != nil {
+		return err
+	}
+	if w.PreviousSecret.Env != "" || w.PreviousSecret.File != "" {
+		if err := w.PreviousSecret.Validate(repoPath, "webhook.previous_secret_source"); err != nil {
+			return err
+		}
+	}
+	if len(w.InstallationIDs) == 0 && !w.AllowRepositoryHook {
+		return fmt.Errorf("webhook.installation_ids must contain at least one installation ID")
+	}
+	seen := map[int64]bool{}
+	for _, id := range w.InstallationIDs {
+		if id <= 0 || seen[id] {
+			return fmt.Errorf("webhook.installation_ids must contain unique positive IDs")
+		}
+		seen[id] = true
+	}
+	if w.SafetySweepInterval.Duration <= 0 || w.SafetySweepJitter < 0 || w.SafetySweepJitter > 1 {
+		return fmt.Errorf("webhook safety sweep requires a positive interval and jitter between 0%% and 100%%")
+	}
+	if w.MaxBodyBytes < 1024 || w.MaxBodyBytes > 25*1024*1024 || w.ReadTimeout.Duration <= 0 || w.ReadHeaderTimeout.Duration <= 0 || w.IdleTimeout.Duration <= 0 || w.MaxConcurrent < 1 || w.MaxConcurrent > 1024 {
+		return fmt.Errorf("webhook HTTP limits are invalid")
+	}
+	return nil
+}
+
+func (s SecretSource) Validate(repoPath, field string) error {
+	if (s.Env == "") == (s.File == "") {
+		return fmt.Errorf("%s must set exactly one of env or file", field)
+	}
+	if s.Env != "" && !environmentName.MatchString(s.Env) {
+		return fmt.Errorf("%s.env is not a valid environment variable name", field)
+	}
+	if s.File != "" {
+		if !filepath.IsAbs(s.File) {
+			return fmt.Errorf("%s.file must be absolute", field)
+		}
+		if repoPath != "" && (s.File == repoPath || strings.HasPrefix(s.File, repoPath+string(filepath.Separator))) {
+			return fmt.Errorf("%s.file must be outside the repository", field)
 		}
 	}
 	return nil

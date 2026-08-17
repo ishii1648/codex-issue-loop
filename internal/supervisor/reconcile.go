@@ -60,7 +60,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 	}
 	numbers := make([]int, 0, len(snapshot.Issues))
 	for _, item := range snapshot.Issues {
-		if item.Status == "completed" && item.GitHubSync == "" && (item.PullRequestURL == "" || item.PullRequestMerged) {
+		if !startupRemoteInspectionRequired(item, l.now()) {
 			continue
 		}
 		numbers = append(numbers, item.Number)
@@ -71,7 +71,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 		if current == nil {
 			continue
 		}
-		remote, err := l.GitHub.Inspect(ctx, l.Config, number, current.Branch)
+		remote, err := l.inspectIssue(ctx, *current)
 		if err != nil {
 			return fmt.Errorf("reconcile GitHub state for Issue #%d: %w", number, err)
 		}
@@ -116,6 +116,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			item.LastError = decision.lastError
 			item.Branch = decision.branch
 			item.PullRequestURL = decision.pullRequest
+			item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
 			item.PullRequestMerged = decision.prMerged
 			item.GitHubSync = decision.githubSync
 			item.RetryAfter = decision.retryAt
@@ -129,6 +130,23 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 		}
 	}
 	return nil
+}
+
+func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
+	if item == nil {
+		return false
+	}
+	if item.GitHubSync != "" {
+		return true
+	}
+	switch item.Status {
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		return true
+	case "retry_wait":
+		return item.RetryAfter == nil || !item.RetryAfter.After(now)
+	default:
+		return false
+	}
 }
 
 func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) reconciliationDecision {

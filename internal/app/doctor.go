@@ -299,6 +299,7 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	diagnostics = append(diagnostics, passedDiagnostic("CONFIG_VALID", "repository", entry.RepoID, ".agent-loop.yamlを読み込めます", cfg.GitHub.Repo))
 	diagnostics = append(diagnostics, diagnoseWorkerBackend(ctx, entry, cfg)...)
 	diagnostics = append(diagnostics, diagnoseFormatters(ctx, entry, cfg)...)
+	diagnostics = append(diagnostics, diagnoseWebhook(l, entry, cfg)...)
 
 	if len(entry.Commands) > 0 {
 		missing := []string{}
@@ -357,6 +358,57 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	}
 
 	diagnostics = append(diagnostics, diagnoseDurableState(l, entry, cfg)...)
+	return diagnostics
+}
+
+func diagnoseWebhook(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
+	if !cfg.Webhook.Enabled() {
+		return []diagnostic{passedDiagnostic("WEBHOOK_MODE_POLLING", "repository", entry.RepoID, "Webhook modeは無効で明示的polling fallbackを使用します", "mode=polling")}
+	}
+	diagnostics := []diagnostic{passedDiagnostic("WEBHOOK_LOOPBACK_BIND", "repository", entry.RepoID, "Webhook listenerはloopback限定です", cfg.Webhook.ListenerAddress)}
+	if _, err := os.Stat(l.BrokerPlistPath()); err != nil {
+		diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_NOT_REGISTERED", "repository", entry.RepoID, "共有Webhook broker LaunchAgentがありません", err.Error(), command("broker登録を再生成します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath))))
+	} else {
+		diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_BROKER_REGISTERED", "repository", entry.RepoID, "共有Webhook broker LaunchAgentが登録されています", l.BrokerPlistPath()))
+	}
+	source := cfg.Webhook.SecretSource
+	switch {
+	case source.Env != "":
+		if os.Getenv(source.Env) == "" {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_SECRET_UNAVAILABLE", "repository", entry.RepoID, "Webhook secret sourceを読み取れません", "configured environment variable is unavailable; value was not logged", instruction("LaunchAgentから利用できる権限制限credential fileへ移行するか、broker環境へsecretを設定してください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_SECRET_AVAILABLE", "repository", entry.RepoID, "Webhook secret sourceを利用できます", "environment source; value not inspected or logged"))
+		}
+	case source.File != "":
+		info, err := os.Lstat(source.File)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_SECRET_FILE_UNSAFE", "repository", entry.RepoID, "Webhook secret fileが安全に読み取れません", fmt.Sprintf("path=%s error=%v", source.File, err), instruction("repository外のregular fileをowner-only permission (0600)で作成してください")))
+		} else if value, readErr := os.ReadFile(source.File); readErr != nil || strings.TrimSpace(string(value)) == "" {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_SECRET_FILE_EMPTY", "repository", entry.RepoID, "Webhook secret fileを読み取れません", "credential file is empty or unreadable; value was not logged", instruction("owner-only credential fileへ空でないsecretを配置してください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_SECRET_FILE_SAFE", "repository", entry.RepoID, "Webhook secret fileはowner-onlyです", source.File))
+		}
+	}
+	if cfg.Webhook.PublicURLIdentifier == "" {
+		diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_REVERSE_PROXY_UNIDENTIFIED", "repository", entry.RepoID, "reverse proxy到達先識別子がありません", "", instruction("public_url_identifierを設定してください")))
+	} else {
+		diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_REVERSE_PROXY_CONFIGURED", "repository", entry.RepoID, "reverse proxyの公開URL識別子が設定されています", cfg.Webhook.PublicURLIdentifier))
+	}
+	if registered, err := (registry.Store{Path: l.RegistryPath}).Load(); err == nil {
+		for _, other := range registered.Repos {
+			if other.RepoID == entry.RepoID {
+				continue
+			}
+			otherConfig, loadErr := config.Load(other.RepoPath)
+			if loadErr != nil || !otherConfig.Webhook.Enabled() {
+				continue
+			}
+			if otherConfig.Webhook.ListenerAddress != cfg.Webhook.ListenerAddress || otherConfig.Webhook.MaxBodyBytes != cfg.Webhook.MaxBodyBytes || otherConfig.Webhook.MaxConcurrent != cfg.Webhook.MaxConcurrent || otherConfig.Webhook.ReadTimeout != cfg.Webhook.ReadTimeout || otherConfig.Webhook.ReadHeaderTimeout != cfg.Webhook.ReadHeaderTimeout || otherConfig.Webhook.IdleTimeout != cfg.Webhook.IdleTimeout {
+				diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_CONFIG_MISMATCH", "repository", entry.RepoID, "共有broker設定が他repositoryと一致しません", "listener address or HTTP limits differ", instruction("同じmanaged rootのWebhook repositoryでlistenerとHTTP上限を一致させてください")))
+				break
+			}
+		}
+	}
 	return diagnostics
 }
 
