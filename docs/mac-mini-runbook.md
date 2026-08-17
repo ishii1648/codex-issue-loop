@@ -249,6 +249,14 @@ agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --conf
 
 この操作は同じbranch/PRだけを`awaiting_checks`へ戻し、worker retry budgetをresetしない。checksがfailure、head未変更、dirty/unpushed worktree、active worker、pending request、manual/security exclusion、別branch/PR、closed-without-mergeでは拒否する。GitHub同期途中で停止した場合はstateやlabelを編集せず、supervisor再起動または同じコマンドで冪等に収束させる。leaseはmerge確認まで保持される。
 
+terminal state後にoperatorが保存branchからPRを作成・merge済みで、durable stateの`pull_request_url`が空のままretained leaseがqueueを止めている場合は、statusとGitHubのPRを確認して次を使う。
+
+```sh
+agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
+```
+
+この操作は保存run/worktree/branch、lease owner generationとbase SHA、clean/fully pushedなlocal/remote head、supervisor-owned terminal marker、同一repo・configured baseの一意なmerged PRとmerge commit SHAを検証する。成功するとPR auditをdurable stateへ保存し、同じtransactionでcompleted化とlease解放を行う。worker attempt、continuation、session、回答は保持される。0件/複数PR、openまたはunmerged、別repo/branch/base/head、dirty/unpushed、active worker、pending request、manual/security exclusionでは拒否する。CLIはcommit、push、PR、mergeを作成しない。GitHub同期途中で止まった場合もstate/labelを編集せず、同じコマンドで収束させる。
+
 実例では、target repositoryがCIでDeno 2.7.14を固定していた一方、worker環境のDeno 2.9.5で3 fileをformatしたため正準形が異なりchecks retryを使い切った。同じbranchへCI固定版Deno 2.7.14のformatter結果をcommit・pushしてgreenを確認し、この限定復旧を使う。再発防止にはworker verificationもrepositoryのpinned toolchainから起動し、host側の新しいformatterを直接使わない。
 
 v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。

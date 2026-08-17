@@ -342,6 +342,7 @@ agent-loop <command> [options]
 | `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
 | `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
 | `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
+| `adopt-merged-pr` | terminal state後に外部mergeされた保存branchの単一PRを明示確認付きで完了へ採用する |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -458,7 +459,19 @@ operatorが同じPR branchへ外部commitをpushした後、run、managed worktr
 
 同期後は同じbranch/PRの`awaiting_checks`へ戻し、通常のDraft解除、auto merge、done/close、merge確認後のlease releaseを再利用する。worker attempts、continuations、run historyをresetせず、新branch、PR、push、worker実行を作らない。GitHub同期途中の停止・再起動は保存intentをauthoritative Issue/PR/head/checksと再照合してから同じmarkerへ収束する。closed-without-merge、head/branch/PR不一致、dirty/unpushed worktree、active worker、pending request、manual/security exclusionはstateとlabelを変更せずfail closedとする。
 
-### 6.9 終了コード
+### 6.9 adopt-merged-pr
+
+```sh
+agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
+```
+
+保存済みPR URLが空のterminal `blocked`または`failed`で、operatorが保存branchから作成したPRをすでにmergeした場合だけを対象にする。run ID、managed worktree、local/remote branchとhead、clean/fully pushed状態、retained leaseのowner generation・resource・base SHA、baseからheadへの履歴、active PID/PGID不在、pending request不在を検証する。GitHubではsupervisor-owned terminal markerと対応label、target repo、head repository、保存branch、configured base、head SHA、merged state、merge commit SHAを検証し、PRが0件または複数なら拒否する。
+
+検証後はadoption ID、generation、confirmation/adoption時刻、PR URL/number、head SHA、merge SHA、base branch、GitHub同期intentをdurable event/stateへ保存する同じtransactionで`completed`へ遷移し、fenced leaseを解放する。attempt、continuation、session、Goal、回答、worktree、branch、worker historyは変更しない。GitHub同期途中で停止した場合は同じコマンドを再実行し、authoritative PRを再検証して同じadoptionへ冪等に収束する。
+
+open/closed-unmerged PR、別repo/branch/base/head、dirty/unpushed worktree、active worker、pending request、running/completed state、missing/inconsistent lease、manual/security exclusion、supervisor markerのないterminal stateは変更せずfail closedとする。コマンドはbranch、commit、push、PR、mergeを新規作成せず、state fileやlabelの手編集を代替手順にしない。
+
+### 6.10 終了コード
 
 | code | 意味 |
 | --- | --- |
