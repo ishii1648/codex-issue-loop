@@ -40,7 +40,7 @@ make test-race
 | localhost-only configの閉じたallowlistと不整合拒否 | `TestLoadLocalhostOnlyCommandNetworkIsClosedAndOptIn` |
 | Codex proxy/tool隔離argvとcapability検出 | `TestCodexLocalhostNetworkArgumentsAreFailClosed`、`TestCodexProbeDetectsLocalhostNetworkProxyCapability` |
 | worker環境blockedのsession/resource保持と同一worktree resume | `TestWorkerEnvironmentBlockPreservesContinuationAndResourceState`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
-| operator resumeの冪等性・dirty保持・手動block拒否 | `TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
+| operator resumeの冪等性・dirty保持・手動block拒否・lost lease回復 | `TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
 
 ## 追加の部分障害と境界
 
@@ -48,6 +48,7 @@ make test-race
 |---|---|
 | supervisor kill後の永続状態再利用 | `TestFaultSupervisorRestartResumesWithDurableAnswers` |
 | GitHub label/comment同期の途中停止 | `TestFaultPartialLabelCommentSyncCanBeRetried`、`TestFaultGitHubSyncPartialFailureIsRetried` |
+| environment resume保存とstartup/periodic reconciliationの競合 | `TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume`、`TestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume` |
 | push後に未記録のPR | `TestFaultStartupReconciliationPersistsDiscoveredPullRequest` |
 | registry add/resolve/remove | `TestFaultRegistryAddResolveRemoveAndAmbiguity` |
 | atomic fileとmarshal失敗 | `TestFaultAtomicWriteReplacesContentAndPreservesMode`、`TestFaultJSONMarshalFailureDoesNotCreateDestination` |

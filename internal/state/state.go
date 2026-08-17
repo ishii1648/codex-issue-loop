@@ -158,6 +158,7 @@ type EnvironmentResume struct {
 	Status         string    `json:"status"`
 	ConfirmedAt    time.Time `json:"confirmed_at"`
 	PreviousReason string    `json:"previous_reason"`
+	BaseSHA        string    `json:"base_sha,omitempty"`
 }
 
 type Issue struct {

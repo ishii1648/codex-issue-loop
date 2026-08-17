@@ -2,7 +2,9 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +17,8 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
+
+var errReconciliationStateChanged = errors.New("durable Issue state changed during reconciliation")
 
 type osProcessInspector struct{}
 
@@ -69,66 +73,76 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 	}
 	sort.Ints(numbers)
 	for _, number := range numbers {
-		current := snapshot.Issues[strconv.Itoa(number)]
-		if current == nil {
-			continue
-		}
-		remote, err := l.inspectIssue(ctx, *current)
-		if err != nil {
-			return fmt.Errorf("reconcile GitHub state for Issue #%d: %w", number, err)
-		}
-		inspection := worktree.Inspection{}
-		if current.Worktree != "" {
-			inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+		for {
+			latest, err := l.Store.Load()
 			if err != nil {
-				return fmt.Errorf("reconcile worktree for Issue #%d: %w", number, err)
+				return err
 			}
-		}
-		decision := l.decideReconciliation(snapshot, *current, remote, inspection)
-		if decision.workerPID == 0 {
-			decision.workerPGID = 0
-		}
-		if decision.markRunning {
-			if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
-				return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
+			current := latest.Issues[strconv.Itoa(number)]
+			if current == nil || !startupRemoteInspectionRequired(current, l.now()) {
+				break
 			}
-		}
-		_, err = l.Store.Update("startup_reconciled", number, current.RunID, map[string]any{
-			"previous_status": current.Status,
-			"status":          decision.status,
-			"reason":          decision.reason,
-			"worktree":        inspection,
-			"pull_requests":   remote.PullRequests,
-		}, func(s *state.Snapshot) error {
-			item := s.Issues[strconv.Itoa(number)]
-			if item == nil {
-				return fmt.Errorf("Issue #%d disappeared during startup reconciliation", number)
+			remote, err := l.inspectIssue(ctx, *current)
+			if err != nil {
+				return fmt.Errorf("reconcile GitHub state for Issue #%d: %w", number, err)
 			}
-			if decision.status == "completed" && item.Lease != nil {
-				if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
-					return err
+			inspection := worktree.Inspection{}
+			if current.Worktree != "" {
+				inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+				if err != nil {
+					return fmt.Errorf("reconcile worktree for Issue #%d: %w", number, err)
 				}
 			}
-			if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
-				if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
-					return err
+			decision := l.decideReconciliation(latest, *current, remote, inspection)
+			if decision.workerPID == 0 {
+				decision.workerPGID = 0
+			}
+			if decision.markRunning {
+				if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
+					return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
 				}
 			}
-			item.Status = decision.status
-			item.LastError = decision.lastError
-			item.Branch = decision.branch
-			item.PullRequestURL = decision.pullRequest
-			item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
-			item.PullRequestMerged = decision.prMerged
-			item.GitHubSync = decision.githubSync
-			item.RetryAfter = decision.retryAt
-			item.WorkerPID = decision.workerPID
-			item.WorkerPGID = decision.workerPGID
-			item.UpdatedAt = l.now()
-			return nil
-		})
-		if err != nil {
-			return err
+			_, err = l.Store.Update("startup_reconciled", number, current.RunID, map[string]any{
+				"previous_status": current.Status,
+				"status":          decision.status,
+				"reason":          decision.reason,
+				"worktree":        inspection,
+				"pull_requests":   remote.PullRequests,
+			}, func(s *state.Snapshot) error {
+				item := s.Issues[strconv.Itoa(number)]
+				if !reflect.DeepEqual(item, current) {
+					return errReconciliationStateChanged
+				}
+				if decision.status == "completed" && item.Lease != nil {
+					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
+						return err
+					}
+				}
+				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
+						return err
+					}
+				}
+				item.Status = decision.status
+				item.LastError = decision.lastError
+				item.Branch = decision.branch
+				item.PullRequestURL = decision.pullRequest
+				item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
+				item.PullRequestMerged = decision.prMerged
+				item.GitHubSync = decision.githubSync
+				item.RetryAfter = decision.retryAt
+				item.WorkerPID = decision.workerPID
+				item.WorkerPGID = decision.workerPGID
+				item.UpdatedAt = l.now()
+				return nil
+			})
+			if errors.Is(err, errReconciliationStateChanged) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			break
 		}
 	}
 	return nil
@@ -208,8 +222,8 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		"reason":      decision.reason,
 	}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil {
-			return fmt.Errorf("Issue #%d disappeared during webhook reconciliation", current.Number)
+		if !reflect.DeepEqual(item, &current) {
+			return errReconciliationStateChanged
 		}
 		if decision.status == "completed" && item.Lease != nil {
 			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
@@ -234,6 +248,9 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		item.UpdatedAt = l.now()
 		return nil
 	})
+	if errors.Is(err, errReconciliationStateChanged) {
+		return false, nil
+	}
 	return err == nil, err
 }
 
