@@ -453,11 +453,21 @@ func (s Store) AcquireSupervisorLock() (*os.File, error) {
 }
 
 func (s Store) ensureDir() error {
+	const managedModeMask = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(s.Dir, 0o700); err != nil {
+	info, err := os.Lstat(s.Dir)
+	if err != nil {
 		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("managed state directory is not a directory: %s", s.Dir)
+	}
+	if info.Mode()&managedModeMask != 0o700 {
+		if err := os.Chmod(s.Dir, 0o700); err != nil {
+			return err
+		}
 	}
 	for _, path := range []string{s.StatePath(), s.EventsPath(), s.TransactionPath(), s.lockPath(), filepath.Join(s.Dir, "supervisor.lock")} {
 		info, err := os.Lstat(path)
@@ -469,6 +479,9 @@ func (s Store) ensureDir() error {
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("managed state path is not a regular file: %s", path)
+		}
+		if info.Mode()&managedModeMask == 0o600 {
+			continue
 		}
 		if err := os.Chmod(path, 0o600); err != nil {
 			return err
