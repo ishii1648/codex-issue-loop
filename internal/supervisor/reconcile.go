@@ -177,7 +177,7 @@ func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 		return true
 	}
 	switch item.Status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 		return true
 	case "retry_wait":
 		return item.RetryAfter == nil || !item.RetryAfter.After(now)
@@ -299,7 +299,7 @@ func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg confi
 	}
 	if labels[cfg.RunningLabel] {
 		switch current.Status {
-		case "claiming", "claimed", "running", "retry_wait", "resume_pending", "environment_resume_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		case "claiming", "claimed", "running", "retry_wait", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 			return true
 		}
 	}
@@ -387,6 +387,10 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		}
 	}
 	if failed {
+		if current.GitHubSync == "pull_request_checks_recovery" && current.Status == "pull_request_checks_recovery_pending" {
+			decision.reason = "explicit Pull Request checks recovery is waiting for GitHub label synchronization"
+			return decision
+		}
 		if current.GitHubSync == "publication_recovery" && current.Status == "publication_recovery_pending" {
 			decision.reason = "explicit publication recovery is waiting for GitHub label synchronization"
 			return decision
@@ -537,6 +541,11 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		decision.reason = "operator-confirmed publication recovery remains pending in the saved worktree"
 		if !running {
 			decision.githubSync = "publication_recovery"
+		}
+	case "pull_request_checks_recovery_pending":
+		decision.reason = "operator-confirmed Pull Request checks recovery remains pending in the saved worktree"
+		if !running {
+			decision.githubSync = "pull_request_checks_recovery"
 		}
 	case "needs_input":
 		decision.reason = "unanswered request remains sticky"

@@ -99,6 +99,13 @@ func (c *rateLimitedGitHub) MarkConflictRetry(ctx context.Context, cfg config.Co
 	return c.delegate.MarkConflictRetry(ctx, cfg, number, recoveryID)
 }
 
+func (c *rateLimitedGitHub) MarkPullRequestChecksRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
+	if err := c.before(); err != nil {
+		return err
+	}
+	return c.delegate.MarkPullRequestChecksRecovery(ctx, cfg, number, recoveryID)
+}
+
 func (c *rateLimitedGitHub) ReadyPullRequest(ctx context.Context, cfg config.Config, url string) error {
 	if err := c.before(); err != nil {
 		return err

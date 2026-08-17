@@ -241,6 +241,16 @@ agent-loop recover-publication --repo /absolute/path/to/repository --issue 123 -
 
 これは汎用failed retryではない。worker実装失敗、security/manual exclusion、closed-without-merge、PR conflict、open/closed PR不整合、unknown provenance、保存resultやworktreeの変更は拒否する。新branchへの移植、state/labelの手編集、retry budgetのreset、force pushで回避してはならない。
 
+保存済みPRのchecks retry exhaustionで`failed`となり、同じPR branchをoperatorが外部修正した場合は、`status --json`で`pull_request_checks_failure.code=checks_retry_exhausted`、失敗時head SHA、open PR、retained lease、`recoverable_checks_failure`を確認する。worktreeをcleanかつfully pushedにし、新headのrequired checksがpendingまたはgreenであることを確認してから次を実行する。
+
+```sh
+agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
+```
+
+この操作は同じbranch/PRだけを`awaiting_checks`へ戻し、worker retry budgetをresetしない。checksがfailure、head未変更、dirty/unpushed worktree、active worker、pending request、manual/security exclusion、別branch/PR、closed-without-mergeでは拒否する。GitHub同期途中で停止した場合はstateやlabelを編集せず、supervisor再起動または同じコマンドで冪等に収束させる。leaseはmerge確認まで保持される。
+
+実例では、target repositoryがCIでDeno 2.7.14を固定していた一方、worker環境のDeno 2.9.5で3 fileをformatしたため正準形が異なりchecks retryを使い切った。同じbranchへCI固定版Deno 2.7.14のformatter結果をcommit・pushしてgreenを確認し、この限定復旧を使う。再発防止にはworker verificationもrepositoryのpinned toolchainから起動し、host側の新しいformatterを直接使わない。
+
 v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。
 
 ### Git transportまたはcommit署名で停止する

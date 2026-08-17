@@ -131,6 +131,14 @@ worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missin
 
 このコマンドは汎用failed retryではありません。manual exclusion、worker failure、security block、PR conflict、closed Issue、unknown failure provenance、missing/changed resultやworktreeをfail closedで拒否します。
 
+保存済みPRのrequired checks失敗でretry budgetを使い切ったIssueは、同じbranchへ外部修正をpushした後だけ、明示操作で既存PR lifecycleへ戻せます。旧headと異なるclean・fully pushedなhead、open Issue/PR、typed failure provenance、retained leaseを検証し、worker retry budgetはresetしません。
+
+```sh
+"$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --confirm-external-fix --json
+```
+
+checksがpendingまたはgreenなら`awaiting_checks`から通常のDraft解除・auto mergeへ収束し、failureならterminal `failed`を維持します。manual/security exclusion、active worker、pending request、dirty/unpushed worktree、別branch/PR/head、closed-without-mergeでは拒否します。
+
 local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_network` localhost-only policyへopt-inできます。既定はnetwork無効です。設定と残余リスクは[localhost-only command network](docs/localhost-network.md)を参照してください。
 
 ### 4. 複数リポジトリを並列実行する

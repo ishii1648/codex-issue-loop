@@ -95,6 +95,26 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 			status: "completed", githubSync: "done", reason: "done label",
 		},
 		{
+			name: "checks recovery before label sync survives restart", current: func() state.Issue {
+				value := base
+				value.Status = "pull_request_checks_recovery_pending"
+				value.GitHubSync = "pull_request_checks_recovery"
+				return value
+			}(),
+			remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.FailedLabel}}}, inspection: valid,
+			status: "pull_request_checks_recovery_pending", githubSync: "pull_request_checks_recovery", reason: "waiting for GitHub label synchronization",
+		},
+		{
+			name: "checks recovery after label sync survives restart", current: func() state.Issue {
+				value := base
+				value.Status = "pull_request_checks_recovery_pending"
+				value.GitHubSync = "pull_request_checks_recovery"
+				return value
+			}(),
+			remote: gh.RemoteState{Issue: runningIssue}, inspection: valid,
+			status: "pull_request_checks_recovery_pending", githubSync: "pull_request_checks_recovery", reason: "remains pending",
+		},
+		{
 			name: "legacy completed draft returns to check monitoring", current: func() state.Issue {
 				value := base
 				value.Status = "completed"
