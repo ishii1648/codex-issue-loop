@@ -40,6 +40,8 @@ type PullRequest struct {
 	MergeStateStatus string
 	ChecksStatus     string
 	HeadSHA          string
+	MergeSHA         string
+	HeadRepository   string
 }
 
 type checkRollup struct {
@@ -205,19 +207,29 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	// Reconciliation only distinguishes zero, one, or multiple Pull Requests.
 	// Fetching two is sufficient to detect the unsafe multiple-PR case and
 	// avoids requesting 100 expensive statusCheckRollup nodes every poll.
-	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "number,url,state,isDraft,mergedAt,headRefName,baseRefName,headRefOid,mergeStateStatus,statusCheckRollup").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "number,url,state,isDraft,mergedAt,headRefName,baseRefName,headRefOid,mergeCommit,headRepository,headRepositoryOwner,mergeStateStatus,statusCheckRollup").CombinedOutput()
 	if err != nil {
 		return RemoteState{}, c.commandError(ctx, path, fmt.Sprintf("inspect Pull Requests for branch %s", branch), err, out)
 	}
 	var raw []struct {
-		Number            int           `json:"number"`
-		URL               string        `json:"url"`
-		State             string        `json:"state"`
-		IsDraft           bool          `json:"isDraft"`
-		MergedAt          *time.Time    `json:"mergedAt"`
-		HeadRefName       string        `json:"headRefName"`
-		BaseRefName       string        `json:"baseRefName"`
-		HeadRefOID        string        `json:"headRefOid"`
+		Number      int        `json:"number"`
+		URL         string     `json:"url"`
+		State       string     `json:"state"`
+		IsDraft     bool       `json:"isDraft"`
+		MergedAt    *time.Time `json:"mergedAt"`
+		HeadRefName string     `json:"headRefName"`
+		BaseRefName string     `json:"baseRefName"`
+		HeadRefOID  string     `json:"headRefOid"`
+		MergeCommit *struct {
+			OID string `json:"oid"`
+		} `json:"mergeCommit"`
+		HeadRepository *struct {
+			NameWithOwner string `json:"nameWithOwner"`
+			Name          string `json:"name"`
+		} `json:"headRepository"`
+		HeadRepositoryOwner *struct {
+			Login string `json:"login"`
+		} `json:"headRepositoryOwner"`
 		MergeStateStatus  string        `json:"mergeStateStatus"`
 		StatusCheckRollup []checkRollup `json:"statusCheckRollup"`
 	}
@@ -225,11 +237,23 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		return RemoteState{}, fmt.Errorf("decode Pull Requests for branch %s: %w", branch, err)
 	}
 	for _, item := range raw {
+		mergeSHA, headRepository := "", ""
+		if item.MergeCommit != nil {
+			mergeSHA = item.MergeCommit.OID
+		}
+		if item.HeadRepository != nil {
+			headRepository = item.HeadRepository.NameWithOwner
+			if headRepository == "" && item.HeadRepositoryOwner != nil && item.HeadRepositoryOwner.Login != "" && item.HeadRepository.Name != "" {
+				headRepository = item.HeadRepositoryOwner.Login + "/" + item.HeadRepository.Name
+			}
+		}
 		state.PullRequests = append(state.PullRequests, PullRequest{
 			Number: item.Number, URL: item.URL, State: item.State, IsDraft: item.IsDraft,
 			MergedAt: item.MergedAt, HeadRefName: item.HeadRefName,
 			BaseRefName:      item.BaseRefName,
 			HeadSHA:          item.HeadRefOID,
+			MergeSHA:         mergeSHA,
+			HeadRepository:   headRepository,
 			MergeStateStatus: item.MergeStateStatus,
 			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
 		})
