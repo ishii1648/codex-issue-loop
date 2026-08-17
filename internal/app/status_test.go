@@ -11,6 +11,10 @@ import (
 func TestStatusSummarizesMultipleWorkersResourcesAndRequests(t *testing.T) {
 	now := time.Now().UTC()
 	snapshot := state.Snapshot{
+		Supervisor: state.Supervisor{RateLimit: &state.RateLimit{
+			Resource: "graphql", ObservedResetAt: now.Add(time.Hour),
+			CooldownSource: "rest-rate-limit", SuppressedRetryCount: 17,
+		}},
 		Issues: map[string]*state.Issue{
 			"9": {
 				Number: 9, RunID: "run_9", Status: "running", WorkerPID: 109, WorkerPGID: 109,
@@ -37,5 +41,8 @@ func TestStatusSummarizesMultipleWorkersResourcesAndRequests(t *testing.T) {
 	}
 	if len(result.PendingRequests) != 2 || result.PendingRequests[0].ID != "req_a" || result.PendingRequests[1].ID != "req_b" {
 		t.Fatalf("requests=%+v", result.PendingRequests)
+	}
+	if result.State.Supervisor.RateLimit == nil || result.State.Supervisor.RateLimit.Resource != "graphql" || result.State.Supervisor.RateLimit.SuppressedRetryCount != 17 {
+		t.Fatalf("rate_limit=%+v", result.State.Supervisor.RateLimit)
 	}
 }

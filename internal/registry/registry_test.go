@@ -66,7 +66,7 @@ func TestFaultRegistryAddResolveRemoveAndAmbiguity(t *testing.T) {
 func TestRegistryRejectsSymbolicLink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target.json")
-	if err := os.WriteFile(target, []byte(`{"version":3,"repos":{}}`), 0o600); err != nil {
+	if err := os.WriteFile(target, []byte(`{"version":4,"repos":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "registry.json")
@@ -109,12 +109,51 @@ func TestRegistryResolvesSelectedBackendCommand(t *testing.T) {
 	}
 }
 
+func TestRegistryRegistersGofmtOnlyWhenEnabled(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "gh", "codex", "launchctl", "gofmt"} {
+		body := "#!/bin/sh\nexit 0\n"
+		if name == "gofmt" {
+			body = "#!/bin/sh\nprintf 'package probe\\n\\nfunc f() {}\\n'\n"
+		}
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testRegistryConfig(t, repo, "owner/repo")
+	store := Store{Path: filepath.Join(root, "registry.json")}
+	disabled, err := store.Add(cfg)
+	if err != nil || disabled.Commands["gofmt"] != "" {
+		t.Fatalf("disabled formatter registration=%+v err=%v", disabled.Commands, err)
+	}
+	cfg.Formatters.Go.Enabled = true
+	enabled, err := store.Add(cfg)
+	if err != nil || enabled.Commands["gofmt"] != filepath.Join(binDir, "gofmt") {
+		t.Fatalf("enabled formatter registration=%+v err=%v", enabled.Commands, err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "gofmt"), []byte("#!/bin/sh\nprintf 'wrong\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Add(cfg); err == nil || !strings.Contains(err.Error(), "gofmt capability") {
+		t.Fatalf("invalid gofmt capability registered: %v", err)
+	}
+}
+
 func TestRegistryRejectsLegacyAndFutureSchemaWithActionableErrors(t *testing.T) {
 	for _, test := range []struct {
 		version int
 		want    string
 	}{
-		{version: 2, want: "migration required"},
+		{version: 3, want: "migration required"},
 		{version: CurrentVersion + 1, want: "unsupported registry version"},
 	} {
 		path := filepath.Join(t.TempDir(), "registry.json")

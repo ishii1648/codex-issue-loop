@@ -3,7 +3,9 @@ package compat
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -59,21 +61,56 @@ func ProbeCodex(ctx context.Context, path string) Report {
 
 	execHelp, execErr := exec.CommandContext(ctx, path, "exec", "--help").CombinedOutput()
 	resumeHelp, resumeErr := exec.CommandContext(ctx, path, "exec", "resume", "--help").CombinedOutput()
+	features, featuresErr := exec.CommandContext(ctx, path, "features", "list").CombinedOutput()
 	base := execErr == nil && containsAll(string(execHelp), "--json", "--output-schema", "--output-last-message", "--sandbox", "--cd")
 	resume := resumeErr == nil && containsAll(string(resumeHelp), "--json", "--output-schema", "--output-last-message")
 	report.Capabilities["exec_structured"] = base
 	report.Capabilities["session_resume"] = resume
 	report.Capabilities["session_event_thread_id"] = true // Accepted by the tolerant JSONL parser.
+	report.Capabilities["app_server_goal"] = probeCodexAppServerGoal(ctx, path)
+	report.Capabilities["localhost_network_proxy"] = execErr == nil && featuresErr == nil &&
+		containsAll(string(execHelp), "--ignore-user-config", "--strict-config", "--disable") &&
+		containsAll(string(features), "network_proxy", "apps", "browser_use", "computer_use", "plugins", "remote_plugin", "skill_search", "tool_suggest")
 	if !base {
 		report.Missing = append(report.Missing, "exec_structured")
 	}
 	if !report.VersionOK {
 		report.Missing = append(report.Missing, "minimum_version")
 	}
-	if execErr != nil || resumeErr != nil {
-		report.Detail = safeDetail(append(execHelp, resumeHelp...), firstError(execErr, resumeErr))
+	if execErr != nil || resumeErr != nil || featuresErr != nil {
+		report.Detail = safeDetail(append(append(execHelp, resumeHelp...), features...), firstError(execErr, resumeErr, featuresErr))
 	}
 	return report
+}
+
+func probeCodexAppServerGoal(ctx context.Context, path string) bool {
+	help, err := exec.CommandContext(ctx, path, "app-server", "generate-json-schema", "--help").CombinedOutput()
+	if err != nil || !containsAll(string(help), "--out", "--experimental") {
+		return false
+	}
+	dir, err := os.MkdirTemp("", "agent-loop-codex-app-server-schema-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+	if _, err := exec.CommandContext(ctx, path, "app-server", "generate-json-schema", "--experimental", "--out", dir).CombinedOutput(); err != nil {
+		return false
+	}
+	client, err := os.ReadFile(filepath.Join(dir, "ClientRequest.json"))
+	if err != nil {
+		return false
+	}
+	serverRequests, err := os.ReadFile(filepath.Join(dir, "ServerRequest.json"))
+	if err != nil {
+		return false
+	}
+	notifications, err := os.ReadFile(filepath.Join(dir, "ServerNotification.json"))
+	if err != nil {
+		return false
+	}
+	return containsAll(string(client), "thread/start", "thread/resume", "thread/goal/set", "thread/goal/get", "thread/goal/clear", "turn/start", "turn/steer") &&
+		containsAll(string(serverRequests), "item/tool/requestUserInput", "item/commandExecution/requestApproval", "item/fileChange/requestApproval") &&
+		containsAll(string(notifications), "thread/tokenUsage/updated", "turn/completed")
 }
 
 func ProbeClaudeCode(ctx context.Context, path string) Report {
@@ -179,6 +216,25 @@ func ProbeGH(ctx context.Context, path string) Report {
 		report.Detail = safeDetail(append(append(listHelp, editHelp...), commentHelp...), firstError(listErr, editErr, commentErr))
 	}
 	return report
+}
+
+// ProbeGofmt verifies the fixed stdin formatting contract without reading or
+// writing repository files. It deliberately accepts no repository-provided
+// arguments or source.
+func ProbeGofmt(ctx context.Context, path string) error {
+	if path == "" {
+		return fmt.Errorf("gofmt path is missing")
+	}
+	command := exec.CommandContext(ctx, path)
+	command.Stdin = strings.NewReader("package probe\nfunc f( ){}\n")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gofmt capability probe: %s", safeDetail(output, err))
+	}
+	if string(output) != "package probe\n\nfunc f() {}\n" {
+		return fmt.Errorf("gofmt capability probe returned unexpected output")
+	}
+	return nil
 }
 
 var versionPattern = regexp.MustCompile(`\b([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][0-9A-Za-z.-]+)?\b`)

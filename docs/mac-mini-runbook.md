@@ -62,7 +62,7 @@ codex login
 
 ### 2.3 対象repositoryの設定とラベル
 
-対象repositoryのrootに`.agent-loop.yaml`を置き、[設定例](../.agent-loop.example.yaml)をもとにrepository名、ラベル、base branch、sandbox、timeoutを確認する。GitHub Issue本文や設定へtokenを保存しない。
+対象repositoryのrootに`.agent-loop.yaml`を置き、[設定例](../.agent-loop.example.yaml)をもとにrepository名、ラベル、base branch、sandbox、timeoutを確認する。Go publisher整形を使うrepositoryでは`formatters.go.enabled: true`を明示し、`gofmt`を利用できるPATHでregisterする。任意formatter commandや追加引数は指定できない。GitHub Issue本文や設定へtokenを保存しない。
 
 まず不足ラベルのplanだけを表示し、内容を確認してから適用する。
 
@@ -100,6 +100,8 @@ agent-loop status --repo /absolute/path/to/repository --json
 ```
 
 `doctor`はread-onlyである。`schema_version: 1`、`ok: true`、LaunchAgentのloaded状態、supervisorの状態を確認する。失敗codeに応じた復旧は[doctor診断・復旧runbook](doctor.md)に従い、表示されたremediationを無条件に自動実行しない。
+
+formatterを有効にした場合は`FORMATTER_GO_AVAILABLE`も確認する。`FORMATTER_GO_NOT_REGISTERED`、`FORMATTER_GO_UNAVAILABLE`、`FORMATTER_GO_CAPABILITY_MISSING`ではloopを開始せず、Go toolchainと非対話LaunchAgentのPATHを直してregister、doctorを繰り返す。registerとdoctorは固定sourceをstdinへ渡すread-only probeで実際の整形capabilityも確認する。
 
 ### 2.6 Codex Remoteを接続する
 
@@ -151,7 +153,7 @@ Codex taskが終了または切断してもループ本体は継続する。同�
 agent-loop watch --repo /absolute/path/to/repository --until-attention --json
 ```
 
-監視task未接続時もスマートフォンへattentionを知らせる場合は、opt-inの外部pushを設定する。tokenを会話やcommand引数へ貼らず、[スマートフォン直接push通知](notifications.md)のprovider準備、`notification-token --token-file -`、実機到達確認に従う。通知は正本ではないため、tap後は必ず`status`から現在のrequestを読み直す。
+監視task未接続時のattentionは永続snapshotに保持される。再接続時は`status`から現在のrequestを読み直し、未回答requestをwatchより先に表示する。
 
 ### 質問へ回答
 
@@ -206,6 +208,8 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 worktreeのbranch変更、未commit変更、remote PRとの不一致がある場合は自動修復しない。対象Issueのworktreeを人が確認し、変更を保持する方針を決める。
 
+`publication_audited`の`reason`が`formatter_failed`なら、`formatter.failure_code`（`executable_unavailable`、`path_unsafe`、`exit_failure`、`timeout`、`canceled`、`verification_failed`等）を確認する。worktreeを削除せず、path safety違反は対象file種別とsymlinkを調査し、availabilityは停止後の再registerで直す。再試行は同じworktree・branchへ冪等に収束し、整形済みなら空commitを作らない。
+
 PR conflictは検出時点では`resolving_conflict`となり、base SHAごとの自動復旧とCI再確認を行う。budget超過等で最終`blocked`になった場合は、`status --json`の`conflict_recovery`にある試行履歴、base SHA、競合file、最終理由を確認する。worktree・branch・open PRの対応と停止原因を直した後だけ、次の明示操作を使う。
 
 ```sh
@@ -214,6 +218,30 @@ agent-loop status --repo /absolute/path/to/repository --json
 ```
 
 `retry`は無関係なblocked原因を初期化せず、保存済みbranchとPRが一致する場合だけ`resolving_conflict`へ戻す。新しいbranch/PRやforce pushは作らない。
+
+workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。導入前のworker blockだけは`failure_kind=issue`とsupervisor生成の`worker blocked` errorからCLIがprovenanceを正規化し、失われたleaseを`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource leaseとGitHub label/PRが一致するときだけ次を使う。v0.6.0以前のlegacy recordでは`lease`または`lease.base_sha`がないことがあるが、stateを手編集しない。
+
+```sh
+agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
+```
+
+この操作はconfigured base branchのremote-tracking commitを検証し、leaseを補う場合は非空の`base_sha`も同じtransactionで保存する。`resolve configured base branch`で拒否された場合はGitHub labelとdurable stateは未変更なので、`git -C <saved-worktree> fetch origin <base-branch>`で正しいremote-tracking commitを取得し、`status --json`でblocked状態を再確認して同じコマンドを再実行する。既存の非空`base_sha`は上書きしない。
+
+resumeはdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`lease.base_sha`が非空であることを確認する。GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動するか同じ`resume-blocked`を再実行して収束させる。旧版の競合で`status=blocked`、`environment_resume.status=requested|github_synced`、`lease=null`となった場合も、修正版の同じコマンドがeventに保存したbase SHAとGitHub/worktree/run/PRを再検証し、競合のない`repo:*` leaseを再予約する。event historyからbase SHAを回復できない場合や、`conflict_recovery`、手動`blocked`/`do-not-automate`、security block、active worker、unanswered request、running/completed、closed-without-merge、worktree/branch/PR不整合がある場合は修復・再開せず原因別runbookへ戻る。
+
+workerがschema-conformingな`completed` resultを保存した後、publisherがcommit/push/PR作成へ到達する前の`durable_base_sha_missing`だけでretry budgetを使い切った場合は、`status --json`で`status=failed`、空の`github_sync`、`publication_failure.origin=publisher`、`phase=pre_publication`、`code=durable_base_sha_missing`、`recoverable=true`を確認する。導入前のlegacy recordは、CLIが同じ厳密なfailure chain、空base SHAの`publication_audit`、上限到達済みworker attempts、保存済みcompleted resultをすべて確認できる場合だけ対象になる。
+
+外部前提を解消し、Issueがopenかつfailed labelと同期済みで、active PID/PGID・pending request・manual exclusionがなく、保存run/worktree/branch/resource/PRが一致することを確認してから次を使う。
+
+```sh
+agent-loop recover-publication --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
+```
+
+この操作はconfigured base branchの検証済みcommitをleaseと同じdurable transactionへ保存し、failed labelからrunningへの同期をwrite-aheadで行う。dirty changes、unpushed commit、answers、session、run history、resource metadata、元のworker attempt数は保持し、`publication_recovery`のgeneration・累積attempt・result SHA-256を別に監査記録する。GitHub同期やstate transactionの途中失敗は同じコマンドで冪等に収束させ、publisherは既存commit/remote branch/PRを再利用する。
+
+これは汎用failed retryではない。worker実装失敗、security/manual exclusion、closed-without-merge、PR conflict、open/closed PR不整合、unknown provenance、保存resultやworktreeの変更は拒否する。新branchへの移植、state/labelの手編集、retry budgetのreset、force pushで回避してはならない。
+
+v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。
 
 ### Git transportまたはcommit署名で停止する
 
@@ -406,3 +434,157 @@ display off、screen lock、logout、OS再起動はMac miniの通常運用では
 - [GitHub CLI: gh auth status](https://cli.github.com/manual/gh_auth_status)
 - [GitHub CLI: gh auth login](https://cli.github.com/manual/gh_auth_login)
 - [Apple: Set sleep and wake settings for your Mac](https://support.apple.com/en-gb/guide/mac-help/mchle41a6ccd/mac)
+
+## 12. Webhook brokerとreverse proxy
+
+Webhook modeはopt-inである。agent-loopはpublic endpoint、TLS certificate、DNS、reverse proxy providerのaccount・credential・daemonを作成または変更しない。運用者が管理する公開HTTPS URLから、同じMacのliteral loopback listener `http://127.0.0.1:8787/github/webhook`（または`http://[::1]:8787/github/webhook`）へraw request bodyとGitHub headerを変更せず転送する。
+
+reverse proxyは次のcontractを満たすものを選ぶ。
+
+- public側でTLS 1.2以上を終端し、certificate hostnameを検証可能にする
+- upstreamはloopbackだけとし、LAN/public interfaceやUnix socketを公開先にしない
+- `X-Hub-Signature-256`、`X-GitHub-Delivery`、`X-GitHub-Event`とraw bodyを保持する
+- body sizeと接続timeoutをbroker設定以下に制限し、request buffering中のdisk permissionも限定する
+- providerが対応する場合はGitHub公式Webhook送信元CIDRをallowlistし、更新を監視する。ただしCIDR制限をHMACの代用にしない
+- provider固有のaccess token、tunnel credential、daemon設定をrepositoryやagent-loop stateへ保存しない
+
+### Cloudflare Tunnelでの構成例
+
+Cloudflare Tunnelは上のcontractのうち送信元CIDR allowlistまで満たせるため、inbound portを開けずに構成できる。Tunnel本体、DNS、custom rule 1本はいずれも無料プランの範囲で、帯域課金もない。ここに書くのは一例であり、agent-loopはこのproviderに依存しない。
+
+Cloudflareアカウント、対象ドメインのCloudflareへの委任、`cloudflared tunnel login`のbrowser認証、`sudo cloudflared service install`、WAF custom ruleの作成は運用者が行う。agent-loopはこれらを作成も変更もしない。
+
+```sh
+brew install cloudflared
+cloudflared tunnel login
+cloudflared tunnel create agent-loop-hooks
+cloudflared tunnel route dns agent-loop-hooks hooks.example.invalid
+```
+
+`~/.cloudflared/config.yml`ではpathを`/github/webhook`だけに限定し、それ以外をloopbackへ到達させない。upstreamはliteral loopbackにする。
+
+```yaml
+tunnel: <TUNNEL-ID>
+credentials-file: /Users/example/.cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: hooks.example.invalid
+    path: ^/github/webhook$
+    service: http://127.0.0.1:8787
+    originRequest:
+      connectTimeout: 5s
+  - service: http_status:404
+```
+
+送信元CIDRは公式APIから取得し、WAF custom ruleでGitHub以外をBlockする。CIDRは6件程度でruleの式へ直接書けるため、IP Listは不要である。GitHubはchallengeを解けないのでManaged Challengeは選ばない。
+
+```sh
+gh api meta --jq '.hooks[]'
+```
+
+```text
+http.host eq "hooks.example.invalid"
+and not ip.src in {192.30.252.0/22 185.199.108.0/22 140.82.112.0/20 143.55.64.0/20 2a0a:a440::/29 2606:50c0::/32}
+```
+
+このCIDRは変更されるため、差分監視を運用に含める。記録値は`.github/github-hooks-cidr.txt`にあり、`scripts/check-hooks-cidr.sh`が現在値と比較して差分があれば`exit 1`する。`.github/workflows/hooks-cidr.yml`が毎週これを実行し、差分を検出したらIssueを作成する。同じ内容のopen Issueがある間は重複作成しない。
+
+このIssueにready labelは付かないため、loopは自動で着手しない。reverse proxyのallowlistを更新し、記録値も同じcommitで更新する。CIDR制限はHMACの代用にしないため、更新までの間もsignature検証は有効である。
+
+```sh
+./scripts/check-hooks-cidr.sh
+```
+
+無料プランでは次の2点がcontractに対して不足する。いずれも受け入れるか、上位プランを選ぶかを明示的に判断する。
+
+- request body sizeによる制限は`http.request.body.size`がEnterprise専用のため設定できない。brokerの`max_body_bytes`が最終防衛線になる。
+- WAFのLogアクションが使えないため、allowlistをdry-runで検証できない。Blockのまま投入し、GitHubのRecent Deliveriesが202を返すことで確認する。Blockされたrequestは無料プランでもSecurity Events（保持24時間、sampled）に残る。
+
+`cloudflared`はLaunchDaemon、brokerはLaunchAgentであるため、login前のdeliveryは5xxになる。取りこぼしはredeliveryとsafety sweepが回収する。
+
+### secretとrepository設定
+
+secret fileはrepository外へowner-onlyで作る。値をshell historyへ残さない組織のsecret provisioning手段を使い、最終状態だけ確認する。
+
+```sh
+install -d -m 700 "$HOME/Library/Application Support/codex-issue-loop/credentials"
+umask 077
+touch "$HOME/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook"
+chmod 600 "$HOME/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook"
+```
+
+対象repositoryのnumeric repository IDとGitHub App installation IDをGitHubの管理画面または認証済みAPIで確認し、次をdefault branchの`.agent-loop.yaml`へ追加する。`public_url_identifier`は監査用の非secret識別子であり、query tokenを含むURLを書かない。LaunchAgent運用では環境変数がログインlaunchdへ安全に注入されていることを保証しにくいため、通常は0600 file sourceを使う。
+
+```yaml
+github:
+  repo: owner/repository
+  repository_id: 123456789
+
+webhook:
+  mode: webhook
+  listener_address: 127.0.0.1:8787
+  public_url_identifier: hooks.example.invalid/agent-loop/owner-repository
+  secret_source:
+    file: /Users/example/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook
+  installation_ids: [987654]
+  allow_repository_webhook: false
+  safety_sweep_interval: 15m
+  safety_sweep_jitter: 10%
+  max_body_bytes: 2097152
+  read_timeout: 10s
+  read_header_timeout: 5s
+  idle_timeout: 30s
+  max_concurrent: 16
+```
+
+GitHub Appまたはrepository webhookのpayload URLは公開HTTPS URLの`/github/webhook`へ合わせ、content typeは`application/json`、SSL verificationは有効、secretは上のcredentialと同一にする。最低限`issues`、`issue_comment`、`pull_request`、`check_run`、`status`を購読し、Actionsの状態だけで必要な場合に`workflow_run`を追加する。登録後の`ping`が202になり、次を確認してからready labelを使う。
+
+GitHub Appでは`installation_ids`をallowlistとして維持する。installationを含まないclassic repository webhookを使う場合だけ、`installation_ids: []`と`allow_repository_webhook: true`を明示する。このopt-inはrepository ID/full nameとHMAC検証を緩和しない。
+
+classic repository webhookをCLIで登録する場合も、secretをargvへ展開しない。owner-onlyの一時fileへrequest bodyを書き、`--input`で渡して直ちに削除する。
+
+```sh
+umask 077
+# hook.json へ config.url、config.secret、config.content_type、events を書く
+gh api repos/OWNER/REPO/hooks --method POST --input hook.json
+rm -P hook.json
+gh api repos/OWNER/REPO/hooks --jq '.[] | {id, url: .config.url, active}'
+```
+
+`ping`の結果は`gh api repos/OWNER/REPO/hooks/<id>/deliveries`でも確認でき、GitHub UIのRecent Deliveriesと同じstatusを返す。
+
+```sh
+agent-loop register --repo /absolute/path/to/repository --json
+agent-loop doctor --repo /absolute/path/to/repository --json
+agent-loop start --repo /absolute/path/to/repository --json
+agent-loop status --repo /absolute/path/to/repository --json
+```
+
+`status --json`の`broker`でmode、listener、last accepted delivery、queue depth、reject/duplicate countを確認し、`repository_safety_sweep`でlast successful、HTTP status、304/200 count、ETagを確認する。secret、signature、Authorization、payloadは表示されない。listenerへの直接疎通はGitHubのredeliveryまたは署名済みの管理fixtureだけで行い、secretをcommand lineへ展開しない。
+
+### secret rotation
+
+1. 新secretを別の0600 fileへ配置する。
+2. 現在のsourceを`previous_secret_source`、新fileを`secret_source`に設定し、`register`、`doctor`、`restart`を行う。
+3. GitHub側を新secretへ切り替え、`ping`またはredeliveryがacceptedになることを確認する。
+4. `previous_secret_source`を削除して再度`register`、`doctor`、`restart`し、旧fileを組織のcredential廃棄手順で削除する。
+
+rotation期間を長期化しない。どちらのsecretが一致したかはlogへ出さない。
+
+### proxy停止・broker crash・redelivery
+
+proxy停止中のdeliveryは復旧後にGitHub UIからredeliveryできる。同じdelivery IDはdurable inboxでdedupeされる。redeliveryできない取りこぼしは15分のjitter付き条件付きREST sweepが収束させ、変更なし304を正常として記録する。brokerを停止してもrepo別supervisor、worker、state、worktree、未処理mailboxを削除しない。Mac再起動後はFileVault unlockとloginの後、broker LaunchAgentと各repository statusを確認する。
+
+### pollingへのrollback
+
+proxyまたはWebhook設定を安全に復旧できない場合は、対象repositoryを停止し、`webhook.mode: polling`へ明示的に戻して再登録する。
+
+```sh
+agent-loop stop --repo /absolute/path/to/repository --json
+# .agent-loop.yaml の webhook.mode を polling へ変更
+agent-loop register --repo /absolute/path/to/repository --json
+agent-loop doctor --repo /absolute/path/to/repository --json
+agent-loop start --repo /absolute/path/to/repository --json
+```
+
+他にWebhook repositoryが残っている間、共有brokerは停止しない。最後のWebhook repositoryを`unregister`した場合だけbroker LaunchAgentが削除される。rollbackはdurable inbox、repo state、worktreeを消さず、provider daemonやcredentialをagent-loopから変更しない。

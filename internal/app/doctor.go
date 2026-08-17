@@ -18,11 +18,13 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 )
 
 const doctorSchemaVersion = 1
@@ -122,7 +124,7 @@ func diagnoseSchemas(l layout.Layout) ([]diagnostic, bool) {
 		return []diagnostic{failedDiagnostic("SCHEMA_VERSION_UNSUPPORTED", "host", "", "このbinaryで扱えない永続schemaがあります", strings.Join(parts, ", "), instruction("対応binaryへ戻すか、対応するmigration手順を確認してください"))}, false
 	}
 	if report.NeedsMigration {
-		return []diagnostic{failedDiagnostic("SCHEMA_MIGRATION_REQUIRED", "host", "", "永続schemaをv2へmigrationする必要があります", "agent-loop migrate --jsonで対象を確認してください", command("全loop停止後にforward migrationを実行します", "agent-loop migrate --apply --json"))}, false
+		return []diagnostic{failedDiagnostic("SCHEMA_MIGRATION_REQUIRED", "host", "", "永続schemaをv4へmigrationする必要があります", "agent-loop migrate --jsonで対象を確認してください", command("全loop停止後にforward migrationを実行します", "agent-loop migrate --apply --json"))}, false
 	}
 	return []diagnostic{passedDiagnostic("SCHEMA_VERSION_SUPPORTED", "host", "", "永続schemaはこのbinaryと互換です", fmt.Sprintf("version=%d artifacts=%d", report.TargetVersion, len(report.Artifacts)))}, true
 }
@@ -297,8 +299,9 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 			instruction(filepath.Join(entry.RepoPath, config.FileName)+"を修正し、doctorを再実行してください")))
 	}
 	diagnostics = append(diagnostics, passedDiagnostic("CONFIG_VALID", "repository", entry.RepoID, ".agent-loop.yamlを読み込めます", cfg.GitHub.Repo))
-	diagnostics = append(diagnostics, diagnoseNotificationCredential(l, entry, cfg)...)
 	diagnostics = append(diagnostics, diagnoseWorkerBackend(ctx, entry, cfg)...)
+	diagnostics = append(diagnostics, diagnoseFormatters(ctx, entry, cfg)...)
+	diagnostics = append(diagnostics, diagnoseWebhook(ctx, l, entry, cfg)...)
 
 	if len(entry.Commands) > 0 {
 		missing := []string{}
@@ -360,6 +363,111 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	return diagnostics
 }
 
+func diagnoseWebhook(ctx context.Context, l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
+	if !cfg.Webhook.Enabled() {
+		return []diagnostic{passedDiagnostic("WEBHOOK_MODE_POLLING", "repository", entry.RepoID, "Webhook modeは無効で明示的polling fallbackを使用します", "mode=polling")}
+	}
+	diagnostics := []diagnostic{passedDiagnostic("WEBHOOK_LOOPBACK_BIND", "repository", entry.RepoID, "Webhook listenerはloopback限定です", cfg.Webhook.ListenerAddress)}
+	if _, err := os.Stat(l.BrokerPlistPath()); err != nil {
+		diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_NOT_REGISTERED", "repository", entry.RepoID, "共有Webhook broker LaunchAgentがありません", err.Error(), command("broker登録を再生成します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath))))
+	} else {
+		diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_BROKER_REGISTERED", "repository", entry.RepoID, "共有Webhook broker LaunchAgentが登録されています", l.BrokerPlistPath()))
+		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+		status, statusErr := manager.BrokerStatus(ctx)
+		switch {
+		case statusErr != nil:
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_STATUS_UNAVAILABLE", "repository", entry.RepoID, "共有Webhook brokerのLaunchAgent状態を確認できません", statusErr.Error(), command("broker状態を確認します", "launchctl print gui/$(id -u)/"+l.BrokerLabel())))
+		case !status.Loaded:
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_UNLOADED", "repository", entry.RepoID, "共有Webhook broker LaunchAgentが停止しています", "plist exists but service is not loaded", command("共有brokerを起動します", fmt.Sprintf("agent-loop start --repo %q", entry.RepoPath))))
+		case !status.Running && status.LastExitStatus != nil && *status.LastExitStatus != 0:
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_CRASH_LOOP", "repository", entry.RepoID, "共有Webhook brokerが異常終了を繰り返しています", fmt.Sprintf("state=%s last_exit_status=%d", status.State, *status.LastExitStatus), instruction("brokerのlaunchd.stderr.logと設定を確認してください")))
+		case !status.Running:
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_NOT_RUNNING", "repository", entry.RepoID, "共有Webhook brokerはloadedですが実行中ではありません", "state="+status.State, instruction("brokerのlaunchd.stderr.logとlaunchctl状態を確認してください")))
+		default:
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_BROKER_RUNNING", "repository", entry.RepoID, "共有Webhook brokerは実行中です", fmt.Sprintf("pid=%d state=%s", status.PID, status.State)))
+		}
+
+		var brokerState webhook.Status
+		statusPath := filepath.Join(l.BrokerDir(), "status.json")
+		data, readErr := os.ReadFile(statusPath)
+		if readErr != nil {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_STATUS_STALE", "repository", entry.RepoID, "共有Webhook broker statusがありません", readErr.Error(), instruction("brokerの起動状態とlaunchd.stderr.logを確認してください")))
+		} else if decodeErr := json.Unmarshal(data, &brokerState); decodeErr != nil {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_STATUS_STALE", "repository", entry.RepoID, "共有Webhook broker statusを読み取れません", decodeErr.Error(), instruction("brokerの起動状態とstatus.jsonを確認してください")))
+		} else if brokerState.UpdatedAt.IsZero() || time.Since(brokerState.UpdatedAt) > 2*time.Minute {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_STATUS_STALE", "repository", entry.RepoID, "共有Webhook broker statusが更新されていません", fmt.Sprintf("updated_at=%s", brokerState.UpdatedAt.Format(time.RFC3339)), instruction("brokerのcrashまたはlistener停止を確認してください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_BROKER_STATUS_FRESH", "repository", entry.RepoID, "共有Webhook broker statusは更新されています", brokerState.UpdatedAt.Format(time.RFC3339)))
+		}
+		if brokerState.ListenerAddress != "" && brokerState.ListenerAddress != cfg.Webhook.ListenerAddress {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_LISTENER_MISMATCH", "repository", entry.RepoID, "Webhook listener addressが設定と一致しません", fmt.Sprintf("status=%s config=%s", brokerState.ListenerAddress, cfg.Webhook.ListenerAddress), instruction("共有brokerを再起動して最新設定を読み込んでください")))
+		}
+	}
+	source := cfg.Webhook.SecretSource
+	switch {
+	case source.Env != "":
+		if os.Getenv(source.Env) == "" {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_SECRET_UNAVAILABLE", "repository", entry.RepoID, "Webhook secret sourceを読み取れません", "configured environment variable is unavailable; value was not logged", instruction("LaunchAgentから利用できる権限制限credential fileへ移行するか、broker環境へsecretを設定してください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_SECRET_AVAILABLE", "repository", entry.RepoID, "Webhook secret sourceを利用できます", "environment source; value not inspected or logged"))
+		}
+	case source.File != "":
+		info, err := os.Lstat(source.File)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_SECRET_FILE_UNSAFE", "repository", entry.RepoID, "Webhook secret fileが安全に読み取れません", fmt.Sprintf("path=%s error=%v", source.File, err), instruction("repository外のregular fileをowner-only permission (0600)で作成してください")))
+		} else if value, readErr := os.ReadFile(source.File); readErr != nil || strings.TrimSpace(string(value)) == "" {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_SECRET_FILE_EMPTY", "repository", entry.RepoID, "Webhook secret fileを読み取れません", "credential file is empty or unreadable; value was not logged", instruction("owner-only credential fileへ空でないsecretを配置してください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_SECRET_FILE_SAFE", "repository", entry.RepoID, "Webhook secret fileはowner-onlyです", source.File))
+		}
+	}
+	if cfg.Webhook.PublicURLIdentifier == "" {
+		diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_REVERSE_PROXY_UNIDENTIFIED", "repository", entry.RepoID, "reverse proxy到達先識別子がありません", "", instruction("public_url_identifierを設定してください")))
+	} else {
+		diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_REVERSE_PROXY_CONFIGURED", "repository", entry.RepoID, "reverse proxyの公開URL識別子が設定されています", cfg.Webhook.PublicURLIdentifier))
+	}
+	if registered, err := (registry.Store{Path: l.RegistryPath}).Load(); err == nil {
+		for _, other := range registered.Repos {
+			if other.RepoID == entry.RepoID {
+				continue
+			}
+			otherConfig, loadErr := config.Load(other.RepoPath)
+			if loadErr != nil || !otherConfig.Webhook.Enabled() {
+				continue
+			}
+			if otherConfig.Webhook.ListenerAddress != cfg.Webhook.ListenerAddress || otherConfig.Webhook.MaxBodyBytes != cfg.Webhook.MaxBodyBytes || otherConfig.Webhook.MaxConcurrent != cfg.Webhook.MaxConcurrent || otherConfig.Webhook.ReadTimeout != cfg.Webhook.ReadTimeout || otherConfig.Webhook.ReadHeaderTimeout != cfg.Webhook.ReadHeaderTimeout || otherConfig.Webhook.IdleTimeout != cfg.Webhook.IdleTimeout {
+				diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_CONFIG_MISMATCH", "repository", entry.RepoID, "共有broker設定が他repositoryと一致しません", "listener address or HTTP limits differ", instruction("同じmanaged rootのWebhook repositoryでlistenerとHTTP上限を一致させてください")))
+				break
+			}
+		}
+	}
+	return diagnostics
+}
+
+func diagnoseFormatters(ctx context.Context, entry registry.Entry, cfg config.Config) []diagnostic {
+	if !cfg.Formatters.Go.Enabled {
+		return []diagnostic{passedDiagnostic("FORMATTER_GO_DISABLED", "repository", entry.RepoID, "built-in Go formatterは無効です", "")}
+	}
+	path := entry.Commands["gofmt"]
+	if path == "" {
+		return []diagnostic{failedDiagnostic("FORMATTER_GO_NOT_REGISTERED", "repository", entry.RepoID, "built-in Go formatterが登録されていません", "gofmt",
+			command("gofmtの固定command pathを登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return []diagnostic{failedDiagnostic("FORMATTER_GO_UNAVAILABLE", "repository", entry.RepoID, "登録済みgofmtを実行できません", fmt.Sprintf("path=%s error=%v", path, err),
+			command("gofmtの固定command pathを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	probeErr := compat.ProbeGofmt(probeCtx, path)
+	cancel()
+	if probeErr != nil {
+		return []diagnostic{failedDiagnostic("FORMATTER_GO_CAPABILITY_MISSING", "repository", entry.RepoID, "登録済みgofmtの必須capabilityを確認できません", probeErr.Error(),
+			command("対応するgofmtの固定command pathを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+	}
+	return []diagnostic{passedDiagnostic("FORMATTER_GO_AVAILABLE", "repository", entry.RepoID, "built-in Go formatterを利用できます", path)}
+}
+
 func diagnoseWorkerBackend(ctx context.Context, entry registry.Entry, cfg config.Config) []diagnostic {
 	backend := cfg.Worker.Backend
 	if backend == "" {
@@ -400,6 +508,13 @@ func diagnoseWorkerBackend(ctx context.Context, entry registry.Entry, cfg config
 	} else {
 		diagnostics = append(diagnostics, failedDiagnostic(codePrefix+"_RUNTIME_INCOMPATIBLE", "repository", entry.RepoID, "選択worker runtimeのversionまたはcapabilityが非対応です", compatibilityDetail(report), instruction("runtimeを対応versionへ更新してdoctorを再実行してください")))
 		return diagnostics
+	}
+	if cfg.Worker.CommandNetwork.LocalhostOnly() {
+		if report.Has("localhost_network_proxy") {
+			diagnostics = append(diagnostics, passedDiagnostic("CODEX_LOCALHOST_NETWORK_PROXY_READY", "repository", entry.RepoID, "localhost-only command network policyを初期化できます", "strict config、user config isolation、network_proxy、hosted tool disable capabilityを確認しました"))
+		} else {
+			diagnostics = append(diagnostics, failedDiagnostic("CODEX_LOCALHOST_NETWORK_PROXY_UNAVAILABLE", "repository", entry.RepoID, "localhost-only command network policyを安全に初期化できません", "必要なCodex network_proxyまたはtool隔離capabilityがありません。workerは開始されません", instruction("Codex CLIをnetwork_proxy対応versionへ更新し、doctorを再実行してください")))
+		}
 	}
 	if entry.WorkerVersion != "" && entry.WorkerVersion != report.Version {
 		diagnostics = append(diagnostics, failedDiagnostic("WORKER_RUNTIME_VERSION_DRIFT", "repository", entry.RepoID, "登録後にworker runtime versionが変化しました", fmt.Sprintf("registered=%s current=%s", entry.WorkerVersion, report.Version),
@@ -442,22 +557,6 @@ func containsModelLine(output, model string) bool {
 		}
 	}
 	return false
-}
-
-func diagnoseNotificationCredential(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
-	if !cfg.Notifications.Enabled {
-		return []diagnostic{passedDiagnostic("NOTIFICATIONS_DISABLED", "repository", entry.RepoID, "外部push通知は無効です", "opt-in")}
-	}
-	_, err := loadNotificationToken(l, entry)
-	if errors.Is(err, os.ErrNotExist) {
-		return []diagnostic{failedDiagnostic("NOTIFICATION_CREDENTIAL_MISSING", "repository", entry.RepoID, "通知credentialが設定されていません", l.NotificationTokenPath(entry.RepoID),
-			command("標準入力からcredentialを安全に保存します", fmt.Sprintf("agent-loop notification-token --repo %q --token-file -", entry.RepoPath)))}
-	}
-	if err != nil {
-		return []diagnostic{failedDiagnostic("NOTIFICATION_CREDENTIAL_UNSAFE", "repository", entry.RepoID, "通知credentialを安全に読み込めません", err.Error(),
-			command("credentialを安全な管理fileへ保存し直します", fmt.Sprintf("agent-loop notification-token --repo %q --token-file -", entry.RepoPath)))}
-	}
-	return []diagnostic{passedDiagnostic("NOTIFICATION_CREDENTIAL_VALID", "repository", entry.RepoID, "通知credentialを安全に読み込めます", "managed file mode=0600")}
 }
 
 func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {

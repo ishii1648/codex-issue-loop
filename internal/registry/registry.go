@@ -92,6 +92,9 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		entry.WorkerBackend = "codex"
 	}
 	commands := map[string]string{"git": "git", "gh": "gh", entry.WorkerBackend: cfg.Worker.EffectiveCommand(), "launchctl": "launchctl"}
+	if cfg.Formatters.Go.Enabled {
+		commands["gofmt"] = "gofmt"
+	}
 	for name, command := range commands {
 		path, resolveErr := exec.LookPath(command)
 		if resolveErr != nil {
@@ -102,6 +105,14 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 			return Entry{}, resolveErr
 		}
 		entry.Commands[name] = absolute
+	}
+	if cfg.Formatters.Go.Enabled {
+		formatterCtx, cancelFormatter := context.WithTimeout(context.Background(), 5*time.Second)
+		formatterErr := compat.ProbeGofmt(formatterCtx, entry.Commands["gofmt"])
+		cancelFormatter()
+		if formatterErr != nil {
+			return Entry{}, fmt.Errorf("verify gofmt capability: %w", formatterErr)
+		}
 	}
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
 	entry.WorkerVersion = compat.ProbeBackend(probeCtx, entry.WorkerBackend, entry.Commands[entry.WorkerBackend]).Version

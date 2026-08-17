@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -60,6 +61,45 @@ exit 2
 	}
 }
 
+func TestCodexProbeDetectsLocalhostNetworkProxyCapability(t *testing.T) {
+	dir := t.TempDir()
+	codex := filepath.Join(dir, "codex")
+	writeExecutable(t, codex, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'codex-cli 0.147.0'; exit 0; fi
+if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd --ignore-user-config --strict-config --disable'; exit 0; fi
+if [ "$1 $2 $3" = "exec resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
+if [ "$1 $2" = "features list" ]; then echo 'network_proxy apps browser_use computer_use plugins remote_plugin skill_search tool_suggest'; exit 0; fi
+exit 2
+`)
+	report := ProbeCodex(context.Background(), codex)
+	if !report.OK() || !report.Has("localhost_network_proxy") {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestCodexProbeDetectsGeneratedAppServerGoalContract(t *testing.T) {
+	dir := t.TempDir()
+	codex := filepath.Join(dir, "codex")
+	writeExecutable(t, codex, `#!/bin/sh
+if [ "$1 $2 $3" = "app-server generate-json-schema --help" ]; then echo '--out --experimental'; exit 0; fi
+if [ "$1 $2 $3" = "app-server generate-json-schema --experimental" ]; then
+  schema_out=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--out" ]; then schema_out="$2"; break; fi
+    shift
+  done
+  printf '%s' 'thread/start thread/resume thread/goal/set thread/goal/get thread/goal/clear turn/start turn/steer' > "$schema_out/ClientRequest.json"
+  printf '%s' 'item/tool/requestUserInput item/commandExecution/requestApproval item/fileChange/requestApproval' > "$schema_out/ServerRequest.json"
+  printf '%s' 'thread/tokenUsage/updated turn/completed' > "$schema_out/ServerNotification.json"
+  exit 0
+fi
+exit 2
+`)
+	if !probeCodexAppServerGoal(context.Background(), codex) {
+		t.Fatal("generated App Server Goal contract was not detected")
+	}
+}
+
 func TestBuiltInBackendCapabilityProbes(t *testing.T) {
 	dir := t.TempDir()
 	claude := filepath.Join(dir, "claude")
@@ -80,6 +120,17 @@ exit 2
 		if report := ProbeBackend(context.Background(), backend, path); !report.OK() || !report.Has("structured_output") || !report.Has("session_resume") {
 			t.Fatalf("backend=%s report=%+v", backend, report)
 		}
+	}
+}
+
+func TestGofmtCapabilityProbe(t *testing.T) {
+	if err := ProbeGofmt(context.Background(), filepath.Join(runtime.GOROOT(), "bin", "gofmt")); err != nil {
+		t.Fatal(err)
+	}
+	invalid := filepath.Join(t.TempDir(), "gofmt")
+	writeExecutable(t, invalid, "#!/bin/sh\nprintf 'not gofmt\\n'\n")
+	if err := ProbeGofmt(context.Background(), invalid); err == nil {
+		t.Fatal("invalid gofmt capability passed")
 	}
 }
 

@@ -36,8 +36,10 @@ type PullRequest struct {
 	IsDraft          bool
 	MergedAt         *time.Time
 	HeadRefName      string
+	BaseRefName      string
 	MergeStateStatus string
 	ChecksStatus     string
+	HeadSHA          string
 }
 
 type checkRollup struct {
@@ -107,6 +109,13 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 	// gh paginates internally up to the requested limit. Keep this above the
 	// MVP's original 100 so large queues are not silently truncated.
 	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,createdAt,labels,assignees,milestone"}
+	// A single configured ready label can be pushed into GitHub's query
+	// without changing the local has-any-label eligibility contract. This
+	// avoids paying GraphQL node cost for every unrelated open Issue on each
+	// reconciliation poll. Multiple ready labels retain local OR filtering.
+	if len(cfg.GitHub.ReadyLabels) == 1 {
+		args = append(args, "--label", cfg.GitHub.ReadyLabels[0])
+	}
 	if cfg.GitHub.Assignee != "" {
 		args = append(args, "--assignee", cfg.GitHub.Assignee)
 	}
@@ -115,7 +124,7 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 	}
 	out, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("list GitHub Issues: %w: %s", err, c.safe(out))
+		return nil, c.commandError(ctx, path, "list GitHub Issues", err, out)
 	}
 	var raw []rawIssue
 	if err := json.Unmarshal(out, &raw); err != nil {
@@ -154,7 +163,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	}
 	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,labels,assignees,milestone,comments").CombinedOutput()
 	if err != nil {
-		return Issue{}, fmt.Errorf("get GitHub Issue #%d: %w: %s", number, err, c.safe(out))
+		return Issue{}, c.commandError(ctx, path, fmt.Sprintf("get GitHub Issue #%d", number), err, out)
 	}
 	var item rawIssue
 	if err := json.Unmarshal(out, &item); err != nil {
@@ -192,9 +201,12 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName,mergeStateStatus,statusCheckRollup").CombinedOutput()
+	// Reconciliation only distinguishes zero, one, or multiple Pull Requests.
+	// Fetching two is sufficient to detect the unsafe multiple-PR case and
+	// avoids requesting 100 expensive statusCheckRollup nodes every poll.
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "number,url,state,isDraft,mergedAt,headRefName,baseRefName,headRefOid,mergeStateStatus,statusCheckRollup").CombinedOutput()
 	if err != nil {
-		return RemoteState{}, fmt.Errorf("inspect Pull Requests for branch %s: %w: %s", branch, err, c.safe(out))
+		return RemoteState{}, c.commandError(ctx, path, fmt.Sprintf("inspect Pull Requests for branch %s", branch), err, out)
 	}
 	var raw []struct {
 		Number            int           `json:"number"`
@@ -203,6 +215,8 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		IsDraft           bool          `json:"isDraft"`
 		MergedAt          *time.Time    `json:"mergedAt"`
 		HeadRefName       string        `json:"headRefName"`
+		BaseRefName       string        `json:"baseRefName"`
+		HeadRefOID        string        `json:"headRefOid"`
 		MergeStateStatus  string        `json:"mergeStateStatus"`
 		StatusCheckRollup []checkRollup `json:"statusCheckRollup"`
 	}
@@ -213,6 +227,8 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		state.PullRequests = append(state.PullRequests, PullRequest{
 			Number: item.Number, URL: item.URL, State: item.State, IsDraft: item.IsDraft,
 			MergedAt: item.MergedAt, HeadRefName: item.HeadRefName,
+			BaseRefName:      item.BaseRefName,
+			HeadSHA:          item.HeadRefOID,
 			MergeStateStatus: item.MergeStateStatus,
 			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
 		})
@@ -279,6 +295,22 @@ func Eligible(labels []string, cfg config.GitHub) bool {
 	return true
 }
 
+func EligibleIssue(issue Issue, cfg config.GitHub) bool {
+	if !Eligible(issue.Labels, cfg) {
+		return false
+	}
+	if cfg.Assignee != "" {
+		matched := false
+		for _, assignee := range issue.Assignees {
+			matched = matched || strings.EqualFold(assignee, cfg.Assignee)
+		}
+		if !matched {
+			return false
+		}
+	}
+	return cfg.Milestone == "" || issue.Milestone == cfg.Milestone
+}
+
 func (c CLI) Claim(ctx context.Context, cfg config.Config, issue Issue, runID string) error {
 	labels := map[string]bool{}
 	for _, label := range issue.Labels {
@@ -337,7 +369,7 @@ func (c CLI) MarkDone(ctx context.Context, cfg config.Config, number int, prURL 
 		}
 		out, err := exec.CommandContext(ctx, path, "issue", "close", fmt.Sprint(number), "--repo", cfg.GitHub.Repo).CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("close Issue #%d: %w: %s", number, err, c.safe(out))
+			return c.commandError(ctx, path, fmt.Sprintf("close Issue #%d", number), err, out)
 		}
 	}
 	return nil
@@ -382,6 +414,36 @@ func (c CLI) MarkConflictRetry(ctx context.Context, cfg config.Config, number in
 	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
 }
 
+// MarkEnvironmentResume removes only supervisor-owned terminal labels. Manual
+// exclusions such as do-not-automate are never removed by this operation.
+func (c CLI) MarkEnvironmentResume(ctx context.Context, cfg config.Config, number int, resumeID string) error {
+	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			remove = append(remove, label)
+		}
+	}
+	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
+		return err
+	}
+	marker := fmt.Sprintf("<!-- codex-issue-loop:environment-resume:%s -->", resumeID)
+	body := marker + "\nEnvironment-blocked worker execution was explicitly resumed using the existing worktree and durable state."
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
+}
+
+// MarkPublicationRecovery removes only non-exclusion supervisor state labels.
+// In particular, a concurrently added blocked/do-not-automate label is never
+// removed. The operation is idempotent through labels and the durable marker.
+func (c CLI) MarkPublicationRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
+	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
+	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
+		return err
+	}
+	marker := fmt.Sprintf("<!-- codex-issue-loop:publication-recovery:%s -->", recoveryID)
+	body := marker + "\nPre-publication failure recovery was explicitly resumed using the existing worktree and durable state."
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
+}
+
 func (c CLI) ReadyPullRequest(ctx context.Context, cfg config.Config, prURL string) error {
 	path := c.Path
 	if path == "" {
@@ -389,7 +451,7 @@ func (c CLI) ReadyPullRequest(ctx context.Context, cfg config.Config, prURL stri
 	}
 	out, err := exec.CommandContext(ctx, path, "pr", "ready", prURL, "--repo", cfg.GitHub.Repo).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("mark Pull Request ready: %w: %s", err, c.safe(out))
+		return c.commandError(ctx, path, "mark Pull Request ready", err, out)
 	}
 	return nil
 }
@@ -401,7 +463,7 @@ func (c CLI) UpdatePullRequest(ctx context.Context, cfg config.Config, prURL str
 	}
 	out, err := exec.CommandContext(ctx, path, "pr", "update-branch", prURL, "--repo", cfg.GitHub.Repo).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("update Pull Request branch: %w: %s", err, c.safe(out))
+		return c.commandError(ctx, path, "update Pull Request branch", err, out)
 	}
 	return nil
 }
@@ -413,7 +475,7 @@ func (c CLI) MergePullRequest(ctx context.Context, cfg config.Config, prURL stri
 	}
 	out, err := exec.CommandContext(ctx, path, "pr", "merge", prURL, "--repo", cfg.GitHub.Repo, "--squash").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("merge Pull Request: %w: %s", err, c.safe(out))
+		return c.commandError(ctx, path, "merge Pull Request", err, out)
 	}
 	return nil
 }
@@ -436,7 +498,7 @@ func (c CLI) editLabels(ctx context.Context, repo string, number int, add, remov
 	}
 	out, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("update Issue #%d labels: %w: %s", number, err, c.safe(out))
+		return c.commandError(ctx, path, fmt.Sprintf("update Issue #%d labels", number), err, out)
 	}
 	return nil
 }
@@ -450,9 +512,14 @@ func (c CLI) ensureComment(ctx context.Context, repo string, number int, marker,
 	if err == nil && strings.Contains(string(view), marker) {
 		return nil
 	}
+	if err != nil {
+		if _, _, _, limited := primaryRateLimit(view); limited {
+			return c.commandError(ctx, path, fmt.Sprintf("inspect comments on Issue #%d", number), err, view)
+		}
+	}
 	out, err := exec.CommandContext(ctx, path, "issue", "comment", fmt.Sprint(number), "--repo", repo, "--body", body).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("comment on Issue #%d: %w: %s", number, err, c.safe(out))
+		return c.commandError(ctx, path, fmt.Sprintf("comment on Issue #%d", number), err, out)
 	}
 	return nil
 }

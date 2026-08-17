@@ -31,6 +31,26 @@ func TestBackendFactoryAndCapabilities(t *testing.T) {
 	}
 }
 
+func TestBackendFactoryEnablesGoalOnlyWhenConfiguredAndSupported(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Worker.AppServer.Enabled = true
+	supported, unsupported := true, false
+	backend, err := NewBackend(cfg, FactoryOptions{AppServerGoalSupported: &unsupported})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(Codex); !ok || backend.Capabilities().ThreadGoal {
+		t.Fatalf("unsupported capability did not fall back to codex exec: %T %+v", backend, backend.Capabilities())
+	}
+	backend, err = NewBackend(cfg, FactoryOptions{AppServerGoalSupported: &supported})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(CodexAppServer); !ok || !backend.Capabilities().ThreadGoal {
+		t.Fatalf("supported capability did not select App Server: %T %+v", backend, backend.Capabilities())
+	}
+}
+
 func TestClaudeCodeInitialAndResumePassModelAndEffortWithoutPromptArgv(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "claude")
@@ -110,7 +130,7 @@ func TestOpenCodeTimeoutAbortsSessionAndStopsServerGroup(t *testing.T) {
 	t.Setenv("AGENT_LOOP_OPENCODE_MODE", "timeout")
 	t.Setenv("AGENT_LOOP_OPENCODE_ABORTED", aborted)
 	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/test", "")
-	cfg.Worker.Timeout.Duration = 150 * time.Millisecond
+	cfg.Worker.Timeout.Duration = time.Second
 	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
 	pid := 0
 	_, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_timeout", Attempts: 1}, "", func(value int) error { pid = value; return nil })

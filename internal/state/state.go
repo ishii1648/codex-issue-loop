@@ -2,7 +2,6 @@ package state
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
@@ -42,6 +43,14 @@ type Supervisor struct {
 	FailureKind         string     `json:"failure_kind,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
 	RetryAfter          *time.Time `json:"retry_after,omitempty"`
+	RateLimit           *RateLimit `json:"rate_limit,omitempty"`
+}
+
+type RateLimit struct {
+	Resource             string    `json:"resource"`
+	ObservedResetAt      time.Time `json:"observed_reset_at"`
+	CooldownSource       string    `json:"cooldown_source"`
+	SuppressedRetryCount uint64    `json:"suppressed_retry_count"`
 }
 
 type AnswerRecord struct {
@@ -63,6 +72,22 @@ type WorkerIdentity struct {
 	RequestedModel string `json:"requested_model,omitempty"`
 	ResolvedModel  string `json:"resolved_model,omitempty"`
 	Variant        string `json:"variant,omitempty"`
+}
+
+// WorkerGoal is a durable snapshot of the App Server thread-local Goal. The
+// supervisor still owns Issue selection, queueing, leases, and process lifetime.
+type WorkerGoal struct {
+	ThreadID          string `json:"thread_id"`
+	Objective         string `json:"objective"`
+	Status            string `json:"status"`
+	TokenBudget       *int64 `json:"token_budget,omitempty"`
+	TimeBudgetSeconds int64  `json:"time_budget_seconds,omitempty"`
+	TokensUsed        int64  `json:"tokens_used"`
+	TimeUsedSeconds   int64  `json:"time_used_seconds"`
+	InputTokens       int64  `json:"input_tokens,omitempty"`
+	CachedInputTokens int64  `json:"cached_input_tokens,omitempty"`
+	OutputTokens      int64  `json:"output_tokens,omitempty"`
+	UpdatedAt         int64  `json:"updated_at,omitempty"`
 }
 
 // LeaseOwner fences lease mutations to one Issue run and one monotonically
@@ -126,34 +151,93 @@ type ConflictRecovery struct {
 	UpdatedAt       time.Time              `json:"updated_at,omitempty"`
 }
 
+// BlockedCause records provenance needed by the operator resume command. Older
+// or manually-created blocked records intentionally have no provenance and are
+// therefore not resumable.
+type BlockedCause struct {
+	Origin    string    `json:"origin"`
+	Kind      string    `json:"kind"`
+	Resumable bool      `json:"resumable"`
+	Reason    string    `json:"reason"`
+	BlockedAt time.Time `json:"blocked_at"`
+}
+
+type EnvironmentResume struct {
+	ID             string    `json:"id"`
+	Status         string    `json:"status"`
+	ConfirmedAt    time.Time `json:"confirmed_at"`
+	PreviousReason string    `json:"previous_reason"`
+	BaseSHA        string    `json:"base_sha,omitempty"`
+}
+
+type PublicationRecoveryAttempt struct {
+	Number     int       `json:"number"`
+	Generation int       `json:"generation"`
+	Status     string    `json:"status"`
+	Reason     string    `json:"reason,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
+}
+
+// PublicationRecovery records an operator-confirmed, publication-only retry.
+// Worker attempt counters and history are intentionally separate and are never
+// reset by this recovery path.
+type PublicationRecovery struct {
+	ID               string                       `json:"id"`
+	Status           string                       `json:"status"`
+	Generation       int                          `json:"generation"`
+	Attempts         int                          `json:"attempts"`
+	MaxAttempts      int                          `json:"max_attempts"`
+	History          []PublicationRecoveryAttempt `json:"history,omitempty"`
+	ConfirmedAt      time.Time                    `json:"confirmed_at"`
+	PreviousReason   string                       `json:"previous_reason"`
+	ResultSHA256     string                       `json:"result_sha256"`
+	Summary          string                       `json:"summary"`
+	ExpectedHeadSHA  string                       `json:"expected_head_sha"`
+	WorktreeSHA256   string                       `json:"worktree_sha256"`
+	OriginalDirty    bool                         `json:"original_dirty"`
+	OriginalUnpushed bool                         `json:"original_unpushed_commits"`
+}
+
 type Issue struct {
-	Number            int               `json:"number"`
-	Title             string            `json:"title"`
-	Status            string            `json:"status"`
-	RunID             string            `json:"run_id,omitempty"`
-	LeaseGeneration   uint64            `json:"lease_generation,omitempty"`
-	Lease             *ResourceLease    `json:"lease,omitempty"`
-	DeclaredResources []string          `json:"declared_resources,omitempty"`
-	ActualResources   []string          `json:"actual_resources,omitempty"`
-	Branch            string            `json:"branch,omitempty"`
-	Worktree          string            `json:"worktree,omitempty"`
-	Attempts          int               `json:"attempts"`
-	Continuations     int               `json:"continuations"`
-	ExecutionProfile  string            `json:"execution_profile,omitempty"`
-	SessionID         string            `json:"session_id,omitempty"`
-	Session           *WorkerSession    `json:"session,omitempty"`
-	WorkerIdentity    WorkerIdentity    `json:"worker_identity,omitempty"`
-	WorkerPID         int               `json:"worker_pid,omitempty"`
-	WorkerPGID        int               `json:"worker_pgid,omitempty"`
-	PullRequestURL    string            `json:"pull_request_url,omitempty"`
-	PullRequestMerged bool              `json:"pull_request_merged,omitempty"`
-	GitHubSync        string            `json:"github_sync,omitempty"`
-	FailureKind       string            `json:"failure_kind,omitempty"`
-	LastError         string            `json:"last_error,omitempty"`
-	RetryAfter        *time.Time        `json:"retry_after,omitempty"`
-	Answers           []AnswerRecord    `json:"answers,omitempty"`
-	ConflictRecovery  *ConflictRecovery `json:"conflict_recovery,omitempty"`
-	UpdatedAt         time.Time         `json:"updated_at"`
+	Number            int                `json:"number"`
+	Title             string             `json:"title"`
+	Status            string             `json:"status"`
+	RunID             string             `json:"run_id,omitempty"`
+	LeaseGeneration   uint64             `json:"lease_generation,omitempty"`
+	Lease             *ResourceLease     `json:"lease,omitempty"`
+	DeclaredResources []string           `json:"declared_resources,omitempty"`
+	ActualResources   []string           `json:"actual_resources,omitempty"`
+	PublicationAudit  *publication.Audit `json:"publication_audit,omitempty"`
+	Branch            string             `json:"branch,omitempty"`
+	Worktree          string             `json:"worktree,omitempty"`
+	Attempts          int                `json:"attempts"`
+	Continuations     int                `json:"continuations"`
+	ExecutionProfile  string             `json:"execution_profile,omitempty"`
+	SessionID         string             `json:"session_id,omitempty"`
+	Session           *WorkerSession     `json:"session,omitempty"`
+	WorkerIdentity    WorkerIdentity     `json:"worker_identity,omitempty"`
+	Goal              *WorkerGoal        `json:"goal,omitempty"`
+	WorkerPID         int                `json:"worker_pid,omitempty"`
+	WorkerPGID        int                `json:"worker_pgid,omitempty"`
+	PullRequestURL    string             `json:"pull_request_url,omitempty"`
+	PullRequestNumber int                `json:"pull_request_number,omitempty"`
+	HeadSHA           string             `json:"head_sha,omitempty"`
+	PullRequestMerged bool               `json:"pull_request_merged,omitempty"`
+	GitHubSync        string             `json:"github_sync,omitempty"`
+	FailureKind       string             `json:"failure_kind,omitempty"`
+	LastError         string             `json:"last_error,omitempty"`
+	RetryAfter        *time.Time         `json:"retry_after,omitempty"`
+	Answers           []AnswerRecord     `json:"answers,omitempty"`
+	ConflictRecovery  *ConflictRecovery  `json:"conflict_recovery,omitempty"`
+	BlockedCause      *BlockedCause      `json:"blocked_cause,omitempty"`
+	EnvironmentResume *EnvironmentResume `json:"environment_resume,omitempty"`
+
+	PublicationFailure *publication.FailureProvenance `json:"publication_failure,omitempty"`
+
+	PublicationRecovery *PublicationRecovery `json:"publication_recovery,omitempty"`
+
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Option struct {
@@ -183,30 +267,15 @@ type Recovery struct {
 	DetectedAt time.Time `json:"detected_at"`
 }
 
-type Notification struct {
-	ID          string     `json:"id"`
-	Kind        string     `json:"kind"`
-	IssueNumber int        `json:"issue_number,omitempty"`
-	RequestID   string     `json:"request_id,omitempty"`
-	RunID       string     `json:"run_id,omitempty"`
-	Status      string     `json:"status"`
-	Attempts    int        `json:"attempts"`
-	CreatedAt   time.Time  `json:"created_at"`
-	NextAttempt time.Time  `json:"next_attempt,omitempty"`
-	SentAt      *time.Time `json:"sent_at,omitempty"`
-	LastError   string     `json:"last_error,omitempty"`
-}
-
 type Snapshot struct {
-	Version         int                      `json:"version"`
-	RepoID          string                   `json:"repo_id"`
-	RepoPath        string                   `json:"repo_path"`
-	StateRevision   uint64                   `json:"state_revision"`
-	Supervisor      Supervisor               `json:"supervisor"`
-	Issues          map[string]*Issue        `json:"issues"`
-	PendingRequests map[string]*Request      `json:"pending_requests"`
-	Notifications   map[string]*Notification `json:"notifications,omitempty"`
-	Recovery        *Recovery                `json:"recovery,omitempty"`
+	Version         int                 `json:"version"`
+	RepoID          string              `json:"repo_id"`
+	RepoPath        string              `json:"repo_path"`
+	StateRevision   uint64              `json:"state_revision"`
+	Supervisor      Supervisor          `json:"supervisor"`
+	Issues          map[string]*Issue   `json:"issues"`
+	PendingRequests map[string]*Request `json:"pending_requests"`
+	Recovery        *Recovery           `json:"recovery,omitempty"`
 }
 
 type Event struct {
@@ -222,12 +291,11 @@ type Event struct {
 }
 
 type Store struct {
-	Dir                  string
-	RepoID               string
-	RepoPath             string
-	Secrets              []string
-	EventRetention       retention.Policy
-	NotificationsEnabled bool
+	Dir            string
+	RepoID         string
+	RepoPath       string
+	Secrets        []string
+	EventRetention retention.Policy
 }
 
 func (s Store) StatePath() string  { return filepath.Join(s.Dir, "state.json") }
@@ -284,9 +352,6 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	}
 	snapshot.StateRevision++
 	now := time.Now().UTC()
-	if s.NotificationsEnabled {
-		enqueueAttention(&snapshot, eventType, issueNumber, runID, now)
-	}
 	snapshot.Supervisor.UpdatedAt = now
 	snapshotJSON, err := redact.Marshal(snapshot, s.Secrets)
 	if err != nil {
@@ -318,35 +383,6 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	return snapshot, nil
-}
-
-func enqueueAttention(snapshot *Snapshot, eventType string, issueNumber int, runID string, now time.Time) {
-	if snapshot.Notifications == nil {
-		snapshot.Notifications = map[string]*Notification{}
-	}
-	add := func(id, kind, requestID string) {
-		if id == "" || snapshot.Notifications[id] != nil {
-			return
-		}
-		snapshot.Notifications[id] = &Notification{
-			ID: id, Kind: kind, IssueNumber: issueNumber, RequestID: requestID, RunID: runID,
-			Status: "pending", CreatedAt: now, NextAttempt: now,
-		}
-	}
-	switch eventType {
-	case "input_requested":
-		for _, request := range snapshot.PendingRequests {
-			if request != nil && request.IssueNumber == issueNumber && request.Status == "pending" {
-				add("needs_input:"+request.ID, "needs_input", request.ID)
-			}
-		}
-	case "issue_blocked":
-		id := fmt.Sprintf("issue_blocked:%d:%s", issueNumber, runID)
-		add(id, "issue_blocked", "")
-	case "supervisor_blocked":
-		digest := sha256.Sum256([]byte(snapshot.Supervisor.Message))
-		add(fmt.Sprintf("supervisor_blocked:%x", digest[:8]), "supervisor_blocked", "")
-	}
 }
 
 func (s Store) rotateEventsUnlocked(snapshot Snapshot) error {
@@ -417,11 +453,21 @@ func (s Store) AcquireSupervisorLock() (*os.File, error) {
 }
 
 func (s Store) ensureDir() error {
+	const managedModeMask = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(s.Dir, 0o700); err != nil {
+	info, err := os.Lstat(s.Dir)
+	if err != nil {
 		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("managed state directory is not a directory: %s", s.Dir)
+	}
+	if info.Mode()&managedModeMask != 0o700 {
+		if err := os.Chmod(s.Dir, 0o700); err != nil {
+			return err
+		}
 	}
 	for _, path := range []string{s.StatePath(), s.EventsPath(), s.TransactionPath(), s.lockPath(), filepath.Join(s.Dir, "supervisor.lock")} {
 		info, err := os.Lstat(path)
@@ -433,6 +479,9 @@ func (s Store) ensureDir() error {
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("managed state path is not a regular file: %s", path)
+		}
+		if info.Mode()&managedModeMask == 0o600 {
+			continue
 		}
 		if err := os.Chmod(path, 0o600); err != nil {
 			return err
@@ -494,7 +543,7 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
+			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "publication_recovery_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
 				return "", false
 			}
 		}
@@ -509,4 +558,17 @@ func NewID(prefix string) string {
 		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
 	}
 	return prefix + "_" + hex.EncodeToString(buf)
+}
+
+func ValidID(value, prefix string) bool {
+	if !strings.HasPrefix(value, prefix) || len(value) <= len(prefix) || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }

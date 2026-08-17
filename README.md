@@ -107,11 +107,31 @@ sleep 3
 
 `doctor`が`ok: true`を返し、LaunchAgentとsupervisorが稼働していることを確認します。LaunchAgentのPATH、aqua利用時の登録、初回セットアップの詳細は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
 
+多数のrepositoryを常駐させる場合は、明示的な`webhook.mode: webhook`で共有localhost brokerを利用できます。公開HTTPS endpointはagent-loopが用意せず、既存のreverse proxyから`127.0.0.1`または`::1`へ配送します。署名検証、secret管理、GitHub event、rotation、15分の条件付きREST safety sweep、pollingへのrollbackは[Mac mini常駐運用runbook](docs/mac-mini-runbook.md#12-webhook-brokerとreverse-proxy)を参照してください。
+
 `completion.auto_merge: true`でPR conflictが発生した場合は、同じworktree・branch・PRを使う`resolving_conflict`へ自動遷移します。規定回数後に最終`blocked`となったconflictだけ、原因を修復したうえで次の明示操作から再開します。
 
 ```sh
 "$agent_loop_bin" retry --repo "$PWD" --issue 123 --json
 ```
+
+workerが外部環境前提を理由に返した`blocked`は、前提をoperatorが解消し、active processがないことを確認した後だけ、別の明示操作で同じworktree・branch・sessionから再開します。PR conflict、手動exclusion、security block、completed/closed Issueには適用されません。
+
+```sh
+"$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
+```
+
+legacy stateでleaseが欠けている場合も、configured base branchの検証済みcommit SHAと保守的な`repo:*` leaseを同じtransactionで補います。base SHAを検証できない場合はstateとGitHub labelを変更せず拒否するため、state fileを編集せずremote-tracking branchを復旧して再実行します。
+
+worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missing`として最終`failed`になったIssueは、保存済みcompleted resultとdirty worktreeが一致する場合だけpublication-only recoveryを明示要求できます。workerは再実行せず、元のattempt budget、run、worktree、branch、回答、session、resource metadataを保持します。
+
+```sh
+"$agent_loop_bin" recover-publication --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
+```
+
+このコマンドは汎用failed retryではありません。manual exclusion、worker failure、security block、PR conflict、closed Issue、unknown failure provenance、missing/changed resultやworktreeをfail closedで拒否します。
+
+local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_network` localhost-only policyへopt-inできます。既定はnetwork無効です。設定と残余リスクは[localhost-only command network](docs/localhost-network.md)を参照してください。
 
 ### 4. 複数リポジトリを並列実行する
 
@@ -152,7 +172,7 @@ gh issue edit 123 --add-label codex-loop:ready
 
 PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
 
-同一repository内並列実行で使う`resources.definitions`、`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。publisherは保存済みbase SHAからtracked/untracked変更pathを検査し、actual resourceが宣言claimを超える場合はcommit・pushせず`needs_input`へ移します。
+同一repository内並列実行で使う`resources.definitions`、`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。publisherは保存済みbase SHAからtracked/untracked変更pathを検査し、actual resourceが宣言claimを超える場合はcommit・pushせず`needs_input`へ移します。`formatters.go.enabled: true`を明示したrepositoryでは、register済み`gofmt`が変更対象Go fileだけをcommit前に整形します。CIは引き続きread-onlyの`make fmt-check`を最終防衛線とします。
 
 ### 2. 状態を確認・監視する
 
@@ -204,7 +224,7 @@ schema migrationが必要な場合はloopを開始せず、[migration runbook](d
 
 ## 詳細ドキュメント
 
-- 運用: [Codex Desktop監視task](docs/codex-desktop-monitoring.md)、[Mac mini常駐運用](docs/mac-mini-runbook.md)、[concurrency 2 rollout・rollback](docs/concurrency-rollout.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[外部push通知](docs/notifications.md)、[worktree](docs/worktree-lifecycle.md)
-- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
+- 運用: [Codex Desktop監視task](docs/codex-desktop-monitoring.md)、[Mac mini常駐運用](docs/mac-mini-runbook.md)、[concurrency 2 rollout・rollback](docs/concurrency-rollout.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[worktree](docs/worktree-lifecycle.md)
+- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[App Server Goal adapter](docs/app-server-goal-adapter.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
 - 実測: [Mac mini実機E2E](docs/e2e/2026-08-15-mac-mini.md)、[LLM内ループとのtoken消費比較](docs/e2e/2026-08-16-llm-loop-token-comparison.md)
 - 開発: [Build・test](Makefile)、[実装状況](docs/implementation.md)、[脅威モデル](docs/threat-model.md)、[セキュリティ運用](docs/security-runbook.md)、[CLI互換性](docs/compatibility.md)

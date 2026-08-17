@@ -144,7 +144,7 @@ func (s Store) emptySnapshot() Snapshot {
 	return Snapshot{
 		Version: CurrentVersion, RepoID: s.RepoID, RepoPath: s.RepoPath,
 		Supervisor: Supervisor{State: "stopped", UpdatedAt: now},
-		Issues:     map[string]*Issue{}, PendingRequests: map[string]*Request{}, Notifications: map[string]*Notification{},
+		Issues:     map[string]*Issue{}, PendingRequests: map[string]*Request{},
 	}
 }
 
@@ -176,9 +176,6 @@ func normalizeSnapshot(snapshot *Snapshot) {
 	}
 	if snapshot.PendingRequests == nil {
 		snapshot.PendingRequests = map[string]*Request{}
-	}
-	if snapshot.Notifications == nil {
-		snapshot.Notifications = map[string]*Notification{}
 	}
 	for _, issue := range snapshot.Issues {
 		if issue == nil {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,15 +27,16 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
-	"github.com/ishii1648/codex-issue-loop/internal/notify"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
+	"github.com/ishii1648/codex-issue-loop/internal/ratelimit"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
@@ -157,8 +159,10 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.answer(l, args)
 	case "retry":
 		return a.retryConflict(ctx, l, args)
-	case "notification-token":
-		return a.notificationToken(ctx, l, args)
+	case "resume-blocked":
+		return a.resumeBlocked(ctx, l, args)
+	case "recover-publication":
+		return a.recoverPublication(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -171,6 +175,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.bootstrapLabels(ctx, args)
 	case "run":
 		return a.supervise(ctx, l, args)
+	case "broker":
+		return a.runBroker(ctx, l, args)
 	case "help", "--help", "-h":
 		a.usage()
 		return nil
@@ -198,13 +204,16 @@ Commands:
   watch         Wait for needs_input, blocked, stopped, or optional idle
   answer        Record an answer for a pending request
   retry         Explicitly resume a blocked Pull Request conflict recovery
-  notification-token  Configure or clear a managed notification credential
+  resume-blocked  Explicitly resume a worker environment-blocked Issue
+  recover-publication  Recover an eligible failed Issue at the publication boundary
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree
   doctor        Validate dependencies, auth, config, and registration
   bootstrap-labels  Preview or create required GitHub labels
   run           Run the supervisor (used by launchd)`)
+	// broker is intentionally omitted from the primary operator workflow; it is
+	// the shared LaunchAgent entrypoint managed by register/start/unregister.
 }
 
 func (a App) initUserRules(args []string) error {
@@ -277,6 +286,11 @@ func (a App) install(ctx context.Context, l layout.Layout, args []string) error 
 	if len(loaded) > 0 {
 		return fmt.Errorf("cannot install over running supervisors; use agent-loop update")
 	}
+	if _, brokerLoaded, brokerErr := loadedWebhookBroker(ctx, l); brokerErr != nil {
+		return brokerErr
+	} else if brokerLoaded {
+		return fmt.Errorf("cannot install over a running webhook broker; use agent-loop update")
+	}
 	source, err := os.Executable()
 	if err != nil {
 		return err
@@ -338,6 +352,14 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 			return err
 		}
 	}
+	brokerManager := launchd.Manager{Layout: l}
+	brokerLoaded := false
+	if !migrationNeeded {
+		brokerManager, brokerLoaded, err = loadedWebhookBroker(ctx, l)
+		if err != nil {
+			return err
+		}
+	}
 	backup, err := backupInstallation(l)
 	if err != nil {
 		return fmt.Errorf("backup current installation: %w", err)
@@ -346,9 +368,20 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
+	if brokerLoaded {
+		if err := brokerManager.StopBroker(ctx); err != nil {
+			_ = startEntries(ctx, l, loaded)
+			return err
+		}
+	}
 	manifest, _, updateErr := installArtifacts(l, source, Version, Commit)
 	if updateErr == nil && !migrationNeeded {
 		updateErr = rewritePlists(l)
+	}
+	if updateErr == nil {
+		if brokerLoaded {
+			updateErr = brokerManager.StartBroker(ctx)
+		}
 	}
 	if updateErr == nil {
 		updateErr = startEntries(ctx, l, loaded)
@@ -356,6 +389,9 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 	if updateErr != nil {
 		rollbackErr := restoreInstallation(l, backup)
 		_ = rewritePlists(l)
+		if brokerLoaded {
+			_ = brokerManager.StartBroker(ctx)
+		}
 		_ = startEntries(ctx, l, loaded)
 		if rollbackErr != nil {
 			return fmt.Errorf("update failed: %v; automatic rollback failed: %w", updateErr, rollbackErr)
@@ -410,17 +446,39 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 			return err
 		}
 	}
+	brokerManager := launchd.Manager{Layout: l}
+	brokerLoaded := false
+	if !legacySchemaRollback {
+		brokerManager, brokerLoaded, err = loadedWebhookBroker(ctx, l)
+		if err != nil {
+			return err
+		}
+	}
 	if err := stopEntries(ctx, l, loaded, a.ProcessController); err != nil {
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
+	if brokerLoaded {
+		if err := brokerManager.StopBroker(ctx); err != nil {
+			_ = startEntries(ctx, l, loaded)
+			return err
+		}
+	}
 	if err := restoreInstallation(l, resolved); err != nil {
+		if brokerLoaded {
+			_ = brokerManager.StartBroker(ctx)
+		}
 		_ = startEntries(ctx, l, loaded)
 		return err
 	}
 	if !legacySchemaRollback {
 		if err := rewritePlists(l); err != nil {
 			_ = startEntries(ctx, l, loaded)
+			return err
+		}
+	}
+	if brokerLoaded {
+		if err := brokerManager.StartBroker(ctx); err != nil {
 			return err
 		}
 	}
@@ -669,12 +727,46 @@ func rewritePlists(l layout.Layout) error {
 		return err
 	}
 	binary := filepath.Join(l.BinDir, "agent-loop")
+	brokerWritten := false
 	for _, entry := range registered.Repos {
 		if err := (launchd.Manager{Layout: l}).WritePlist(entry, binary); err != nil {
 			return err
 		}
+		cfg, err := config.Load(entry.RepoPath)
+		if err != nil {
+			return err
+		}
+		if cfg.Webhook.Enabled() && !brokerWritten {
+			if err := (launchd.Manager{Layout: l}).WriteBrokerPlist(binary, entry.EnvironmentPath); err != nil {
+				return err
+			}
+			brokerWritten = true
+		}
 	}
 	return nil
+}
+
+func loadedWebhookBroker(ctx context.Context, l layout.Layout) (launchd.Manager, bool, error) {
+	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
+		return launchd.Manager{}, false, err
+	}
+	for _, entry := range registered.Repos {
+		cfg, loadErr := config.Load(entry.RepoPath)
+		if loadErr != nil {
+			return launchd.Manager{}, false, loadErr
+		}
+		if !cfg.Webhook.Enabled() {
+			continue
+		}
+		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+		status, statusErr := manager.BrokerStatus(ctx)
+		if statusErr != nil {
+			return manager, false, statusErr
+		}
+		return manager, status.Loaded, nil
+	}
+	return launchd.Manager{Layout: l}, false, nil
 }
 
 func repoIDs(entries []registry.Entry) []string {
@@ -705,6 +797,11 @@ func (a App) uninstall(ctx context.Context, l layout.Layout, args []string) erro
 		if status.Loaded {
 			return fmt.Errorf("cannot uninstall while %s is loaded; stop it first", entry.RepoID)
 		}
+	}
+	if _, brokerLoaded, brokerErr := loadedWebhookBroker(ctx, l); brokerErr != nil {
+		return brokerErr
+	} else if brokerLoaded {
+		return fmt.Errorf("cannot uninstall while the shared webhook broker is loaded; stop and unregister webhook repositories first")
 	}
 	removed := []string{}
 	for _, path := range []string{
@@ -764,6 +861,11 @@ func (a App) register(l layout.Layout, args []string) error {
 	if err := (launchd.Manager{Layout: l}).WritePlist(entry, installed); err != nil {
 		return err
 	}
+	if cfg.Webhook.Enabled() {
+		if err := (launchd.Manager{Layout: l}).WriteBrokerPlist(installed, entry.EnvironmentPath); err != nil {
+			return err
+		}
+	}
 	return a.output(*jsonOut, map[string]any{"entry": entry, "plist": l.PlistPath(entry.RepoID)})
 }
 
@@ -784,6 +886,35 @@ func (a App) unregister(ctx context.Context, l layout.Layout, args []string) err
 	}
 	if err := os.Remove(l.PlistPath(entry.RepoID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	registered, loadErr := (registry.Store{Path: l.RegistryPath}).Load()
+	if loadErr != nil {
+		return loadErr
+	}
+	webhookRemaining := false
+	for _, remaining := range registered.Repos {
+		remainingConfig, configErr := config.Load(remaining.RepoPath)
+		if configErr != nil {
+			return fmt.Errorf("cannot determine shared broker ownership for %s: %w", remaining.RepoID, configErr)
+		}
+		if remainingConfig.Webhook.Enabled() {
+			webhookRemaining = true
+			break
+		}
+	}
+	if !webhookRemaining {
+		if err := lm.StopBroker(ctx); err != nil {
+			return err
+		}
+		if err := os.Remove(l.BrokerPlistPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else if brokerStatus, statusErr := lm.BrokerStatus(ctx); statusErr != nil {
+		return statusErr
+	} else if brokerStatus.Loaded {
+		if err := lm.RestartBroker(ctx); err != nil {
+			return err
+		}
 	}
 	return a.output(jsonOut, map[string]any{"unregistered": entry.RepoID, "state_preserved": true})
 }
@@ -807,6 +938,16 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		if err == nil && !launchStatus.Loaded {
 			err = recordSupervisorControl(store, "starting", "start requested")
 		}
+		if err == nil && cfg.Webhook.Enabled() {
+			if _, statErr := os.Stat(l.BrokerPlistPath()); statErr != nil {
+				err = fmt.Errorf("webhook broker LaunchAgent is not registered: %w", statErr)
+			} else {
+				// StartBroker is a no-op for a healthy loaded broker. In particular,
+				// starting one already-loaded repository never restarts sibling
+				// supervisors or a healthy shared broker.
+				err = lm.StartBroker(ctx)
+			}
+		}
 		if err == nil {
 			err = lm.Start(ctx, entry)
 		}
@@ -822,6 +963,9 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		}
 		if err == nil {
 			err = recordSupervisorControl(store, "starting", "restart requested")
+		}
+		if err == nil && cfg.Webhook.Enabled() {
+			err = lm.RestartBroker(ctx)
 		}
 		if err == nil {
 			err = lm.Start(ctx, entry)
@@ -850,6 +994,39 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 	return a.output(jsonOut, result)
 }
 
+func (a App) runBroker(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("broker", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(registered.Repos))
+	for id := range registered.Repos {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	registrations := make([]webhook.Registration, 0, len(ids))
+	for _, id := range ids {
+		entry := registered.Repos[id]
+		cfg, loadErr := config.Load(entry.RepoPath)
+		if loadErr != nil {
+			return fmt.Errorf("load webhook repository %s: %w", entry.RepoID, loadErr)
+		}
+		if cfg.Webhook.Enabled() {
+			registrations = append(registrations, webhook.Registration{Entry: entry, Config: cfg})
+		}
+	}
+	broker := &webhook.Broker{Root: l.Root, Registrations: registrations, Logger: log.New(a.Err, "agent-loop broker: ", log.LstdFlags|log.LUTC)}
+	return broker.Run(ctx)
+}
+
 func recordSupervisorControl(store state.Store, supervisorState, message string) error {
 	_, err := store.Update("supervisor_"+supervisorState, 0, "", map[string]string{"reason": message}, func(s *state.Snapshot) error {
 		s.Supervisor.State = supervisorState
@@ -858,6 +1035,7 @@ func recordSupervisorControl(store state.Store, supervisorState, message string)
 		s.Supervisor.FailureKind = ""
 		s.Supervisor.ConsecutiveFailures = 0
 		s.Supervisor.RetryAfter = nil
+		s.Supervisor.RateLimit = nil
 		return nil
 	})
 	return err
@@ -877,11 +1055,55 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 	if err != nil {
 		return err
 	}
+	if cooldown, active, cooldownErr := (ratelimit.Store{Path: l.RateLimitPath()}).Current(time.Now().UTC()); cooldownErr != nil {
+		return cooldownErr
+	} else if active {
+		snapshot.Supervisor.RateLimit = &state.RateLimit{
+			Resource: cooldown.Resource, ObservedResetAt: cooldown.ResetAt,
+			CooldownSource: cooldown.Source, SuppressedRetryCount: cooldown.SuppressedRetryCount,
+		}
+		if snapshot.Supervisor.RetryAfter == nil || cooldown.ResetAt.After(*snapshot.Supervisor.RetryAfter) {
+			snapshot.Supervisor.RetryAfter = &cooldown.ResetAt
+		}
+	}
 	launchStatus, err := (launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}).Status(ctx, entry)
 	if err != nil {
 		return err
 	}
-	return a.output(jsonOut, buildStatus(launchStatus, snapshot, cfg.Queue.Concurrency))
+	result := buildStatus(launchStatus, snapshot, cfg.Queue.Concurrency)
+	if cfg.Webhook.Enabled() {
+		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+		brokerLaunchd, statusErr := manager.BrokerStatus(ctx)
+		if statusErr != nil {
+			return statusErr
+		}
+		var brokerState webhook.Status
+		data, readErr := os.ReadFile(filepath.Join(l.BrokerDir(), "status.json"))
+		if readErr == nil {
+			if err := json.Unmarshal(data, &brokerState); err != nil {
+				return fmt.Errorf("decode broker status: %w", err)
+			}
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			return readErr
+		}
+		sweep, sweepErr := webhook.LoadSweepState(l.RepoDir(entry.RepoID))
+		if sweepErr != nil {
+			return sweepErr
+		}
+		brokerState.LastSuccessfulSafetySweep = sweep.LastSuccessful
+		brokerState.NotModified304 = sweep.NotModified304
+		if mailboxEntries, mailboxErr := os.ReadDir(webhook.MailboxDir(l.RepoDir(entry.RepoID))); mailboxErr == nil {
+			for _, mailboxEntry := range mailboxEntries {
+				if !mailboxEntry.IsDir() && strings.HasSuffix(mailboxEntry.Name(), ".json") {
+					brokerState.QueueDepth++
+				}
+			}
+		} else if !errors.Is(mailboxErr, os.ErrNotExist) {
+			return mailboxErr
+		}
+		result.Broker = &brokerStatus{Launchd: brokerLaunchd, State: brokerState, Sweep: sweep}
+	}
+	return a.output(jsonOut, result)
 }
 
 func (a App) watch(ctx context.Context, l layout.Layout, args []string) error {
@@ -1128,6 +1350,306 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 	})
 }
 
+func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("resume-blocked", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	repo := fs.String("repo", "", "repository path")
+	issueNumber := fs.Int("issue", 0, "environment-blocked Issue number")
+	confirmed := fs.Bool("confirm-prerequisite-resolved", false, "confirm the external environment prerequisite is resolved")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if *issueNumber <= 0 {
+		return exitError{2, fmt.Errorf("--issue must be a positive Issue number")}
+	}
+	if !*confirmed {
+		return exitError{2, fmt.Errorf("--confirm-prerequisite-resolved is required")}
+	}
+	entry, err := a.resolvePath(l, *repo)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(entry.RepoPath)
+	if err != nil {
+		return err
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
+	snapshot, err := store.Load()
+	if err != nil {
+		return err
+	}
+	current := snapshot.Issues[strconv.Itoa(*issueNumber)]
+	if current == nil {
+		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
+	}
+	pendingResume := false
+	if current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" && current.Status != "blocked" {
+		if current.Status != "environment_resume_pending" {
+			return exitError{4, fmt.Errorf("Issue #%d is not waiting for an environment resume (status=%s)", *issueNumber, current.Status)}
+		}
+		if current.Lease == nil || current.RunID == "" || current.Worktree == "" || current.Branch == "" {
+			return exitError{4, fmt.Errorf("Issue #%d pending environment resume does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
+		}
+		if current.GitHubSync == "environment_resume" {
+			if current.EnvironmentResume.Status != "requested" {
+				return exitError{4, fmt.Errorf("Issue #%d pending environment resume has inconsistent durable synchronization state", *issueNumber)}
+			}
+			pendingResume = true
+		} else if current.GitHubSync != "" || current.EnvironmentResume.Status != "github_synced" {
+			return exitError{4, fmt.Errorf("Issue #%d pending environment resume has inconsistent durable synchronization state", *issueNumber)}
+		} else {
+			baseSHA := current.Lease.BaseSHA
+			return a.output(*jsonOut, map[string]any{
+				"issue": *issueNumber, "status": current.Status, "resume_id": current.EnvironmentResume.ID,
+				"branch": current.Branch, "worktree": current.Worktree, "base_sha": baseSHA, "idempotent": true,
+			})
+		}
+	}
+	if !pendingResume && (current.Status != "blocked" || current.GitHubSync != "") {
+		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before environment resume (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
+	}
+	interruptedResume := current.Status == "blocked" && current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" &&
+		(current.EnvironmentResume.Status == "requested" || current.EnvironmentResume.Status == "github_synced")
+	resumeIntent := interruptedResume || pendingResume
+	legacyWorkerBlock := current.BlockedCause == nil && current.FailureKind == "issue" && strings.Contains(current.LastError, "worker blocked")
+	if !legacyWorkerBlock && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
+		return exitError{4, fmt.Errorf("Issue #%d is not a resumable worker environment block", *issueNumber)}
+	}
+	if current.ConflictRecovery != nil {
+		return exitError{4, fmt.Errorf("Issue #%d is a Pull Request conflict block; use agent-loop retry", *issueNumber)}
+	}
+	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && !legacyWorkerBlock && !interruptedResume) {
+		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
+	}
+	controller := a.ProcessController
+	if controller == nil {
+		controller = supervisor.OSProcessGroupController{}
+	}
+	pgid := current.WorkerPGID
+	if pgid <= 1 {
+		pgid = current.WorkerPID
+	}
+	if controller.Alive(current.WorkerPID) || controller.GroupAlive(pgid) {
+		return exitError{4, fmt.Errorf("Issue #%d still has an active worker process", *issueNumber)}
+	}
+	for _, request := range snapshot.PendingRequests {
+		if request != nil && request.IssueNumber == *issueNumber && request.Status == "pending" {
+			return exitError{4, fmt.Errorf("Issue #%d has a pending manual answer request and is not an environment-blocked resume candidate", *issueNumber)}
+		}
+	}
+	manager := worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]}
+	inspection, err := manager.Inspect(ctx, cfg, current.Worktree, current.Branch)
+	if err != nil {
+		return fmt.Errorf("inspect environment resume worktree: %w", err)
+	}
+	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists {
+		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to resume: %+v", inspection)}
+	}
+	if interruptedResume && current.Lease == nil && current.EnvironmentResume.BaseSHA == "" {
+		baseSHA, recoverErr := store.EnvironmentResumeBaseSHA(*issueNumber, current.RunID, current.EnvironmentResume.ID)
+		if recoverErr != nil {
+			return exitError{4, fmt.Errorf("recover publication base SHA for interrupted environment resume: %w; state was not changed", recoverErr)}
+		}
+		current.EnvironmentResume.BaseSHA = baseSHA
+	}
+	baseSHA, err := environmentResumeBaseSHA(ctx, entry.Commands["git"], cfg, current, inspection)
+	if err != nil {
+		return exitError{4, err}
+	}
+	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
+	remote, err := client.Inspect(ctx, cfg, *issueNumber, current.Branch)
+	if err != nil {
+		return fmt.Errorf("inspect environment-blocked Issue: %w", err)
+	}
+	if !strings.EqualFold(remote.Issue.State, "open") {
+		return exitError{4, fmt.Errorf("Issue #%d is not open", *issueNumber)}
+	}
+	labels := map[string]bool{}
+	for _, label := range remote.Issue.Labels {
+		labels[strings.ToLower(label)] = true
+	}
+	blockedLabel := ""
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			blockedLabel = strings.ToLower(label)
+			continue
+		}
+		if labels[strings.ToLower(label)] {
+			return exitError{4, fmt.Errorf("Issue #%d has manual exclusion label %q", *issueNumber, label)}
+		}
+	}
+	if blockedLabel == "" {
+		return exitError{4, fmt.Errorf("GitHub exclude labels do not define the supervisor-owned blocked label")}
+	}
+	runningLabel := labels[strings.ToLower(cfg.GitHub.RunningLabel)]
+	blocked := labels[blockedLabel]
+	if resumeIntent {
+		switch current.EnvironmentResume.Status {
+		case "requested":
+			if blocked == runningLabel {
+				return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume has ambiguous GitHub blocked/running labels", *issueNumber)}
+			}
+		case "github_synced":
+			marker := "<!-- codex-issue-loop:environment-resume:" + current.EnvironmentResume.ID + " -->"
+			commented := false
+			for _, comment := range remote.Issue.Comments {
+				commented = commented || strings.Contains(comment, marker)
+			}
+			if blocked || !runningLabel || !commented {
+				return exitError{4, fmt.Errorf("Issue #%d GitHub state no longer matches the synchronized environment resume", *issueNumber)}
+			}
+		}
+	} else if !blocked || runningLabel {
+		return exitError{4, fmt.Errorf("Issue #%d does not have only the supervisor-owned blocked label", *issueNumber)}
+	}
+	if labels[strings.ToLower(cfg.GitHub.DoneLabel)] || labels[strings.ToLower(cfg.GitHub.FailedLabel)] || labels[strings.ToLower(cfg.GitHub.NeedsInputLabel)] {
+		return exitError{4, fmt.Errorf("Issue #%d has an incompatible terminal or needs-input label", *issueNumber)}
+	}
+	if current.PullRequestURL == "" {
+		if len(remote.PullRequests) != 0 {
+			return exitError{4, fmt.Errorf("Issue #%d has a Pull Request not recorded in durable state", *issueNumber)}
+		}
+	} else {
+		matched := len(remote.PullRequests) == 1 && remote.PullRequests[0].URL == current.PullRequestURL &&
+			strings.EqualFold(remote.PullRequests[0].State, "open") && remote.PullRequests[0].HeadRefName == current.Branch
+		if !matched {
+			return exitError{4, fmt.Errorf("Issue #%d saved Pull Request is inconsistent with GitHub", *issueNumber)}
+		}
+	}
+
+	resumeID := state.NewID("resume")
+	if resumeIntent {
+		resumeID = current.EnvironmentResume.ID
+	}
+	now := time.Now().UTC()
+	previousReason := current.LastError
+	if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
+		previousReason = current.BlockedCause.Reason
+	}
+	if !pendingResume {
+		eventType := "environment_resume_requested"
+		if interruptedResume {
+			eventType = "environment_resume_recovered"
+		}
+		_, err = store.Update(eventType, *issueNumber, current.RunID, map[string]any{
+			"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock, "interrupted_resume": interruptedResume, "base_sha": baseSHA,
+		}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(*issueNumber)]
+			if item == nil || item.RunID != current.RunID || item.Status != "blocked" || item.GitHubSync != "" ||
+				(interruptedResume && (item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != current.EnvironmentResume.Status)) {
+				return fmt.Errorf("Issue #%d changed while environment resume was being prepared", *issueNumber)
+			}
+			if item.Worktree != current.Worktree || item.Branch != current.Branch || item.PullRequestURL != current.PullRequestURL || !reflect.DeepEqual(item.Lease, current.Lease) {
+				return fmt.Errorf("Issue #%d worktree, branch, Pull Request, or resource lease changed while environment resume was being prepared", *issueNumber)
+			}
+			item.Status = "environment_resume_pending"
+			item.GitHubSync = "environment_resume"
+			if item.BlockedCause == nil && legacyWorkerBlock {
+				item.BlockedCause = &state.BlockedCause{
+					Origin: "worker", Kind: "environment", Resumable: true,
+					Reason: item.LastError, BlockedAt: item.UpdatedAt,
+				}
+			}
+			if item.Lease == nil && (legacyWorkerBlock || interruptedResume) {
+				item.LeaseGeneration++
+				owner := state.LeaseOwner{RunID: item.RunID, Generation: item.LeaseGeneration}
+				item.Lease = &state.ResourceLease{
+					Owner: owner, Slot: 0, DeclaredResources: []string{},
+					ResolvedResources: []string{state.RepositoryResource}, BaseSHA: baseSHA, ReservedAt: now,
+				}
+			} else if item.Lease != nil && item.Lease.BaseSHA == "" {
+				item.Lease.BaseSHA = baseSHA
+			}
+			if interruptedResume {
+				item.EnvironmentResume.Status = "requested"
+				item.EnvironmentResume.BaseSHA = baseSHA
+			} else {
+				item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: item.LastError, BaseSHA: baseSHA}
+			}
+			item.RetryAfter = nil
+			item.UpdatedAt = now
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if err := client.MarkEnvironmentResume(ctx, cfg, *issueNumber, resumeID); err != nil {
+		return fmt.Errorf("sync environment resume to GitHub (durable resume remains pending): %w", err)
+	}
+	updated, err := store.Update("github_state_synced", *issueNumber, current.RunID, map[string]string{"state": "environment_resume", "resume_id": resumeID}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(*issueNumber)]
+		if item != nil && item.GitHubSync == "environment_resume" && item.EnvironmentResume != nil && item.EnvironmentResume.ID == resumeID {
+			item.GitHubSync = ""
+			item.EnvironmentResume.Status = "github_synced"
+			item.UpdatedAt = time.Now().UTC()
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	status := "environment_resume_pending"
+	if item := updated.Issues[strconv.Itoa(*issueNumber)]; item != nil {
+		status = item.Status
+	}
+	return a.output(*jsonOut, map[string]any{
+		"issue": *issueNumber, "status": status, "resume_id": resumeID,
+		"branch": current.Branch, "worktree": current.Worktree, "session_id": current.SessionID,
+		"base_sha": baseSHA,
+		"dirty":    inspection.Dirty, "unpushed_commits": inspection.UnpushedCommits,
+	})
+}
+
+func environmentResumeBaseSHA(ctx context.Context, git string, cfg config.Config, current *state.Issue, inspection worktree.Inspection) (string, error) {
+	return verifiedPublicationBaseSHA(ctx, git, cfg, current, inspection, "environment resume")
+}
+
+func verifiedPublicationBaseSHA(ctx context.Context, git string, cfg config.Config, current *state.Issue, inspection worktree.Inspection, operation string) (string, error) {
+	if git == "" {
+		git = "git"
+	}
+	baseSHA := ""
+	if current.Lease != nil {
+		baseSHA = current.Lease.BaseSHA
+		if baseSHA != strings.TrimSpace(baseSHA) {
+			return "", fmt.Errorf("saved publication base SHA is not canonical; state was not changed")
+		}
+	}
+	if baseSHA == "" && current.EnvironmentResume != nil {
+		baseSHA = current.EnvironmentResume.BaseSHA
+		if baseSHA != strings.TrimSpace(baseSHA) {
+			return "", fmt.Errorf("saved environment resume base SHA is not canonical; state was not changed")
+		}
+	}
+	if baseSHA == "" {
+		ref := "refs/remotes/origin/" + cfg.Git.BaseBranch
+		out, err := exec.CommandContext(ctx, git, "-C", current.Worktree, "rev-parse", "--verify", ref+"^{commit}").Output()
+		if err != nil {
+			return "", fmt.Errorf("resolve configured base branch %q for %s: %w; fetch origin/%s and retry without editing durable state", cfg.Git.BaseBranch, operation, err, cfg.Git.BaseBranch)
+		}
+		baseSHA = strings.TrimSpace(string(out))
+		if baseSHA == "" {
+			return "", fmt.Errorf("resolve configured base branch %q for %s: git returned an empty commit SHA; state was not changed", cfg.Git.BaseBranch, operation)
+		}
+	}
+	verified, err := exec.CommandContext(ctx, git, "-C", current.Worktree, "rev-parse", "--verify", baseSHA+"^{commit}").Output()
+	if err != nil {
+		return "", fmt.Errorf("verify publication base SHA %q for %s: %w; state was not changed", baseSHA, operation, err)
+	}
+	if strings.TrimSpace(string(verified)) != baseSHA {
+		return "", fmt.Errorf("verify publication base SHA %q for %s: value is not a full canonical commit SHA; state was not changed", baseSHA, operation)
+	}
+	if inspection.Head == "" {
+		return "", fmt.Errorf("verify publication base SHA for %s: saved worktree HEAD is empty; state was not changed", operation)
+	}
+	if err := exec.CommandContext(ctx, git, "-C", current.Worktree, "merge-base", "--is-ancestor", baseSHA, inspection.Head).Run(); err != nil {
+		return "", fmt.Errorf("verify publication base SHA %s for %s: it is not an ancestor of worktree HEAD %s; state was not changed", baseSHA, operation, inspection.Head)
+	}
+	return baseSHA, nil
+}
+
 func (a App) logs(l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
@@ -1187,6 +1709,9 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	if !workerCompatibility.OK() {
 		return fmt.Errorf("unsupported %s worker runtime: %s", backendID, compatibilityDetail(workerCompatibility))
 	}
+	if cfg.Worker.CommandNetwork.LocalhostOnly() && !workerCompatibility.Has("localhost_network_proxy") {
+		return fmt.Errorf("Codex runtime does not provide the required localhost network proxy capability; worker was not started")
+	}
 	if entry.WorkerVersion != "" && entry.WorkerVersion != workerCompatibility.Version {
 		return fmt.Errorf("worker runtime version drift detected for %s (registered=%s current=%s); run doctor and re-register after compatibility review", backendID, entry.WorkerVersion, workerCompatibility.Version)
 	}
@@ -1195,14 +1720,6 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		return fmt.Errorf("unsupported gh CLI: %s", compatibilityDetail(ghCompatibility))
 	}
 	secrets := cfg.RedactionValues()
-	notificationToken := ""
-	if cfg.Notifications.Enabled {
-		notificationToken, err = loadNotificationToken(l, entry)
-		if err != nil {
-			return fmt.Errorf("load notification credential: %w", err)
-		}
-		secrets = append(secrets, notificationToken)
-	}
 	logPolicy := retention.Policy{MaxBytes: cfg.Logs.RotateBytes, MaxAge: cfg.Logs.RotateInterval.Duration, Keep: cfg.Logs.Generations}
 	for _, name := range []string{"launchd.stdout.log", "launchd.stderr.log"} {
 		if err := retention.RotateExisting(filepath.Join(l.RepoDir(entry.RepoID), name), logPolicy); err != nil {
@@ -1216,11 +1733,12 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	defer supervisorLog.Close()
 	store := state.Store{
 		Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath,
-		Secrets: secrets, EventRetention: logPolicy, NotificationsEnabled: cfg.Notifications.Enabled,
+		Secrets: secrets, EventRetention: logPolicy,
 	}
 	cfg.Worker.Command = workerPath
 	backend, err := worker.NewBackend(cfg, worker.FactoryOptions{StateDir: l.RepoDir(entry.RepoID), Secrets: secrets,
-		RuntimeVersion: workerCompatibility.Version, ResumeSupported: boolPointer(workerCompatibility.Has("session_resume"))})
+		RuntimeVersion: workerCompatibility.Version, ResumeSupported: boolPointer(workerCompatibility.Has("session_resume")),
+		AppServerGoalSupported: boolPointer(workerCompatibility.Has("app_server_goal"))})
 	if err != nil {
 		return err
 	}
@@ -1234,13 +1752,13 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	defer safeLog.Flush()
 	loop := &supervisor.Loop{
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
+		RateLimits:     ratelimit.Store{Path: l.RateLimitPath()},
 		Worktrees:      worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
 		Worker:         backend,
 		WorkerIdentity: identity,
-		Publisher:      publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], Secrets: secrets},
+		Publisher:      publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], GofmtPath: entry.Commands["gofmt"], Secrets: secrets},
 		Conflicts:      conflict.Manager{GitPath: entry.Commands["git"]},
 		Logger:         log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
-		Notifications:  notify.NewDispatcher(cfg, store, notificationToken),
 	}
 	err = loop.Run(ctx)
 	var blocked supervisor.BlockedError

@@ -13,9 +13,62 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
+
+func TestLoadDoesNotEmitPermissionWatchEventsWhenModesAreSecure(t *testing.T) {
+	store := newStore(t)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	if err := watcher.Add(store.Dir); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 5 {
+		if _, err := store.Load(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	select {
+	case event := <-watcher.Events:
+		t.Fatalf("secure state load emitted fsnotify event: %s", event)
+	case err := <-watcher.Errors:
+		t.Fatal(err)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestLoadRepairsUnsafeManagedStateModes(t *testing.T) {
+	store := newStore(t)
+	if err := os.Chmod(store.Dir, 0o755|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{store.StatePath(), store.lockPath()}
+	for _, path := range paths {
+		if err := os.Chmod(path, 0o644|os.ModeSetuid); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	const managedModeMask = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	if info, err := os.Stat(store.Dir); err != nil || info.Mode()&managedModeMask != 0o700 {
+		t.Fatalf("state directory mode=%v err=%v", info, err)
+	}
+	for _, path := range paths {
+		if info, err := os.Stat(path); err != nil || info.Mode()&managedModeMask != 0o600 {
+			t.Fatalf("managed path %s mode=%v err=%v", path, info, err)
+		}
+	}
+}
 
 func TestStateAndEventsNeverPersistSecrets(t *testing.T) {
 	secret := "configured-secret-value"
@@ -407,7 +460,7 @@ func TestFaultPartialEventTailIsTruncatedAndRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString(`{"version":3,"sequence":2`); err != nil {
+	if _, err := f.WriteString(`{"version":4,"sequence":2`); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
@@ -507,6 +560,17 @@ func TestUnsupportedSchemaVersionIsRejectedWithoutQuarantine(t *testing.T) {
 				t.Fatalf("unsupported state was quarantined: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidIDRejectsRunDirectoryTraversal(t *testing.T) {
+	if !ValidID("run_abc-123", "run_") {
+		t.Fatal("valid run ID was rejected")
+	}
+	for _, value := range []string{"run_", "../run_abc", "run_../../state", "resume_abc", "run_with space"} {
+		if ValidID(value, "run_") {
+			t.Fatalf("unsafe run ID was accepted: %q", value)
+		}
 	}
 }
 

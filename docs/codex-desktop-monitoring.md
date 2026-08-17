@@ -6,7 +6,7 @@
 
 この導線の正本はActivityやOS通知ではない。質問、request ID、回答状態は`agent-loop`の永続snapshotに、作業要求と公開結果はGitHub IssueとPull Requestに保持する。Codex Desktopが終了中、Macが停止中、または監視chatのtool callが切断中の期間に、新しい項目がActivityへ追加されることは保証しない。再接続後に`status`または`watch`がsnapshotを読み、既存の未回答requestを再表示する。
 
-`.agent-loop.yaml`の`notifications`は、この通常経路とは別のopt-in外部push adapterである。監視chatが未接続の期間にも通知が必要な場合だけ[スマートフォン直接push通知](notifications.md)を追加する。外部processから任意のDesktop chatをwakeしたり、その表示を直接`Needs input`へ変えたりする非公開機能には依存しない。
+外部processから任意のDesktop chatをwakeしたり、その表示を直接`Needs input`へ変えたりする非公開機能には依存しない。監視chatが未接続の期間は永続snapshotだけが正本となり、再接続後のstatus-first手順で未回答requestを再表示する。
 
 ## 2. DesktopとmacOSのセットアップ
 
@@ -18,7 +18,7 @@ OpenAI公式の[Projects and chats](https://learn.chatgpt.com/docs/projects)と[
 4. sidebarのbellからActivityを開けることを確認する。macOSでは`Cmd`+`Option`+`U`でも開閉できる。表示filterに利用可能なら`Pinned`を含める。
 5. repository専用の監視chatを作成し、後述の名前へ変更してpinする。pinは見つけやすさだけを変え、権限や参照contextを増やさない。
 
-質問通知とActivityが利用できないaccountまたはsurfaceでは、この導線を受け入れ済みとしない。CLIの永続質問は利用できるため、`status --json`で回答待ちを確認するか、必要なら外部pushを設定する。
+質問通知とActivityが利用できないaccountまたはsurfaceでは、この導線を受け入れ済みとしない。CLIの永続質問は利用できるため、`status --json`で回答待ちを確認する。
 
 ## 3. repositoryごとの監視chat
 

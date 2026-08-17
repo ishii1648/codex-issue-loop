@@ -10,7 +10,7 @@
 | 項目 | 判定 | `agent-loop`での扱い |
 | --- | --- | --- |
 | 対話surfaceのGoal | 利用可能 | 単一目的の監視・復旧taskで利用できる |
-| headless Goal | App Server経由で利用可能 | optional `extended` worker adapterをIssue #53で検証する。現行workerは変更しない |
+| headless Goal | App Server経由で利用可能 | optional `extended` worker adapterとして検証実装済み。既定の`codex exec`経路は維持する |
 | `codex exec --goal`相当 | 利用不可 | 公式non-interactive interfaceにGoal optionはないため推測で呼ばない |
 | App Server所有threadのprogrammatic resume/start | 利用可能 | `thread/resume`と`turn/start`を将来adapterで利用できる |
 | Desktopのquestion notifications | 利用可能 | 接続中の監視taskが質問した際の通常OS通知に使う |
@@ -48,7 +48,7 @@ Goalを利用しても責務境界は変えない。
 - Goal stateをqueueの正本やLaunchAgentの代替にしない。
 - App Server adapterが失敗しても、現行worktreeと永続stateを失わない。
 
-実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)へ切り出した。
+実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)で行い、責務・failure model・rollbackは[App Server Goal adapter](app-server-goal-adapter.md)へ記録した。
 
 ## External wakeとNeeds input
 
@@ -73,7 +73,7 @@ App Serverの`thread/status/changed`とserver requestは、そのApp Server clie
 
 [Scheduled tasks](https://learn.chatgpt.com/docs/automations)は同じchatへ時刻ベースで戻り、long-running operationをpollできる。ただし各runはChatGPT/Codex workを実行する。filesystem eventで即時wakeする仕組みでも、modelを呼ばないmonitorでもないため、`agent-loop watch`の代替にはしない。
 
-[CLI notifications](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications)の外部`notify`が現在扱うeventは`agent-turn-complete`だけである。よって、監視task未接続時の`needs_input`とsupervisor blockedには引き続き永続outbox + ntfy adapterを使う。
+[CLI notifications](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications)の外部`notify`が現在扱うeventは`agent-turn-complete`だけであり、`needs_input`の正本には使わない。監視task未接続時は永続snapshotにattentionを保持し、再接続時のstatus-first手順で回収する。
 
 ## Token usageと待機
 

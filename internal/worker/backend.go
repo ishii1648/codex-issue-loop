@@ -7,10 +7,11 @@ import (
 )
 
 type FactoryOptions struct {
-	StateDir        string
-	Secrets         []string
-	RuntimeVersion  string
-	ResumeSupported *bool
+	StateDir               string
+	Secrets                []string
+	RuntimeVersion         string
+	ResumeSupported        *bool
+	AppServerGoalSupported *bool
 }
 
 // NewBackend resolves only built-in adapters. It intentionally does not
@@ -18,7 +19,11 @@ type FactoryOptions struct {
 func NewBackend(cfg config.Config, options FactoryOptions) (Backend, error) {
 	switch cfg.Worker.Backend {
 	case "", "codex":
-		return Codex{StateDir: options.StateDir, Secrets: options.Secrets, ResumeSupported: options.ResumeSupported, RuntimeVersion: options.RuntimeVersion}, nil
+		execAdapter := Codex{StateDir: options.StateDir, Secrets: options.Secrets, ResumeSupported: options.ResumeSupported, RuntimeVersion: options.RuntimeVersion}
+		if cfg.Worker.AppServer.Enabled && options.AppServerGoalSupported != nil && *options.AppServerGoalSupported {
+			return CodexAppServer{Exec: execAdapter, StateDir: options.StateDir, Secrets: options.Secrets, RuntimeVersion: options.RuntimeVersion}, nil
+		}
+		return execAdapter, nil
 	case "claude-code":
 		return ClaudeCode{StateDir: options.StateDir, Secrets: options.Secrets, ResumeSupported: options.ResumeSupported, RuntimeVersion: options.RuntimeVersion}, nil
 	case "opencode":

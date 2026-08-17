@@ -54,7 +54,7 @@ conflicts(A, B) =
 並列化を導入するschema v3では、`.agent-loop.yaml`に次の形式を追加する。配列順は表示用であり、admission優先度には使わない。
 
 ```yaml
-version: 3
+version: 4
 
 queue:
   concurrency: 3
@@ -276,7 +276,7 @@ migrationは全loop停止、checksum付きbackup、read-only preview、明示`--
 
 v2からv3へ移行する際、既存のactive Issueは宣言resourceを推測せず、slot 0と`repo:*`のexclusive leaseへ安全側に移行する。既存の未処理Issueは本文やlabelを変更せず受理し、metadataが揃うまでは`repo:*`へ縮退する。active Issueが複数あるなどconcurrency 1の前提と矛盾するv2 stateは自動修復せずmigrationを拒否する。
 
-未知のconfig/state/metadata versionは推測で読み替えない。config/stateの未知versionは起動を拒否し、Issue metadataだけが未知versionの場合はそのIssueを`repo:*`へ縮退させる。rollbackは全loop停止、active leaseなし、v3 backupとの対応確認を必須とし、v3のactive leaseをv2 stateへ捨てて戻してはならない。
+未知のconfig/state/metadata versionは推測で読み替えない。config/stateの未知versionは起動を拒否し、Issue metadataだけが未知versionの場合はそのIssueを`repo:*`へ縮退させる。現行v4からv3へのrollbackも全loop停止、active leaseなし、対応backupの確認を必須とし、active leaseを古いstateへ捨てて戻してはならない。
 
 ## 11. Self-hosting初期taxonomy
 
@@ -289,7 +289,7 @@ v2からv3へ移行する際、既存のactive Issueは宣言resourceを推測�
 | `github` | `internal/github/**`、`internal/publish/**` | GitHub取得とpublication |
 | `worker` | `internal/worker/**`、`schemas/**` | worker processとresult contract |
 | `host` | `cmd/**`、`internal/app/**`、`internal/launchd/**`、`internal/registry/**`、`internal/layout/**`、`internal/lifecycle/**`、`internal/worktree/**` | CLI、LaunchAgent、host-local lifecycle |
-| `operations` | `internal/observe/**`、`internal/notify/**`、`internal/retention/**`、`internal/redact/**`、`docs/*runbook.md` | 監視、通知、保持、運用 |
+| `operations` | `internal/observe/**`、`internal/retention/**`、`internal/redact/**`、`docs/*runbook.md` | 監視、保持、運用 |
 | `release` | `.github/**`、`scripts/**`、`Makefile`、`go.mod`、`go.sum`、`assets.go`、`internal/compat/**`、`internal/migration/**`、`docs/release.md`、`docs/compatibility.md`、`docs/migration.md` | build、配布、互換性、migration |
 | `docs` | `.gitignore`、`README.md`、`AGENTS.md`、`docs/**` | 上記に含まれない横断文書 |
 
