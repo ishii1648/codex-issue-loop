@@ -20,6 +20,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/publication"
+	"github.com/ishii1648/codex-issue-loop/internal/ratelimit"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
@@ -56,6 +57,7 @@ type Loop struct {
 	Processes       ProcessInspector
 	Clock           Clock
 	SchedulerTimers SchedulerTimerSource
+	RateLimits      ratelimit.Store
 	Random          RandomSource
 	Logger          *log.Logger
 	DiskAvailable   func(string) (uint64, error)
@@ -161,6 +163,7 @@ func (l *Loop) waitForWork(ctx context.Context, delay time.Duration, watcher *fs
 }
 
 func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
+	l.enableRateLimitGate()
 	snapshot, err := l.Store.Load()
 	if err != nil {
 		return false, failure.Wrap(failure.Supervisor, "load durable state", err)
@@ -1490,11 +1493,50 @@ func (l *Loop) recordSupervisorRetry(cause error, kind failure.Kind, consecutive
 	return err
 }
 
+func rateLimitState(cooldown ratelimit.Cooldown) *state.RateLimit {
+	return &state.RateLimit{
+		Resource: cooldown.Resource, ObservedResetAt: cooldown.ResetAt,
+		CooldownSource: cooldown.Source, SuppressedRetryCount: cooldown.SuppressedRetryCount,
+	}
+}
+
+func (l *Loop) recordSupervisorRateLimit(cause error, consecutive int, cooldown ratelimit.Cooldown) error {
+	_, err := l.Store.Update("supervisor_rate_limit_cooldown", 0, "", map[string]any{
+		"resource": cooldown.Resource, "observed_reset_at": cooldown.ResetAt,
+		"cooldown_source": cooldown.Source, "suppressed_retry_count": cooldown.SuppressedRetryCount,
+	}, func(s *state.Snapshot) error {
+		s.Supervisor.State = "retry_wait"
+		s.Supervisor.Message = cause.Error()
+		s.Supervisor.FailureKind = string(failure.Transient)
+		s.Supervisor.ConsecutiveFailures = consecutive
+		s.Supervisor.RetryAfter = &cooldown.ResetAt
+		s.Supervisor.RateLimit = rateLimitState(cooldown)
+		return nil
+	})
+	return err
+}
+
+func (l *Loop) recordRateLimitSuppressed(cooldown ratelimit.Cooldown) error {
+	_, err := l.Store.Update("supervisor_rate_limit_retry_suppressed", 0, "", map[string]any{
+		"resource": cooldown.Resource, "observed_reset_at": cooldown.ResetAt,
+		"cooldown_source": cooldown.Source, "suppressed_retry_count": cooldown.SuppressedRetryCount,
+	}, func(s *state.Snapshot) error {
+		s.Supervisor.State = "retry_wait"
+		s.Supervisor.Message = fmt.Sprintf("GitHub %s primary rate-limit cooldown until %s", cooldown.Resource, cooldown.ResetAt.Format(time.RFC3339))
+		s.Supervisor.FailureKind = string(failure.Transient)
+		s.Supervisor.RetryAfter = &cooldown.ResetAt
+		s.Supervisor.RateLimit = rateLimitState(cooldown)
+		return nil
+	})
+	return err
+}
+
 func (l *Loop) resetSupervisorFailures(previous int) error {
 	_, err := l.Store.Update("supervisor_recovered", 0, "", map[string]int{"previous_consecutive_failures": previous}, func(s *state.Snapshot) error {
 		s.Supervisor.FailureKind = ""
 		s.Supervisor.ConsecutiveFailures = 0
 		s.Supervisor.RetryAfter = nil
+		s.Supervisor.RateLimit = nil
 		return nil
 	})
 	return err

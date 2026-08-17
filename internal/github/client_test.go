@@ -198,6 +198,50 @@ func TestFaultGitHubAdapterRejectsMalformedResponse(t *testing.T) {
 	}
 }
 
+func TestCLIPrimaryGraphQLRateLimitUsesRESTRateLimitReset(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	logPath := filepath.Join(dir, "calls.log")
+	reset := time.Date(2026, 8, 17, 3, 0, 19, 0, time.UTC)
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+if [ "$1 $2" = "api /rate_limit" ]; then
+  printf '%%s\n' '{"resources":{"graphql":{"reset":%d}}}'
+  exit 0
+fi
+printf '%%s\n' 'GraphQL: API rate limit exceeded for user' >&2
+exit 1
+`, logPath, reset.Unix())
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	_, err := (CLI{Path: fake}).ListReady(context.Background(), cfg)
+	limited, ok := AsRateLimit(err)
+	if !ok {
+		t.Fatalf("error was not classified as primary rate limit: %v", err)
+	}
+	if limited.Resource != "graphql" || !limited.ResetAt.Equal(reset) || limited.Source != "rest-rate-limit" {
+		t.Fatalf("rate limit=%+v", limited)
+	}
+	calls, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Count(string(calls), "issue list") != 1 || strings.Count(string(calls), "api /rate_limit") != 1 {
+		t.Fatalf("unexpected calls:\n%s", calls)
+	}
+}
+
+func TestPrimaryRateLimitPrefersResponseResetHeader(t *testing.T) {
+	reset := time.Date(2026, 8, 17, 4, 0, 0, 0, time.UTC)
+	resource, got, source, ok := primaryRateLimit([]byte(fmt.Sprintf("GraphQL: rate limit exceeded\nx-ratelimit-reset: %d", reset.Unix())))
+	if !ok || resource != "graphql" || !got.Equal(reset) || source != "x-ratelimit-reset" {
+		t.Fatalf("resource=%q reset=%s source=%q ok=%v", resource, got, source, ok)
+	}
+}
+
 func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")

@@ -42,6 +42,14 @@ type Supervisor struct {
 	FailureKind         string     `json:"failure_kind,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
 	RetryAfter          *time.Time `json:"retry_after,omitempty"`
+	RateLimit           *RateLimit `json:"rate_limit,omitempty"`
+}
+
+type RateLimit struct {
+	Resource             string    `json:"resource"`
+	ObservedResetAt      time.Time `json:"observed_reset_at"`
+	CooldownSource       string    `json:"cooldown_source"`
+	SuppressedRetryCount uint64    `json:"suppressed_retry_count"`
 }
 
 type AnswerRecord struct {
