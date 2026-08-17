@@ -2,16 +2,20 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/ratelimit"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
@@ -21,6 +25,403 @@ type numberedFakeGitHub struct{ *fakeGitHub }
 
 func (f numberedFakeGitHub) Get(_ context.Context, cfg config.Config, number int) (gh.Issue, error) {
 	return gh.Issue{Number: number, Title: "Test", State: "OPEN", Labels: append([]string(nil), cfg.GitHub.ReadyLabels...)}, nil
+}
+
+type countingGitHub struct {
+	*fakeGitHub
+	mu        sync.Mutex
+	listCalls int
+	called    chan struct{}
+	empty     bool
+}
+
+type startupRateLimitGitHub struct {
+	*fakeGitHub
+	inspectErr error
+}
+
+type startupRateLimitObserverGitHub struct {
+	*startupRateLimitGitHub
+	status      gh.RateLimitStatus
+	statusCalls int
+}
+
+func (f *startupRateLimitObserverGitHub) PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool) {
+	f.statusCalls++
+	return f.status, true
+}
+
+func (f *startupRateLimitGitHub) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (gh.RemoteState, error) {
+	f.inspectCalls++
+	if f.inspectErr != nil {
+		return gh.RemoteState{}, f.inspectErr
+	}
+	return f.fakeGitHub.Inspect(ctx, cfg, number, branch)
+}
+
+func (f *countingGitHub) ListReady(ctx context.Context, cfg config.Config) ([]gh.Issue, error) {
+	f.mu.Lock()
+	f.listCalls++
+	f.mu.Unlock()
+	if f.called != nil {
+		select {
+		case f.called <- struct{}{}:
+		default:
+		}
+	}
+	if f.empty {
+		return []gh.Issue{}, nil
+	}
+	return f.fakeGitHub.ListReady(ctx, cfg)
+}
+
+func (f *countingGitHub) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
+}
+
+type inertSchedulerTimer struct{ ch chan time.Time }
+
+func (t inertSchedulerTimer) C() <-chan time.Time { return t.ch }
+func (t inertSchedulerTimer) Stop() bool          { return true }
+
+type inertSchedulerTimers struct{ created chan struct{} }
+
+func (t inertSchedulerTimers) NewTimer(time.Duration) SchedulerTimer {
+	select {
+	case t.created <- struct{}{}:
+	default:
+	}
+	return inertSchedulerTimer{ch: make(chan time.Time)}
+}
+
+func waitForTimers(t *testing.T, created <-chan struct{}, count int) {
+	t.Helper()
+	for range count {
+		select {
+		case <-created:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for scheduler timer")
+		}
+	}
+}
+
+func TestSchedulerFsnotifyWakeCannotBypassSupervisorRetryDeadline(t *testing.T) {
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	now := time.Now().UTC()
+	retryAt := now.Add(time.Hour)
+	_, err := loop.Store.Update("retry_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = "retry_wait"
+		snapshot.Supervisor.ConsecutiveFailures = 2
+		snapshot.Supervisor.RetryAfter = &retryAt
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &countingGitHub{fakeGitHub: fake}
+	loop.GitHub = client
+	created := make(chan struct{}, 8)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	wakes := make(chan fsnotify.Event, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, wakes, nil) }()
+	waitForTimers(t, created, 2)
+	wakes <- fsnotify.Event{Name: loop.Store.StatePath(), Op: fsnotify.Write}
+	waitForTimers(t, created, 2)
+	if got := client.calls(); got != 0 {
+		t.Fatalf("GitHub calls before retry deadline=%d, want 0", got)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Supervisor.ConsecutiveFailures != 2 {
+		t.Fatalf("no-op wake reset failure counter: %+v", snapshot.Supervisor)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchedulerCoalescesSelfGeneratedWakeBacklog(t *testing.T) {
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	client := &countingGitHub{fakeGitHub: fake, called: make(chan struct{}, 1), empty: true}
+	loop.GitHub = client
+	created := make(chan struct{}, 8)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	wakes := make(chan fsnotify.Event, 1200)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, wakes, nil) }()
+	select {
+	case <-client.called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial GitHub poll did not complete")
+	}
+	waitForTimers(t, created, 1)
+	for range 1100 {
+		wakes <- fsnotify.Event{Name: loop.Store.EventsPath(), Op: fsnotify.Write}
+	}
+	waitForTimers(t, created, 1)
+	if got := client.calls(); got != 1 {
+		t.Fatalf("GitHub polls after 1100 wake events=%d, want 1", got)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchedulerSharesPrimaryRateLimitCooldownAcrossRepositories(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	resetAt := now.Add(20 * time.Minute)
+	shared := ratelimit.Store{Path: filepath.Join(t.TempDir(), "github-rate-limit.json")}
+
+	first, firstGitHub := testLoop(t, worker.Result{})
+	first.Clock = fixedClock{value: now}
+	first.Logger = log.New(io.Discard, "", 0)
+	first.Random = fixedRandom(0.5)
+	first.RateLimits = shared
+	firstGitHub.listErr = &gh.RateLimitError{
+		Resource: "graphql", ResetAt: resetAt, Source: "rest-rate-limit", Err: errors.New("GraphQL: API rate limit exceeded"),
+	}
+	firstScheduler := &scheduler{
+		loop: first, events: make(chan schedulerEvent, 2), active: map[int]activeJob{},
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, pollAt: now,
+	}
+	if _, err := firstScheduler.schedule(context.Background(), true); err == nil {
+		t.Fatal("primary rate limit was not returned")
+	} else if fatal := firstScheduler.handleCycleError(err); fatal != nil {
+		t.Fatal(fatal)
+	}
+
+	second, secondFake := testLoop(t, worker.Result{})
+	second.Clock = fixedClock{value: now}
+	second.Logger = log.New(io.Discard, "", 0)
+	second.Random = fixedRandom(0.5)
+	second.RateLimits = shared
+	secondClient := &countingGitHub{fakeGitHub: secondFake, empty: true}
+	second.GitHub = secondClient
+	secondScheduler := &scheduler{
+		loop: second, events: make(chan schedulerEvent, 2), active: map[int]activeJob{},
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, pollAt: now,
+	}
+	if result, err := secondScheduler.schedule(context.Background(), true); err != nil || result.githubSucceeded {
+		t.Fatalf("suppressed result=%+v err=%v", result, err)
+	}
+	if got := secondClient.calls(); got != 0 {
+		t.Fatalf("second repository called GitHub during shared cooldown: %d", got)
+	}
+	snapshot, err := second.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Supervisor.RateLimit == nil || snapshot.Supervisor.RateLimit.Resource != "graphql" || snapshot.Supervisor.RateLimit.CooldownSource != "rest-rate-limit" || snapshot.Supervisor.RateLimit.SuppressedRetryCount != 1 {
+		t.Fatalf("shared cooldown status=%+v", snapshot.Supervisor)
+	}
+
+	second.Clock = fixedClock{value: resetAt.Add(time.Second)}
+	if result, err := secondScheduler.schedule(context.Background(), true); err != nil || !result.githubSucceeded {
+		t.Fatalf("post-reset result=%+v err=%v", result, err)
+	}
+	if got := secondClient.calls(); got != 1 {
+		t.Fatalf("post-reset GitHub calls=%d, want 1", got)
+	}
+}
+
+func TestStartupReconciliationObservesRateLimitWithoutExiting(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	resetAt := now.Add(20 * time.Minute)
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: now}
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "github-rate-limit.json")}
+	client := &startupRateLimitGitHub{
+		fakeGitHub: fake,
+		inspectErr: &gh.RateLimitError{
+			Resource: "graphql", ResetAt: resetAt, Source: "rest-rate-limit", Err: errors.New("GraphQL: API rate limit exceeded"),
+		},
+	}
+	loop.GitHub = client
+	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "running", RunID: "run_7"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 2)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.reconcileStartupWithRateLimit(ctx, snapshot) }()
+	waitForTimers(t, created, 1)
+	if client.inspectCalls != 1 {
+		t.Fatalf("startup GitHub calls=%d, want 1", client.inspectCalls)
+	}
+	cooldown, active, err := loop.RateLimits.Current(now)
+	if err != nil || !active || !cooldown.ResetAt.Equal(resetAt) {
+		t.Fatalf("shared cooldown=%+v active=%v err=%v", cooldown, active, err)
+	}
+	loaded, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Supervisor.RateLimit == nil || loaded.Supervisor.RetryAfter == nil || !loaded.Supervisor.RetryAfter.Equal(resetAt) {
+		t.Fatalf("startup rate-limit state=%+v", loaded.Supervisor)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup reconciliation exit=%v, want context canceled", err)
+	}
+}
+
+func TestStartupReconciliationUsesSharedCooldownBeforeGitHub(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	resetAt := now.Add(20 * time.Minute)
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: now}
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "github-rate-limit.json")}
+	if _, err := loop.RateLimits.Observe(ratelimit.Cooldown{Resource: "graphql", ResetAt: resetAt, Source: "rest-rate-limit"}, now); err != nil {
+		t.Fatal(err)
+	}
+	client := &startupRateLimitGitHub{fakeGitHub: fake}
+	loop.GitHub = client
+	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "blocked", RunID: "run_7"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 2)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.reconcileStartupWithRateLimit(ctx, snapshot) }()
+	waitForTimers(t, created, 1)
+	if client.inspectCalls != 0 {
+		t.Fatalf("startup called GitHub during shared cooldown: %d", client.inspectCalls)
+	}
+	cooldown, active, err := loop.RateLimits.Current(now)
+	if err != nil || !active || cooldown.SuppressedRetryCount != 1 {
+		t.Fatalf("shared cooldown=%+v active=%v err=%v", cooldown, active, err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup reconciliation exit=%v, want context canceled", err)
+	}
+}
+
+func TestStartupReconciliationShortensStaleCooldownWhenRESTHasRemaining(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: now}
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "github-rate-limit.json")}
+	if _, err := loop.RateLimits.Observe(ratelimit.Cooldown{Resource: "graphql", ResetAt: now.Add(time.Hour), Source: "rest-rate-limit"}, now); err != nil {
+		t.Fatal(err)
+	}
+	client := &startupRateLimitObserverGitHub{
+		startupRateLimitGitHub: &startupRateLimitGitHub{fakeGitHub: fake},
+		status:                 gh.RateLimitStatus{Resource: "graphql", ResetAt: now.Add(time.Hour), Remaining: 4930},
+	}
+	loop.GitHub = client
+	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "blocked", RunID: "run_7"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 2)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.reconcileStartupWithRateLimit(ctx, snapshot) }()
+	waitForTimers(t, created, 1)
+	if client.inspectCalls != 0 {
+		t.Fatalf("startup called GitHub before recovered retry deadline: %d", client.inspectCalls)
+	}
+	cooldown, active, err := loop.RateLimits.Current(now)
+	if err != nil || !active || !cooldown.ResetAt.Equal(now.Add(5*time.Second)) || cooldown.Source != "rest-rate-limit-recovered" {
+		t.Fatalf("revalidated cooldown=%+v active=%v err=%v", cooldown, active, err)
+	}
+	if client.statusCalls != 1 {
+		t.Fatalf("REST rate-limit status calls=%d, want 1", client.statusCalls)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup reconciliation exit=%v, want context canceled", err)
+	}
+}
+
+func TestStartupReconciliationDoesNotExtendRecoveredCooldown(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	loop, fake := testLoop(t, worker.Result{})
+	client := &startupRateLimitObserverGitHub{
+		startupRateLimitGitHub: &startupRateLimitGitHub{fakeGitHub: fake},
+		status:                 gh.RateLimitStatus{Resource: "graphql", ResetAt: now.Add(time.Hour), Remaining: 4930},
+	}
+	loop.GitHub = client
+	want := ratelimit.Cooldown{Resource: "graphql", ResetAt: now.Add(5 * time.Second), Source: "rest-rate-limit-recovered"}
+	got, err := loop.revalidateStartupCooldown(context.Background(), want, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ResetAt.Equal(want.ResetAt) || got.Source != want.Source {
+		t.Fatalf("recovered cooldown was changed: got=%+v want=%+v", got, want)
+	}
+	if client.statusCalls != 0 {
+		t.Fatalf("recovered cooldown triggered REST revalidation: %d", client.statusCalls)
+	}
+}
+
+func TestSchedulerTransientFailuresIncreaseWithoutNoOpRecovery(t *testing.T) {
+	now := time.Date(2026, 8, 17, 1, 0, 0, 0, time.UTC)
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: now}
+	loop.Random = fixedRandom(0.5)
+	loop.Logger = log.New(io.Discard, "", 0)
+	s := &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	for attempt, wantDelay := range []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second} {
+		if fatal := s.handleCycleError(failure.Wrap(failure.Transient, "poll", errors.New("temporary"))); fatal != nil {
+			t.Fatalf("attempt %d: %v", attempt+1, fatal)
+		}
+		snapshot, err := loop.Store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Supervisor.ConsecutiveFailures != attempt+1 || snapshot.Supervisor.RetryAfter == nil || !snapshot.Supervisor.RetryAfter.Equal(now.Add(wantDelay)) {
+			t.Fatalf("attempt %d supervisor=%+v", attempt+1, snapshot.Supervisor)
+		}
+		result, err := s.schedule(context.Background(), false)
+		if err != nil || result.githubSucceeded {
+			t.Fatalf("no-op attempt %d result=%+v err=%v", attempt+1, result, err)
+		}
+		if s.consecutiveFailures != attempt+1 {
+			t.Fatalf("no-op reset in-memory failures: got=%d want=%d", s.consecutiveFailures, attempt+1)
+		}
+	}
 }
 
 type webhookFakeGitHub struct {
@@ -79,8 +480,8 @@ func TestWebhookMailboxClaimsReadyIssueWithoutQueuePolling(t *testing.T) {
 		loop: loop, events: make(chan schedulerEvent, 2), active: map[int]activeJob{},
 		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, pollAt: loop.now().Add(15 * time.Minute),
 	}
-	if dispatched, err := s.schedule(context.Background(), false); err != nil || !dispatched {
-		t.Fatalf("dispatched=%v err=%v", dispatched, err)
+	if result, err := s.schedule(context.Background(), false); err != nil || !result.dispatched {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	select {
 	case event := <-s.events:
@@ -108,8 +509,8 @@ func TestWebhookSchedulerNeverPerformsQueueSweep(t *testing.T) {
 		loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{},
 		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
 	}
-	if dispatched, err := s.schedule(context.Background(), true); err != nil || dispatched {
-		t.Fatalf("dispatched=%v err=%v", dispatched, err)
+	if result, err := s.schedule(context.Background(), true); err != nil || result.dispatched {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	if github.listCalls != 0 || github.conditionalCalls != 0 {
 		t.Fatalf("list=%d conditional=%d", github.listCalls, github.conditionalCalls)
@@ -138,8 +539,8 @@ func TestTwoWebhookRepositorySchedulersMakeZeroQueueRequestsAcrossFakeHour(t *te
 	for minute := 0; minute <= 60; minute++ {
 		for index, loop := range loops {
 			loop.Clock = fixedClock{value: base.Add(time.Duration(minute) * time.Minute)}
-			if dispatched, err := schedulers[index].schedule(context.Background(), true); err != nil || dispatched {
-				t.Fatalf("minute=%d repo=%d dispatched=%v err=%v", minute, index+1, dispatched, err)
+			if result, err := schedulers[index].schedule(context.Background(), true); err != nil || result.dispatched {
+				t.Fatalf("minute=%d repo=%d result=%+v err=%v", minute, index+1, result, err)
 			}
 		}
 	}
@@ -502,8 +903,8 @@ func TestSchedulerContinuesAfterNeedsInputWhenConfigured(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if dispatched, err := s.schedule(ctx, true); err != nil || !dispatched {
-		t.Fatalf("dispatched=%v err=%v", dispatched, err)
+	if result, err := s.schedule(ctx, true); err != nil || !result.dispatched {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	if number := <-pool.started; number != 2 {
 		t.Fatalf("started Issue=%d, want 2", number)
@@ -547,9 +948,9 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	dispatched, err := s.schedule(ctx, false)
-	if err != nil || !dispatched {
-		t.Fatalf("dispatched=%v err=%v", dispatched, err)
+	result, err := s.schedule(ctx, false)
+	if err != nil || !result.dispatched {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	first, second := <-pool.started, <-pool.started
 	if first == second || len(s.active) != 2 {
@@ -663,8 +1064,8 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			if dispatched, err := s.schedule(ctx, false); err != nil || !dispatched {
-				t.Fatalf("dispatched=%v err=%v", dispatched, err)
+			if result, err := s.schedule(ctx, false); err != nil || !result.dispatched {
+				t.Fatalf("result=%+v err=%v", result, err)
 			}
 			started := map[int]bool{}
 			for range 2 {

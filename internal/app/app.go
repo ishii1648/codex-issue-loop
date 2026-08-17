@@ -29,6 +29,7 @@ import (
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
+	"github.com/ishii1648/codex-issue-loop/internal/ratelimit"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
@@ -1034,6 +1035,7 @@ func recordSupervisorControl(store state.Store, supervisorState, message string)
 		s.Supervisor.FailureKind = ""
 		s.Supervisor.ConsecutiveFailures = 0
 		s.Supervisor.RetryAfter = nil
+		s.Supervisor.RateLimit = nil
 		return nil
 	})
 	return err
@@ -1052,6 +1054,17 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 	snapshot, err := store.Load()
 	if err != nil {
 		return err
+	}
+	if cooldown, active, cooldownErr := (ratelimit.Store{Path: l.RateLimitPath()}).Current(time.Now().UTC()); cooldownErr != nil {
+		return cooldownErr
+	} else if active {
+		snapshot.Supervisor.RateLimit = &state.RateLimit{
+			Resource: cooldown.Resource, ObservedResetAt: cooldown.ResetAt,
+			CooldownSource: cooldown.Source, SuppressedRetryCount: cooldown.SuppressedRetryCount,
+		}
+		if snapshot.Supervisor.RetryAfter == nil || cooldown.ResetAt.After(*snapshot.Supervisor.RetryAfter) {
+			snapshot.Supervisor.RetryAfter = &cooldown.ResetAt
+		}
 	}
 	launchStatus, err := (launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}).Status(ctx, entry)
 	if err != nil {
@@ -1739,6 +1752,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	defer safeLog.Flush()
 	loop := &supervisor.Loop{
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
+		RateLimits:     ratelimit.Store{Path: l.RateLimitPath()},
 		Worktrees:      worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
 		Worker:         backend,
 		WorkerIdentity: identity,

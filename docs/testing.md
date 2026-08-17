@@ -29,6 +29,9 @@ make test-race
 | Desktop監視の即時再表示・payload保持・冪等回答・watch再開 | `TestWatchAnswerReconnectRoundTripPreservesQuestionContract` |
 | event通知を破棄した場合のreconciliation | `TestFaultDroppedEventReconcilesAttention` |
 | watcher作成・購読失敗時のpolling-only fallback | `TestFaultWatcherSubscriptionFailureFallsBackToReconciliation` |
+| fsnotify自己wakeとbacklogのcoalesce | `TestSchedulerFsnotifyWakeCannotBypassSupervisorRetryDeadline`、`TestSchedulerCoalescesSelfGeneratedWakeBacklog` |
+| primary rate-limitの共有cooldown | `TestCLIPrimaryGraphQLRateLimitUsesRESTRateLimitReset`、`TestSchedulerSharesPrimaryRateLimitCooldownAcrossRepositories`、`TestStoreSharesAndAtomicallyCountsSuppressedRetries` |
+| E2E LaunchAgent cleanup | `TestE2ESupervisorCleanupOnSuccessFailureSignalAndTimeout` |
 | read-subscribe-read間に状態が変わるrace | `TestFaultReadSubscribeReadRace` |
 | attention状態と`state_revision`の永続化 | `TestFaultAttentionRevisionPersistsSnapshotAndEvent`、`TestFaultAttentionRemainsStickyUntilAnswered` |
 | standard workerが追加runなしで完了 | `TestFaultStandardWorkerCompletesWithoutAdditionalRun` |
