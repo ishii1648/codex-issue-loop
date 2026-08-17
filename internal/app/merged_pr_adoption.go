@@ -51,6 +51,12 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
+	if current.MergedPullRequestAdoption == nil && current.Status == "completed" {
+		current, err = recoverMergedPullRequestAdoptionMetadata(ctx, store, cfg, l.Root, entry.Commands["git"], entry.Commands["gh"], current)
+		if err != nil {
+			return exitError{4, err}
+		}
+	}
 	if current.MergedPullRequestAdoption != nil && current.Status == "completed" {
 		if current.GitHubSync == "done" {
 			if err := syncMergedPullRequestAdoption(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
@@ -139,7 +145,7 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	_, err = store.Update("merged_pull_request_adopted", *issueNumber, current.RunID, map[string]any{
 		"adoption_id": adoption.ID, "generation": adoption.Generation, "operator_confirmed": true,
 		"pull_request_url": pr.URL, "pull_request_number": pr.Number, "head_sha": pr.HeadSHA,
-		"merge_sha": pr.MergeSHA, "adopted_at": now, "lease_owner": owner,
+		"merge_sha": pr.MergeSHA, "base_branch": pr.BaseRefName, "confirmed_at": now, "adopted_at": now, "lease_owner": owner,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(*issueNumber)]
 		if item == nil || !reflect.DeepEqual(item, current) {
@@ -175,7 +181,86 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	if err != nil {
 		return err
 	}
+	if current.MergedPullRequestAdoption == nil {
+		record, recordErr := store.MergedPullRequestAdoptionRecord(current.Number, current.RunID)
+		if recordErr != nil {
+			return recordErr
+		}
+		current.MergedPullRequestAdoption = &record.Adoption
+	}
 	return a.output(*jsonOut, mergedPullRequestAdoptionOutput(current, false))
+}
+
+func recoverMergedPullRequestAdoptionMetadata(ctx context.Context, store state.Store, cfg config.Config, stateRoot, gitPath, ghPath string, current *state.Issue) (*state.Issue, error) {
+	record, err := store.MergedPullRequestAdoptionRecord(current.Number, current.RunID)
+	if err != nil {
+		return nil, err
+	}
+	adoption := record.Adoption
+	if adoption.BaseBranch == "" {
+		adoption.BaseBranch = cfg.Git.BaseBranch
+	}
+	if current.Status != "completed" || current.Lease != nil || !current.PullRequestMerged || (current.GitHubSync != "" && current.GitHubSync != "done") ||
+		current.PullRequestURL != adoption.PullRequestURL || current.PullRequestNumber != adoption.PullRequestNumber || current.HeadSHA != adoption.HeadSHA ||
+		record.LeaseOwner.RunID != current.RunID || record.LeaseOwner.Generation != current.LeaseGeneration {
+		return nil, fmt.Errorf("Issue #%d completed snapshot is inconsistent with its durable adoption event", current.Number)
+	}
+	manager := worktree.Manager{StateRoot: stateRoot, GitPath: gitPath}
+	inspection, err := manager.Inspect(ctx, cfg, current.Worktree, current.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("inspect adopted Pull Request worktree: %w", err)
+	}
+	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists || !inspection.RemoteBranchExists ||
+		inspection.Dirty || inspection.UnpushedCommits || inspection.Head != adoption.HeadSHA || inspection.RemoteHead != adoption.HeadSHA {
+		return nil, fmt.Errorf("Issue #%d adopted worktree and branch no longer match durable history", current.Number)
+	}
+	client := gh.CLI{Path: ghPath, Secrets: cfg.RedactionValues()}
+	remote, err := client.Inspect(ctx, cfg, current.Number, current.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("reinspect adopted Pull Request metadata: %w", err)
+	}
+	if len(remote.PullRequests) != 1 {
+		return nil, fmt.Errorf("Issue #%d adopted Pull Request count changed", current.Number)
+	}
+	pr := remote.PullRequests[0]
+	labels := lowerLabelSet(remote.Issue.Labels)
+	githubSynced := labels[strings.ToLower(cfg.GitHub.DoneLabel)] && hasAppComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->")
+	terminalPending := current.GitHubSync == "done" && hasAppComment(remote.Issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number))
+	if (!githubSynced && !terminalPending) || pr.URL != adoption.PullRequestURL || pr.Number != adoption.PullRequestNumber || !strings.EqualFold(pr.State, "merged") || pr.MergedAt == nil ||
+		pr.HeadRefName != current.Branch || pr.BaseRefName != adoption.BaseBranch || pr.HeadSHA != adoption.HeadSHA || pr.MergeSHA != adoption.MergeSHA ||
+		!strings.EqualFold(pr.HeadRepository, cfg.GitHub.Repo) {
+		return nil, fmt.Errorf("Issue #%d authoritative GitHub completion no longer matches durable adoption history", current.Number)
+	}
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if labels[strings.ToLower(label)] && !(terminalPending && strings.EqualFold(label, "blocked")) {
+			return nil, fmt.Errorf("Issue #%d has exclusion label %q after adoption", current.Number, label)
+		}
+	}
+	now := time.Now().UTC()
+	_, err = store.Update("merged_pull_request_adoption_recovered", current.Number, current.RunID, map[string]any{
+		"adoption_id": adoption.ID, "generation": adoption.Generation, "pull_request_url": adoption.PullRequestURL,
+		"pull_request_number": adoption.PullRequestNumber, "head_sha": adoption.HeadSHA, "merge_sha": adoption.MergeSHA,
+		"adopted_at": adoption.AdoptedAt, "source": "durable_event_history",
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		if item == nil || !reflect.DeepEqual(item, current) {
+			return fmt.Errorf("Issue #%d changed while adoption metadata was being recovered", current.Number)
+		}
+		item.MergedPullRequestAdoption = &adoption
+		item.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	updated, err := issueFromStore(store, current.Number)
+	if err != nil {
+		return nil, err
+	}
+	if updated.MergedPullRequestAdoption == nil {
+		updated.MergedPullRequestAdoption = &adoption
+	}
+	return updated, nil
 }
 
 func validateMergedPullRequestAdoption(cfg config.Config, current *state.Issue, remote gh.RemoteState, inspection worktree.Inspection) (gh.PullRequest, error) {
