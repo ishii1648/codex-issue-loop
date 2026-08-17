@@ -14,6 +14,14 @@ import (
 
 var resetHeaderPattern = regexp.MustCompile(`(?i)x-ratelimit-reset\s*[:=]\s*([0-9]+)`)
 
+const recoveredRateLimitRetry = 5 * time.Second
+
+type RateLimitStatus struct {
+	Resource  string
+	ResetAt   time.Time
+	Remaining int
+}
+
 // RateLimitError identifies a GitHub primary quota exhaustion. ResetAt is
 // populated from a response header when available, or by the REST rate_limit
 // endpoint. Callers must not probe GraphQL while waiting for this deadline.
@@ -40,9 +48,14 @@ func (c CLI) commandError(ctx context.Context, path, operation string, commandEr
 		return base
 	}
 	if resetAt.IsZero() && ctx.Err() == nil {
-		if observed, ok := c.observeRateLimitReset(ctx, path, resource); ok {
-			resetAt = observed
-			source = "rest-rate-limit"
+		if status, ok := c.observeRateLimitStatus(ctx, path, resource); ok {
+			if status.Remaining > 0 {
+				resetAt = time.Now().UTC().Add(recoveredRateLimitRetry)
+				source = "rest-rate-limit-recovered"
+			} else {
+				resetAt = status.ResetAt
+				source = "rest-rate-limit"
+			}
 		}
 	}
 	return &RateLimitError{Resource: resource, ResetAt: resetAt, Source: source, Err: base}
@@ -69,24 +82,33 @@ func primaryRateLimit(output []byte) (string, time.Time, string, bool) {
 	return resource, time.Time{}, "", true
 }
 
-func (c CLI) observeRateLimitReset(ctx context.Context, path, resource string) (time.Time, bool) {
+func (c CLI) PrimaryRateLimitStatus(ctx context.Context, resource string) (RateLimitStatus, bool) {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	return c.observeRateLimitStatus(ctx, path, resource)
+}
+
+func (c CLI) observeRateLimitStatus(ctx context.Context, path, resource string) (RateLimitStatus, bool) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(probeCtx, path, "api", "/rate_limit").Output()
 	if err != nil {
-		return time.Time{}, false
+		return RateLimitStatus{}, false
 	}
 	var response struct {
 		Resources map[string]struct {
-			Reset int64 `json:"reset"`
+			Reset     int64 `json:"reset"`
+			Remaining int   `json:"remaining"`
 		} `json:"resources"`
 	}
 	if err := json.Unmarshal(out, &response); err != nil {
-		return time.Time{}, false
+		return RateLimitStatus{}, false
 	}
 	value, ok := response.Resources[resource]
 	if !ok || value.Reset <= 0 {
-		return time.Time{}, false
+		return RateLimitStatus{}, false
 	}
-	return time.Unix(value.Reset, 0).UTC(), true
+	return RateLimitStatus{Resource: resource, ResetAt: time.Unix(value.Reset, 0).UTC(), Remaining: value.Remaining}, true
 }

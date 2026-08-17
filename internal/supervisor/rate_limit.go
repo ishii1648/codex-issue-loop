@@ -11,6 +11,11 @@ import (
 )
 
 const unknownRateLimitCooldown = 1 * time.Hour
+const recoveredRateLimitCooldown = 5 * time.Second
+
+type primaryRateLimitStatusObserver interface {
+	PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool)
+}
 
 type rateLimitedGitHub struct {
 	loop     *Loop
@@ -153,4 +158,30 @@ func cooldownFromError(err error, now time.Time) (ratelimit.Cooldown, bool) {
 		resource = "graphql"
 	}
 	return ratelimit.Cooldown{Resource: resource, ResetAt: resetAt, Source: source}, true
+}
+
+func (l *Loop) revalidateStartupCooldown(ctx context.Context, cooldown ratelimit.Cooldown, now time.Time) (ratelimit.Cooldown, error) {
+	delegate := l.GitHub
+	if guarded, ok := delegate.(*rateLimitedGitHub); ok {
+		delegate = guarded.delegate
+	}
+	observer, ok := delegate.(primaryRateLimitStatusObserver)
+	if !ok {
+		return cooldown, nil
+	}
+	status, ok := observer.PrimaryRateLimitStatus(ctx, cooldown.Resource)
+	if !ok {
+		return cooldown, nil
+	}
+	if status.Remaining <= 0 {
+		if status.ResetAt.After(cooldown.ResetAt) {
+			cooldown.ResetAt = status.ResetAt
+			cooldown.Source = "rest-rate-limit"
+			return l.RateLimits.Observe(cooldown, now)
+		}
+		return cooldown, nil
+	}
+	cooldown.ResetAt = now.Add(recoveredRateLimitCooldown)
+	cooldown.Source = "rest-rate-limit-recovered"
+	return l.RateLimits.Replace(cooldown, now)
 }

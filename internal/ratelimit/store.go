@@ -102,6 +102,24 @@ func (s Store) Observe(observed Cooldown, now time.Time) (Cooldown, error) {
 	return result, err
 }
 
+// Replace writes an externally revalidated cooldown even when it shortens the
+// currently active deadline. Callers must only use this after an authoritative
+// quota status reports that requests are available again.
+func (s Store) Replace(observed Cooldown, now time.Time) (Cooldown, error) {
+	if observed.Resource == "" {
+		observed.Resource = "graphql"
+	}
+	observed.ResetAt = observed.ResetAt.UTC()
+	observed.ObservedAt = now.UTC()
+	if s.Path == "" {
+		return observed, nil
+	}
+	err := s.withLock(func() error {
+		return fsutil.WriteJSON(s.Path, observed, 0o600)
+	})
+	return observed, err
+}
+
 func (s Store) withLock(fn func() error) error {
 	processStoreMu.Lock()
 	defer processStoreMu.Unlock()

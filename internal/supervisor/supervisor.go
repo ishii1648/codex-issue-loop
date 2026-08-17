@@ -139,6 +139,10 @@ func (l *Loop) reconcileStartupWithRateLimit(ctx context.Context, snapshot state
 			return failure.Wrap(failure.Supervisor, "load startup GitHub rate-limit cooldown", err)
 		}
 		if active {
+			cooldown, err = l.revalidateStartupCooldown(ctx, cooldown, now)
+			if err != nil {
+				return failure.Wrap(failure.Supervisor, "revalidate startup GitHub rate-limit cooldown", err)
+			}
 			updated, stillActive, suppressErr := l.RateLimits.Suppress(now)
 			if suppressErr != nil {
 				return failure.Wrap(failure.Supervisor, "record startup GitHub rate-limit suppression", suppressErr)

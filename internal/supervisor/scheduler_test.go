@@ -39,6 +39,15 @@ type startupRateLimitGitHub struct {
 	inspectErr error
 }
 
+type startupRateLimitObserverGitHub struct {
+	*startupRateLimitGitHub
+	status gh.RateLimitStatus
+}
+
+func (f *startupRateLimitObserverGitHub) PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool) {
+	return f.status, true
+}
+
 func (f *startupRateLimitGitHub) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (gh.RemoteState, error) {
 	f.inspectCalls++
 	if f.inspectErr != nil {
@@ -306,6 +315,50 @@ func TestStartupReconciliationUsesSharedCooldownBeforeGitHub(t *testing.T) {
 	cooldown, active, err := loop.RateLimits.Current(now)
 	if err != nil || !active || cooldown.SuppressedRetryCount != 1 {
 		t.Fatalf("shared cooldown=%+v active=%v err=%v", cooldown, active, err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup reconciliation exit=%v, want context canceled", err)
+	}
+}
+
+func TestStartupReconciliationShortensStaleCooldownWhenRESTHasRemaining(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: now}
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "github-rate-limit.json")}
+	if _, err := loop.RateLimits.Observe(ratelimit.Cooldown{Resource: "graphql", ResetAt: now.Add(time.Hour), Source: "rest-rate-limit"}, now); err != nil {
+		t.Fatal(err)
+	}
+	client := &startupRateLimitObserverGitHub{
+		startupRateLimitGitHub: &startupRateLimitGitHub{fakeGitHub: fake},
+		status:                 gh.RateLimitStatus{Resource: "graphql", ResetAt: now.Add(time.Hour), Remaining: 4930},
+	}
+	loop.GitHub = client
+	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "blocked", RunID: "run_7"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 2)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.reconcileStartupWithRateLimit(ctx, snapshot) }()
+	waitForTimers(t, created, 1)
+	if client.inspectCalls != 0 {
+		t.Fatalf("startup called GitHub before recovered retry deadline: %d", client.inspectCalls)
+	}
+	cooldown, active, err := loop.RateLimits.Current(now)
+	if err != nil || !active || !cooldown.ResetAt.Equal(now.Add(5*time.Second)) || cooldown.Source != "rest-rate-limit-recovered" {
+		t.Fatalf("revalidated cooldown=%+v active=%v err=%v", cooldown, active, err)
 	}
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {

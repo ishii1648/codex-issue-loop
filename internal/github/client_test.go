@@ -206,7 +206,7 @@ func TestCLIPrimaryGraphQLRateLimitUsesRESTRateLimitReset(t *testing.T) {
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 if [ "$1 $2" = "api /rate_limit" ]; then
-  printf '%%s\n' '{"resources":{"graphql":{"reset":%d}}}'
+  printf '%%s\n' '{"resources":{"graphql":{"reset":%d,"remaining":0}}}'
   exit 0
 fi
 printf '%%s\n' 'GraphQL: API rate limit already exceeded for user ID 7684738.' >&2
@@ -231,6 +231,35 @@ exit 1
 	}
 	if strings.Count(string(calls), "issue list") != 1 || strings.Count(string(calls), "api /rate_limit") != 1 {
 		t.Fatalf("unexpected calls:\n%s", calls)
+	}
+}
+
+func TestCLIPrimaryGraphQLRateLimitUsesShortRetryWhenRESTHasRemaining(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	nextReset := time.Now().UTC().Add(time.Hour)
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1 $2" = "api /rate_limit" ]; then
+  printf '%%s\n' '{"resources":{"graphql":{"reset":%d,"remaining":4930}}}'
+  exit 0
+fi
+printf '%%s\n' 'GraphQL: API rate limit already exceeded for user ID 7684738.' >&2
+exit 1
+`, nextReset.Unix())
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	before := time.Now().UTC()
+	_, err := (CLI{Path: fake}).ListReady(context.Background(), cfg)
+	after := time.Now().UTC()
+	limited, ok := AsRateLimit(err)
+	if !ok {
+		t.Fatalf("error was not classified as primary rate limit: %v", err)
+	}
+	if limited.Source != "rest-rate-limit-recovered" || limited.ResetAt.Before(before.Add(4*time.Second)) || limited.ResetAt.After(after.Add(6*time.Second)) {
+		t.Fatalf("recovered rate limit=%+v before=%s after=%s", limited, before, after)
 	}
 }
 
