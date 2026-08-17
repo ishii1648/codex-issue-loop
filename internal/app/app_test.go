@@ -617,7 +617,7 @@ esac
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	legacyError := "issue: worker blocked: localhost bind denied"
+	legacyError := "worker blocked: localhost bind denied"
 	_, err = store.Update("issue_blocked", 8, "run_8", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(s *state.Snapshot) error {
 		s.Issues["8"] = &state.Issue{
 			Number: 8, Status: "blocked", RunID: "run_8", Branch: branch, Worktree: repo,

@@ -9,7 +9,11 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
 
-const legacyManualExclusionError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
+const (
+	legacyManualExclusionError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
+	workerBlockErrorMarker     = "worker blocked: "
+	legacyWorkerBlockMarker    = "issue: worker blocked: "
+)
 
 // MayHaveLegacyWorkerBlockProvenance identifies records created before
 // BlockedCause was introduced, including records whose legacy marker was
@@ -19,7 +23,8 @@ func MayHaveLegacyWorkerBlockProvenance(issue *Issue) bool {
 	if issue == nil || issue.Status != "blocked" || issue.BlockedCause != nil || issue.RunID == "" || issue.FailureKind != "issue" {
 		return false
 	}
-	return strings.HasPrefix(issue.LastError, "issue: worker blocked: ") || issue.LastError == legacyManualExclusionError
+	_, workerBlock := legacyWorkerBlockReason(issue.LastError)
+	return workerBlock || issue.LastError == legacyManualExclusionError
 }
 
 // LegacyWorkerBlockProvenance reconstructs typed provenance only when durable
@@ -127,8 +132,8 @@ func legacyWorkerBlockFromEvents(events []Event, issue Issue) (*BlockedCause, er
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			return nil, fmt.Errorf("decode issue_blocked payload at sequence %d: %w", event.Sequence, err)
 		}
-		marker := "issue: worker blocked: "
-		if payload.FailureKind != "issue" || !strings.HasPrefix(payload.Error, marker) || event.Timestamp.IsZero() ||
+		reason, workerBlock := legacyWorkerBlockReason(payload.Error)
+		if payload.FailureKind != "issue" || !workerBlock || event.Timestamp.IsZero() ||
 			(payload.BlockedOrigin != "" && payload.BlockedOrigin != "worker") ||
 			(payload.BlockedKind != "" && payload.BlockedKind != "environment") {
 			continue
@@ -146,10 +151,6 @@ func legacyWorkerBlockFromEvents(events []Event, issue Issue) (*BlockedCause, er
 			return nil, fmt.Errorf("decode github_state_synced payload at sequence %d: %w", events[next].Sequence, err)
 		}
 		if synced.State != "blocked" {
-			continue
-		}
-		reason := strings.TrimSpace(strings.TrimPrefix(payload.Error, marker))
-		if reason == "" {
 			continue
 		}
 		if cause != nil {
@@ -184,4 +185,19 @@ func legacyWorkerBlockFromEvents(events []Event, issue Issue) (*BlockedCause, er
 		}
 	}
 	return cause, nil
+}
+
+// legacyWorkerBlockReason accepts the marker emitted by the worker block path
+// and the exact v0.6.9 fixture representation. Keeping the allowlist here
+// prevents a worker-block substring elsewhere in an error from being treated
+// as durable provenance.
+func legacyWorkerBlockReason(message string) (string, bool) {
+	for _, marker := range []string{workerBlockErrorMarker, legacyWorkerBlockMarker} {
+		if !strings.HasPrefix(message, marker) {
+			continue
+		}
+		reason := strings.TrimSpace(strings.TrimPrefix(message, marker))
+		return reason, reason != ""
+	}
+	return "", false
 }
