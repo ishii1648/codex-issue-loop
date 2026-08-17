@@ -487,7 +487,13 @@ http.host eq "hooks.example.invalid"
 and not ip.src in {192.30.252.0/22 185.199.108.0/22 140.82.112.0/20 143.55.64.0/20 2a0a:a440::/29 2606:50c0::/32}
 ```
 
-このCIDRは変更されるため、`gh api meta`の差分監視を運用に含める。CIDR制限はHMACの代用にしない。
+このCIDRは変更されるため、差分監視を運用に含める。記録値は`.github/github-hooks-cidr.txt`にあり、`scripts/check-hooks-cidr.sh`が現在値と比較して差分があれば`exit 1`する。`.github/workflows/hooks-cidr.yml`が毎週これを実行し、差分を検出したらIssueを作成する。同じ内容のopen Issueがある間は重複作成しない。
+
+このIssueにready labelは付かないため、loopは自動で着手しない。reverse proxyのallowlistを更新し、記録値も同じcommitで更新する。CIDR制限はHMACの代用にしないため、更新までの間もsignature検証は有効である。
+
+```sh
+./scripts/check-hooks-cidr.sh
+```
 
 無料プランでは次の2点がcontractに対して不足する。いずれも受け入れるか、上位プランを選ぶかを明示的に判断する。
 
