@@ -16,6 +16,7 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 )
 
@@ -103,16 +104,19 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 	}
 	s := &scheduler{
 		loop: l, events: make(chan schedulerEvent, concurrency+1), active: map[int]activeJob{},
-		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, pollAt: l.now(),
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
 		consecutiveFailures: current.Supervisor.ConsecutiveFailures,
 		rateLimitActive:     current.Supervisor.RateLimit != nil,
 	}
-	if current.Supervisor.RetryAfter != nil && current.Supervisor.RetryAfter.After(s.pollAt) {
+	if !l.Config.Webhook.Enabled() {
+		s.pollAt = l.now()
+	}
+	if current.Supervisor.RetryAfter != nil && (s.pollAt.IsZero() || current.Supervisor.RetryAfter.After(s.pollAt)) {
 		s.pollAt = *current.Supervisor.RetryAfter
 		s.cooldownUntil = *current.Supervisor.RetryAfter
 	}
 
-	pollCandidates := !s.pollAt.After(l.now())
+	pollCandidates := !l.Config.Webhook.Enabled() && !s.pollAt.After(l.now())
 	for {
 		result, scheduleErr := s.schedule(ctx, pollCandidates)
 		pollCandidates = false
@@ -129,13 +133,24 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 			s.consecutiveFailures = 0
 			s.rateLimitActive = false
 			s.cooldownUntil = time.Time{}
+			if l.Config.Webhook.Enabled() {
+				s.pollAt = time.Time{}
+			}
 		}
-		pollTimer := l.newSchedulerTimer(until(l.now(), s.pollAt))
-		retryTimer := l.newSchedulerTimer(s.nextRetryDelay())
+		var pollTimer, retryTimer SchedulerTimer
+		var pollTimerC, retryTimerC <-chan time.Time
+		if !s.pollAt.IsZero() {
+			pollTimer = l.newSchedulerTimer(until(l.now(), s.pollAt))
+			pollTimerC = pollTimer.C()
+		}
+		if delay, ok := s.nextRetryDelay(); ok {
+			retryTimer = l.newSchedulerTimer(delay)
+			retryTimerC = retryTimer.C()
+		}
 		select {
 		case <-ctx.Done():
-			pollTimer.Stop()
-			retryTimer.Stop()
+			stopSchedulerTimer(pollTimer)
+			stopSchedulerTimer(retryTimer)
 			s.cancelAndDrain()
 			_, _ = l.Store.Update("supervisor_stopped", 0, "", map[string]string{"reason": ctx.Err().Error()}, func(snapshot *state.Snapshot) error {
 				snapshot.Supervisor.State = "stopped"
@@ -145,39 +160,61 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 			})
 			return nil
 		case event := <-s.events:
-			pollTimer.Stop()
-			retryTimer.Stop()
+			stopSchedulerTimer(pollTimer)
+			stopSchedulerTimer(retryTimer)
 			if eventErr := s.handleEvent(event); eventErr != nil {
 				if fatal := s.handleCycleError(eventErr); fatal != nil {
 					s.cancelAndDrain()
 					return fatal
 				}
 			}
-		case <-pollTimer.C():
-			retryTimer.Stop()
-			pollCandidates = true
-		case <-retryTimer.C():
-			pollTimer.Stop()
+			// A freed slot immediately admits the next candidate instead of
+			// waiting for the regular GitHub poll interval.
+			if !l.Config.Webhook.Enabled() {
+				s.pollAt = l.now()
+				pollCandidates = true
+			}
+		case <-pollTimerC:
+			stopSchedulerTimer(retryTimer)
+			if l.Config.Webhook.Enabled() {
+				// Webhook schedulers have no periodic GitHub queue timer. A non-zero
+				// pollAt in this mode is only a shared supervisor cooldown deadline.
+				s.pollAt = time.Time{}
+				pollCandidates = false
+			} else {
+				pollCandidates = true
+			}
+		case <-retryTimerC:
+			stopSchedulerTimer(pollTimer)
 		case event, ok := <-watchEvents:
-			pollTimer.Stop()
-			retryTimer.Stop()
+			stopSchedulerTimer(pollTimer)
+			stopSchedulerTimer(retryTimer)
 			if !ok {
 				watchEvents, watchErrors = nil, nil
 				continue
 			}
 			base := filepath.Base(event.Name)
-			if base != "state.json" && base != "events.jsonl" {
+			if filepath.Dir(event.Name) != webhook.MailboxDir(l.Store.Dir) && base != "state.json" && base != "events.jsonl" {
 				continue
 			}
 			watchEvents, watchErrors = coalesceWatchEvents(watchEvents, watchErrors)
+			if !l.Config.Webhook.Enabled() {
+				pollCandidates = s.hasFreeSlot()
+			}
 		case _, ok := <-watchErrors:
-			pollTimer.Stop()
-			retryTimer.Stop()
+			stopSchedulerTimer(pollTimer)
+			stopSchedulerTimer(retryTimer)
 			if !ok {
 				watchErrors = nil
 			}
 			// Timers remain authoritative when fsnotify reports an error.
 		}
+	}
+}
+
+func stopSchedulerTimer(timer SchedulerTimer) {
+	if timer != nil {
+		timer.Stop()
 	}
 }
 
@@ -221,6 +258,11 @@ func coalesceWatchEvents(events <-chan fsnotify.Event, watchErrors <-chan error)
 }
 
 func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (scheduleResult, error) {
+	if s.loop.Config.Webhook.Enabled() {
+		// Defense in depth: even a stale timer or direct test invocation cannot
+		// make a repository scheduler query the shared GitHub ready queue.
+		pollCandidates = false
+	}
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	result := scheduleResult{}
@@ -269,6 +311,17 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 	s.cooldownUntil = time.Time{}
 	s.lastSuppressedReset = time.Time{}
+	mailboxCandidates, mailboxBatch, err := s.processMailbox(ctx, snapshot)
+	if err != nil {
+		return result, failure.Wrap(failure.Supervisor, "read webhook mailbox", err)
+	}
+	if len(mailboxBatch) > 0 {
+		// Reload RetryAfter changes made while routing active lifecycle events.
+		snapshot, err = s.loop.Store.Load()
+		if err != nil {
+			return result, failure.Wrap(failure.Supervisor, "reload webhook-routed state", err)
+		}
+	}
 
 	for _, current := range pendingIssues(snapshot, now) {
 		if _, running := s.active[current.Number]; running || s.retryPending(current.Number) {
@@ -296,25 +349,47 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		result.dispatched = true
 	}
 
+	if len(mailboxCandidates) > 0 && s.hasFreeSlot() {
+		selected, evaluation, ok, selectErr := s.selectReady(ctx, mailboxCandidates, snapshot)
+		if selectErr != nil {
+			return result, failure.Wrap(failure.Supervisor, "select webhook Issue admission", selectErr)
+		}
+		if ok {
+			slot, slotOK := s.freeSlot()
+			if slotOK {
+				runID := state.NewID("run")
+				s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
+					return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
+				})
+				result.dispatched = true
+			}
+		}
+	}
+	if len(mailboxBatch) > 0 {
+		if err := webhook.AckMailbox(s.loop.Store.Dir, mailboxBatch); err != nil {
+			return result, failure.Wrap(failure.Supervisor, "ack webhook mailbox", err)
+		}
+	}
+
 	if !pollCandidates {
 		return result, nil
 	}
 	if !s.hasFreeSlot() {
-		s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
+		s.pollAt = s.loop.now().Add(s.pollDelay())
 		return result, nil
 	}
 	if !s.loop.Config.Queue.ContinueAfterNeedsInput {
 		if hasPendingRequests(snapshot) {
-			s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
+			s.pollAt = s.loop.now().Add(s.pollDelay())
 			return result, s.markPollingIfIdle(snapshot, "waiting for user input")
 		}
 	}
-	issues, err := s.loop.GitHub.ListReady(ctx, s.loop.Config)
+	issues, err := s.listReady(ctx)
 	if err != nil {
 		return result, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
 	result.githubSucceeded = true
-	s.pollAt = s.loop.now().Add(s.loop.pollDelay(s.loop.Config.Queue.PollInterval.Duration))
+	s.pollAt = s.loop.now().Add(s.pollDelay())
 	selected, evaluation, ok, selectErr := s.selectReady(ctx, issues, snapshot)
 	if selectErr != nil {
 		return result, failure.Wrap(failure.Supervisor, "select Issue admission", selectErr)
@@ -369,6 +444,149 @@ func (s *scheduler) handleCycleError(cause error) error {
 	return nil
 }
 
+func (s *scheduler) pollInterval() time.Duration {
+	return s.loop.Config.Queue.PollInterval.Duration
+}
+
+func (s *scheduler) pollDelay() time.Duration {
+	interval := s.pollInterval()
+	return s.loop.pollDelay(interval)
+}
+
+func (s *scheduler) listReady(ctx context.Context) ([]gh.Issue, error) {
+	return s.loop.GitHub.ListReady(ctx, s.loop.Config)
+}
+
+func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot) ([]gh.Issue, []webhook.Delivery, error) {
+	if !s.loop.Config.Webhook.Enabled() {
+		return nil, nil, nil
+	}
+	deliveries, err := webhook.ReadMailbox(s.loop.Store.Dir)
+	if err != nil || len(deliveries) == 0 {
+		return nil, deliveries, err
+	}
+	candidates := make([]gh.Issue, 0)
+	acknowledged := make([]webhook.Delivery, 0, len(deliveries))
+	seen := map[int]bool{}
+	processed := map[int]bool{}
+	for index := len(deliveries) - 1; index >= 0; index-- {
+		delivery := deliveries[index]
+		number := delivery.IssueNumber
+		if number == 0 && delivery.PullRequestNumber != 0 {
+			for _, issue := range snapshot.Issues {
+				if issue != nil && (issue.PullRequestNumber == delivery.PullRequestNumber || strings.HasSuffix(issue.PullRequestURL, "/pull/"+fmt.Sprint(delivery.PullRequestNumber))) {
+					number = issue.Number
+					break
+				}
+			}
+		}
+		if number == 0 && delivery.HeadSHA != "" {
+			for _, issue := range snapshot.Issues {
+				if issue != nil && issue.HeadSHA == delivery.HeadSHA {
+					number = issue.Number
+					break
+				}
+			}
+		}
+		if number == 0 {
+			continue
+		}
+		if seen[number] {
+			if processed[number] {
+				acknowledged = append(acknowledged, delivery)
+			}
+			continue
+		}
+		seen[number] = true
+		if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
+			if delivery.Event == "issues" && delivery.Action == "collection_exited" {
+				converged, reconcileErr := s.loop.reconcileCollectionExit(ctx, *local, delivery)
+				if reconcileErr != nil {
+					return nil, nil, reconcileErr
+				}
+				if converged {
+					if job, active := s.active[number]; active && job.runID == local.RunID {
+						job.cancel()
+					}
+				}
+				acknowledged = append(acknowledged, delivery)
+				processed[number] = true
+				continue
+			}
+			if terminalWebhookStatus(local.Status) {
+				handled, reconcileErr := s.loop.reconcileTerminalWebhook(ctx, *local, delivery)
+				if reconcileErr != nil {
+					return nil, nil, reconcileErr
+				}
+				if handled {
+					acknowledged = append(acknowledged, delivery)
+					processed[number] = true
+				}
+				continue
+			}
+			if !webhookRoutableStatus(local.Status) && local.GitHubSync == "" {
+				continue
+			}
+			_, updateErr := s.loop.Store.Update("webhook_scheduler_wake", number, local.RunID, map[string]any{
+				"delivery_id": delivery.DeliveryID, "event": delivery.Event, "action": delivery.Action,
+			}, func(current *state.Snapshot) error {
+				item := current.Issues[fmt.Sprint(number)]
+				if item != nil {
+					now := s.loop.now()
+					item.RetryAfter = &now
+					if delivery.HeadSHA != "" {
+						item.HeadSHA = delivery.HeadSHA
+					}
+					if delivery.PullRequestNumber != 0 {
+						item.PullRequestNumber = delivery.PullRequestNumber
+					}
+				}
+				return nil
+			})
+			if updateErr != nil {
+				return nil, nil, updateErr
+			}
+			acknowledged = append(acknowledged, delivery)
+			processed[number] = true
+			continue
+		}
+		if delivery.Event != "issues" && delivery.Event != "issue_comment" {
+			continue
+		}
+		candidate, getErr := s.loop.getIssue(ctx, number)
+		if getErr != nil {
+			return nil, nil, getErr
+		}
+		if gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
+			candidates = append(candidates, candidate)
+			// Keep the delivery until the durable local Issue exists. A crash
+			// between admission and lease reservation can then replay safely.
+		} else {
+			acknowledged = append(acknowledged, delivery)
+			processed[number] = true
+		}
+	}
+	return candidates, acknowledged, nil
+}
+
+func terminalWebhookStatus(status string) bool {
+	switch status {
+	case "blocked", "failed", "needs_input", "completed":
+		return true
+	default:
+		return false
+	}
+}
+
+func webhookRoutableStatus(status string) bool {
+	switch status {
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		return true
+	default:
+		return false
+	}
+}
+
 func hasPendingRequests(snapshot state.Snapshot) bool {
 	for _, request := range snapshot.PendingRequests {
 		if request != nil && request.Status == "pending" {
@@ -409,7 +627,7 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 				}
 				continue
 			}
-			remote, getErr := s.loop.GitHub.Get(ctx, s.loop.Config, number)
+			remote, getErr := s.loop.getIssue(ctx, number)
 			if _, limited := gh.AsRateLimit(getErr); limited {
 				return gh.Issue{}, admission.Evaluation{}, false, getErr
 			}
@@ -607,10 +825,10 @@ func (s *scheduler) hasMaintenanceJob() bool {
 	return false
 }
 
-func (s *scheduler) nextRetryDelay() time.Duration {
+func (s *scheduler) nextRetryDelay() (time.Duration, bool) {
 	now := s.loop.now()
 	if s.cooldownUntil.After(now) {
-		return s.cooldownUntil.Sub(now)
+		return s.cooldownUntil.Sub(now), true
 	}
 	deadline := time.Time{}
 	for number, value := range s.issueRetry {
@@ -627,7 +845,10 @@ func (s *scheduler) nextRetryDelay() time.Duration {
 			}
 		}
 	}
-	return until(now, deadline)
+	if deadline.IsZero() {
+		return 0, false
+	}
+	return until(now, deadline), true
 }
 
 func (s *scheduler) markPollingIfIdle(snapshot state.Snapshot, message string) error {
@@ -650,7 +871,7 @@ func pendingIssues(snapshot state.Snapshot, now time.Time) []state.Issue {
 }
 
 func pendingIssue(issue state.Issue, now time.Time) bool {
-	if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+	if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 		return false
 	}
 	return issue.RetryAfter == nil || !issue.RetryAfter.After(now)
@@ -661,7 +882,7 @@ func issueUsesWorkerSlot(issue state.Issue) bool {
 		return false
 	}
 	switch issue.Status {
-	case "awaiting_checks", "awaiting_merge":
+	case "awaiting_checks", "awaiting_merge", "publication_recovery_pending":
 		return false
 	default:
 		return true

@@ -5,6 +5,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 )
 
 type statusResult struct {
@@ -12,6 +13,13 @@ type statusResult struct {
 	WorkerPool      workerPoolStatus `json:"worker_pool"`
 	PendingRequests []*state.Request `json:"pending_requests"`
 	State           state.Snapshot   `json:"state"`
+	Broker          *brokerStatus    `json:"broker,omitempty"`
+}
+
+type brokerStatus struct {
+	Launchd launchd.Status     `json:"launchd"`
+	State   webhook.Status     `json:"state"`
+	Sweep   webhook.SweepState `json:"repository_safety_sweep"`
 }
 
 type workerPoolStatus struct {

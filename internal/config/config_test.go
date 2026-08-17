@@ -71,6 +71,33 @@ watch:
 	}
 }
 
+func TestWebhookModeIsExplicitAndLoopbackOnly(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "webhook-secret")
+	base := `version: 4
+github:
+  repo: owner/repo
+  repository_id: 123
+webhook:
+  mode: webhook
+  listener_address: %s
+  public_url_identifier: hooks.example/agent-loop
+  secret_source:
+    file: %s
+  installation_ids: [456]
+`
+	dir := writeConfig(t, fmt.Sprintf(base, "127.0.0.1:8787", secret))
+	cfg, err := Load(dir)
+	if err != nil || !cfg.Webhook.Enabled() || cfg.Webhook.SafetySweepInterval.Duration != 15*time.Minute {
+		t.Fatalf("webhook=%+v err=%v", cfg.Webhook, err)
+	}
+	for _, address := range []string{"0.0.0.0:8787", "localhost:8787", "192.0.2.10:8787"} {
+		dir = writeConfig(t, fmt.Sprintf(base, address, secret))
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "loopback") {
+			t.Fatalf("unsafe listener accepted: %s err=%v", address, err)
+		}
+	}
+}
+
 func TestLoadBuiltInGoFormatterOptIn(t *testing.T) {
 	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nformatters:\n  go:\n    enabled: true\n    timeout: 45s\n")
 	cfg, err := Load(dir)

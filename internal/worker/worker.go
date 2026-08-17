@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -447,6 +448,44 @@ func (r Result) Validate() error {
 		return fmt.Errorf("invalid worker status %q", r.Status)
 	}
 	return nil
+}
+
+// LoadLatestCompletedResult returns the newest sanitized, schema-conforming
+// completed result for a durable run together with the bytes used for digest
+// verification. Invalid or non-completed later files are skipped so adapter
+// retries within one run remain recoverable.
+func LoadLatestCompletedResult(runDir string) (Result, []byte, error) {
+	info, err := os.Lstat(runDir)
+	if err != nil {
+		return Result{}, nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return Result{}, nil, fmt.Errorf("worker run path is not a real directory")
+	}
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return Result{}, nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		entryInfo, infoErr := entry.Info()
+		if infoErr == nil && entry.Type()&os.ModeSymlink == 0 && entryInfo.Mode().IsRegular() && entryInfo.Size() <= 1<<20 && strings.HasPrefix(entry.Name(), "result-") && strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	for _, name := range names {
+		data, readErr := os.ReadFile(filepath.Join(runDir, name))
+		if readErr != nil {
+			continue
+		}
+		result, decodeErr := decodeResult(data)
+		if decodeErr != nil || result.Validate() != nil || result.Status != "completed" || result.Git != nil {
+			continue
+		}
+		return result, data, nil
+	}
+	return Result{}, nil, fmt.Errorf("run has no schema-conforming unpublished completed result")
 }
 
 func decodeResult(data []byte) (Result, error) {

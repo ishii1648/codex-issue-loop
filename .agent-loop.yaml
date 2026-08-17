@@ -23,7 +23,7 @@ resources:
     - name: config
       paths: [.agent-loop*.yaml, internal/config/**, docs/resource-admission.md, docs/specification.md]
     - name: scheduler
-      paths: [internal/supervisor/**, internal/state/**, internal/schema/**, internal/failure/**, internal/fsutil/**]
+      paths: [internal/supervisor/**, internal/state/**, internal/webhook/**, internal/schema/**, internal/failure/**, internal/fsutil/**]
     - name: github
       paths: [internal/github/**, internal/publish/**, internal/publication/**]
     - name: worker

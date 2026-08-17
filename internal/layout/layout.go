@@ -69,3 +69,11 @@ func (l Layout) PlistPath(repoID string) string {
 func (l Layout) Label(repoID string) string {
 	return "com.codex-issue-loop." + repoID
 }
+
+func (l Layout) BrokerDir() string { return filepath.Join(l.Root, "broker") }
+
+func (l Layout) BrokerPlistPath() string {
+	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop.broker.plist")
+}
+
+func (l Layout) BrokerLabel() string { return "com.codex-issue-loop.broker" }

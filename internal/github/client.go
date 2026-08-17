@@ -36,8 +36,10 @@ type PullRequest struct {
 	IsDraft          bool
 	MergedAt         *time.Time
 	HeadRefName      string
+	BaseRefName      string
 	MergeStateStatus string
 	ChecksStatus     string
+	HeadSHA          string
 }
 
 type checkRollup struct {
@@ -202,7 +204,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	// Reconciliation only distinguishes zero, one, or multiple Pull Requests.
 	// Fetching two is sufficient to detect the unsafe multiple-PR case and
 	// avoids requesting 100 expensive statusCheckRollup nodes every poll.
-	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "number,url,state,isDraft,mergedAt,headRefName,mergeStateStatus,statusCheckRollup").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "number,url,state,isDraft,mergedAt,headRefName,baseRefName,headRefOid,mergeStateStatus,statusCheckRollup").CombinedOutput()
 	if err != nil {
 		return RemoteState{}, c.commandError(ctx, path, fmt.Sprintf("inspect Pull Requests for branch %s", branch), err, out)
 	}
@@ -213,6 +215,8 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		IsDraft           bool          `json:"isDraft"`
 		MergedAt          *time.Time    `json:"mergedAt"`
 		HeadRefName       string        `json:"headRefName"`
+		BaseRefName       string        `json:"baseRefName"`
+		HeadRefOID        string        `json:"headRefOid"`
 		MergeStateStatus  string        `json:"mergeStateStatus"`
 		StatusCheckRollup []checkRollup `json:"statusCheckRollup"`
 	}
@@ -223,6 +227,8 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		state.PullRequests = append(state.PullRequests, PullRequest{
 			Number: item.Number, URL: item.URL, State: item.State, IsDraft: item.IsDraft,
 			MergedAt: item.MergedAt, HeadRefName: item.HeadRefName,
+			BaseRefName:      item.BaseRefName,
+			HeadSHA:          item.HeadRefOID,
 			MergeStateStatus: item.MergeStateStatus,
 			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
 		})
@@ -287,6 +293,22 @@ func Eligible(labels []string, cfg config.GitHub) bool {
 		}
 	}
 	return true
+}
+
+func EligibleIssue(issue Issue, cfg config.GitHub) bool {
+	if !Eligible(issue.Labels, cfg) {
+		return false
+	}
+	if cfg.Assignee != "" {
+		matched := false
+		for _, assignee := range issue.Assignees {
+			matched = matched || strings.EqualFold(assignee, cfg.Assignee)
+		}
+		if !matched {
+			return false
+		}
+	}
+	return cfg.Milestone == "" || issue.Milestone == cfg.Milestone
 }
 
 func (c CLI) Claim(ctx context.Context, cfg config.Config, issue Issue, runID string) error {
@@ -400,6 +422,19 @@ func (c CLI) MarkEnvironmentResume(ctx context.Context, cfg config.Config, numbe
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:environment-resume:%s -->", resumeID)
 	body := marker + "\nEnvironment-blocked worker execution was explicitly resumed using the existing worktree and durable state."
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
+}
+
+// MarkPublicationRecovery removes only non-exclusion supervisor state labels.
+// In particular, a concurrently added blocked/do-not-automate label is never
+// removed. The operation is idempotent through labels and the durable marker.
+func (c CLI) MarkPublicationRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
+	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
+	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
+		return err
+	}
+	marker := fmt.Sprintf("<!-- codex-issue-loop:publication-recovery:%s -->", recoveryID)
+	body := marker + "\nPre-publication failure recovery was explicitly resumed using the existing worktree and durable state."
 	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
 }
 

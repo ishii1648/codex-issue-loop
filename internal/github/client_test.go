@@ -39,7 +39,7 @@ case "$1 $2" in
       *" --limit 2 "*) ;;
       *) exit 3 ;;
     esac
-    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
+    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test","baseRefName":"main","headRefOid":"abc123","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
     ;;
   *) exit 2 ;;
 esac
@@ -53,7 +53,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" || remote.PullRequests[0].ChecksStatus != "success" {
+	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" || remote.PullRequests[0].BaseRefName != "main" || remote.PullRequests[0].ChecksStatus != "success" {
 		t.Fatalf("remote=%+v", remote)
 	}
 }
@@ -123,6 +123,36 @@ esac
 	}
 }
 
+func TestMarkPublicationRecoveryNeverRemovesExclusionLabels(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	logPath := filepath.Join(dir, "calls.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue edit"|"issue comment") exit 0 ;;
+  "issue view") printf '%%s\n' '' ;;
+  *) exit 2 ;;
+esac
+`, logPath)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	if err := (CLI{Path: fake}).MarkPublicationRecovery(context.Background(), cfg, 7, "publication_recovery_1"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(calls)
+	if !strings.Contains(text, "--remove-label codex-loop:failed") || strings.Contains(text, "--remove-label blocked") || strings.Contains(text, "--remove-label do-not-automate") || !strings.Contains(text, "codex-issue-loop:publication-recovery:publication_recovery_1") {
+		t.Fatalf("unexpected publication recovery calls:\n%s", text)
+	}
+}
+
 func TestPullRequestChecksStatus(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -131,6 +161,7 @@ func TestPullRequestChecksStatus(t *testing.T) {
 		want       string
 	}{
 		{name: "no checks on clean Pull Request", mergeState: "CLEAN", want: "success"},
+		{name: "no checks on dirty Pull Request", mergeState: "DIRTY", want: "pending"},
 		{name: "no checks before mergeability is known", mergeState: "UNKNOWN", want: "pending"},
 		{name: "successful check run", checks: []checkRollup{{Status: "COMPLETED", Conclusion: "SUCCESS"}}, want: "success"},
 		{name: "pending check run", checks: []checkRollup{{Status: "IN_PROGRESS"}}, want: "pending"},

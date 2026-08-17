@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
@@ -250,6 +252,191 @@ func TestFaultStartupReconciliationPersistsDiscoveredPullRequest(t *testing.T) {
 	events, err := os.ReadFile(loop.Store.EventsPath())
 	if err != nil || !strings.Contains(string(events), "startup_reconciled") {
 		t.Fatalf("events=%s err=%v", events, err)
+	}
+}
+
+func TestFaultStartupReconciliationConvergesOnDirtyPullRequestWithoutDuplicateConflictAttempt(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Completion.AutoMerge = true
+	prURL := "https://example.test/pull/1"
+	_, err := loop.Store.Update("awaiting_checks", 1, "run_1", nil, func(s *state.Snapshot) error {
+		s.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: "awaiting_checks", RunID: "run_1",
+			Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, PullRequestURL: prURL,
+			UpdatedAt: time.Now().UTC(),
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{
+		Number: 1, URL: prURL, State: "OPEN", HeadRefName: "codex/issue-1-test",
+		MergeStateStatus: "DIRTY", ChecksStatus: "pending",
+	}}}
+	resolver := &fakeConflictResolver{preparation: conflict.Preparation{
+		PreviousBaseSHA: "base-old", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+		ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"},
+	}}
+	loop.Conflicts = resolver
+	loop.Worker = fakeWorker{result: worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "retry later",
+	}}
+
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileStartup(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item := first.Issues["1"]; item.Status != "resolving_conflict" || item.ConflictRecovery == nil || item.ConflictRecovery.Attempts != 1 {
+		t.Fatalf("first convergence=%+v", item)
+	}
+	if resolver.prepareCalls != 2 {
+		t.Fatalf("prepare calls=%d, want 2", resolver.prepareCalls)
+	}
+
+	if err := loop.reconcileStartup(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item := second.Issues["1"]; item.Status != "resolving_conflict" || item.ConflictRecovery == nil || item.ConflictRecovery.Attempts != 1 || len(item.ConflictRecovery.History) != 1 {
+		t.Fatalf("restart convergence=%+v", item)
+	}
+	if resolver.prepareCalls != 2 {
+		t.Fatalf("restart created duplicate conflict work: prepare calls=%d", resolver.prepareCalls)
+	}
+}
+
+func TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run_1", Slot: 0,
+		DeclaredResources: []string{"scheduler"}, ResolvedResources: []string{"scheduler"}, BaseSHA: "base-sha", ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := "codex/issue-1-test"
+	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "blocked"
+		item.Branch = branch
+		item.Worktree = loop.Config.RepoPath
+		item.GitHubSync = "blocked"
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: time.Now().UTC()}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}}}
+	inspection := worktree.Inspection{Exists: true, Valid: true, Branch: branch, LocalBranchExists: true, RemoteBranchExists: true}
+	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: &inspection}
+	github.inspectHook = func() {
+		github.inspectHook = nil
+		_, updateErr := loop.Store.Update("environment_resume_requested", 1, owner.RunID, map[string]string{"resume_id": "resume_race", "base_sha": "base-sha"}, func(snapshot *state.Snapshot) error {
+			item := snapshot.Issues["1"]
+			item.Status = "environment_resume_pending"
+			item.GitHubSync = "environment_resume"
+			item.EnvironmentResume = &state.EnvironmentResume{ID: "resume_race", Status: "requested", ConfirmedAt: time.Now().UTC(), BaseSHA: "base-sha"}
+			return nil
+		})
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+
+	if err := loop.reconcileStartup(context.Background(), stale); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := loaded.Issues["1"]
+	if item.Status != "environment_resume_pending" || item.GitHubSync != "environment_resume" || item.EnvironmentResume == nil || item.EnvironmentResume.ID != "resume_race" || item.Lease == nil || item.Lease.Owner != owner {
+		t.Fatalf("concurrent environment resume was overwritten: %+v", item)
+	}
+	if github.inspectCalls != 2 {
+		t.Fatalf("inspect calls=%d, want stale inspection plus retry", github.inspectCalls)
+	}
+}
+
+func TestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run_1", Slot: 0,
+		DeclaredResources: []string{"scheduler"}, ResolvedResources: []string{"scheduler"}, BaseSHA: "base-sha", ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := "codex/issue-1-test"
+	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "blocked"
+		item.Branch = branch
+		item.Worktree = loop.Config.RepoPath
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: time.Now().UTC()}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}}}
+	inspection := worktree.Inspection{Exists: true, Valid: true, Branch: branch, LocalBranchExists: true, RemoteBranchExists: true}
+	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: &inspection}
+	github.inspectHook = func() {
+		github.inspectHook = nil
+		_, updateErr := loop.Store.Update("environment_resume_requested", 1, owner.RunID, map[string]string{"resume_id": "resume_webhook", "base_sha": "base-sha"}, func(snapshot *state.Snapshot) error {
+			item := snapshot.Issues["1"]
+			item.Status = "environment_resume_pending"
+			item.GitHubSync = "environment_resume"
+			item.EnvironmentResume = &state.EnvironmentResume{ID: "resume_webhook", Status: "requested", ConfirmedAt: time.Now().UTC(), BaseSHA: "base-sha"}
+			return nil
+		})
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	handled, err := loop.reconcileTerminalWebhook(context.Background(), *stale.Issues["1"], webhook.Delivery{DeliveryID: "delivery-race", Event: "issues", Action: "labeled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handled {
+		t.Fatal("stale webhook reconciliation was acknowledged")
+	}
+	loaded, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := loaded.Issues["1"]
+	if item.Status != "environment_resume_pending" || item.GitHubSync != "environment_resume" || item.EnvironmentResume == nil || item.EnvironmentResume.ID != "resume_webhook" || item.Lease == nil || item.Lease.Owner != owner {
+		t.Fatalf("webhook reconciliation overwrote concurrent environment resume: %+v", item)
 	}
 }
 

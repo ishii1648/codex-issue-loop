@@ -1,6 +1,10 @@
 package publication
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 const (
 	ReasonResourceClaimMismatch = "resource_claim_mismatch"
@@ -26,6 +30,60 @@ type Audit struct {
 	ActualResources   []string       `json:"actual_resources"`
 	Formatter         FormatterAudit `json:"formatter"`
 	Reason            string         `json:"reason,omitempty"`
+}
+
+const (
+	FailureOriginPublisher        = "publisher"
+	FailurePhasePublication       = "publication"
+	FailurePhasePrePublication    = "pre_publication"
+	FailureCodeDurableBaseMissing = "durable_base_sha_missing"
+)
+
+// DurableBaseMissingError identifies the only publisher failure that can be
+// recovered by backfilling a verified base before publication mutates Git.
+type DurableBaseMissingError struct{}
+
+func (DurableBaseMissingError) Error() string {
+	return "inspect publish changes: durable base SHA is missing"
+}
+
+// FailureProvenance is the durable, typed boundary used by the operator-only
+// publication recovery command. Unknown publisher errors are recorded but are
+// deliberately not recoverable.
+type FailureProvenance struct {
+	Origin      string    `json:"origin"`
+	Phase       string    `json:"phase"`
+	Code        string    `json:"code"`
+	Recoverable bool      `json:"recoverable"`
+	Reason      string    `json:"reason"`
+	FailedAt    time.Time `json:"failed_at"`
+
+	DeclaredResources []string `json:"declared_resources,omitempty"`
+	ResolvedResources []string `json:"resolved_resources,omitempty"`
+	ActualResources   []string `json:"actual_resources,omitempty"`
+}
+
+func ClassifyFailure(err error, now time.Time) FailureProvenance {
+	result := FailureProvenance{
+		Origin: FailureOriginPublisher, Phase: FailurePhasePublication,
+		Code: "unknown", Reason: err.Error(), FailedAt: now.UTC(),
+	}
+	var missing DurableBaseMissingError
+	if errors.As(err, &missing) {
+		result.Phase = FailurePhasePrePublication
+		result.Code = FailureCodeDurableBaseMissing
+		result.Recoverable = true
+		return result
+	}
+	var formatter FormatterError
+	if errors.As(err, &formatter) {
+		result.Code = ReasonFormatterFailed
+	}
+	var mismatch PullRequestMismatchError
+	if errors.As(err, &mismatch) {
+		result.Code = ReasonPullRequestMismatch
+	}
+	return result
 }
 
 type ClaimMismatchError struct {

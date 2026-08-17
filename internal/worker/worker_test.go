@@ -465,3 +465,28 @@ func TestFindSessionIDAcceptsKnownEventShapes(t *testing.T) {
 		t.Fatalf("findSessionID()=%q", got)
 	}
 }
+
+func TestLoadLatestCompletedResultRequiresUnpublishedSchemaConformingResult(t *testing.T) {
+	dir := t.TempDir()
+	completed := `{"version":1,"status":"completed","execution_profile":"extended","summary":"verified","question":null,"tests":[],"git":null,"retry":null}`
+	if err := os.WriteFile(filepath.Join(dir, "result-1.json"), []byte(completed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "result-2.json"), []byte(`{"status":"completed"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, data, err := LoadLatestCompletedResult(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "completed" || result.Summary != "verified" || string(data) != completed {
+		t.Fatalf("result=%+v data=%s", result, data)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "result-3.json"), []byte(`{"version":1,"status":"completed","execution_profile":"extended","summary":"published","question":null,"tests":[],"git":{"branch":"b","commit":"c","pull_request_url":"p"},"retry":null}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, _, err = LoadLatestCompletedResult(dir)
+	if err != nil || result.Summary != "verified" {
+		t.Fatalf("published result must be skipped: result=%+v err=%v", result, err)
+	}
+}
