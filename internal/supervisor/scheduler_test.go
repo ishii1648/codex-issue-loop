@@ -41,10 +41,12 @@ type startupRateLimitGitHub struct {
 
 type startupRateLimitObserverGitHub struct {
 	*startupRateLimitGitHub
-	status gh.RateLimitStatus
+	status      gh.RateLimitStatus
+	statusCalls int
 }
 
 func (f *startupRateLimitObserverGitHub) PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool) {
+	f.statusCalls++
 	return f.status, true
 }
 
@@ -360,9 +362,33 @@ func TestStartupReconciliationShortensStaleCooldownWhenRESTHasRemaining(t *testi
 	if err != nil || !active || !cooldown.ResetAt.Equal(now.Add(5*time.Second)) || cooldown.Source != "rest-rate-limit-recovered" {
 		t.Fatalf("revalidated cooldown=%+v active=%v err=%v", cooldown, active, err)
 	}
+	if client.statusCalls != 1 {
+		t.Fatalf("REST rate-limit status calls=%d, want 1", client.statusCalls)
+	}
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("startup reconciliation exit=%v, want context canceled", err)
+	}
+}
+
+func TestStartupReconciliationDoesNotExtendRecoveredCooldown(t *testing.T) {
+	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
+	loop, fake := testLoop(t, worker.Result{})
+	client := &startupRateLimitObserverGitHub{
+		startupRateLimitGitHub: &startupRateLimitGitHub{fakeGitHub: fake},
+		status:                 gh.RateLimitStatus{Resource: "graphql", ResetAt: now.Add(time.Hour), Remaining: 4930},
+	}
+	loop.GitHub = client
+	want := ratelimit.Cooldown{Resource: "graphql", ResetAt: now.Add(5 * time.Second), Source: "rest-rate-limit-recovered"}
+	got, err := loop.revalidateStartupCooldown(context.Background(), want, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ResetAt.Equal(want.ResetAt) || got.Source != want.Source {
+		t.Fatalf("recovered cooldown was changed: got=%+v want=%+v", got, want)
+	}
+	if client.statusCalls != 0 {
+		t.Fatalf("recovered cooldown triggered REST revalidation: %d", client.statusCalls)
 	}
 }
 

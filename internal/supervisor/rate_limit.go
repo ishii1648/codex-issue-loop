@@ -161,6 +161,9 @@ func cooldownFromError(err error, now time.Time) (ratelimit.Cooldown, bool) {
 }
 
 func (l *Loop) revalidateStartupCooldown(ctx context.Context, cooldown ratelimit.Cooldown, now time.Time) (ratelimit.Cooldown, error) {
+	if cooldown.Source == "rest-rate-limit-recovered" {
+		return cooldown, nil
+	}
 	delegate := l.GitHub
 	if guarded, ok := delegate.(*rateLimitedGitHub); ok {
 		delegate = guarded.delegate
