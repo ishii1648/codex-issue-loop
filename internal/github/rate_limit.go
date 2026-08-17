@@ -53,7 +53,7 @@ func primaryRateLimit(output []byte) (string, time.Time, string, bool) {
 	if strings.Contains(text, "secondary rate limit") || strings.Contains(text, "abuse detection") {
 		return "", time.Time{}, "", false
 	}
-	if !strings.Contains(text, "rate limit exceeded") && !strings.Contains(text, "rate limit exhaustion") {
+	if !strings.Contains(text, "rate limit exceeded") && !strings.Contains(text, "rate limit already exceeded") && !strings.Contains(text, "rate limit exhaustion") {
 		return "", time.Time{}, "", false
 	}
 	resource := "core"

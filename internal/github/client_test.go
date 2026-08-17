@@ -209,7 +209,7 @@ if [ "$1 $2" = "api /rate_limit" ]; then
   printf '%%s\n' '{"resources":{"graphql":{"reset":%d}}}'
   exit 0
 fi
-printf '%%s\n' 'GraphQL: API rate limit exceeded for user' >&2
+printf '%%s\n' 'GraphQL: API rate limit already exceeded for user ID 7684738.' >&2
 exit 1
 `, logPath, reset.Unix())
 	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
