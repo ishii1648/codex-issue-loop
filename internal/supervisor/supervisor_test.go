@@ -43,6 +43,7 @@ type fakeGitHub struct {
 	issue                     gh.Issue
 	remote                    *gh.RemoteState
 	claimed, done, needsInput bool
+	doneCalls                 int
 	markedRunning             bool
 	readyPullRequest          bool
 	updatedPullRequest        bool
@@ -85,6 +86,7 @@ func (f *fakeGitHub) MarkNeedsInput(context.Context, config.Config, int, string,
 	return nil
 }
 func (f *fakeGitHub) MarkDone(context.Context, config.Config, int, string) error {
+	f.doneCalls++
 	if f.doneErr != nil {
 		err := f.doneErr
 		f.doneErr = nil

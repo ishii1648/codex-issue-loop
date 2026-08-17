@@ -149,6 +149,99 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 	}
 }
 
+func TestTerminalPullRequestReconciliationRequiresAuthoritativeSavedMerge(t *testing.T) {
+	cfg := config.Defaults()
+	loop := &Loop{Config: cfg}
+	merged := timePointer()
+	base := state.Issue{
+		Number: 7, Status: "blocked", RunID: "run_7", Branch: "codex/issue-7-test",
+		PullRequestURL: "https://example.test/pull/7", FailureKind: "issue",
+	}
+	automationIssue := gh.Issue{
+		Number: 7, State: "OPEN", Labels: []string{"blocked"},
+		Comments: []string{"<!-- codex-issue-loop:failed:7 -->\nAutomation stopped."},
+	}
+	matching := gh.PullRequest{
+		Number: 7, URL: base.PullRequestURL, State: "MERGED", MergedAt: merged,
+		HeadRefName: base.Branch,
+	}
+	tests := []struct {
+		name       string
+		current    state.Issue
+		remote     gh.RemoteState
+		completed  bool
+		reasonPart string
+	}{
+		{name: "automation blocked merged PR completes", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{matching}}, completed: true, reasonPart: "merge discovered"},
+		{name: "unmerged PR remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.MergedAt = nil; value.State = "OPEN"; return value }()}}, reasonPart: "not merged"},
+		{name: "closed without merge remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.MergedAt = nil; value.State = "CLOSED"; return value }()}}, reasonPart: "closed without merge"},
+		{name: "multiple PRs remain sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{matching, matching}}, reasonPart: "multiple Pull Requests"},
+		{name: "different saved URL remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.URL += "-other"; return value }()}}, reasonPart: "does not match"},
+		{name: "different head remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.HeadRefName += "-other"; return value }()}}, reasonPart: "head does not match"},
+		{name: "manual blocked label remains sticky", current: func() state.Issue { value := base; value.FailureKind = ""; return value }(), remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked"}}, PullRequests: []gh.PullRequest{matching}}, reasonPart: "applied manually"},
+		{name: "manual exclusion remains sticky", current: base, remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked", "do-not-automate"}, Comments: automationIssue.Comments}, PullRequests: []gh.PullRequest{matching}}, reasonPart: "applied manually"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, ok := loop.decideTerminalPullRequestReconciliation(test.current, test.remote)
+			if !ok || (decision.status == "completed") != test.completed || !strings.Contains(decision.reason, test.reasonPart) {
+				t.Fatalf("decision=%+v ok=%v", decision, ok)
+			}
+		})
+	}
+}
+
+func TestPeriodicTerminalReconciliationCompletesAndIsIdempotent(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)}
+	runID := "run_blocked"
+	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Blocked", RunID: runID, Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("blocked_fixture", 1, runID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "blocked"
+		item.Branch = "codex/issue-1-test"
+		item.PullRequestURL = "https://example.test/pull/1"
+		item.FailureKind = "issue"
+		item.LastError = "merge conflict"
+		item.Lease.Owner = owner
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}, Comments: []string{"<!-- codex-issue-loop:failed:1 -->"}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pull/1", State: "MERGED", MergedAt: timePointer(), HeadRefName: "codex/issue-1-test"}},
+	}
+	current, err := loop.issueState(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileTerminalPullRequest(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if item.Status != "completed" || !item.PullRequestMerged || item.Lease != nil || item.GitHubSync != "" || !github.done {
+		t.Fatalf("issue=%+v github.done=%v", item, github.done)
+	}
+	if err := loop.reconcileTerminalPullRequest(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if github.inspectCalls != 1 || github.doneCalls != 1 {
+		t.Fatalf("inspect calls=%d done calls=%d", github.inspectCalls, github.doneCalls)
+	}
+}
+
 func TestStartupReconciliationSkipsMergeConfirmedHistory(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	_, err := loop.Store.Update("completed", 1, "run_1", nil, func(s *state.Snapshot) error {

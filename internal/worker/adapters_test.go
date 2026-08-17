@@ -130,7 +130,7 @@ func TestOpenCodeTimeoutAbortsSessionAndStopsServerGroup(t *testing.T) {
 	t.Setenv("AGENT_LOOP_OPENCODE_MODE", "timeout")
 	t.Setenv("AGENT_LOOP_OPENCODE_ABORTED", aborted)
 	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/test", "")
-	cfg.Worker.Timeout.Duration = 150 * time.Millisecond
+	cfg.Worker.Timeout.Duration = time.Second
 	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
 	pid := 0
 	_, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_timeout", Attempts: 1}, "", func(value int) error { pid = value; return nil })

@@ -345,7 +345,13 @@ func (c CLI) MarkNeedsInput(ctx context.Context, cfg config.Config, number int, 
 }
 
 func (c CLI) MarkDone(ctx context.Context, cfg config.Config, number int, prURL string) error {
-	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.DoneLabel}, []string{cfg.GitHub.RunningLabel, cfg.GitHub.NeedsInputLabel}); err != nil {
+	remove := []string{cfg.GitHub.RunningLabel, cfg.GitHub.NeedsInputLabel, cfg.GitHub.FailedLabel}
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			remove = append(remove, label)
+		}
+	}
+	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.DoneLabel}, remove); err != nil {
 		return err
 	}
 	marker := "<!-- codex-issue-loop:done -->"

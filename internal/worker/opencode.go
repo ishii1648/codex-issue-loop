@@ -126,8 +126,13 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 		stopErr := stop()
 		_ = safeOut.Flush()
 		_ = safeErr.Flush()
-		if stopErr != nil && ctx.Err() != nil {
-			return Result{SessionID: sessionID, Identity: identity}, stopErr
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			termination := &TerminationError{Timeout: cfg.Worker.Timeout.Duration, GracePeriod: cfg.Worker.TimeoutGrace.Duration, Cause: ctxErr}
+			var stopped *TerminationError
+			if errors.As(stopErr, &stopped) {
+				termination.Forced = stopped.Forced
+			}
+			return Result{SessionID: sessionID, Identity: identity}, termination
 		}
 		return Result{SessionID: sessionID, Identity: identity}, fmt.Errorf("start opencode server: %w", err)
 	}

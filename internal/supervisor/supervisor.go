@@ -602,6 +602,41 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	return l.handleResult(ctx, issue, current, result, err)
 }
 
+func (l *Loop) reconcileTerminalPullRequest(ctx context.Context, scheduled state.Issue) error {
+	current, err := l.issueState(scheduled.Number)
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "refresh terminal Issue state", err)
+	}
+	if !terminalPullRequestCandidate(current) || current.RunID != scheduled.RunID {
+		return nil
+	}
+	remote, err := l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+	if err != nil {
+		return failure.Wrap(failure.Transient, "reconcile terminal Pull Request", err)
+	}
+	decision, ok := l.decideTerminalPullRequestReconciliation(current, remote)
+	if !ok {
+		return nil
+	}
+	if decision.status == "completed" && decision.prMerged {
+		return l.completeIssue(ctx, current, decision.pullRequest, map[string]any{
+			"source": "periodic_terminal_reconciliation", "reason": decision.reason,
+			"pull_requests": remote.PullRequests,
+		})
+	}
+	_, err = l.Store.Update("terminal_pull_request_reconciled", current.Number, current.RunID, map[string]any{
+		"status": current.Status, "reason": decision.reason, "pull_requests": remote.PullRequests,
+	}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.RunID != current.RunID || !terminalPullRequestCandidate(*item) {
+			return nil
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	return failure.Wrap(failure.Supervisor, "persist terminal Pull Request reconciliation", err)
+}
+
 func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.Issue, result worker.Result, runErr error) error {
 	profile := result.ExecutionProfile
 	if profile == "" {
