@@ -165,6 +165,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.recoverPublication(ctx, l, args)
 	case "recover-checks":
 		return a.recoverPullRequestChecks(ctx, l, args)
+	case "adopt-merged-pr":
+		return a.adoptMergedPullRequest(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -209,6 +211,7 @@ Commands:
   resume-blocked  Explicitly resume a worker environment-blocked Issue
   recover-publication  Recover an eligible failed Issue at the publication boundary
   recover-checks  Return an externally repaired Pull Request to its saved lifecycle
+  adopt-merged-pr  Adopt the single merged Pull Request for a terminal saved branch
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree

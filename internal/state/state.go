@@ -236,6 +236,25 @@ type PullRequestChecksRecovery struct {
 	ChecksStatus   string    `json:"checks_status"`
 }
 
+// MergedPullRequestAdoption records an operator-confirmed association between
+// a terminal Issue and the single merged Pull Request for its saved branch.
+// It exists only for publication that happened outside the supervisor after a
+// worker stopped, and is never used to infer or adopt an open Pull Request.
+type MergedPullRequestAdoption struct {
+	ID                string    `json:"id"`
+	Status            string    `json:"status"`
+	Generation        int       `json:"generation"`
+	ConfirmedAt       time.Time `json:"confirmed_at"`
+	AdoptedAt         time.Time `json:"adopted_at"`
+	PreviousStatus    string    `json:"previous_status"`
+	PreviousReason    string    `json:"previous_reason"`
+	PullRequestURL    string    `json:"pull_request_url"`
+	PullRequestNumber int       `json:"pull_request_number"`
+	Branch            string    `json:"branch"`
+	HeadSHA           string    `json:"head_sha"`
+	MergeCommitSHA    string    `json:"merge_commit_sha"`
+}
+
 type Issue struct {
 	Number            int                `json:"number"`
 	Title             string             `json:"title"`
@@ -276,6 +295,7 @@ type Issue struct {
 
 	PullRequestChecksFailure  *PullRequestChecksFailure  `json:"pull_request_checks_failure,omitempty"`
 	PullRequestChecksRecovery *PullRequestChecksRecovery `json:"pull_request_checks_recovery,omitempty"`
+	MergedPullRequestAdoption *MergedPullRequestAdoption `json:"merged_pull_request_adoption,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 }

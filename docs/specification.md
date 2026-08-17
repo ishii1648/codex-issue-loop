@@ -342,6 +342,7 @@ agent-loop <command> [options]
 | `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
 | `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
 | `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
+| `adopt-merged-pr` | terminal state外で手動merge済みとなった保存branchの単一PRを監査付きで採用しleaseを解放する |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -458,7 +459,19 @@ operatorが同じPR branchへ外部commitをpushした後、run、managed worktr
 
 同期後は同じbranch/PRの`awaiting_checks`へ戻し、通常のDraft解除、auto merge、done/close、merge確認後のlease releaseを再利用する。worker attempts、continuations、run historyをresetせず、新branch、PR、push、worker実行を作らない。GitHub同期途中の停止・再起動は保存intentをauthoritative Issue/PR/head/checksと再照合してから同じmarkerへ収束する。closed-without-merge、head/branch/PR不一致、dirty/unpushed worktree、active worker、pending request、manual/security exclusionはstateとlabelを変更せずfail closedとする。
 
-### 6.9 終了コード
+### 6.9 adopt-merged-pr
+
+```sh
+agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
+```
+
+保存run/worktree/branchとfenced leaseを持つ、GitHub同期済みのterminal `blocked`または`failed`で、PR URL/number/merged stateが未記録のIssueだけを対象にする。`blocked`はtypedなresumable worker environment provenanceを必須とする。active PID/PGID、pending request、別のrecovery、dirtyまたはunpushed worktree、local/remote head不一致、manual/security exclusion、ready/running/needs-input/doneとの曖昧なlabel組み合わせを拒否する。GitHub failure markerとstatusに対応するsupervisor-owned terminal labelを要求する。
+
+保存branchにはPRが正確に1件だけ存在し、mergedAt、branch、base branch、head SHA、merge commit SHAがすべて一致しなければならない。merge commitをlocal object databaseで検証し、`origin/<configured-base>`の祖先であることを確認する。コマンド自身はbranch、commit、push、PR、mergeを作成・変更しない。
+
+検証済みPR URL/number、branch/head、merge commit、operator確認時刻、元status/reason、generationをtyped `merged_pull_request_adoption`とeventへ保存する。同じtransactionでfenced ownerを照合してleaseを解放し、Issueをcompleted、PR merged、`github_sync=done`にする。worker attempts、continuations、session、Goal、answers、blocked provenanceとhistoryは保持する。GitHub done同期前の停止はdurable intentとして残り、supervisor再起動または同じコマンドがauthoritative Issue/PRを再検証して冪等に完了する。
+
+### 6.10 終了コード
 
 | code | 意味 |
 | --- | --- |

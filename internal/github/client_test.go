@@ -39,7 +39,7 @@ case "$1 $2" in
       *" --limit 2 "*) ;;
       *) exit 3 ;;
     esac
-    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test","baseRefName":"main","headRefOid":"abc123","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
+    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"MERGED","isDraft":false,"mergedAt":"2026-08-18T00:00:00Z","headRefName":"codex/issue-7-test","baseRefName":"main","headRefOid":"abc123","mergeCommit":{"oid":"merge123"},"mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
     ;;
   *) exit 2 ;;
 esac
@@ -53,7 +53,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" || remote.PullRequests[0].BaseRefName != "main" || remote.PullRequests[0].ChecksStatus != "success" {
+	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" || remote.PullRequests[0].BaseRefName != "main" || remote.PullRequests[0].ChecksStatus != "success" || remote.PullRequests[0].MergeCommitSHA != "merge123" {
 		t.Fatalf("remote=%+v", remote)
 	}
 }
