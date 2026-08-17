@@ -123,7 +123,9 @@ webhook:
   # installation_ids: [987654]
   # allow_repository_webhook: false
   # safety_sweep_interval: 15m
-  # safety_sweep_jitter: 10%
+  # Unlike watch.reconcile_jitter, this field has no percent-aware unmarshaler.
+  # Write it as a decimal fraction.
+  # safety_sweep_jitter: 0.1
   # max_body_bytes: 2097152
   # read_timeout: 10s
   # read_header_timeout: 5s
