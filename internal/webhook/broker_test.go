@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -188,5 +190,126 @@ func TestSharedBrokerSafetySweepPersists304(t *testing.T) {
 	}
 	if b.status.NotModified304 != 1 || b.status.LastSuccessfulSafetySweep.IsZero() {
 		t.Fatalf("broker status=%+v", b.status)
+	}
+}
+
+func TestSharedBrokerSafetySweepPaginatesAndWarmsWith304(t *testing.T) {
+	b, _ := testBroker(t)
+	dir := t.TempDir()
+	for page, count := range map[int]int{1: 100, 2: 100, 3: 50} {
+		items := make([]map[string]any, 0, count)
+		for index := 0; index < count; index++ {
+			number := (page-1)*100 + index + 1
+			items = append(items, map[string]any{
+				"number": number, "title": fmt.Sprintf("Issue %d", number), "body": "body",
+				"html_url":   fmt.Sprintf("https://example.test/issues/%d", number),
+				"created_at": "2026-08-17T00:00:00Z", "state": "open",
+				"labels": []map[string]string{{"name": b.Registrations[0].Config.GitHub.ReadyLabels[0]}},
+			})
+		}
+		data, err := json.Marshal(items)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, fmt.Sprintf("page-%d.json", page))
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(fmt.Sprintf("SWEEP_PAGE_%d", page), path)
+	}
+	ghPath := filepath.Join(dir, "gh")
+	script := `#!/bin/sh
+page=1
+case "$*" in *page=2*) page=2;; *page=3*) page=3;; esac
+eval body=\$SWEEP_PAGE_$page
+if echo "$*" | /usr/bin/grep -q If-None-Match; then
+  printf 'HTTP/2 304 Not Modified\r\nETag: "page-%s"\r\nX-RateLimit-Remaining: 4999\r\n\r\n' "$page"
+  exit 0
+fi
+printf 'HTTP/2 200 OK\r\nETag: "page-%s"\r\nX-RateLimit-Remaining: 4999\r\n\r\n' "$page"
+/bin/cat "$body"
+`
+	if err := os.WriteFile(ghPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registration := b.Registrations[0]
+	registration.Entry.Commands = map[string]string{"gh": ghPath}
+	if _, err := b.sweepOnce(context.Background(), registration); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := MailboxDir(filepath.Join(b.Root, "repos", registration.Entry.RepoID))
+	entries, err := os.ReadDir(mailbox)
+	if err != nil || len(entries) != 250 {
+		t.Fatalf("mailbox entries=%d err=%v", len(entries), err)
+	}
+	if _, err := b.sweepOnce(context.Background(), registration); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ = os.ReadDir(mailbox)
+	state, err := LoadSweepState(filepath.Join(b.Root, "repos", registration.Entry.RepoID))
+	if err != nil || len(entries) != 250 || len(state.Pages) != 3 || state.REST200 != 3 || state.NotModified304 != 3 {
+		t.Fatalf("entries=%d state=%+v err=%v", len(entries), state, err)
+	}
+}
+
+func TestRouteMovesPendingDeliveryToReceiptAndRecoversPartialRoute(t *testing.T) {
+	b, body := testBroker(t)
+	recorder := httptest.NewRecorder()
+	b.ServeHTTP(recorder, signedRequest(body, "crash-route"))
+	data, err := os.ReadFile(b.inboxPath("crash-route"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivery Delivery
+	if err := json.Unmarshal(data, &delivery); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a crash after the durable mailbox write but before receipt.
+	repoDir := filepath.Join(b.Root, "repos", delivery.RepoID)
+	if err := EnqueueMailbox(repoDir, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.route(delivery.DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(b.inboxPath(delivery.DeliveryID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pending delivery remains: %v", err)
+	}
+	if _, err := os.Stat(b.receiptPath(delivery.DeliveryID)); err != nil {
+		t.Fatalf("receipt missing: %v", err)
+	}
+	// Simulate a crash after receipt creation but before pending removal.
+	if err := os.WriteFile(b.inboxPath(delivery.DeliveryID), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.route(delivery.DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(b.inboxPath(delivery.DeliveryID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replayed pending delivery remains: %v", err)
+	}
+}
+
+func TestReceiptCompactionAppliesRetentionWithoutReadingReceiptBodies(t *testing.T) {
+	b, _ := testBroker(t)
+	oldPath := b.receiptPath("old")
+	recentPath := b.receiptPath("recent")
+	for _, path := range []string{oldPath, recentPath} {
+		if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := b.Now().Add(-receiptRetention - time.Hour)
+	if err := os.Chtimes(oldPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.compactReceipts(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired receipt remains: %v", err)
+	}
+	if _, err := os.Stat(recentPath); err != nil {
+		t.Fatalf("recent receipt removed: %v", err)
 	}
 }

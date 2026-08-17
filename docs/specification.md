@@ -266,7 +266,7 @@ webhook:
 - `webhook.mode`の既定は`polling`であり、設定を追加しただけでWebhookをsilentに有効化しない。`webhook`では`github.repository_id`、GitHub App用の1件以上の`installation_ids`、公開URLを秘密値なしで識別する`public_url_identifier`を必須とする。classic repository webhookだけは`allow_repository_webhook: true`を明示してinstallation欠落を許可でき、HMACとrepository ID/full nameは引き続き必須とする。
 - Webhook listenerはliteralな`127.0.0.1`または`::1`だけを許可する。共有brokerを使う全repositoryはlistenerとHTTP上限を一致させる。public/LAN addressやhostnameへのbindは拒否する。
 - `secret_source`は環境変数名またはrepository外の絶対file pathのどちらか一方だけを指定する。fileはruntimeでregular fileかつowner-only permissionであることを検証する。rotation中だけ`previous_secret_source`を併記できる。secret値をconfig、registry、snapshot、event、status、logへ保存しない。
-- `safety_sweep_interval`の既定は15分で、ETag/Last-Modifiedを`webhook-sweep.json`へ永続化し、ready labelを含む安定したREST collection URLへ条件付きrequestを送る。正しく認証された304は成功として記録する。Webhook modeの通常経路はrepository mailbox eventで対象Issue/PR/SHAだけをREST再検証し、queueまたは変化のないPRをGraphQL pollingしない。
+- `safety_sweep_interval`の既定は15分で、managed-root brokerだけがpage別のETag/Last-Modifiedとcache bodyを`webhook-sweep.json`へ永続化し、ready labelを含む安定したREST collection URLを最大10 page（1000件）まで条件付きrequestする。304 pageはdurable cacheと合成し、正しく認証された304は成功として記録する。broker起動直後にもoutage recovery sweepを行う。Webhook modeのrepository schedulerはqueue timerとsweep state writerを持たず、repository mailbox、Issue retry deadline、worker event、shared cooldownだけでwakeする。通常経路は対象Issue/PR/SHAだけをREST再検証し、queueまたは変化のないPRをGraphQL pollingしない。
 - `queue.concurrency` は1以上とする。`resources.definitions`未設定時は安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。2以上はresource definition、valid metadata、既知の`area:` claimを使う単一host worker poolであり、distributed modeは有効化しない。
 - `resources.metadata_version`は`1`、各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
 - `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
@@ -474,7 +474,7 @@ LaunchAgentなので、ユーザーがログアウトしている間は動作保
 
 broker endpointは`POST /github/webhook`だけである。raw bodyの`X-Hub-Signature-256`をHMAC-SHA256でconstant-time検証し、`X-GitHub-Delivery`、event/action、repository ID/full name、installation IDのallowlist検証後、検証済みrouting metadataを0600のdurable inboxへO_EXCLで保存してから202を返す。raw payload、Authorization、署名、secretは保存・log出力しない。
 
-inboxはdelivery IDを正本とし、redeliveryを冪等にdedupeする。ACK後にcrashした場合は再起動時に未route deliveryをrepo別`webhook-mailbox`へ再生する。schedulerは同一Issue/PR/SHAへのbatchをcoalesceし、active lifecycleの`RetryAfter`だけをwakeする。未登録または設定不一致のrepositoryはfail closedとなり、GitHub read/mutationを開始しない。mutationとretryは既存のsupervisor lifecycleおよびcooldown gateを迂回しない。
+inboxはdelivery IDを正本とし、redeliveryを冪等にdedupeする。pending deliveryだけを`broker/inbox`へ置き、route後はretention付きの`broker/receipts` tombstoneへ移すため、通常replayの処理量は未route件数に比例する。mailbox write、receipt write、pending removeの途中でcrashしても同じdelivery IDの再生で収束し、deliveryを消失させない。schedulerは同一Issue/PR/SHAへのbatchをcoalesceし、active lifecycleの`RetryAfter`だけをwakeする。stable terminal stateもtargeted REST inspectionが成功してauthoritativeなmerged/closed/label stateへ収束するまでACKせず、manual exclusion解除やfailed stateからworkerを暗黙再開しない。未登録または設定不一致のrepositoryはfail closedとなり、GitHub read/mutationを開始しない。mutationとretryは既存のsupervisor lifecycleおよびcooldown gateを迂回しない。
 
 ## 8. supervisor状態機械
 

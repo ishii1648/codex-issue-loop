@@ -25,8 +25,12 @@ type Manager struct {
 }
 
 type Status struct {
-	Loaded bool   `json:"loaded"`
-	Raw    string `json:"raw,omitempty"`
+	Loaded         bool   `json:"loaded"`
+	Running        bool   `json:"running"`
+	State          string `json:"state,omitempty"`
+	PID            int    `json:"pid,omitempty"`
+	LastExitStatus *int   `json:"last_exit_status,omitempty"`
+	Raw            string `json:"raw,omitempty"`
 }
 
 func (m Manager) WritePlist(entry registry.Entry, binary string) error {
@@ -246,7 +250,7 @@ func (m Manager) Status(ctx context.Context, entry registry.Entry) (Status, erro
 		}
 		return Status{}, fmt.Errorf("launchctl print: %w", err)
 	}
-	return Status{Loaded: true, Raw: strings.TrimSpace(string(out))}, nil
+	return parseServiceStatus(out), nil
 }
 
 func (m Manager) StartBroker(ctx context.Context) error {
@@ -347,7 +351,31 @@ func (m Manager) serviceStatus(ctx context.Context, label string) (Status, error
 		}
 		return Status{}, err
 	}
-	return Status{Loaded: true, Raw: strings.TrimSpace(string(out))}, nil
+	return parseServiceStatus(out), nil
+}
+
+func parseServiceStatus(out []byte) Status {
+	raw := strings.TrimSpace(string(out))
+	status := Status{Loaded: true, Raw: raw}
+	for _, line := range strings.Split(raw, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), " = ")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "state":
+			status.State = strings.TrimSpace(value)
+		case "pid":
+			status.PID, _ = strconv.Atoi(strings.TrimSpace(value))
+		case "last exit code":
+			parsed, err := strconv.Atoi(strings.TrimSpace(value))
+			if err == nil {
+				status.LastExitStatus = &parsed
+			}
+		}
+	}
+	status.Running = status.PID > 0 || strings.EqualFold(status.State, "running")
+	return status
 }
 
 func guiTarget() (string, error) {

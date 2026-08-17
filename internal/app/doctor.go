@@ -18,11 +18,13 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 )
 
 const doctorSchemaVersion = 1
@@ -299,7 +301,7 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	diagnostics = append(diagnostics, passedDiagnostic("CONFIG_VALID", "repository", entry.RepoID, ".agent-loop.yamlを読み込めます", cfg.GitHub.Repo))
 	diagnostics = append(diagnostics, diagnoseWorkerBackend(ctx, entry, cfg)...)
 	diagnostics = append(diagnostics, diagnoseFormatters(ctx, entry, cfg)...)
-	diagnostics = append(diagnostics, diagnoseWebhook(l, entry, cfg)...)
+	diagnostics = append(diagnostics, diagnoseWebhook(ctx, l, entry, cfg)...)
 
 	if len(entry.Commands) > 0 {
 		missing := []string{}
@@ -361,7 +363,7 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	return diagnostics
 }
 
-func diagnoseWebhook(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
+func diagnoseWebhook(ctx context.Context, l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
 	if !cfg.Webhook.Enabled() {
 		return []diagnostic{passedDiagnostic("WEBHOOK_MODE_POLLING", "repository", entry.RepoID, "Webhook modeは無効で明示的polling fallbackを使用します", "mode=polling")}
 	}
@@ -370,6 +372,36 @@ func diagnoseWebhook(l layout.Layout, entry registry.Entry, cfg config.Config) [
 		diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_NOT_REGISTERED", "repository", entry.RepoID, "共有Webhook broker LaunchAgentがありません", err.Error(), command("broker登録を再生成します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath))))
 	} else {
 		diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_BROKER_REGISTERED", "repository", entry.RepoID, "共有Webhook broker LaunchAgentが登録されています", l.BrokerPlistPath()))
+		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+		status, statusErr := manager.BrokerStatus(ctx)
+		switch {
+		case statusErr != nil:
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_STATUS_UNAVAILABLE", "repository", entry.RepoID, "共有Webhook brokerのLaunchAgent状態を確認できません", statusErr.Error(), command("broker状態を確認します", "launchctl print gui/$(id -u)/"+l.BrokerLabel())))
+		case !status.Loaded:
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_UNLOADED", "repository", entry.RepoID, "共有Webhook broker LaunchAgentが停止しています", "plist exists but service is not loaded", command("共有brokerを起動します", fmt.Sprintf("agent-loop start --repo %q", entry.RepoPath))))
+		case !status.Running && status.LastExitStatus != nil && *status.LastExitStatus != 0:
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_CRASH_LOOP", "repository", entry.RepoID, "共有Webhook brokerが異常終了を繰り返しています", fmt.Sprintf("state=%s last_exit_status=%d", status.State, *status.LastExitStatus), instruction("brokerのlaunchd.stderr.logと設定を確認してください")))
+		case !status.Running:
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_NOT_RUNNING", "repository", entry.RepoID, "共有Webhook brokerはloadedですが実行中ではありません", "state="+status.State, instruction("brokerのlaunchd.stderr.logとlaunchctl状態を確認してください")))
+		default:
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_BROKER_RUNNING", "repository", entry.RepoID, "共有Webhook brokerは実行中です", fmt.Sprintf("pid=%d state=%s", status.PID, status.State)))
+		}
+
+		var brokerState webhook.Status
+		statusPath := filepath.Join(l.BrokerDir(), "status.json")
+		data, readErr := os.ReadFile(statusPath)
+		if readErr != nil {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_STATUS_STALE", "repository", entry.RepoID, "共有Webhook broker statusがありません", readErr.Error(), instruction("brokerの起動状態とlaunchd.stderr.logを確認してください")))
+		} else if decodeErr := json.Unmarshal(data, &brokerState); decodeErr != nil {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_STATUS_STALE", "repository", entry.RepoID, "共有Webhook broker statusを読み取れません", decodeErr.Error(), instruction("brokerの起動状態とstatus.jsonを確認してください")))
+		} else if brokerState.UpdatedAt.IsZero() || time.Since(brokerState.UpdatedAt) > 2*time.Minute {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_BROKER_STATUS_STALE", "repository", entry.RepoID, "共有Webhook broker statusが更新されていません", fmt.Sprintf("updated_at=%s", brokerState.UpdatedAt.Format(time.RFC3339)), instruction("brokerのcrashまたはlistener停止を確認してください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_BROKER_STATUS_FRESH", "repository", entry.RepoID, "共有Webhook broker statusは更新されています", brokerState.UpdatedAt.Format(time.RFC3339)))
+		}
+		if brokerState.ListenerAddress != "" && brokerState.ListenerAddress != cfg.Webhook.ListenerAddress {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_LISTENER_MISMATCH", "repository", entry.RepoID, "Webhook listener addressが設定と一致しません", fmt.Sprintf("status=%s config=%s", brokerState.ListenerAddress, cfg.Webhook.ListenerAddress), instruction("共有brokerを再起動して最新設定を読み込んでください")))
+		}
 	}
 	source := cfg.Webhook.SecretSource
 	switch {

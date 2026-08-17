@@ -30,6 +30,11 @@ import (
 
 const InboxVersion = 1
 
+const (
+	receiptRetention = 30 * 24 * time.Hour
+	receiptLimit     = 200000
+)
+
 var deliveryIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
 var commitSHAPattern = regexp.MustCompile(`^[0-9a-fA-F]{40,64}$`)
 
@@ -91,14 +96,15 @@ type Broker struct {
 	Logger        *log.Logger
 	Now           func() time.Time
 
-	mu       sync.Mutex
-	status   Status
-	byName   map[string]Registration
-	byID     map[int64]Registration
-	work     chan string
-	requests chan struct{}
-	sweeps   chan struct{}
-	server   *http.Server
+	mu         sync.Mutex
+	deliveryMu sync.Mutex
+	status     Status
+	byName     map[string]Registration
+	byID       map[int64]Registration
+	work       chan string
+	requests   chan struct{}
+	sweeps     chan struct{}
+	server     *http.Server
 }
 
 func (b *Broker) Run(ctx context.Context) error {
@@ -132,6 +138,7 @@ func (b *Broker) Run(ctx context.Context) error {
 		go b.worker(ctx)
 	}
 	b.startSafetySweeps(ctx)
+	go b.heartbeat(ctx)
 	go b.replay(ctx)
 	errCh := make(chan error, 1)
 	go func() { errCh <- b.server.Serve(listener) }()
@@ -186,13 +193,19 @@ func (b *Broker) initialize() error {
 		b.byName[name] = registration
 		b.byID[registration.Config.GitHub.RepositoryID] = registration
 	}
-	for _, dir := range []string{b.inboxDir(), filepath.Join(b.Root, "broker")} {
+	for _, dir := range []string{b.inboxDir(), b.receiptDir(), filepath.Join(b.Root, "broker")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 		if err := os.Chmod(dir, 0o700); err != nil {
 			return err
 		}
+	}
+	if err := b.migrateRoutedInbox(); err != nil {
+		return err
+	}
+	if err := b.compactReceipts(); err != nil {
+		return err
 	}
 	b.refreshDepthLocked()
 	b.persistStatusLocked()
@@ -210,7 +223,14 @@ func (b *Broker) startSafetySweeps(ctx context.Context) {
 
 func (b *Broker) runSafetySweep(ctx context.Context, registration Registration) {
 	interval := registration.Config.Webhook.SafetySweepInterval.Duration
-	delay := jitterDuration(interval, registration.Config.Webhook.SafetySweepJitter)
+	// Broker recovery closes the webhook outage window after a short jittered
+	// delay. Keeping it non-zero avoids an extra interval-boundary request when
+	// a fleet of brokers is restarted together.
+	recoveryDelay := 5 * time.Second
+	if interval < recoveryDelay {
+		recoveryDelay = interval / 10
+	}
+	delay := jitterDuration(recoveryDelay, registration.Config.Webhook.SafetySweepJitter)
 	for {
 		timer := time.NewTimer(delay)
 		select {
@@ -248,30 +268,53 @@ func (b *Broker) sweepOnce(ctx context.Context, registration Registration) (time
 		return 0, err
 	}
 	client := gh.CLI{Path: registration.Entry.Commands["gh"], Secrets: registration.Config.RedactionValues()}
-	result, err := client.ListReadyConditional(ctx, registration.Config, state.ETag, state.LastModified)
-	if err != nil {
-		return 0, err
-	}
 	now := b.Now()
-	state.LastStatus = result.StatusCode
+	changed := make([]gh.Issue, 0)
+	notModified := uint64(0)
+	for page := 1; page <= 10; page++ {
+		cached := state.Pages[page]
+		result, pageErr := client.ListReadyConditionalPage(ctx, registration.Config, page, cached.ETag, cached.LastModified)
+		if pageErr != nil {
+			return 0, pageErr
+		}
+		state.LastStatus = result.StatusCode
+		state.RateRemaining = result.RateRemaining
+		state.RateReset = result.RateReset
+		if result.NotModified {
+			state.NotModified304++
+			notModified++
+			if result.ETag != "" {
+				cached.ETag = result.ETag
+			}
+			if result.LastModified != "" {
+				cached.LastModified = result.LastModified
+			}
+			state.Pages[page] = cached
+		} else if result.StatusCode == http.StatusOK {
+			state.REST200++
+			cached = SweepPageState{
+				ETag: result.ETag, LastModified: result.LastModified,
+				ItemCount: result.ItemCount, Issues: append([]gh.Issue(nil), result.Issues...),
+			}
+			state.Pages[page] = cached
+			changed = append(changed, result.Issues...)
+		}
+		if page == 1 {
+			state.ETag = cached.ETag
+			state.LastModified = cached.LastModified
+		}
+		if cached.ItemCount < 100 {
+			for stale := page + 1; stale <= 10; stale++ {
+				delete(state.Pages, stale)
+			}
+			break
+		}
+	}
 	state.LastSuccessful = now
-	if result.ETag != "" {
-		state.ETag = result.ETag
-	}
-	if result.LastModified != "" {
-		state.LastModified = result.LastModified
-	}
-	state.RateRemaining = result.RateRemaining
-	state.RateReset = result.RateReset
-	if result.NotModified {
-		state.NotModified304++
-	} else if result.StatusCode == http.StatusOK {
-		state.REST200++
-	}
 	if err := SaveSweepState(repoDir, state); err != nil {
 		return 0, err
 	}
-	for _, issue := range result.Issues {
+	for _, issue := range changed {
 		delivery := Delivery{
 			Version: InboxVersion, DeliveryID: fmt.Sprintf("sweep-%d-%d", now.UnixNano(), issue.Number),
 			Event: "issues", Action: "reconciled", RepoID: registration.Entry.RepoID,
@@ -284,14 +327,12 @@ func (b *Broker) sweepOnce(ctx context.Context, registration Registration) (time
 	}
 	b.mu.Lock()
 	b.status.LastSuccessfulSafetySweep = now
-	if result.NotModified {
-		b.status.NotModified304++
-	}
+	b.status.NotModified304 += notModified
 	b.status.UpdatedAt = now
 	b.persistStatusLocked()
 	b.mu.Unlock()
-	if result.RateRemaining == "0" {
-		if reset, parseErr := strconv.ParseInt(result.RateReset, 10, 64); parseErr == nil {
+	if state.RateRemaining == "0" {
+		if reset, parseErr := strconv.ParseInt(state.RateReset, 10, 64); parseErr == nil {
 			resetAt := time.Unix(reset, 0).UTC().Add(time.Second)
 			if resetAt.After(now) {
 				return resetAt.Sub(now), nil
@@ -543,6 +584,13 @@ func readSecret(source config.SecretSource) ([]byte, error) {
 }
 
 func (b *Broker) appendInbox(delivery Delivery) (bool, error) {
+	b.deliveryMu.Lock()
+	defer b.deliveryMu.Unlock()
+	if _, err := os.Stat(b.receiptPath(delivery.DeliveryID)); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
 	path := b.inboxPath(delivery.DeliveryID)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errors.Is(err, os.ErrExist) {
@@ -591,16 +639,13 @@ func (b *Broker) worker(ctx context.Context) {
 func (b *Broker) replay(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	cleanup := time.NewTicker(time.Hour)
+	defer cleanup.Stop()
 	for {
 		entries, _ := os.ReadDir(b.inboxDir())
 		for _, entry := range entries {
 			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
 				id := strings.TrimSuffix(entry.Name(), ".json")
-				data, readErr := os.ReadFile(filepath.Join(b.inboxDir(), entry.Name()))
-				var delivery Delivery
-				if readErr != nil || json.Unmarshal(data, &delivery) != nil || !delivery.RoutedAt.IsZero() {
-					continue
-				}
 				select {
 				case b.work <- id:
 				default:
@@ -611,12 +656,26 @@ func (b *Broker) replay(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-cleanup.C:
+			if err := b.compactReceipts(); err != nil {
+				b.Logger.Printf("webhook receipt compaction failed")
+			}
 		}
 	}
 }
 
 func (b *Broker) route(id string) error {
+	b.deliveryMu.Lock()
+	defer b.deliveryMu.Unlock()
 	path := b.inboxPath(id)
+	if _, err := os.Stat(b.receiptPath(id)); err == nil {
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -624,9 +683,6 @@ func (b *Broker) route(id string) error {
 	var delivery Delivery
 	if err := json.Unmarshal(data, &delivery); err != nil {
 		return err
-	}
-	if !delivery.RoutedAt.IsZero() {
-		return nil
 	}
 	registration, ok := b.byName[strings.ToLower(delivery.Repository)]
 	if !ok || registration.Entry.RepoID != delivery.RepoID || registration.Config.GitHub.RepositoryID != delivery.RepositoryID {
@@ -640,9 +696,14 @@ func (b *Broker) route(id string) error {
 		return err
 	}
 	delivery.RoutedAt = b.Now()
-	if err := fsutil.WriteJSON(path, delivery, 0o600); err != nil {
+	if err := fsutil.WriteJSON(b.receiptPath(id), delivery, 0o600); err != nil {
 		return err
 	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	syncDirectory(b.inboxDir())
+	syncDirectory(b.receiptDir())
 	b.mu.Lock()
 	b.refreshDepthLocked()
 	b.persistStatusLocked()
@@ -650,9 +711,11 @@ func (b *Broker) route(id string) error {
 	return nil
 }
 
-func (b *Broker) inboxDir() string           { return filepath.Join(b.Root, "broker", "inbox") }
-func (b *Broker) inboxPath(id string) string { return filepath.Join(b.inboxDir(), id+".json") }
-func (b *Broker) statusPath() string         { return filepath.Join(b.Root, "broker", "status.json") }
+func (b *Broker) inboxDir() string             { return filepath.Join(b.Root, "broker", "inbox") }
+func (b *Broker) inboxPath(id string) string   { return filepath.Join(b.inboxDir(), id+".json") }
+func (b *Broker) receiptDir() string           { return filepath.Join(b.Root, "broker", "receipts") }
+func (b *Broker) receiptPath(id string) string { return filepath.Join(b.receiptDir(), id+".json") }
+func (b *Broker) statusPath() string           { return filepath.Join(b.Root, "broker", "status.json") }
 
 func (b *Broker) reject(w http.ResponseWriter, code int) {
 	b.mu.Lock()
@@ -685,16 +748,105 @@ func (b *Broker) refreshDepthLocked() {
 	entries, _ := os.ReadDir(b.inboxDir())
 	b.status.QueueDepth = 0
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(b.inboxDir(), entry.Name()))
-		var delivery Delivery
-		if err == nil && json.Unmarshal(data, &delivery) == nil && delivery.RoutedAt.IsZero() {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
 			b.status.QueueDepth++
 		}
 	}
 	b.status.UpdatedAt = b.Now()
+}
+
+func (b *Broker) heartbeat(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.mu.Lock()
+			b.refreshDepthLocked()
+			b.persistStatusLocked()
+			b.mu.Unlock()
+		}
+	}
+}
+
+func (b *Broker) migrateRoutedInbox() error {
+	entries, err := os.ReadDir(b.inboxDir())
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(b.inboxDir(), entry.Name())
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		var delivery Delivery
+		if json.Unmarshal(data, &delivery) != nil || delivery.RoutedAt.IsZero() {
+			continue
+		}
+		if err := fsutil.WriteJSON(filepath.Join(b.receiptDir(), entry.Name()), delivery, 0o600); err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *Broker) compactReceipts() error {
+	b.deliveryMu.Lock()
+	defer b.deliveryMu.Unlock()
+	entries, err := os.ReadDir(b.receiptDir())
+	if err != nil {
+		return err
+	}
+	type receiptInfo struct {
+		path string
+		mod  time.Time
+	}
+	values := make([]receiptInfo, 0, len(entries))
+	cutoff := b.Now().Add(-receiptRetention)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return statErr
+		}
+		path := filepath.Join(b.receiptDir(), entry.Name())
+		if info.ModTime().Before(cutoff) {
+			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				return removeErr
+			}
+			continue
+		}
+		values = append(values, receiptInfo{path: path, mod: info.ModTime()})
+	}
+	if len(values) > receiptLimit {
+		sort.Slice(values, func(i, j int) bool { return values[i].mod.Before(values[j].mod) })
+		for _, value := range values[:len(values)-receiptLimit] {
+			if err := os.Remove(value.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	syncDirectory(b.receiptDir())
+	return nil
+}
+
+func syncDirectory(path string) {
+	dir, err := os.Open(path)
+	if err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
 }
 
 func (b *Broker) persistStatusLocked() {

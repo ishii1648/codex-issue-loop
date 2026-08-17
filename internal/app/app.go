@@ -934,8 +934,15 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		if err == nil && !launchStatus.Loaded {
 			err = recordSupervisorControl(store, "starting", "start requested")
 		}
-		if err == nil && cfg.Webhook.Enabled() && !launchStatus.Loaded {
-			err = lm.RestartBroker(ctx)
+		if err == nil && cfg.Webhook.Enabled() {
+			if _, statErr := os.Stat(l.BrokerPlistPath()); statErr != nil {
+				err = fmt.Errorf("webhook broker LaunchAgent is not registered: %w", statErr)
+			} else {
+				// StartBroker is a no-op for a healthy loaded broker. In particular,
+				// starting one already-loaded repository never restarts sibling
+				// supervisors or a healthy shared broker.
+				err = lm.StartBroker(ctx)
+			}
 		}
 		if err == nil {
 			err = lm.Start(ctx, entry)
