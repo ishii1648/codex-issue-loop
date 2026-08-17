@@ -40,6 +40,7 @@ type PullRequest struct {
 	MergeStateStatus string
 	ChecksStatus     string
 	HeadSHA          string
+	MergeSHA         string
 	MergeCommitSHA   string
 	HeadRepository   string
 }
@@ -254,6 +255,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 			HeadSHA:          item.HeadRefOID,
 			MergeStateStatus: item.MergeStateStatus,
 			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
+			MergeSHA:         mergeCommitSHA,
 			MergeCommitSHA:   mergeCommitSHA,
 			HeadRepository:   headRepository,
 		})

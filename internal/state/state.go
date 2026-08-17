@@ -252,7 +252,8 @@ type MergedPullRequestAdoption struct {
 	PullRequestNumber int       `json:"pull_request_number"`
 	Branch            string    `json:"branch"`
 	HeadSHA           string    `json:"head_sha"`
-	MergeCommitSHA    string    `json:"merge_commit_sha"`
+	MergeSHA          string    `json:"merge_sha"`
+	BaseBranch        string    `json:"base_branch"`
 }
 
 type Issue struct {

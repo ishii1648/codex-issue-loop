@@ -73,7 +73,9 @@ func TestAdoptMergedPullRequestReleasesLeaseOnceAndIsIdempotent(t *testing.T) {
 	ghLog := filepath.Join(t.TempDir(), "gh.log")
 	issueJSON := `{"number":129,"title":"bootstrap","body":"","url":"https://example.test/issues/129","state":"CLOSED","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:failed:129 -->\nAutomation stopped."}]}`
 	prJSON := fmt.Sprintf(`[{"number":132,"url":"https://example.test/pull/132","state":"MERGED","isDraft":false,"mergedAt":"2026-08-17T22:25:30Z","headRefName":%q,"baseRefName":"main","headRefOid":%q,"mergeCommit":{"oid":%q},"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"},"mergeStateStatus":"UNKNOWN","statusCheckRollup":[]}]`, branch, headSHA, mergeSHA)
-	script := fmt.Sprintf(`#!/bin/sh
+	writeFakeGH := func(issue string) {
+		t.Helper()
+		script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$1 $2" in
   "issue view") printf '%%s\n' '%s' ;;
@@ -81,10 +83,12 @@ case "$1 $2" in
   "issue edit"|"issue comment"|"issue close") exit 0 ;;
   *) exit 2 ;;
 esac
-`, ghLog, issueJSON, prJSON)
-	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
+		`, ghLog, issue, prJSON)
+		if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
+	writeFakeGH(issueJSON)
 	cfg := mustConfig(t, repo)
 	entry, err := (registry.Store{Path: l.RegistryPath}).Add(cfg)
 	if err != nil {
@@ -140,6 +144,27 @@ esac
 			t.Fatalf("second adoption was not idempotent: first=%v second=%v", firstOutput, output)
 		}
 	}
+	_, err = store.Update("old_supervisor_snapshot_write", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["129"].MergedPullRequestAdoption = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneIssueJSON := `{"number":129,"title":"bootstrap","body":"","url":"https://example.test/issues/129","state":"CLOSED","labels":[{"name":"codex-loop:done"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:done -->\nCompleted by codex-issue-loop."}]}`
+	writeFakeGH(doneIssueJSON)
+	var recoveredOut, recoveredErr bytes.Buffer
+	recoveryApp := App{Out: &recoveredOut, Err: &recoveredErr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	if code := recoveryApp.Run(context.Background(), args); code != 0 {
+		t.Fatalf("event recovery code=%d stdout=%s stderr=%s", code, recoveredOut.String(), recoveredErr.String())
+	}
+	var recoveredOutput map[string]any
+	if err := json.Unmarshal(recoveredOut.Bytes(), &recoveredOutput); err != nil {
+		t.Fatal(err)
+	}
+	if recoveredOutput["adoption_id"] != firstOutput["adoption_id"] || recoveredOutput["idempotent"] != true {
+		t.Fatalf("event recovery created a different adoption: first=%v recovered=%v", firstOutput, recoveredOutput)
+	}
 	snapshot, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +172,7 @@ esac
 	item := snapshot.Issues["129"]
 	if item.Status != "completed" || item.Lease != nil || !item.PullRequestMerged || item.PullRequestURL != "https://example.test/pull/132" ||
 		item.PullRequestNumber != 132 || item.HeadSHA != headSHA || item.GitHubSync != "" || item.MergedPullRequestAdoption == nil ||
-		item.MergedPullRequestAdoption.Status != "completed" || item.MergedPullRequestAdoption.MergeCommitSHA != mergeSHA ||
+		item.MergedPullRequestAdoption.Status != "synced" || item.MergedPullRequestAdoption.MergeSHA != mergeSHA ||
 		item.Attempts != 3 || item.Continuations != 2 || item.SessionID != "session-129" || item.Session == nil {
 		t.Fatalf("adopted state is inconsistent: %+v", item)
 	}
@@ -157,6 +182,9 @@ esac
 	}
 	if strings.Count(string(events), `"type":"merged_pull_request_adopted"`) != 1 {
 		t.Fatalf("lease-releasing adoption was not recorded exactly once:\n%s", events)
+	}
+	if strings.Count(string(events), `"type":"merged_pull_request_adoption_recovered"`) != 1 {
+		t.Fatalf("stripped metadata was not recovered exactly once:\n%s", events)
 	}
 }
 

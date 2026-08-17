@@ -23,7 +23,7 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	fs.SetOutput(a.Err)
 	repo := fs.String("repo", "", "repository path")
 	issueNumber := fs.Int("issue", 0, "terminal Issue number")
-	confirmed := fs.Bool("confirm-merged-pr-adoption", false, "confirm the saved branch was manually published and merged")
+	confirmed := fs.Bool("confirm-merged-pr-adoption", false, "confirm adoption of the unique externally merged Pull Request")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
@@ -51,9 +51,15 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
+	if current.MergedPullRequestAdoption == nil && current.Status == "completed" {
+		current, err = recoverMergedPullRequestAdoptionMetadata(ctx, store, cfg, l.Root, entry.Commands["git"], entry.Commands["gh"], current)
+		if err != nil {
+			return exitError{4, err}
+		}
+	}
 	if current.MergedPullRequestAdoption != nil && current.Status == "completed" {
-		if current.GitHubSync == "done" || current.MergedPullRequestAdoption.Status == "requested" {
-			if err := syncAdoptedMergedPullRequest(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
+		if current.GitHubSync == "done" {
+			if err := syncMergedPullRequestAdoption(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
 				return err
 			}
 			current, err = issueFromStore(store, *issueNumber)
@@ -63,25 +69,25 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 		}
 		return a.output(*jsonOut, mergedPullRequestAdoptionOutput(current, true))
 	}
-	if (current.Status != "blocked" && current.Status != "failed") || current.GitHubSync != "" {
-		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and terminal before merged Pull Request adoption (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
+	if (current.Status != "blocked" && current.Status != "failed") || current.GitHubSync != "" || current.PullRequestURL != "" || current.PullRequestNumber != 0 || current.PullRequestMerged {
+		return exitError{4, fmt.Errorf("Issue #%d must be a fully synchronized terminal record without an adopted Pull Request (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
-	if current.FailureKind != "issue" || current.LastError == "" || current.PullRequestURL != "" || current.PullRequestNumber != 0 || current.PullRequestMerged {
-		return exitError{4, fmt.Errorf("Issue #%d does not retain an eligible unpublished terminal failure boundary", *issueNumber)}
+	if !state.ValidID(current.RunID, "run_") || current.Worktree == "" || current.Branch == "" {
+		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, and branch", *issueNumber)}
+	}
+	if current.FailureKind != "issue" || current.LastError == "" {
+		return exitError{4, fmt.Errorf("Issue #%d does not have supervisor-owned Issue failure provenance", *issueNumber)}
+	}
+	if current.Lease == nil || current.Lease.Owner.RunID != current.RunID || current.Lease.Owner.Generation == 0 ||
+		current.Lease.Owner.Generation != current.LeaseGeneration || current.Lease.BaseSHA == "" ||
+		len(current.Lease.DeclaredResources) == 0 || len(current.Lease.ResolvedResources) == 0 {
+		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent fenced resource lease", *issueNumber)}
 	}
 	if current.Status == "blocked" && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
-		return exitError{4, fmt.Errorf("Issue #%d is not a supervisor-owned resumable worker block", *issueNumber)}
+		return exitError{4, fmt.Errorf("Issue #%d is not a resumable worker environment block", *issueNumber)}
 	}
 	if current.ConflictRecovery != nil || current.EnvironmentResume != nil || current.PublicationRecovery != nil || current.PullRequestChecksRecovery != nil {
-		return exitError{4, fmt.Errorf("Issue #%d has an incompatible in-progress recovery", *issueNumber)}
-	}
-	if !state.ValidID(current.RunID, "run_") || current.Worktree == "" || current.Branch == "" || current.Lease == nil {
-		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
-	}
-	owner := current.Lease.Owner
-	if owner.RunID != current.RunID || owner.Generation == 0 || owner.Generation != current.LeaseGeneration ||
-		len(current.Lease.DeclaredResources) == 0 || len(current.Lease.ResolvedResources) == 0 || current.Lease.BaseSHA == "" {
-		return exitError{4, fmt.Errorf("Issue #%d does not retain a complete fenced resource lease", *issueNumber)}
+		return exitError{4, fmt.Errorf("Issue #%d has an incompatible recovery in progress", *issueNumber)}
 	}
 	controller := a.ProcessController
 	if controller == nil {
@@ -99,15 +105,18 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 			return exitError{4, fmt.Errorf("Issue #%d has a pending manual answer request", *issueNumber)}
 		}
 	}
+
 	manager := worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]}
 	inspection, err := manager.Inspect(ctx, cfg, current.Worktree, current.Branch)
 	if err != nil {
 		return fmt.Errorf("inspect merged Pull Request adoption worktree: %w", err)
 	}
 	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists ||
-		!inspection.RemoteBranchExists || inspection.Head == "" || inspection.RemoteHead == "" ||
-		inspection.Head != inspection.RemoteHead || !inspection.RemoteConsistent || inspection.Dirty || inspection.UnpushedCommits {
-		return exitError{4, fmt.Errorf("saved worktree/branch must be clean, fully pushed, and aligned before merged Pull Request adoption: %+v", inspection)}
+		!inspection.RemoteBranchExists || inspection.Head == "" || inspection.RemoteHead == "" || inspection.Head != inspection.RemoteHead || !inspection.RemoteConsistent {
+		return exitError{4, fmt.Errorf("saved worktree/branch is not aligned with its pushed remote head: %+v", inspection)}
+	}
+	if inspection.Dirty || inspection.UnpushedCommits {
+		return exitError{4, fmt.Errorf("saved worktree must be clean and fully pushed before merged Pull Request adoption")}
 	}
 	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
 	remote, err := client.Inspect(ctx, cfg, *issueNumber, current.Branch)
@@ -115,34 +124,29 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 		return fmt.Errorf("inspect merged Pull Request adoption state: %w", err)
 	}
 	pr, err := gh.ValidateMergedPullRequestAdoption(cfg, remote, gh.MergedPullRequestAdoptionExpectation{
-		IssueNumber: *issueNumber, PreviousStatus: current.Status, Branch: current.Branch,
+		IssueNumber: current.Number, PreviousStatus: current.Status, Branch: current.Branch,
 		BaseBranch: cfg.Git.BaseBranch, HeadSHA: inspection.Head,
 	})
 	if err != nil {
 		return exitError{4, err}
 	}
-	if err := verifyAdoptedGitHistory(ctx, entry.Commands["git"], current.Worktree, cfg.Git.BaseBranch, current.Lease.BaseSHA, inspection.Head, pr.MergeCommitSHA); err != nil {
+	if err := verifyAdoptedGitHistory(ctx, entry.Commands["git"], current.Worktree, cfg.Git.BaseBranch, current.Lease.BaseSHA, inspection.Head, pr.MergeSHA); err != nil {
 		return exitError{4, err}
 	}
 	now := time.Now().UTC()
-	generation := 1
-	if current.MergedPullRequestAdoption != nil {
-		generation = current.MergedPullRequestAdoption.Generation + 1
-	}
 	adoption := &state.MergedPullRequestAdoption{
-		ID: state.NewID("merged_pr_adoption"), Status: "requested", Generation: generation,
-		ConfirmedAt: now, AdoptedAt: now, PreviousStatus: current.Status, PreviousReason: current.LastError,
-		PullRequestURL: pr.URL, PullRequestNumber: pr.Number, Branch: pr.HeadRefName,
-		HeadSHA: pr.HeadSHA, MergeCommitSHA: pr.MergeCommitSHA,
+		ID: state.NewID("merged_pr_adoption"), Status: "github_sync_pending", Generation: 1,
+		ConfirmedAt: now, AdoptedAt: now, PullRequestURL: pr.URL, PullRequestNumber: pr.Number,
+		PreviousStatus: current.Status, PreviousReason: current.LastError, Branch: current.Branch,
+		HeadSHA: pr.HeadSHA, MergeSHA: pr.MergeSHA, BaseBranch: pr.BaseRefName,
 	}
+	owner := current.Lease.Owner
 	_, err = store.Update("merged_pull_request_adopted", *issueNumber, current.RunID, map[string]any{
-		"adoption_id": adoption.ID, "generation": generation, "operator_confirmed": true,
-		"previous_status": current.Status, "pull_request_url": pr.URL, "pull_request_number": pr.Number,
-		"branch": pr.HeadRefName, "head_sha": pr.HeadSHA, "merge_commit_sha": pr.MergeCommitSHA,
+		"adoption_id": adoption.ID, "generation": adoption.Generation, "operator_confirmed": true,
+		"pull_request_url": pr.URL, "pull_request_number": pr.Number, "head_sha": pr.HeadSHA,
+		"merge_sha": pr.MergeSHA, "base_branch": pr.BaseRefName, "previous_status": current.Status,
+		"previous_reason": current.LastError, "branch": current.Branch, "confirmed_at": now, "adopted_at": now, "lease_owner": owner,
 	}, func(s *state.Snapshot) error {
-		if s.StateRevision != snapshot.StateRevision {
-			return fmt.Errorf("Issue #%d durable state changed while merged Pull Request adoption was being prepared", *issueNumber)
-		}
 		item := s.Issues[strconv.Itoa(*issueNumber)]
 		if item == nil || !reflect.DeepEqual(item, current) {
 			return fmt.Errorf("Issue #%d changed while merged Pull Request adoption was being prepared", *issueNumber)
@@ -170,21 +174,28 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	if err != nil {
 		return err
 	}
-	if err := syncAdoptedMergedPullRequest(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
+	if err := syncMergedPullRequestAdoption(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
 		return err
 	}
 	current, err = issueFromStore(store, *issueNumber)
 	if err != nil {
 		return err
 	}
+	if current.MergedPullRequestAdoption == nil {
+		record, recordErr := store.MergedPullRequestAdoptionRecord(current.Number, current.RunID)
+		if recordErr != nil {
+			return recordErr
+		}
+		current.MergedPullRequestAdoption = &record.Adoption
+	}
 	return a.output(*jsonOut, mergedPullRequestAdoptionOutput(current, false))
 }
 
-func verifyAdoptedGitHistory(ctx context.Context, gitPath, worktreePath, baseBranch, leaseBaseSHA, headSHA, mergeCommitSHA string) error {
+func verifyAdoptedGitHistory(ctx context.Context, gitPath, worktreePath, baseBranch, leaseBaseSHA, headSHA, mergeSHA string) error {
 	if gitPath == "" {
 		gitPath = "git"
 	}
-	if baseBranch == "" || leaseBaseSHA == "" || headSHA == "" || mergeCommitSHA == "" {
+	if baseBranch == "" || leaseBaseSHA == "" || headSHA == "" || mergeSHA == "" {
 		return fmt.Errorf("merged Pull Request Git history boundary is incomplete")
 	}
 	run := func(args ...string) error {
@@ -200,70 +211,167 @@ func verifyAdoptedGitHistory(ctx context.Context, gitPath, worktreePath, baseBra
 	if err := run("merge-base", "--is-ancestor", leaseBaseSHA, headSHA); err != nil {
 		return fmt.Errorf("saved lease base is not an ancestor of the saved branch head: %w", err)
 	}
-	if err := run("cat-file", "-e", mergeCommitSHA+"^{commit}"); err != nil {
+	if err := run("cat-file", "-e", mergeSHA+"^{commit}"); err != nil {
 		return fmt.Errorf("merged Pull Request commit is not present in the saved repository: %w", err)
 	}
-	if err := run("merge-base", "--is-ancestor", mergeCommitSHA, "origin/"+baseBranch); err != nil {
+	if err := run("merge-base", "--is-ancestor", mergeSHA, "origin/"+baseBranch); err != nil {
 		return fmt.Errorf("merged Pull Request commit is not an ancestor of the configured remote-tracking base; fetch the base branch and retry: %w", err)
 	}
 	return nil
 }
 
-func syncAdoptedMergedPullRequest(ctx context.Context, store state.Store, cfg config.Config, ghPath string, current *state.Issue) error {
-	if current == nil || current.MergedPullRequestAdoption == nil || current.Status != "completed" || !current.PullRequestMerged {
-		return fmt.Errorf("merged Pull Request adoption metadata is missing or inconsistent")
+func recoverMergedPullRequestAdoptionMetadata(ctx context.Context, store state.Store, cfg config.Config, stateRoot, gitPath, ghPath string, current *state.Issue) (*state.Issue, error) {
+	record, err := store.MergedPullRequestAdoptionRecord(current.Number, current.RunID)
+	if err != nil {
+		return nil, err
+	}
+	adoption := record.Adoption
+	if adoption.BaseBranch == "" {
+		adoption.BaseBranch = cfg.Git.BaseBranch
+	}
+	if current.Status != "completed" || current.Lease != nil || !current.PullRequestMerged || (current.GitHubSync != "" && current.GitHubSync != "done") ||
+		current.PullRequestURL != adoption.PullRequestURL || current.PullRequestNumber != adoption.PullRequestNumber || current.HeadSHA != adoption.HeadSHA ||
+		record.LeaseOwner.RunID != current.RunID || record.LeaseOwner.Generation != current.LeaseGeneration {
+		return nil, fmt.Errorf("Issue #%d completed snapshot is inconsistent with its durable adoption event", current.Number)
+	}
+	manager := worktree.Manager{StateRoot: stateRoot, GitPath: gitPath}
+	inspection, err := manager.Inspect(ctx, cfg, current.Worktree, current.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("inspect adopted Pull Request worktree: %w", err)
+	}
+	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists || !inspection.RemoteBranchExists ||
+		inspection.Dirty || inspection.UnpushedCommits || inspection.Head != adoption.HeadSHA || inspection.RemoteHead != adoption.HeadSHA {
+		return nil, fmt.Errorf("Issue #%d adopted worktree and branch no longer match durable history", current.Number)
+	}
+	client := gh.CLI{Path: ghPath, Secrets: cfg.RedactionValues()}
+	remote, err := client.Inspect(ctx, cfg, current.Number, current.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("reinspect adopted Pull Request metadata: %w", err)
+	}
+	if len(remote.PullRequests) != 1 {
+		return nil, fmt.Errorf("Issue #%d adopted Pull Request count changed", current.Number)
+	}
+	pr := remote.PullRequests[0]
+	labels := lowerLabelSet(remote.Issue.Labels)
+	githubSynced := labels[strings.ToLower(cfg.GitHub.DoneLabel)] && hasAppComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->")
+	terminalPending := current.GitHubSync == "done" && hasAppComment(remote.Issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number))
+	if (!githubSynced && !terminalPending) || pr.URL != adoption.PullRequestURL || pr.Number != adoption.PullRequestNumber || !strings.EqualFold(pr.State, "merged") || pr.MergedAt == nil ||
+		pr.HeadRefName != current.Branch || pr.BaseRefName != adoption.BaseBranch || pr.HeadSHA != adoption.HeadSHA || pr.MergeSHA != adoption.MergeSHA ||
+		!strings.EqualFold(pr.HeadRepository, cfg.GitHub.Repo) {
+		return nil, fmt.Errorf("Issue #%d authoritative GitHub completion no longer matches durable adoption history", current.Number)
+	}
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if labels[strings.ToLower(label)] && !(terminalPending && strings.EqualFold(label, "blocked")) {
+			return nil, fmt.Errorf("Issue #%d has exclusion label %q after adoption", current.Number, label)
+		}
+	}
+	now := time.Now().UTC()
+	_, err = store.Update("merged_pull_request_adoption_recovered", current.Number, current.RunID, map[string]any{
+		"adoption_id": adoption.ID, "generation": adoption.Generation, "pull_request_url": adoption.PullRequestURL,
+		"pull_request_number": adoption.PullRequestNumber, "head_sha": adoption.HeadSHA, "merge_sha": adoption.MergeSHA,
+		"adopted_at": adoption.AdoptedAt, "source": "durable_event_history",
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		if item == nil || !reflect.DeepEqual(item, current) {
+			return fmt.Errorf("Issue #%d changed while adoption metadata was being recovered", current.Number)
+		}
+		item.MergedPullRequestAdoption = &adoption
+		item.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	updated, err := issueFromStore(store, current.Number)
+	if err != nil {
+		return nil, err
+	}
+	if updated.MergedPullRequestAdoption == nil {
+		updated.MergedPullRequestAdoption = &adoption
+	}
+	return updated, nil
+}
+
+func syncMergedPullRequestAdoption(ctx context.Context, store state.Store, cfg config.Config, ghPath string, current *state.Issue) error {
+	if current == nil || current.MergedPullRequestAdoption == nil || current.Status != "completed" || current.GitHubSync != "done" {
+		return fmt.Errorf("merged Pull Request adoption synchronization metadata is inconsistent")
+	}
+	client := gh.CLI{Path: ghPath, Secrets: cfg.RedactionValues()}
+	remote, err := client.Inspect(ctx, cfg, current.Number, current.Branch)
+	if err != nil {
+		return fmt.Errorf("reinspect merged Pull Request adoption before synchronization: %w", err)
 	}
 	adoption := current.MergedPullRequestAdoption
-	client := gh.CLI{Path: ghPath, Secrets: cfg.RedactionValues()}
-	remote, err := client.Inspect(ctx, cfg, current.Number, adoption.Branch)
-	if err != nil {
-		return fmt.Errorf("reinspect adopted merged Pull Request before synchronization: %w", err)
+	if len(remote.PullRequests) != 1 {
+		return fmt.Errorf("refuse merged Pull Request adoption synchronization: Pull Request count changed")
 	}
-	if _, err := gh.ValidateMergedPullRequestAdoption(cfg, remote, gh.MergedPullRequestAdoptionExpectation{
-		IssueNumber: current.Number, PreviousStatus: adoption.PreviousStatus, Branch: adoption.Branch,
-		BaseBranch: cfg.Git.BaseBranch, HeadSHA: adoption.HeadSHA, PullRequestURL: adoption.PullRequestURL,
-		PullRequestNumber: adoption.PullRequestNumber, MergeCommitSHA: adoption.MergeCommitSHA, AllowDone: true,
-	}); err != nil {
-		return fmt.Errorf("refuse adopted merged Pull Request synchronization: %w", err)
-	}
-	if current.GitHubSync == "done" {
-		if err := client.MarkDone(ctx, cfg, current.Number, adoption.PullRequestURL); err != nil {
-			return fmt.Errorf("sync adopted merged Pull Request completion to GitHub: %w", err)
+	pr := remote.PullRequests[0]
+	if adoption.PreviousStatus != "" {
+		branch := adoption.Branch
+		if branch == "" {
+			branch = current.Branch
 		}
+		if _, err := gh.ValidateMergedPullRequestAdoption(cfg, remote, gh.MergedPullRequestAdoptionExpectation{
+			IssueNumber: current.Number, PreviousStatus: adoption.PreviousStatus, Branch: branch,
+			BaseBranch: adoption.BaseBranch, HeadSHA: adoption.HeadSHA, PullRequestURL: adoption.PullRequestURL,
+			PullRequestNumber: adoption.PullRequestNumber, MergeCommitSHA: adoption.MergeSHA, AllowDone: true,
+		}); err != nil {
+			return fmt.Errorf("refuse merged Pull Request adoption synchronization: %w", err)
+		}
+	} else {
+		if pr.URL != adoption.PullRequestURL || pr.Number != adoption.PullRequestNumber || !strings.EqualFold(pr.State, "merged") || pr.MergedAt == nil ||
+			pr.HeadRefName != current.Branch || pr.BaseRefName != adoption.BaseBranch || pr.HeadSHA != adoption.HeadSHA || pr.MergeSHA != adoption.MergeSHA ||
+			!strings.EqualFold(pr.HeadRepository, cfg.GitHub.Repo) {
+			return fmt.Errorf("refuse merged Pull Request adoption synchronization: authoritative Pull Request changed")
+		}
+		labels := lowerLabelSet(remote.Issue.Labels)
+		for _, label := range cfg.GitHub.ExcludeLabels {
+			if labels[strings.ToLower(label)] && !strings.EqualFold(label, "blocked") {
+				return fmt.Errorf("refuse merged Pull Request adoption synchronization: label %q excludes adoption", label)
+			}
+		}
+	}
+	if err := client.MarkDone(ctx, cfg, current.Number, current.PullRequestURL); err != nil {
+		return fmt.Errorf("sync merged Pull Request adoption to GitHub (durable completion remains pending): %w", err)
 	}
 	now := time.Now().UTC()
 	_, err = store.Update("merged_pull_request_adoption_synced", current.Number, current.RunID, map[string]any{
 		"adoption_id": adoption.ID, "generation": adoption.Generation, "pull_request_url": adoption.PullRequestURL,
-		"merge_commit_sha": adoption.MergeCommitSHA,
+		"pull_request_number": adoption.PullRequestNumber, "head_sha": adoption.HeadSHA, "merge_sha": adoption.MergeSHA,
+		"adopted_at": adoption.AdoptedAt,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.MergedPullRequestAdoption == nil || item.MergedPullRequestAdoption.ID != adoption.ID {
-			return fmt.Errorf("Issue #%d merged Pull Request adoption changed during synchronization", current.Number)
-		}
-		if item.GitHubSync == "done" {
+		if item != nil && item.GitHubSync == "done" && item.MergedPullRequestAdoption != nil && item.MergedPullRequestAdoption.ID == adoption.ID {
 			item.GitHubSync = ""
+			item.MergedPullRequestAdoption.Status = "synced"
+			item.UpdatedAt = now
 		}
-		item.MergedPullRequestAdoption.Status = "completed"
-		item.UpdatedAt = now
 		return nil
 	})
 	return err
+}
+
+func hasAppComment(comments []string, marker string) bool {
+	for _, comment := range comments {
+		if strings.Contains(comment, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func mergedPullRequestAdoptionOutput(current *state.Issue, idempotent bool) map[string]any {
 	result := map[string]any{
 		"issue": current.Number, "status": current.Status, "branch": current.Branch,
 		"pull_request_url": current.PullRequestURL, "pull_request_number": current.PullRequestNumber,
-		"lease_released": current.Lease == nil, "idempotent": idempotent,
+		"head_sha": current.HeadSHA, "lease_released": current.Lease == nil, "idempotent": idempotent,
 		"worker_attempts": current.Attempts, "worker_continuations": current.Continuations,
 	}
 	if adoption := current.MergedPullRequestAdoption; adoption != nil {
 		result["adoption_id"] = adoption.ID
 		result["generation"] = adoption.Generation
 		result["adoption_status"] = adoption.Status
-		result["head_sha"] = adoption.HeadSHA
-		result["merge_commit_sha"] = adoption.MergeCommitSHA
-		result["confirmed_at"] = adoption.ConfirmedAt
+		result["merge_sha"] = adoption.MergeSHA
 		result["adopted_at"] = adoption.AdoptedAt
 	}
 	return result

@@ -1763,7 +1763,7 @@ esac
 	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
 		t.Fatal(err)
 	}
-	if output["status"] != "completed" || output["adoption_status"] != "completed" || output["lease_released"] != true {
+	if output["status"] != "completed" || output["adoption_status"] != "synced" || output["lease_released"] != true {
 		t.Fatalf("output=%v", output)
 	}
 	snapshot, err := store.Load()
@@ -1772,7 +1772,7 @@ esac
 	}
 	item := snapshot.Issues["102"]
 	if item.Lease != nil || item.Status != "completed" || !item.PullRequestMerged || item.PullRequestNumber != 132 || item.GitHubSync != "" ||
-		item.MergedPullRequestAdoption == nil || item.MergedPullRequestAdoption.MergeCommitSHA != mergeSHA || item.MergedPullRequestAdoption.Status != "completed" {
+		item.MergedPullRequestAdoption == nil || item.MergedPullRequestAdoption.MergeSHA != mergeSHA || item.MergedPullRequestAdoption.Status != "synced" {
 		t.Fatalf("adopted Issue=%+v", item)
 	}
 	if item.Attempts != 3 || item.Continuations != 2 || item.SessionID != "session-102" || !reflect.DeepEqual(item.Answers, []state.AnswerRecord{answer}) {
