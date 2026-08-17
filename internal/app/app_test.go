@@ -617,14 +617,28 @@ esac
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.Update("issue_blocked", 8, "run_8", nil, func(s *state.Snapshot) error {
+	legacyError := "issue: worker blocked: localhost bind denied"
+	_, err = store.Update("issue_blocked", 8, "run_8", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(s *state.Snapshot) error {
 		s.Issues["8"] = &state.Issue{
 			Number: 8, Status: "blocked", RunID: "run_8", Branch: branch, Worktree: repo,
 			SessionID: "session-8", Session: &state.WorkerSession{Backend: "codex", ID: "session-8"},
 			DeclaredResources: []string{state.RepositoryResource}, ActualResources: []string{state.RepositoryResource},
 			Answers:     []state.AnswerRecord{{RequestID: "req-8", Question: "Continue?", Answer: "yes", AnsweredAt: time.Now().UTC()}},
-			FailureKind: "issue", LastError: "issue: worker blocked: localhost bind denied", UpdatedAt: time.Now().UTC(),
+			FailureKind: "issue", LastError: legacyError, UpdatedAt: time.Now().UTC(),
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("github_state_synced", 8, "run_8", map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("startup_reconciled", 8, "run_8", map[string]string{
+		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
+	}, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["8"].LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
 		return nil
 	})
 	if err != nil {
@@ -666,7 +680,7 @@ esac
 	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.RunID != "run_8" || item.Branch != branch || item.Worktree != repo || item.SessionID != "session-8" || item.Lease == nil {
 		t.Fatalf("item=%+v", item)
 	}
-	if item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" || item.Lease.ResolvedResources[0] != state.RepositoryResource {
+	if item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" || item.BlockedCause.Reason != "localhost bind denied" || item.BlockedCause.BlockedAt.IsZero() || item.EnvironmentResume.PreviousReason != "localhost bind denied" || item.Lease.ResolvedResources[0] != state.RepositoryResource {
 		t.Fatalf("legacy worker block was not normalized conservatively: %+v", item)
 	}
 	if item.Lease.BaseSHA != baseSHA || item.Lease.BaseSHA != durableBaseSHA || item.LeaseGeneration != durableGeneration || item.EnvironmentResume.ID != durableResumeID {
@@ -894,13 +908,18 @@ func TestResumeBlockedFailsClosedWhenConfiguredBaseSHAIsUnavailable(t *testing.T
 		t.Fatal(err)
 	}
 	blockedAt := time.Now().UTC()
-	_, err = store.Update("issue_blocked", 9, "run_9", nil, func(snapshot *state.Snapshot) error {
+	legacyError := "issue: worker blocked: legacy environment"
+	_, err = store.Update("issue_blocked", 9, "run_9", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["9"] = &state.Issue{
 			Number: 9, Status: "blocked", RunID: "run_9", Branch: branch, Worktree: cfg.RepoPath,
-			SessionID: "session-9", FailureKind: "issue", LastError: "issue: worker blocked: legacy environment", UpdatedAt: blockedAt,
+			SessionID: "session-9", FailureKind: "issue", LastError: legacyError, UpdatedAt: blockedAt,
 		}
 		return nil
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("github_state_synced", 9, "run_9", map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

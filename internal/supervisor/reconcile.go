@@ -31,17 +31,18 @@ func (osProcessInspector) Alive(pid int) bool {
 }
 
 type reconciliationDecision struct {
-	status      string
-	lastError   string
-	branch      string
-	pullRequest string
-	githubSync  string
-	retryAt     *time.Time
-	workerPID   int
-	workerPGID  int
-	prMerged    bool
-	markRunning bool
-	reason      string
+	status       string
+	lastError    string
+	branch       string
+	pullRequest  string
+	githubSync   string
+	retryAt      *time.Time
+	workerPID    int
+	workerPGID   int
+	prMerged     bool
+	markRunning  bool
+	reason       string
+	blockedCause *state.BlockedCause
 }
 
 func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) error {
@@ -93,7 +94,22 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					return fmt.Errorf("reconcile worktree for Issue #%d: %w", number, err)
 				}
 			}
-			decision := l.decideReconciliation(latest, *current, remote, inspection)
+			evaluated := *current
+			legacyProvenance := false
+			onlyBlockedExclusion := l.hasOnlyBlockedExclusion(labelSet(remote.Issue.Labels))
+			if state.MayHaveLegacyWorkerBlockProvenance(current) {
+				if cause, provenanceErr := l.Store.LegacyWorkerBlockProvenance(*current); provenanceErr == nil {
+					legacyProvenance = true
+					if onlyBlockedExclusion {
+						evaluated.BlockedCause = cause
+						evaluated.LastError = "issue: worker blocked: " + cause.Reason
+					}
+				}
+			}
+			decision := l.decideReconciliation(latest, evaluated, remote, inspection)
+			if legacyProvenance && !onlyBlockedExclusion {
+				decision = blockDecision(decision, "GitHub labels do not contain only the supervisor-owned blocked label")
+			}
 			if decision.workerPID == 0 {
 				decision.workerPGID = 0
 			}
@@ -118,7 +134,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 						return err
 					}
 				}
-				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !resumableWorkerBlock(decision.blockedCause) {
 					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
 						return err
 					}
@@ -133,6 +149,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				item.RetryAfter = decision.retryAt
 				item.WorkerPID = decision.workerPID
 				item.WorkerPGID = decision.workerPGID
+				item.BlockedCause = decision.blockedCause
 				item.UpdatedAt = l.now()
 				return nil
 			})
@@ -148,6 +165,10 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 	return nil
 }
 
+func resumableWorkerBlock(cause *state.BlockedCause) bool {
+	return cause != nil && cause.Origin == "worker" && cause.Kind == "environment" && cause.Resumable
+}
+
 func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 	if item == nil {
 		return false
@@ -160,6 +181,8 @@ func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 		return true
 	case "retry_wait":
 		return item.RetryAfter == nil || !item.RetryAfter.After(now)
+	case "blocked":
+		return state.MayHaveLegacyWorkerBlockProvenance(item)
 	default:
 		return false
 	}
@@ -230,7 +253,7 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 				return err
 			}
 		}
-		if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+		if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !resumableWorkerBlock(decision.blockedCause) {
 			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
 				return err
 			}
@@ -288,7 +311,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		status: current.Status, lastError: current.LastError, branch: current.Branch,
 		pullRequest: current.PullRequestURL, githubSync: current.GitHubSync,
 		retryAt: current.RetryAfter, workerPID: current.WorkerPID, workerPGID: current.WorkerPGID, prMerged: current.PullRequestMerged,
-		reason: "state already converged",
+		reason: "state already converged", blockedCause: current.BlockedCause,
 	}
 	labels := labelSet(remote.Issue.Labels)
 	ready := hasAnyLabel(labels, l.Config.GitHub.ReadyLabels)
@@ -343,7 +366,12 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		return decision
 	}
 	if excluded {
-		if current.GitHubSync == "environment_resume" && current.Status == "environment_resume_pending" {
+		if current.Status == "blocked" && current.BlockedCause != nil && current.BlockedCause.Origin == "worker" &&
+			current.BlockedCause.Kind == "environment" && current.BlockedCause.Resumable && l.hasOnlyBlockedExclusion(labels) {
+			decision.status, decision.workerPID, decision.retryAt, decision.githubSync = "blocked", 0, nil, ""
+			decision.reason = "supervisor-owned worker environment block provenance preserved"
+			return decision
+		} else if current.GitHubSync == "environment_resume" && current.Status == "environment_resume_pending" {
 			decision.reason = "explicit environment resume is waiting for GitHub label synchronization"
 		} else if current.GitHubSync == "conflict_retry" && current.Status == "resolving_conflict" {
 			decision.reason = "explicit conflict retry is waiting for GitHub label synchronization"
@@ -529,6 +557,24 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		decision.reason = "open Pull Request discovered and dead worker scheduled for retry"
 	}
 	return decision
+}
+
+func (l *Loop) hasOnlyBlockedExclusion(labels map[string]bool) bool {
+	if hasAnyLabel(labels, l.Config.GitHub.ReadyLabels) || labels[l.Config.GitHub.RunningLabel] ||
+		labels[l.Config.GitHub.NeedsInputLabel] || labels[l.Config.GitHub.FailedLabel] || labels[l.Config.GitHub.DoneLabel] {
+		return false
+	}
+	blocked := false
+	for _, excluded := range l.Config.GitHub.ExcludeLabels {
+		if !labels[excluded] {
+			continue
+		}
+		if !strings.EqualFold(excluded, "blocked") {
+			return false
+		}
+		blocked = true
+	}
+	return blocked
 }
 
 // decideTerminalPullRequestReconciliation is shared by startup and periodic
