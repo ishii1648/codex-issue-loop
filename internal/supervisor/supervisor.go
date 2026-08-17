@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
@@ -29,6 +30,7 @@ import (
 type WorktreeManager interface {
 	Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error)
 	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
+	ContentDigest(context.Context, string) (string, error)
 }
 
 type Publisher interface {
@@ -210,7 +212,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
 		switch issue.Status {
-		case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "publication_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 			if issue.RunID != "" {
 				exclude[issue.RunID] = true
 			}
@@ -230,7 +232,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
-		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 			continue
 		}
 		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
@@ -348,6 +350,9 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	}
 	if current.Status == "resolving_conflict" {
 		return l.processConflictRecovery(ctx, current)
+	}
+	if current.Status == "publication_recovery_pending" {
+		return l.processPublicationRecovery(ctx, current)
 	}
 	issue, err := l.GitHub.Get(ctx, l.Config, current.Number)
 	if err != nil {
@@ -496,6 +501,10 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		item.ExecutionProfile = profile
 		item.WorkerPID = 0
 		item.WorkerPGID = 0
+		// A fresh worker result supersedes any publisher provenance from an
+		// earlier worker attempt. A new publication failure is recorded below
+		// only if this completed result reaches that boundary again.
+		item.PublicationFailure = nil
 		if result.SessionID != "" {
 			item.SessionID = result.SessionID
 			backend := result.Identity.Backend
@@ -562,7 +571,10 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 				if errors.As(publishErr, &mismatch) {
 					return l.requestResourceCorrection(ctx, current, audit, publishErr.Error())
 				}
-				return l.scheduleRetry(ctx, current, "publish completed work: "+publishErr.Error())
+				if provenanceErr := l.recordPublicationFailure(current, publishErr); provenanceErr != nil {
+					return provenanceErr
+				}
+				return l.schedulePublicationRetry(ctx, current, "publish completed work: "+publishErr.Error())
 			}
 			result.Git = &published
 		}
@@ -623,6 +635,362 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
 	}
+}
+
+func (l *Loop) recordPublicationFailure(current state.Issue, cause error) error {
+	provenance := publication.ClassifyFailure(cause, l.now())
+	_, err := l.Store.Update("publication_failed", current.Number, current.RunID, &provenance, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.RunID != current.RunID {
+			return fmt.Errorf("Issue #%d run changed while recording publication failure", current.Number)
+		}
+		if item.Lease != nil {
+			provenance.DeclaredResources = append([]string(nil), item.Lease.DeclaredResources...)
+			provenance.ResolvedResources = append([]string(nil), item.Lease.ResolvedResources...)
+			provenance.ActualResources = append([]string(nil), item.Lease.ActualResources...)
+		}
+		item.PublicationFailure = &provenance
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	return failure.Wrap(failure.Supervisor, "persist publication failure provenance", err)
+}
+
+func (l *Loop) processPublicationRecovery(ctx context.Context, current state.Issue) error {
+	recovery := current.PublicationRecovery
+	if recovery == nil || recovery.ID == "" || !state.ValidID(current.RunID, "run_") || current.Lease == nil || current.Lease.BaseSHA == "" || l.Publisher == nil || l.Worktrees == nil {
+		return l.failPublicationRecovery(ctx, current, "publication recovery metadata or durable base SHA is missing")
+	}
+	runningAttempt := publicationRecoveryAttemptRunning(recovery, recovery.Attempts)
+	if (recovery.Status == "publishing") != runningAttempt {
+		return l.failPublicationRecovery(ctx, current, "publication recovery attempt history is inconsistent")
+	}
+	if recovery.Attempts >= recovery.MaxAttempts && !runningAttempt {
+		return l.failPublicationRecovery(ctx, current, "publication recovery budget is exhausted")
+	}
+	inspection, err := l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+	if err != nil {
+		return l.failPublicationRecovery(ctx, current, "inspect saved publication worktree: "+err.Error())
+	}
+	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists || inspection.Head == "" {
+		return l.failPublicationRecovery(ctx, current, "saved publication worktree or branch is invalid")
+	}
+	if inspection.RemoteBranchExists && !inspection.RemoteConsistent {
+		return l.failPublicationRecovery(ctx, current, "saved local and remote branch histories diverged")
+	}
+	if recovery.Attempts == 0 && inspection.Head != recovery.ExpectedHeadSHA {
+		return l.failPublicationRecovery(ctx, current, "saved publication worktree HEAD changed after operator validation")
+	}
+	if recovery.Attempts == 0 {
+		digest, digestErr := l.Worktrees.ContentDigest(ctx, current.Worktree)
+		if digestErr != nil || digest != recovery.WorktreeSHA256 {
+			return l.failPublicationRecovery(ctx, current, "saved publication worktree content changed after operator validation")
+		}
+	}
+	result, resultBytes, err := worker.LoadLatestCompletedResult(filepath.Join(l.Store.Dir, "runs", current.RunID))
+	if err != nil {
+		return l.failPublicationRecovery(ctx, current, "saved completed worker result is unavailable: "+err.Error())
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(resultBytes))
+	if digest != recovery.ResultSHA256 || result.Summary != recovery.Summary {
+		return l.failPublicationRecovery(ctx, current, "saved completed worker result changed after operator validation")
+	}
+	remote, err := l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+	if err != nil {
+		return failure.Wrap(failure.Transient, "refresh Issue and Pull Requests for publication recovery", err)
+	}
+	if remoteErr := validatePublicationRecoveryRemote(l.Config, current, remote, inspection, recovery.Attempts > 0); remoteErr != nil {
+		return l.failPublicationRecovery(ctx, current, remoteErr.Error())
+	}
+	issue := remote.Issue
+	savedPRURL := current.PullRequestURL
+	if savedPRURL == "" && len(remote.PullRequests) == 1 {
+		savedPRURL = remote.PullRequests[0].URL
+	}
+
+	now := l.now()
+	resumingAttempt := runningAttempt
+	attemptNumber := recovery.Attempts + 1
+	eventType := "publication_recovery_attempt_started"
+	if resumingAttempt {
+		attemptNumber = recovery.Attempts
+		eventType = "publication_recovery_attempt_resumed"
+	}
+	_, err = l.Store.Update(eventType, current.Number, current.RunID, map[string]any{
+		"recovery_id": recovery.ID, "generation": recovery.Generation, "attempt": attemptNumber,
+		"resumed": resumingAttempt, "pull_request_url": savedPRURL,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.Status != "publication_recovery_pending" || item.GitHubSync != "" || item.PublicationRecovery == nil || item.PublicationRecovery.ID != recovery.ID || item.PublicationRecovery.Attempts != recovery.Attempts {
+			return fmt.Errorf("Issue #%d publication recovery changed before attempt", current.Number)
+		}
+		if !resumingAttempt {
+			item.PublicationRecovery.Attempts = attemptNumber
+			item.PublicationRecovery.History = append(item.PublicationRecovery.History, state.PublicationRecoveryAttempt{
+				Number: attemptNumber, Generation: recovery.Generation, Status: "running", StartedAt: now,
+			})
+		}
+		if item.PullRequestURL == "" && savedPRURL != "" {
+			item.PullRequestURL = savedPRURL
+		}
+		item.PublicationRecovery.Status = "publishing"
+		item.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist publication recovery attempt", err)
+	}
+	declared := append([]string(nil), current.DeclaredResources...)
+	l.publicationMu.Lock()
+	published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, savedPRURL, recovery.Summary, current.Lease.BaseSHA, declared)
+	l.publicationMu.Unlock()
+	_, auditErr := l.Store.Update("publication_audited", current.Number, current.RunID, audit, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		auditCopy := audit
+		item.PublicationAudit = &auditCopy
+		item.ActualResources = append([]string(nil), audit.ActualResources...)
+		if item.Lease != nil {
+			item.Lease.ActualResources = append([]string(nil), audit.ActualResources...)
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if auditErr != nil {
+		return failure.Wrap(failure.Supervisor, "persist recovered publication audit", auditErr)
+	}
+	if publishErr != nil {
+		if ctx.Err() != nil {
+			// Keep the write-ahead attempt running. A restarted supervisor resumes
+			// this same attempt without consuming another budget entry.
+			return nil
+		}
+		return l.finishPublicationRecoveryFailure(ctx, current, recovery.ID, attemptNumber, publishErr)
+	}
+	result.Git = &published
+	_, err = l.Store.Update("publication_recovery_succeeded", current.Number, current.RunID, result, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.PublicationRecovery == nil || item.PublicationRecovery.ID != recovery.ID {
+			return fmt.Errorf("Issue #%d publication recovery disappeared", current.Number)
+		}
+		finishPublicationRecoveryAttempt(item, attemptNumber, "succeeded", "", l.now())
+		item.PublicationRecovery.Status = "succeeded"
+		item.LastError = ""
+		item.FailureKind = ""
+		item.RetryAfter = nil
+		if published.PullRequestURL == "" {
+			if item.Lease != nil {
+				if releaseErr := state.ReleaseIssueLease(item, item.Lease.Owner); releaseErr != nil {
+					return releaseErr
+				}
+			}
+			item.Status = "completed"
+			item.PullRequestURL = ""
+			item.PullRequestMerged = false
+			item.SessionID = ""
+			item.Session = nil
+			item.GitHubSync = "done"
+		} else {
+			item.Status = "awaiting_checks"
+			item.PullRequestURL = published.PullRequestURL
+			item.PullRequestMerged = false
+			item.GitHubSync = ""
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist recovered publication success", err)
+	}
+	if published.PullRequestURL == "" {
+		updated, stateErr := l.issueState(current.Number)
+		if stateErr != nil {
+			return stateErr
+		}
+		return l.syncGitHub(ctx, updated)
+	}
+	return nil
+}
+
+func (l *Loop) finishPublicationRecoveryFailure(ctx context.Context, current state.Issue, recoveryID string, attempt int, cause error) error {
+	provenance := publication.ClassifyFailure(cause, l.now())
+	terminal := current.PublicationRecovery != nil && attempt >= current.PublicationRecovery.MaxAttempts
+	var mismatch publication.PullRequestMismatchError
+	var claimMismatch publication.ClaimMismatchError
+	var formatter publication.FormatterError
+	if errors.As(cause, &mismatch) || errors.As(cause, &claimMismatch) || (errors.As(cause, &formatter) && formatter.Code == "path_unsafe") {
+		terminal = true
+	}
+	discoveredPRURL, discoveredOpenPRs, inspectedPRs := l.discoverOpenPublicationPullRequests(ctx, current)
+	retainLease := current.PullRequestURL != "" || discoveredOpenPRs > 0 || !inspectedPRs
+	retryAt := l.now().Add(l.retryDelay(attempt))
+	_, err := l.Store.Update("publication_recovery_attempt_failed", current.Number, current.RunID, map[string]any{
+		"recovery_id": recoveryID, "attempt": attempt, "failure": provenance, "terminal": terminal,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.PublicationRecovery == nil || item.PublicationRecovery.ID != recoveryID {
+			return fmt.Errorf("Issue #%d publication recovery disappeared", current.Number)
+		}
+		finishPublicationRecoveryAttempt(item, attempt, "failed", cause.Error(), l.now())
+		item.PublicationFailure = &provenance
+		item.LastError = "publication recovery: " + cause.Error()
+		item.FailureKind = string(failure.Issue)
+		if item.PullRequestURL == "" && discoveredOpenPRs == 1 {
+			item.PullRequestURL = discoveredPRURL
+		}
+		if terminal {
+			if !retainLease && item.PullRequestURL == "" && item.Lease != nil {
+				if releaseErr := state.ReleaseIssueLease(item, item.Lease.Owner); releaseErr != nil {
+					return releaseErr
+				}
+			}
+			item.Status = "failed"
+			item.GitHubSync = "failed"
+			item.RetryAfter = nil
+			item.PublicationRecovery.Status = "failed"
+		} else {
+			item.Status = "publication_recovery_pending"
+			item.RetryAfter = &retryAt
+			item.PublicationRecovery.Status = "retry_wait"
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist publication recovery failure", err)
+	}
+	if !terminal {
+		return nil
+	}
+	updated, err := l.issueState(current.Number)
+	if err != nil {
+		return err
+	}
+	return l.syncGitHub(ctx, updated)
+}
+
+func (l *Loop) failPublicationRecovery(ctx context.Context, current state.Issue, reason string) error {
+	provenance := publication.FailureProvenance{
+		Origin: publication.FailureOriginPublisher, Phase: publication.FailurePhasePublication,
+		Code: "recovery_validation_failed", Recoverable: false, Reason: reason, FailedAt: l.now(),
+	}
+	discoveredPRURL, discoveredOpenPRs, inspectedPRs := l.discoverOpenPublicationPullRequests(ctx, current)
+	retainLease := current.PullRequestURL != "" || discoveredOpenPRs > 0 || !inspectedPRs
+	_, err := l.Store.Update("publication_recovery_refused", current.Number, current.RunID, provenance, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		if !retainLease && item.PullRequestURL == "" && item.Lease != nil {
+			if releaseErr := state.ReleaseIssueLease(item, item.Lease.Owner); releaseErr != nil {
+				return releaseErr
+			}
+		}
+		if item.PullRequestURL == "" && discoveredOpenPRs == 1 {
+			item.PullRequestURL = discoveredPRURL
+		}
+		item.Status = "failed"
+		item.LastError = "publication recovery refused: " + reason
+		item.FailureKind = string(failure.Issue)
+		item.PublicationFailure = &provenance
+		item.GitHubSync = "failed"
+		item.RetryAfter = nil
+		if item.PublicationRecovery != nil {
+			item.PublicationRecovery.Status = "failed"
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist publication recovery refusal", err)
+	}
+	updated, err := l.issueState(current.Number)
+	if err != nil {
+		return err
+	}
+	return l.syncGitHub(ctx, updated)
+}
+
+func (l *Loop) discoverOpenPublicationPullRequests(ctx context.Context, current state.Issue) (string, int, bool) {
+	if l.GitHub == nil {
+		return "", 0, false
+	}
+	remote, err := l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+	if err != nil {
+		return "", 0, false
+	}
+	url := ""
+	count := 0
+	for _, pr := range remote.PullRequests {
+		if pr.MergedAt == nil && strings.EqualFold(pr.State, "open") {
+			count++
+			if count == 1 {
+				url = pr.URL
+			} else {
+				url = ""
+			}
+		}
+	}
+	return url, count, true
+}
+
+func finishPublicationRecoveryAttempt(issue *state.Issue, number int, status, reason string, finished time.Time) {
+	for index := len(issue.PublicationRecovery.History) - 1; index >= 0; index-- {
+		attempt := &issue.PublicationRecovery.History[index]
+		if attempt.Number == number && attempt.Status == "running" {
+			attempt.Status = status
+			attempt.Reason = reason
+			attempt.FinishedAt = finished
+			return
+		}
+	}
+}
+
+func publicationRecoveryAttemptRunning(recovery *state.PublicationRecovery, number int) bool {
+	if recovery == nil || number < 1 {
+		return false
+	}
+	for index := len(recovery.History) - 1; index >= 0; index-- {
+		attempt := recovery.History[index]
+		if attempt.Number == number {
+			return attempt.Status == "running" && attempt.FinishedAt.IsZero()
+		}
+	}
+	return false
+}
+
+func validatePublicationRecoveryRemote(cfg config.Config, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection, allowDiscoveredPR bool) error {
+	if !strings.EqualFold(remote.Issue.State, "open") {
+		return fmt.Errorf("GitHub Issue closed before recovered publication")
+	}
+	labels := map[string]bool{}
+	for _, label := range remote.Issue.Labels {
+		labels[strings.ToLower(label)] = true
+	}
+	if !labels[strings.ToLower(cfg.GitHub.RunningLabel)] || labels[strings.ToLower(cfg.GitHub.FailedLabel)] || labels[strings.ToLower(cfg.GitHub.DoneLabel)] || labels[strings.ToLower(cfg.GitHub.NeedsInputLabel)] {
+		return fmt.Errorf("GitHub labels changed after publication recovery confirmation")
+	}
+	for _, label := range append(append([]string(nil), cfg.GitHub.ReadyLabels...), cfg.GitHub.ExcludeLabels...) {
+		if labels[strings.ToLower(label)] {
+			return fmt.Errorf("GitHub label %q excludes publication recovery", label)
+		}
+	}
+	if current.PullRequestURL == "" {
+		if len(remote.PullRequests) == 0 {
+			return nil
+		}
+		if len(remote.PullRequests) == 1 && allowDiscoveredPR {
+			pr := remote.PullRequests[0]
+			if strings.EqualFold(pr.State, "open") && pr.MergedAt == nil && pr.HeadRefName == current.Branch && pr.BaseRefName == cfg.Git.BaseBranch && inspection.RemoteBranchExists {
+				return nil
+			}
+		}
+		return fmt.Errorf("a Pull Request appeared after publication recovery confirmation")
+	}
+	if len(remote.PullRequests) != 1 {
+		return fmt.Errorf("saved Pull Request count changed after publication recovery confirmation")
+	}
+	pr := remote.PullRequests[0]
+	if pr.URL != current.PullRequestURL || !strings.EqualFold(pr.State, "open") || pr.MergedAt != nil || pr.HeadRefName != current.Branch || pr.BaseRefName != cfg.Git.BaseBranch || !inspection.RemoteBranchExists {
+		return fmt.Errorf("saved Pull Request changed after publication recovery confirmation")
+	}
+	return nil
 }
 
 func stateGoal(goal *worker.Goal) *state.WorkerGoal {
@@ -1304,6 +1672,31 @@ func (l *Loop) scheduleRetry(ctx context.Context, issue state.Issue, reason stri
 	return failure.Wrap(failure.Supervisor, "persist Issue retry", err)
 }
 
+// schedulePublicationRetry deliberately ignores worker continuation budget.
+// A publisher failure did not invalidate the completed worker result, and
+// resuming that worker would blur implementation retries with publication
+// retries. Before the worker-attempt budget is exhausted the existing retry
+// path may start a fresh validation run; at the terminal boundary failIssue
+// retains typed recoverable provenance and the completed session for the
+// operator-only publication recovery transaction.
+func (l *Loop) schedulePublicationRetry(ctx context.Context, issue state.Issue, reason string) error {
+	if issue.Attempts >= l.Config.Queue.MaxAttempts {
+		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "worker retry limit reached", errors.New(reason)), false)
+	}
+	delay := l.retryDelay(issue.Attempts)
+	retryAt := l.now().Add(delay)
+	_, err := l.Store.Update("publication_retry_scheduled", issue.Number, issue.RunID, map[string]any{
+		"failure_kind": failure.Transient, "reason": reason, "retry_at": retryAt, "delay": delay.String(),
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(issue.Number)]
+		item.Status, item.LastError, item.RetryAfter = "retry_wait", reason, &retryAt
+		item.FailureKind = string(failure.Transient)
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	return failure.Wrap(failure.Supervisor, "persist publication retry", err)
+}
+
 func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked bool) error {
 	status := "failed"
 	if blocked {
@@ -1321,15 +1714,22 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 			item = &state.Issue{Number: number}
 			s.Issues[strconv.Itoa(number)] = item
 		}
+		publicationRecoverable := item.PublicationFailure != nil && item.PublicationFailure.Origin == publication.FailureOriginPublisher &&
+			item.PublicationFailure.Phase == publication.FailurePhasePrePublication && item.PublicationFailure.Recoverable
 		// An open or previously published Pull Request keeps the lease until
-		// reconciliation confirms merge or explicit abandonment.
+		// reconciliation confirms merge or explicit abandonment. A terminal
+		// pre-publication failure releases it so the queue remains live; the
+		// recovery command reacquires resources transactionally.
 		if item.PullRequestURL == "" {
 			if err := state.ReleaseIssueLease(item, owner); err != nil {
 				return err
 			}
 		}
-		item.Status, item.LastError, item.SessionID = status, cause.Error(), ""
-		item.Session = nil
+		item.Status, item.LastError = status, cause.Error()
+		if !publicationRecoverable {
+			item.SessionID = ""
+			item.Session = nil
+		}
 		item.FailureKind = string(kind)
 		item.GitHubSync = status
 		item.RetryAfter, item.UpdatedAt = nil, l.now()
@@ -1429,6 +1829,18 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		} else {
 			err = l.GitHub.MarkRunning(ctx, l.Config, issue.Number)
 		}
+	case "publication_recovery":
+		recoveryID := issue.RunID
+		if issue.PublicationRecovery != nil && issue.PublicationRecovery.ID != "" {
+			recoveryID = issue.PublicationRecovery.ID
+		}
+		if resumer, ok := l.GitHub.(interface {
+			MarkPublicationRecovery(context.Context, config.Config, int, string) error
+		}); ok {
+			err = resumer.MarkPublicationRecovery(ctx, l.Config, issue.Number, recoveryID)
+		} else {
+			err = l.GitHub.MarkRunning(ctx, l.Config, issue.Number)
+		}
 	case "failed", "blocked":
 		err = l.GitHub.MarkFailed(ctx, l.Config, issue.Number, issue.LastError, issue.GitHubSync == "blocked")
 	default:
@@ -1446,6 +1858,9 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			item.GitHubSync = ""
 			if issue.GitHubSync == "environment_resume" && item.EnvironmentResume != nil {
 				item.EnvironmentResume.Status = "github_synced"
+			}
+			if issue.GitHubSync == "publication_recovery" && item.PublicationRecovery != nil {
+				item.PublicationRecovery.Status = "github_synced"
 			}
 		}
 		item.UpdatedAt = l.now()

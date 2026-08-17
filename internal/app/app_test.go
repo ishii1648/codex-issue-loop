@@ -20,10 +20,12 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
+	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
+	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
 
 type appProcessGroups struct {
@@ -846,6 +848,234 @@ func TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks(t *testing.T) {
 				t.Fatalf("unsafe %s resume accepted: %s", test.name, out.String())
 			}
 		})
+	}
+}
+
+func TestRecoverPublicationResumesLegacyMissingBaseInPlaceAndIsIdempotent(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "config", "user.name", "Test User")
+	runGitApp(t, repo, "config", "user.email", "test@example.com")
+	runGitApp(t, repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "add", "README.md")
+	runGitApp(t, repo, "commit", "-m", "base")
+	runGitApp(t, repo, "branch", "-M", "main")
+	remotePath := filepath.Join(filepath.Dir(repo), "publication-recovery-remote.git")
+	runGitApp(t, filepath.Dir(repo), "init", "--bare", remotePath)
+	runGitApp(t, repo, "remote", "add", "origin", remotePath)
+	runGitApp(t, repo, "push", "-u", "origin", "main")
+	baseSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
+	branch := "codex/issue-102-legacy-publication"
+	runGitApp(t, repo, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(repo, "implementation.txt"), []byte("preserve dirty implementation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeGH := filepath.Join(filepath.Dir(repo), "bin", "gh-publication-recovery")
+	ghLog := filepath.Join(filepath.Dir(repo), "publication-recovery-gh.log")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$AGENT_LOOP_TEST_GH_LOG"
+case "$1 $2" in
+  "issue view") printf '%s\n' '{"number":102,"title":"Legacy publication","body":"","url":"https://example.test/issues/102","state":"OPEN","labels":[{"name":"codex-loop:failed"}],"assignees":[],"milestone":null,"comments":[]}' ;;
+  "pr list") printf '%s\n' '[]' ;;
+  "issue edit"|"issue comment") exit 0 ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_LOOP_TEST_GH_LOG", ghLog)
+	configFile, err := os.OpenFile(filepath.Join(repo, config.FileName), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(configFile, "git:\n  worktree_root: %q\n", filepath.Dir(repo)); err != nil {
+		t.Fatal(err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, repo)
+	entry := registry.Entry{
+		RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo,
+		Commands: map[string]string{"git": "/usr/bin/git", "gh": fakeGH},
+	}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: cfg.RepoPath}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	runID := "run_legacy_102"
+	runDir := filepath.Join(store.Dir, "runs", runID)
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	completed := `{"version":1,"status":"completed","execution_profile":"extended","summary":"implementation verified","question":null,"tests":[{"command":"go test ./...","result":"pass"}],"git":null,"retry":null}`
+	if err := os.WriteFile(filepath.Join(runDir, "result-1.json"), []byte(completed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	_, err = store.Update("issue_failed", 102, runID, nil, func(s *state.Snapshot) error {
+		s.Issues["102"] = &state.Issue{
+			Number: 102, Title: "Legacy publication", Status: "failed", RunID: runID,
+			Branch: branch, Worktree: cfg.RepoPath, Attempts: cfg.Queue.MaxAttempts,
+			SessionID: "session-102", Session: &state.WorkerSession{Backend: "codex", ID: "session-102"},
+			Answers:           []state.AnswerRecord{{RequestID: "req-102", Question: "Continue?", Answer: "yes", AnsweredAt: now}},
+			DeclaredResources: []string{state.RepositoryResource},
+			BlockedCause:      &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "legacy localhost prerequisite", BlockedAt: now},
+			EnvironmentResume: &state.EnvironmentResume{ID: "resume-102", Status: "running", ConfirmedAt: now},
+			PublicationAudit:  &publication.Audit{BaseSHA: "", DeclaredResources: []string{state.RepositoryResource}},
+			FailureKind:       "issue", LastError: "issue: worker retry limit reached: publish completed work: inspect publish changes: durable base SHA is missing",
+			UpdatedAt: now,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRefused := func(name string, app App, args []string) {
+		t.Helper()
+		var out, stderr bytes.Buffer
+		app.Out, app.Err = &out, &stderr
+		if code := app.Run(context.Background(), args); code == 0 {
+			t.Fatalf("%s recovery unexpectedly succeeded: %s", name, out.String())
+		}
+	}
+	baseArgs := []string{"recover-publication", "--repo", cfg.RepoPath, "--issue", "102", "--json"}
+	assertRefused("confirmation", App{}, baseArgs)
+	_, err = store.Update("fault_active_worker", 102, runID, nil, func(s *state.Snapshot) error {
+		s.Issues["102"].WorkerPID = 4242
+		s.Issues["102"].WorkerPGID = 4242
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRefused("active worker", App{ProcessController: &appProcessGroups{alive: map[int]bool{4242: true}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-prerequisite-resolved"))
+	_, err = store.Update("fault_pending_request", 102, runID, nil, func(s *state.Snapshot) error {
+		s.Issues["102"].WorkerPID, s.Issues["102"].WorkerPGID = 0, 0
+		s.PendingRequests["req-pending-102"] = &state.Request{ID: "req-pending-102", IssueNumber: 102, Status: "pending"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRefused("pending request", App{ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-prerequisite-resolved"))
+	_, err = store.Update("faults_repaired", 102, runID, nil, func(s *state.Snapshot) error {
+		delete(s.PendingRequests, "req-pending-102")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var recoveryID string
+	for attempt := 0; attempt < 2; attempt++ {
+		var out, stderr bytes.Buffer
+		a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+		code := a.Run(context.Background(), []string{"recover-publication", "--repo", cfg.RepoPath, "--issue", "102", "--confirm-prerequisite-resolved", "--json"})
+		if code != 0 {
+			t.Fatalf("attempt=%d code=%d stdout=%s stderr=%s", attempt, code, out.String(), stderr.String())
+		}
+		snapshot, loadErr := store.Load()
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		item := snapshot.Issues["102"]
+		if attempt == 0 {
+			recoveryID = item.PublicationRecovery.ID
+		}
+		if item.Status != "publication_recovery_pending" || item.GitHubSync != "" || item.Lease == nil || item.Lease.BaseSHA != baseSHA || item.PublicationRecovery.ID != recoveryID || item.PublicationRecovery.Attempts != 0 {
+			t.Fatalf("recovery was not durable/idempotent: %+v", item)
+		}
+		if item.Attempts != cfg.Queue.MaxAttempts || item.SessionID != "session-102" || item.Session == nil || len(item.Answers) != 1 || item.BlockedCause == nil || item.EnvironmentResume == nil {
+			t.Fatalf("worker history or metadata changed: %+v", item)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(repo, "implementation.txt")); err != nil || string(data) != "preserve dirty implementation\n" {
+		t.Fatalf("dirty implementation changed: data=%q err=%v", data, err)
+	}
+	calls, err := os.ReadFile(ghLog)
+	if err != nil || !strings.Contains(string(calls), "--remove-label codex-loop:failed") || !strings.Contains(string(calls), "codex-issue-loop:publication-recovery:") {
+		t.Fatalf("GitHub recovery sync missing: calls=%s err=%v", calls, err)
+	}
+}
+
+func TestPublicationRecoveryEligibilityAndPullRequestsFailClosed(t *testing.T) {
+	typed := &publication.FailureProvenance{
+		Origin: publication.FailureOriginPublisher, Phase: publication.FailurePhasePrePublication,
+		Code: publication.FailureCodeDurableBaseMissing, Recoverable: true,
+	}
+	if !eligibleTypedBaseFailure(typed) {
+		t.Fatal("typed missing-base failure was rejected")
+	}
+	for _, mutation := range []func(*publication.FailureProvenance){
+		func(value *publication.FailureProvenance) { value.Origin = "worker" },
+		func(value *publication.FailureProvenance) { value.Phase = "worker_execution" },
+		func(value *publication.FailureProvenance) { value.Code = "unknown" },
+		func(value *publication.FailureProvenance) { value.Recoverable = false },
+	} {
+		copy := *typed
+		mutation(&copy)
+		if eligibleTypedBaseFailure(&copy) {
+			t.Fatalf("unsafe provenance was accepted: %+v", copy)
+		}
+	}
+	legacy := &state.Issue{
+		Attempts: 3, FailureKind: "issue",
+		LastError:        "issue: worker retry limit reached: publish completed work: inspect publish changes: durable base SHA is missing",
+		PublicationAudit: &publication.Audit{},
+	}
+	if !eligibleLegacyBaseFailure(legacy, 3) {
+		t.Fatal("strict legacy fixture was rejected")
+	}
+	legacy.LastError = "worker implementation failed"
+	if eligibleLegacyBaseFailure(legacy, 3) {
+		t.Fatal("generic worker failure was accepted")
+	}
+
+	current := &state.Issue{Number: 7, Branch: "codex/issue-7-test"}
+	inspection := worktree.Inspection{RemoteBranchExists: true}
+	if err := validateRecoveryPullRequests(current, gh.RemoteState{PullRequests: []gh.PullRequest{{URL: "https://example.test/pr/7", State: "OPEN"}}}, inspection, "main"); err == nil {
+		t.Fatal("unrecorded Pull Request was accepted")
+	}
+	current.PullRequestURL = "https://example.test/pr/7"
+	for _, pr := range []gh.PullRequest{
+		{URL: current.PullRequestURL, State: "CLOSED", HeadRefName: current.Branch, BaseRefName: "main"},
+		{URL: "https://example.test/pr/other", State: "OPEN", HeadRefName: current.Branch, BaseRefName: "main"},
+		{URL: current.PullRequestURL, State: "OPEN", HeadRefName: "other-branch", BaseRefName: "main"},
+		{URL: current.PullRequestURL, State: "OPEN", HeadRefName: current.Branch, BaseRefName: "release"},
+	} {
+		if err := validateRecoveryPullRequests(current, gh.RemoteState{PullRequests: []gh.PullRequest{pr}}, inspection, "main"); err == nil {
+			t.Fatalf("inconsistent Pull Request was accepted: %+v", pr)
+		}
+	}
+
+	syncCurrent := &state.Issue{Number: 7, Branch: "codex/issue-7-test"}
+	syncRemote := gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"codex-loop:failed"}}}
+	cfg := config.Defaults()
+	if err := validatePublicationRecoverySyncState(cfg, syncCurrent, syncRemote); err != nil {
+		t.Fatalf("synchronized failed state was rejected: %v", err)
+	}
+	syncRemote.Issue.Labels = []string{"codex-loop:running"}
+	if err := validatePublicationRecoverySyncState(cfg, syncCurrent, syncRemote); err != nil {
+		t.Fatalf("idempotent running transition was rejected: %v", err)
+	}
+	for _, labels := range [][]string{
+		{"codex-loop:failed", "codex-loop:running"},
+		{"codex-loop:failed", "do-not-automate"},
+		{"codex-loop:failed", "codex-loop:ready"},
+	} {
+		syncRemote.Issue.Labels = labels
+		if err := validatePublicationRecoverySyncState(cfg, syncCurrent, syncRemote); err == nil {
+			t.Fatalf("unsafe synchronization labels were accepted: %v", labels)
+		}
 	}
 }
 

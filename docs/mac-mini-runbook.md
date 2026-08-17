@@ -229,6 +229,18 @@ agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --conf
 
 resumeはdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`lease.base_sha`が非空であることを確認する。GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動して収束させる。`conflict_recovery`がある場合は`retry`、手動`blocked`/`do-not-automate`、security block、running/completed、closed-without-merge、PR不整合は修復・再開せず原因別runbookへ戻る。
 
+workerがschema-conformingな`completed` resultを保存した後、publisherがcommit/push/PR作成へ到達する前の`durable_base_sha_missing`だけでretry budgetを使い切った場合は、`status --json`で`status=failed`、空の`github_sync`、`publication_failure.origin=publisher`、`phase=pre_publication`、`code=durable_base_sha_missing`、`recoverable=true`を確認する。導入前のlegacy recordは、CLIが同じ厳密なfailure chain、空base SHAの`publication_audit`、上限到達済みworker attempts、保存済みcompleted resultをすべて確認できる場合だけ対象になる。
+
+外部前提を解消し、Issueがopenかつfailed labelと同期済みで、active PID/PGID・pending request・manual exclusionがなく、保存run/worktree/branch/resource/PRが一致することを確認してから次を使う。
+
+```sh
+agent-loop recover-publication --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
+```
+
+この操作はconfigured base branchの検証済みcommitをleaseと同じdurable transactionへ保存し、failed labelからrunningへの同期をwrite-aheadで行う。dirty changes、unpushed commit、answers、session、run history、resource metadata、元のworker attempt数は保持し、`publication_recovery`のgeneration・累積attempt・result SHA-256を別に監査記録する。GitHub同期やstate transactionの途中失敗は同じコマンドで冪等に収束させ、publisherは既存commit/remote branch/PRを再利用する。
+
+これは汎用failed retryではない。worker実装失敗、security/manual exclusion、closed-without-merge、PR conflict、open/closed PR不整合、unknown provenance、保存resultやworktreeの変更は拒否する。新branchへの移植、state/labelの手編集、retry budgetのreset、force pushで回避してはならない。
+
 v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。
 
 ### Git transportまたはcommit署名で停止する

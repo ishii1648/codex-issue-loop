@@ -204,7 +204,30 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		}
 	}
 	if failed {
+		if current.GitHubSync == "publication_recovery" && current.Status == "publication_recovery_pending" {
+			decision.reason = "explicit publication recovery is waiting for GitHub label synchronization"
+			return decision
+		}
+		if current.PublicationRecovery != nil {
+			for _, pr := range remote.PullRequests {
+				if pr.MergedAt != nil {
+					decision.status, decision.lastError, decision.pullRequest = "completed", "", pr.URL
+					decision.prMerged = true
+					decision.workerPID, decision.retryAt, decision.githubSync = 0, nil, "done"
+					decision.reason = "merged recovered Pull Request discovered"
+					return decision
+				}
+			}
+		}
 		decision.status, decision.workerPID, decision.retryAt = "failed", 0, nil
+		if current.PublicationRecovery != nil && current.PublicationRecovery.Status == "failed" && decision.pullRequest == "" {
+			for _, pr := range remote.PullRequests {
+				if pr.MergedAt == nil && strings.EqualFold(pr.State, "open") {
+					decision.pullRequest = pr.URL
+					break
+				}
+			}
+		}
 		if current.GitHubSync == "failed" && !hasComment(remote.Issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number)) {
 			decision.githubSync = "failed"
 		} else {
@@ -327,6 +350,11 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		decision.reason = "recorded answer remains pending for resume"
 	case "environment_resume_pending":
 		decision.reason = "operator-confirmed environment resume remains pending in the saved worktree"
+	case "publication_recovery_pending":
+		decision.reason = "operator-confirmed publication recovery remains pending in the saved worktree"
+		if !running {
+			decision.githubSync = "publication_recovery"
+		}
 	case "needs_input":
 		decision.reason = "unanswered request remains sticky"
 		if !needsInput {

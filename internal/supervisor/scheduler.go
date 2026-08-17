@@ -542,7 +542,7 @@ func pendingIssues(snapshot state.Snapshot, now time.Time) []state.Issue {
 }
 
 func pendingIssue(issue state.Issue, now time.Time) bool {
-	if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+	if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 		return false
 	}
 	return issue.RetryAfter == nil || !issue.RetryAfter.After(now)
@@ -553,7 +553,7 @@ func issueUsesWorkerSlot(issue state.Issue) bool {
 		return false
 	}
 	switch issue.Status {
-	case "awaiting_checks", "awaiting_merge":
+	case "awaiting_checks", "awaiting_merge", "publication_recovery_pending":
 		return false
 	default:
 		return true

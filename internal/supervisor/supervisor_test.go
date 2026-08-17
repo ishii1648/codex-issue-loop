@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -113,6 +114,7 @@ func (f *fakeGitHub) MergePullRequest(context.Context, config.Config, string) er
 type fakeWorktree struct {
 	path       string
 	inspection *worktree.Inspection
+	digest     string
 }
 
 func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error) {
@@ -124,6 +126,7 @@ func (f fakeWorktree) Inspect(context.Context, config.Config, string, string) (w
 	}
 	return worktree.Inspection{Exists: true, Valid: true, Branch: "codex/issue-1-test", LocalBranchExists: true, RemoteBranchExists: true}, nil
 }
+func (f fakeWorktree) ContentDigest(context.Context, string) (string, error) { return f.digest, nil }
 
 type fakeWorker struct {
 	result worker.Result
@@ -442,6 +445,32 @@ func TestFormatterFailurePersistsStructuredAuditAndSchedulesRetry(t *testing.T) 
 	events, err := os.ReadFile(loop.Store.EventsPath())
 	if err != nil || !strings.Contains(string(events), `"reason":"formatter_failed"`) || !strings.Contains(string(events), `"failure_code":"timeout"`) || !strings.Contains(string(events), `"file_count":2`) {
 		t.Fatalf("structured formatter event missing: err=%v events=%s", err, events)
+	}
+}
+
+func TestTypedMissingBaseFailurePreservesRecoveryProvenanceAndSession(t *testing.T) {
+	result := worker.Result{
+		Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "verified", SessionID: "session-publication",
+	}
+	loop, _ := testLoop(t, result)
+	loop.Config.Queue.MaxAttempts = 1
+	loop.Publisher = &fakePublisher{err: publication.DurableBaseMissingError{}}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := snapshot.Issues["1"]
+	if issue.Status != "failed" || issue.GitHubSync != "" || issue.Lease != nil || issue.SessionID != "session-publication" || issue.Session == nil {
+		t.Fatalf("recoverable publication boundary was not preserved: %+v", issue)
+	}
+	if issue.PublicationFailure == nil || issue.PublicationFailure.Origin != publication.FailureOriginPublisher || issue.PublicationFailure.Phase != publication.FailurePhasePrePublication || issue.PublicationFailure.Code != publication.FailureCodeDurableBaseMissing || !issue.PublicationFailure.Recoverable {
+		t.Fatalf("typed publication provenance missing: %+v", issue.PublicationFailure)
+	}
+	if len(issue.PublicationFailure.ResolvedResources) != 1 || issue.PublicationFailure.ResolvedResources[0] != state.RepositoryResource {
+		t.Fatalf("publication resource metadata was not retained: %+v", issue.PublicationFailure)
 	}
 }
 
@@ -1054,5 +1083,111 @@ func TestFaultDiskSafetyReserveBlocksSupervisor(t *testing.T) {
 	snapshot, loadErr := loop.Store.Load()
 	if loadErr != nil || snapshot.Supervisor.State != "blocked" || !strings.Contains(snapshot.Supervisor.Message, "safety reserve") {
 		t.Fatalf("snapshot=%+v err=%v", snapshot.Supervisor, loadErr)
+	}
+}
+
+func TestPublicationRecoveryPublishesSavedCompletedResultWithoutWorker(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	github.issue.State = "OPEN"
+	github.issue.Labels = []string{loop.Config.GitHub.RunningLabel}
+	runID := "run_publication_recovery"
+	runDir := filepath.Join(loop.Store.Dir, "runs", runID)
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resultData := []byte(`{"version":1,"status":"completed","execution_profile":"extended","summary":"verified implementation","question":null,"tests":[{"command":"go test ./...","result":"pass"}],"git":null,"retry":null}`)
+	if err := os.WriteFile(filepath.Join(runDir, "result-1.json"), resultData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(resultData))
+	now := time.Now().UTC()
+	_, err := loop.Store.Update("publication_recovery_requested", 1, runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: "publication_recovery_pending", RunID: runID,
+			Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, Attempts: 3,
+			LeaseGeneration: 1,
+			Lease: &state.ResourceLease{
+				Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: 0,
+				DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+				BaseSHA: "base-sha", ReservedAt: now,
+			},
+			DeclaredResources: []string{state.RepositoryResource},
+			PublicationRecovery: &state.PublicationRecovery{
+				ID: "publication_recovery_1", Status: "github_synced", Generation: 1,
+				MaxAttempts: 3, ConfirmedAt: now, ResultSHA256: digest,
+				Summary: "verified implementation", ExpectedHeadSHA: "worker-head", WorktreeSHA256: "worktree-digest", OriginalDirty: true,
+			},
+			UpdatedAt: now,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, digest: "worktree-digest", inspection: &worktree.Inspection{
+		Exists: true, Valid: true, Branch: "codex/issue-1-test", Head: "worker-head", LocalBranchExists: true, RemoteBranchExists: true, RemoteConsistent: true,
+	}}
+	publisher := &fakePublisher{result: worker.GitResult{
+		Branch: "codex/issue-1-test", Commit: "published-head", PullRequestURL: "https://example.test/pr/1",
+	}}
+	loop.Publisher = publisher
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := snapshot.Issues["1"]
+	if !publisher.called || issue.Status != "awaiting_checks" || issue.PullRequestURL != "https://example.test/pr/1" || issue.Attempts != 3 || issue.PublicationRecovery.Attempts != 1 || issue.PublicationRecovery.Status != "succeeded" {
+		t.Fatalf("publication-only recovery did not converge: publisher=%+v issue=%+v", publisher, issue)
+	}
+	if len(issue.PublicationRecovery.History) != 1 || issue.PublicationRecovery.History[0].Status != "succeeded" || issue.PublicationAudit == nil || issue.PublicationAudit.BaseSHA != "base-sha" {
+		t.Fatalf("publication recovery audit/history missing: %+v", issue)
+	}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{
+		URL: issue.PullRequestURL, State: "OPEN", HeadRefName: issue.Branch, ChecksStatus: "success",
+	}}}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("checks worked=%v err=%v", worked, err)
+	}
+	_, err = loop.Store.Update("fault_merge_due", 1, runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedAt := time.Now().UTC()
+	github.remote.PullRequests[0].State = "MERGED"
+	github.remote.PullRequests[0].MergedAt = &mergedAt
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("merge worked=%v err=%v", worked, err)
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue = snapshot.Issues["1"]; issue.Status != "completed" || issue.Lease != nil || !issue.PullRequestMerged || !github.done {
+		t.Fatalf("recovered publication did not reach done: issue=%+v github=%+v", issue, github)
+	}
+}
+
+func TestFaultPublicationRecoveryRecognizesInterruptedAttemptWithoutResettingBudget(t *testing.T) {
+	recovery := &state.PublicationRecovery{
+		Status: "publishing", Attempts: 3, MaxAttempts: 3,
+		History: []state.PublicationRecoveryAttempt{
+			{Number: 1, Status: "failed", FinishedAt: time.Now().UTC()},
+			{Number: 2, Status: "failed", FinishedAt: time.Now().UTC()},
+			{Number: 3, Status: "running", StartedAt: time.Now().UTC()},
+		},
+	}
+	if !publicationRecoveryAttemptRunning(recovery, 3) {
+		t.Fatal("interrupted write-ahead publication attempt was not resumable")
+	}
+	recovery.History[2].Status = "failed"
+	recovery.History[2].FinishedAt = time.Now().UTC()
+	if publicationRecoveryAttemptRunning(recovery, 3) {
+		t.Fatal("finished publication attempt was treated as resumable")
 	}
 }

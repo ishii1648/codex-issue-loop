@@ -159,6 +159,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.retryConflict(ctx, l, args)
 	case "resume-blocked":
 		return a.resumeBlocked(ctx, l, args)
+	case "recover-publication":
+		return a.recoverPublication(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -199,6 +201,7 @@ Commands:
   answer        Record an answer for a pending request
   retry         Explicitly resume a blocked Pull Request conflict recovery
   resume-blocked  Explicitly resume a worker environment-blocked Issue
+  recover-publication  Recover an eligible failed Issue at the publication boundary
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree
@@ -1340,6 +1343,10 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 }
 
 func environmentResumeBaseSHA(ctx context.Context, git string, cfg config.Config, current *state.Issue, inspection worktree.Inspection) (string, error) {
+	return verifiedPublicationBaseSHA(ctx, git, cfg, current, inspection, "environment resume")
+}
+
+func verifiedPublicationBaseSHA(ctx context.Context, git string, cfg config.Config, current *state.Issue, inspection worktree.Inspection, operation string) (string, error) {
 	if git == "" {
 		git = "git"
 	}
@@ -1354,25 +1361,25 @@ func environmentResumeBaseSHA(ctx context.Context, git string, cfg config.Config
 		ref := "refs/remotes/origin/" + cfg.Git.BaseBranch
 		out, err := exec.CommandContext(ctx, git, "-C", current.Worktree, "rev-parse", "--verify", ref+"^{commit}").Output()
 		if err != nil {
-			return "", fmt.Errorf("resolve configured base branch %q for environment resume: %w; fetch origin/%s and retry without editing durable state", cfg.Git.BaseBranch, err, cfg.Git.BaseBranch)
+			return "", fmt.Errorf("resolve configured base branch %q for %s: %w; fetch origin/%s and retry without editing durable state", cfg.Git.BaseBranch, operation, err, cfg.Git.BaseBranch)
 		}
 		baseSHA = strings.TrimSpace(string(out))
 		if baseSHA == "" {
-			return "", fmt.Errorf("resolve configured base branch %q for environment resume: git returned an empty commit SHA; state was not changed", cfg.Git.BaseBranch)
+			return "", fmt.Errorf("resolve configured base branch %q for %s: git returned an empty commit SHA; state was not changed", cfg.Git.BaseBranch, operation)
 		}
 	}
 	verified, err := exec.CommandContext(ctx, git, "-C", current.Worktree, "rev-parse", "--verify", baseSHA+"^{commit}").Output()
 	if err != nil {
-		return "", fmt.Errorf("verify publication base SHA %q for environment resume: %w; state was not changed", baseSHA, err)
+		return "", fmt.Errorf("verify publication base SHA %q for %s: %w; state was not changed", baseSHA, operation, err)
 	}
 	if strings.TrimSpace(string(verified)) != baseSHA {
-		return "", fmt.Errorf("verify publication base SHA %q for environment resume: value is not a full canonical commit SHA; state was not changed", baseSHA)
+		return "", fmt.Errorf("verify publication base SHA %q for %s: value is not a full canonical commit SHA; state was not changed", baseSHA, operation)
 	}
 	if inspection.Head == "" {
-		return "", fmt.Errorf("verify publication base SHA for environment resume: saved worktree HEAD is empty; state was not changed")
+		return "", fmt.Errorf("verify publication base SHA for %s: saved worktree HEAD is empty; state was not changed", operation)
 	}
 	if err := exec.CommandContext(ctx, git, "-C", current.Worktree, "merge-base", "--is-ancestor", baseSHA, inspection.Head).Run(); err != nil {
-		return "", fmt.Errorf("verify publication base SHA %s for environment resume: it is not an ancestor of worktree HEAD %s; state was not changed", baseSHA, inspection.Head)
+		return "", fmt.Errorf("verify publication base SHA %s for %s: it is not an ancestor of worktree HEAD %s; state was not changed", baseSHA, operation, inspection.Head)
 	}
 	return baseSHA, nil
 }

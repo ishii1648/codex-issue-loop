@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -160,6 +161,35 @@ type EnvironmentResume struct {
 	PreviousReason string    `json:"previous_reason"`
 }
 
+type PublicationRecoveryAttempt struct {
+	Number     int       `json:"number"`
+	Generation int       `json:"generation"`
+	Status     string    `json:"status"`
+	Reason     string    `json:"reason,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
+}
+
+// PublicationRecovery records an operator-confirmed, publication-only retry.
+// Worker attempt counters and history are intentionally separate and are never
+// reset by this recovery path.
+type PublicationRecovery struct {
+	ID               string                       `json:"id"`
+	Status           string                       `json:"status"`
+	Generation       int                          `json:"generation"`
+	Attempts         int                          `json:"attempts"`
+	MaxAttempts      int                          `json:"max_attempts"`
+	History          []PublicationRecoveryAttempt `json:"history,omitempty"`
+	ConfirmedAt      time.Time                    `json:"confirmed_at"`
+	PreviousReason   string                       `json:"previous_reason"`
+	ResultSHA256     string                       `json:"result_sha256"`
+	Summary          string                       `json:"summary"`
+	ExpectedHeadSHA  string                       `json:"expected_head_sha"`
+	WorktreeSHA256   string                       `json:"worktree_sha256"`
+	OriginalDirty    bool                         `json:"original_dirty"`
+	OriginalUnpushed bool                         `json:"original_unpushed_commits"`
+}
+
 type Issue struct {
 	Number            int                `json:"number"`
 	Title             string             `json:"title"`
@@ -191,7 +221,12 @@ type Issue struct {
 	ConflictRecovery  *ConflictRecovery  `json:"conflict_recovery,omitempty"`
 	BlockedCause      *BlockedCause      `json:"blocked_cause,omitempty"`
 	EnvironmentResume *EnvironmentResume `json:"environment_resume,omitempty"`
-	UpdatedAt         time.Time          `json:"updated_at"`
+
+	PublicationFailure *publication.FailureProvenance `json:"publication_failure,omitempty"`
+
+	PublicationRecovery *PublicationRecovery `json:"publication_recovery,omitempty"`
+
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Option struct {
@@ -484,7 +519,7 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
+			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "publication_recovery_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
 				return "", false
 			}
 		}
@@ -499,4 +534,17 @@ func NewID(prefix string) string {
 		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
 	}
 	return prefix + "_" + hex.EncodeToString(buf)
+}
+
+func ValidID(value, prefix string) bool {
+	if !strings.HasPrefix(value, prefix) || len(value) <= len(prefix) || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }

@@ -397,7 +397,7 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 
 func (m Manager) changedPaths(ctx context.Context, git, worktreePath, baseSHA string) ([]string, error) {
 	if strings.TrimSpace(baseSHA) == "" {
-		return nil, fmt.Errorf("inspect publish changes: durable base SHA is missing")
+		return nil, publication.DurableBaseMissingError{}
 	}
 	if _, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "--verify", baseSHA+"^{commit}"); err != nil {
 		return nil, fmt.Errorf("inspect publish base %s: %w", baseSHA, err)
