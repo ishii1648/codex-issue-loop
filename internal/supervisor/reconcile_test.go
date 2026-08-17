@@ -488,7 +488,7 @@ func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing
 		t.Fatal(err)
 	}
 	branch := "codex/issue-1-legacy-block"
-	legacyError := "issue: worker blocked: localhost listen denied"
+	legacyError := "worker blocked: localhost listen denied"
 	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["1"]
 		item.Status = "blocked"
@@ -504,6 +504,15 @@ func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing
 	}
 	_, err = loop.Store.Update("github_state_synced", 1, owner.RunID, map[string]string{"state": "blocked"}, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].GitHubSync = ""
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("startup_reconciled", 1, owner.RunID, map[string]string{
+		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
+	}, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
 		return nil
 	})
 	if err != nil {

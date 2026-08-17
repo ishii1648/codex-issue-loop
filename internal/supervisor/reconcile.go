@@ -102,7 +102,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					legacyProvenance = true
 					if onlyBlockedExclusion {
 						evaluated.BlockedCause = cause
-						evaluated.LastError = "issue: worker blocked: " + cause.Reason
+						evaluated.LastError = "worker blocked: " + cause.Reason
 					}
 				}
 			}

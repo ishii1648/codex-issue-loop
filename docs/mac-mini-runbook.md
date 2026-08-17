@@ -219,7 +219,7 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 `retry`は無関係なblocked原因を初期化せず、保存済みbranchとPRが一致する場合だけ`resolving_conflict`へ戻す。新しいbranch/PRやforce pushは作らない。
 
-workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。導入前のworker blockだけは、CLIがdurable event historyにある同一Issue・同一runの隣接した`issue_blocked`（`failure_kind=issue`かつsupervisor生成の`issue: worker blocked: ...` error）と`github_state_synced(state=blocked)`を検証し、元reasonとevent timestampをtyped provenanceへ正規化する。旧startup reconciliationによる既知のmanual blocked label誤分類event以外に後続Issue eventがある場合は認定しない。失われたleaseは`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource leaseとGitHub label/PRが一致するときだけ次を使う。v0.6.0以前のlegacy recordでは`lease`または`lease.base_sha`がないことがあるが、stateを手編集しない。
+workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。導入前のworker blockだけは、CLIがdurable event historyにある同一Issue・同一runの隣接した`issue_blocked`（`failure_kind=issue`かつsupervisor生成の厳密な`worker blocked: ...` error。v0.6.9 fixtureの`issue: worker blocked: ...`も互換対象）と`github_state_synced(state=blocked)`を検証し、元reasonとevent timestampをtyped provenanceへ正規化する。その他の部分一致や、旧startup reconciliationによる既知のmanual blocked label誤分類event以外に後続Issue eventがある場合は認定しない。失われたleaseは`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource leaseとGitHub label/PRが一致するときだけ次を使う。v0.6.0以前のlegacy recordでは`lease`または`lease.base_sha`がないことがあるが、stateを手編集しない。
 
 ```sh
 agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
