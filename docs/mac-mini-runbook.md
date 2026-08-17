@@ -448,6 +448,56 @@ reverse proxyは次のcontractを満たすものを選ぶ。
 - providerが対応する場合はGitHub公式Webhook送信元CIDRをallowlistし、更新を監視する。ただしCIDR制限をHMACの代用にしない
 - provider固有のaccess token、tunnel credential、daemon設定をrepositoryやagent-loop stateへ保存しない
 
+### Cloudflare Tunnelでの構成例
+
+Cloudflare Tunnelは上のcontractのうち送信元CIDR allowlistまで満たせるため、inbound portを開けずに構成できる。Tunnel本体、DNS、custom rule 1本はいずれも無料プランの範囲で、帯域課金もない。ここに書くのは一例であり、agent-loopはこのproviderに依存しない。
+
+Cloudflareアカウント、対象ドメインのCloudflareへの委任、`cloudflared tunnel login`のbrowser認証、`sudo cloudflared service install`、WAF custom ruleの作成は運用者が行う。agent-loopはこれらを作成も変更もしない。
+
+```sh
+brew install cloudflared
+cloudflared tunnel login
+cloudflared tunnel create agent-loop-hooks
+cloudflared tunnel route dns agent-loop-hooks hooks.example.invalid
+```
+
+`~/.cloudflared/config.yml`ではpathを`/github/webhook`だけに限定し、それ以外をloopbackへ到達させない。upstreamはliteral loopbackにする。
+
+```yaml
+tunnel: <TUNNEL-ID>
+credentials-file: /Users/example/.cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: hooks.example.invalid
+    path: ^/github/webhook$
+    service: http://127.0.0.1:8787
+    originRequest:
+      connectTimeout: 5s
+  - service: http_status:404
+```
+
+送信元CIDRは公式APIから取得し、WAF custom ruleでGitHub以外をBlockする。CIDRは6件程度でruleの式へ直接書けるため、IP Listは不要である。GitHubはchallengeを解けないのでManaged Challengeは選ばない。
+
+```sh
+gh api meta --jq '.hooks[]'
+```
+
+```text
+http.host eq "hooks.example.invalid"
+and not ip.src in {192.30.252.0/22 185.199.108.0/22 140.82.112.0/20 143.55.64.0/20 2a0a:a440::/29 2606:50c0::/32}
+```
+
+このCIDRは変更されるため、`gh api meta`の差分監視を運用に含める。CIDR制限はHMACの代用にしない。
+
+無料プランでは次の2点がcontractに対して不足する。いずれも受け入れるか、上位プランを選ぶかを明示的に判断する。
+
+- request body sizeによる制限は`http.request.body.size`がEnterprise専用のため設定できない。brokerの`max_body_bytes`が最終防衛線になる。
+- WAFのLogアクションが使えないため、allowlistをdry-runで検証できない。Blockのまま投入し、GitHubのRecent Deliveriesが202を返すことで確認する。Blockされたrequestは無料プランでもSecurity Events（保持24時間、sampled）に残る。
+
+`cloudflared`はLaunchDaemon、brokerはLaunchAgentであるため、login前のdeliveryは5xxになる。取りこぼしはredeliveryとsafety sweepが回収する。
+
+### secretとrepository設定
+
 secret fileはrepository外へowner-onlyで作る。値をshell historyへ残さない組織のsecret provisioning手段を使い、最終状態だけ確認する。
 
 ```sh
@@ -484,6 +534,18 @@ webhook:
 GitHub Appまたはrepository webhookのpayload URLは公開HTTPS URLの`/github/webhook`へ合わせ、content typeは`application/json`、SSL verificationは有効、secretは上のcredentialと同一にする。最低限`issues`、`issue_comment`、`pull_request`、`check_run`、`status`を購読し、Actionsの状態だけで必要な場合に`workflow_run`を追加する。登録後の`ping`が202になり、次を確認してからready labelを使う。
 
 GitHub Appでは`installation_ids`をallowlistとして維持する。installationを含まないclassic repository webhookを使う場合だけ、`installation_ids: []`と`allow_repository_webhook: true`を明示する。このopt-inはrepository ID/full nameとHMAC検証を緩和しない。
+
+classic repository webhookをCLIで登録する場合も、secretをargvへ展開しない。owner-onlyの一時fileへrequest bodyを書き、`--input`で渡して直ちに削除する。
+
+```sh
+umask 077
+# hook.json へ config.url、config.secret、config.content_type、events を書く
+gh api repos/OWNER/REPO/hooks --method POST --input hook.json
+rm -P hook.json
+gh api repos/OWNER/REPO/hooks --jq '.[] | {id, url: .config.url, active}'
+```
+
+`ping`の結果は`gh api repos/OWNER/REPO/hooks/<id>/deliveries`でも確認でき、GitHub UIのRecent Deliveriesと同じstatusを返す。
 
 ```sh
 agent-loop register --repo /absolute/path/to/repository --json
