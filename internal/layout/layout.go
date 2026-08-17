@@ -58,6 +58,10 @@ func (l Layout) RepoDir(repoID string) string {
 	return filepath.Join(l.ReposRoot, repoID)
 }
 
+func (l Layout) RateLimitPath() string {
+	return filepath.Join(l.Root, "github-rate-limit.json")
+}
+
 func (l Layout) PlistPath(repoID string) string {
 	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop."+repoID+".plist")
 }

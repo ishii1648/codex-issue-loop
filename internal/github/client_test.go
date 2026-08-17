@@ -35,7 +35,11 @@ case "$1 $2" in
     printf '%s\n' '{"number":7,"title":"Test","body":"Body","url":"https://example.test/issues/7","state":"OPEN","labels":[{"name":"codex-loop:running"}],"assignees":[],"milestone":null,"comments":[{"body":"claim"}]}'
     ;;
   "pr list")
-    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test","baseRefName":"main","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
+    case " $* " in
+      *" --limit 2 "*) ;;
+      *) exit 3 ;;
+    esac
+    printf '%s\n' '[{"number":11,"url":"https://example.test/pull/11","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":"codex/issue-7-test","baseRefName":"main","headRefOid":"abc123","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
     ;;
   *) exit 2 ;;
 esac
@@ -229,6 +233,79 @@ func TestFaultGitHubAdapterRejectsMalformedResponse(t *testing.T) {
 	}
 }
 
+func TestCLIPrimaryGraphQLRateLimitUsesRESTRateLimitReset(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	logPath := filepath.Join(dir, "calls.log")
+	reset := time.Date(2026, 8, 17, 3, 0, 19, 0, time.UTC)
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+if [ "$1 $2" = "api /rate_limit" ]; then
+  printf '%%s\n' '{"resources":{"graphql":{"reset":%d,"remaining":0}}}'
+  exit 0
+fi
+printf '%%s\n' 'GraphQL: API rate limit already exceeded for user ID 7684738.' >&2
+exit 1
+`, logPath, reset.Unix())
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	_, err := (CLI{Path: fake}).ListReady(context.Background(), cfg)
+	limited, ok := AsRateLimit(err)
+	if !ok {
+		t.Fatalf("error was not classified as primary rate limit: %v", err)
+	}
+	if limited.Resource != "graphql" || !limited.ResetAt.Equal(reset) || limited.Source != "rest-rate-limit" {
+		t.Fatalf("rate limit=%+v", limited)
+	}
+	calls, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Count(string(calls), "issue list") != 1 || strings.Count(string(calls), "api /rate_limit") != 1 {
+		t.Fatalf("unexpected calls:\n%s", calls)
+	}
+}
+
+func TestCLIPrimaryGraphQLRateLimitUsesShortRetryWhenRESTHasRemaining(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	nextReset := time.Now().UTC().Add(time.Hour)
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1 $2" = "api /rate_limit" ]; then
+  printf '%%s\n' '{"resources":{"graphql":{"reset":%d,"remaining":4930}}}'
+  exit 0
+fi
+printf '%%s\n' 'GraphQL: API rate limit already exceeded for user ID 7684738.' >&2
+exit 1
+`, nextReset.Unix())
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	before := time.Now().UTC()
+	_, err := (CLI{Path: fake}).ListReady(context.Background(), cfg)
+	after := time.Now().UTC()
+	limited, ok := AsRateLimit(err)
+	if !ok {
+		t.Fatalf("error was not classified as primary rate limit: %v", err)
+	}
+	if limited.Source != "rest-rate-limit-recovered" || limited.ResetAt.Before(before.Add(4*time.Second)) || limited.ResetAt.After(after.Add(6*time.Second)) {
+		t.Fatalf("recovered rate limit=%+v before=%s after=%s", limited, before, after)
+	}
+}
+
+func TestPrimaryRateLimitPrefersResponseResetHeader(t *testing.T) {
+	reset := time.Date(2026, 8, 17, 4, 0, 0, 0, time.UTC)
+	resource, got, source, ok := primaryRateLimit([]byte(fmt.Sprintf("GraphQL: rate limit exceeded\nx-ratelimit-reset: %d", reset.Unix())))
+	if !ok || resource != "graphql" || !got.Equal(reset) || source != "x-ratelimit-reset" {
+		t.Fatalf("resource=%q reset=%s source=%q ok=%v", resource, got, source, ok)
+	}
+}
+
 func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")
@@ -265,8 +342,30 @@ func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "--limit 1000") || !strings.Contains(string(args), "createdAt") {
+	if !strings.Contains(string(args), "--limit 1000") || !strings.Contains(string(args), "createdAt") || !strings.Contains(string(args), "--label codex-loop:ready") {
 		t.Fatalf("large queue limit missing: %s", args)
+	}
+}
+
+func TestListReadyPreservesORFilteringForMultipleReadyLabels(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	argsPath := filepath.Join(dir, "args.txt")
+	if err := os.WriteFile(fake, []byte(fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" > %q\nprintf '%%s\\n' '[]'\n", argsPath)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.GitHub.ReadyLabels = []string{"ready:a", "ready:b"}
+	if _, err := (CLI{Path: fake}).ListReady(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(args), "--label") {
+		t.Fatalf("multiple ready labels were changed from OR to GitHub CLI AND filtering: %s", args)
 	}
 }
 

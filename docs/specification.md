@@ -745,6 +745,8 @@ Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked wor
 
 一時ファイルへのwrite、fsync、renameにより原子的に更新する。ファイルpermissionはユーザーのみ読み書き可能とする。
 
+GitHub primary rate limitを検出した場合、`supervisor.rate_limit`へresource、観測したreset時刻、cooldown source、抑止したretry数を保存する。ユーザー単位のGraphQL quotaを共有するため、同じmanaged rootの全repositoryは`github-rate-limit.json`のcooldownを共有し、resetまではGraphQL status照会を含むGitHub requestをfail closedで抑止する。`status --json`はrepository snapshotに加えて、この共有cooldownの最新値を反映する。
+
 `state_revision` は有効な状態更新ごとに単調増加させる。event通知を取りこぼしたwatchも、最後に確認したrevisionとの差分から状態変化を検出できる。
 
 Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフラグに加え、active時はslot、declared/resolved/actual resources、base SHA、reserved timestamp、`(run_id, generation)` ownerを持つleaseを保持する。declared/actual resourcesはlease解放後もIssue auditとして残す。これによりworker起動前のwrite-ahead予約、publish前のpath scope検査、再起動後の排他復元を行う。
@@ -996,6 +998,8 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - watchの接続、切断、複数接続
 - event通知を破棄した場合の60秒reconciliation
 - watcher生成・購読失敗とevent channel終了時のpolling-only fallback
+- fsnotify自己wakeがpoll/retry deadlineを前倒しせず、wake backlogをcoalesceすること
+- primary GraphQL rate-limit cooldownをmanaged root内の複数repositoryで共有すること
 - 実fsnotifyを使う複数watchと終了後の再接続
 - read-subscribe-read間に状態が変わるrace
 - attention状態と`state_revision`の永続化
@@ -1005,6 +1009,8 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - coordinator adapterのCAS、epoch、lease expiry、partition、古いhost拒否、publication takeover conformance
 
 ### 17.3 macOS E2E
+
+register/startを行う自動E2Eは`scripts/e2e-supervisor.sh`で実行し、成功、失敗、signal、timeoutの全経路で`stop`と`unregister`を行う。
 
 - install/register/start/stop/uninstall
 - `launchctl`による自動再起動

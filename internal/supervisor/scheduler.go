@@ -63,18 +63,37 @@ type activeJob struct {
 }
 
 type scheduler struct {
-	loop        *Loop
-	events      chan schedulerEvent
-	active      map[int]activeJob
-	issueRetry  map[int]time.Time
-	issueFails  map[int]int
-	pollAt      time.Time
-	lifecycleMu sync.Mutex
+	loop                *Loop
+	events              chan schedulerEvent
+	active              map[int]activeJob
+	issueRetry          map[int]time.Time
+	issueFails          map[int]int
+	pollAt              time.Time
+	cooldownUntil       time.Time
+	lastSuppressedReset time.Time
+	consecutiveFailures int
+	rateLimitActive     bool
+	lifecycleMu         sync.Mutex
+}
+
+type scheduleResult struct {
+	dispatched      bool
+	githubSucceeded bool
 }
 
 type lifecycleGateContextKey struct{}
 
 func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) error {
+	var watchEvents <-chan fsnotify.Event
+	var watchErrors <-chan error
+	if watcher != nil {
+		watchEvents, watchErrors = watcher.Events, watcher.Errors
+	}
+	return l.runSchedulerEvents(ctx, watchEvents, watchErrors)
+}
+
+func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnotify.Event, watchErrors <-chan error) error {
+	l.enableRateLimitGate()
 	current, err := l.Store.Load()
 	if err != nil {
 		return l.blockSupervisor(failure.Wrap(failure.Supervisor, "load scheduler state", err), failure.Supervisor, 1)
@@ -86,48 +105,34 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 	s := &scheduler{
 		loop: l, events: make(chan schedulerEvent, concurrency+1), active: map[int]activeJob{},
 		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+		consecutiveFailures: current.Supervisor.ConsecutiveFailures,
+		rateLimitActive:     current.Supervisor.RateLimit != nil,
 	}
 	if !l.Config.Webhook.Enabled() {
 		s.pollAt = l.now()
 	}
-	consecutiveFailures := current.Supervisor.ConsecutiveFailures
 	if current.Supervisor.RetryAfter != nil && (s.pollAt.IsZero() || current.Supervisor.RetryAfter.After(s.pollAt)) {
 		s.pollAt = *current.Supervisor.RetryAfter
+		s.cooldownUntil = *current.Supervisor.RetryAfter
 	}
 
-	var watchEvents <-chan fsnotify.Event
-	var watchErrors <-chan error
-	if watcher != nil {
-		watchEvents, watchErrors = watcher.Events, watcher.Errors
-	}
 	pollCandidates := !l.Config.Webhook.Enabled() && !s.pollAt.After(l.now())
 	for {
-		_, scheduleErr := s.schedule(ctx, pollCandidates)
+		result, scheduleErr := s.schedule(ctx, pollCandidates)
 		pollCandidates = false
 		if scheduleErr != nil {
-			kind := failure.KindOf(scheduleErr)
-			if kind == failure.Supervisor {
+			if fatal := s.handleCycleError(scheduleErr); fatal != nil {
 				s.cancelAndDrain()
-				return l.blockSupervisor(scheduleErr, kind, consecutiveFailures+1)
+				return fatal
 			}
-			consecutiveFailures++
-			l.Logger.Printf("scheduler cycle failed (%d, %s): %v", consecutiveFailures, kind, scheduleErr)
-			if consecutiveFailures >= 5 {
-				s.cancelAndDrain()
-				return l.blockSupervisor(scheduleErr, kind, consecutiveFailures)
-			}
-			delay := l.retryDelay(consecutiveFailures)
-			if recordErr := l.recordSupervisorRetry(scheduleErr, kind, consecutiveFailures, delay); recordErr != nil {
-				s.cancelAndDrain()
-				return BlockedError{Err: failure.Wrap(failure.Supervisor, "persist supervisor retry", recordErr)}
-			}
-			s.pollAt = l.now().Add(delay)
-		} else if consecutiveFailures > 0 {
-			if resetErr := l.resetSupervisorFailures(consecutiveFailures); resetErr != nil {
+		} else if result.githubSucceeded && (s.consecutiveFailures > 0 || s.rateLimitActive) {
+			if resetErr := l.resetSupervisorFailures(s.consecutiveFailures); resetErr != nil {
 				s.cancelAndDrain()
 				return BlockedError{Err: failure.Wrap(failure.Supervisor, "reset supervisor failure counter", resetErr)}
 			}
-			consecutiveFailures = 0
+			s.consecutiveFailures = 0
+			s.rateLimitActive = false
+			s.cooldownUntil = time.Time{}
 			if l.Config.Webhook.Enabled() {
 				s.pollAt = time.Time{}
 			}
@@ -157,9 +162,11 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 		case event := <-s.events:
 			stopSchedulerTimer(pollTimer)
 			stopSchedulerTimer(retryTimer)
-			if fatal := s.handleEvent(event); fatal != nil {
-				s.cancelAndDrain()
-				return l.blockSupervisor(fatal, failure.Supervisor, consecutiveFailures+1)
+			if eventErr := s.handleEvent(event); eventErr != nil {
+				if fatal := s.handleCycleError(eventErr); fatal != nil {
+					s.cancelAndDrain()
+					return fatal
+				}
 			}
 			// A freed slot immediately admits the next candidate instead of
 			// waiting for the regular GitHub poll interval.
@@ -190,12 +197,16 @@ func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) erro
 			if filepath.Dir(event.Name) != webhook.MailboxDir(l.Store.Dir) && base != "state.json" && base != "events.jsonl" {
 				continue
 			}
+			watchEvents, watchErrors = coalesceWatchEvents(watchEvents, watchErrors)
 			if !l.Config.Webhook.Enabled() {
 				pollCandidates = s.hasFreeSlot()
 			}
-		case <-watchErrors:
+		case _, ok := <-watchErrors:
 			stopSchedulerTimer(pollTimer)
 			stopSchedulerTimer(retryTimer)
+			if !ok {
+				watchErrors = nil
+			}
 			// Timers remain authoritative when fsnotify reports an error.
 		}
 	}
@@ -228,7 +239,25 @@ func until(now, deadline time.Time) time.Duration {
 	return deadline.Sub(now)
 }
 
-func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, error) {
+func coalesceWatchEvents(events <-chan fsnotify.Event, watchErrors <-chan error) (<-chan fsnotify.Event, <-chan error) {
+	for range 4096 {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return nil, nil
+			}
+		case _, ok := <-watchErrors:
+			if !ok {
+				watchErrors = nil
+			}
+		default:
+			return events, watchErrors
+		}
+	}
+	return events, watchErrors
+}
+
+func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (scheduleResult, error) {
 	if s.loop.Config.Webhook.Enabled() {
 		// Defense in depth: even a stale timer or direct test invocation cannot
 		// make a repository scheduler query the shared GitHub ready queue.
@@ -236,27 +265,65 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 	}
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
+	result := scheduleResult{}
 	snapshot, err := s.loop.Store.Load()
 	if err != nil {
-		return false, failure.Wrap(failure.Supervisor, "load durable state", err)
+		return result, failure.Wrap(failure.Supervisor, "load durable state", err)
 	}
 	if err := s.preflight(snapshot); err != nil {
-		return false, err
+		return result, err
 	}
+	now := s.loop.now()
+	if snapshot.Supervisor.RetryAfter != nil && snapshot.Supervisor.RetryAfter.After(s.pollAt) {
+		s.pollAt = *snapshot.Supervisor.RetryAfter
+	}
+	if snapshot.Supervisor.RetryAfter != nil && snapshot.Supervisor.RetryAfter.After(now) {
+		s.cooldownUntil = *snapshot.Supervisor.RetryAfter
+		return result, nil
+	}
+	if s.pollAt.After(now) {
+		pollCandidates = false
+	}
+	cooldown, active, err := s.loop.RateLimits.Current(now)
+	if err != nil {
+		return result, failure.Wrap(failure.Supervisor, "load shared GitHub rate-limit cooldown", err)
+	}
+	if active {
+		s.cooldownUntil = cooldown.ResetAt
+		if cooldown.ResetAt.After(s.pollAt) {
+			s.pollAt = cooldown.ResetAt
+		}
+		dueIssues := len(pendingIssues(snapshot, now)) > 0
+		if (dueIssues || pollCandidates && s.hasFreeSlot()) && !cooldown.ResetAt.Equal(s.lastSuppressedReset) {
+			updated, stillActive, suppressErr := s.loop.RateLimits.Suppress(now)
+			if suppressErr != nil {
+				return result, failure.Wrap(failure.Supervisor, "record shared GitHub rate-limit suppression", suppressErr)
+			}
+			if stillActive {
+				s.lastSuppressedReset = updated.ResetAt
+				s.rateLimitActive = true
+				if recordErr := s.loop.recordRateLimitSuppressed(updated); recordErr != nil {
+					return result, failure.Wrap(failure.Supervisor, "persist GitHub rate-limit suppression", recordErr)
+				}
+			}
+		}
+		return result, nil
+	}
+	s.cooldownUntil = time.Time{}
+	s.lastSuppressedReset = time.Time{}
 	mailboxCandidates, mailboxBatch, err := s.processMailbox(ctx, snapshot)
 	if err != nil {
-		return false, failure.Wrap(failure.Supervisor, "read webhook mailbox", err)
+		return result, failure.Wrap(failure.Supervisor, "read webhook mailbox", err)
 	}
 	if len(mailboxBatch) > 0 {
 		// Reload RetryAfter changes made while routing active lifecycle events.
 		snapshot, err = s.loop.Store.Load()
 		if err != nil {
-			return false, failure.Wrap(failure.Supervisor, "reload webhook-routed state", err)
+			return result, failure.Wrap(failure.Supervisor, "reload webhook-routed state", err)
 		}
 	}
 
-	dispatched := false
-	for _, current := range pendingIssues(snapshot, s.loop.now()) {
+	for _, current := range pendingIssues(snapshot, now) {
 		if _, running := s.active[current.Number]; running || s.retryPending(current.Number) {
 			continue
 		}
@@ -269,7 +336,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 			}
 			if current.Lease != nil && current.Lease.Slot != slot {
 				if _, err := s.loop.Store.AssignLeaseSlot(current.Number, current.Lease.Owner, slot); err != nil {
-					return dispatched, failure.Wrap(failure.Supervisor, "assign worker slot", err)
+					return result, failure.Wrap(failure.Supervisor, "assign worker slot", err)
 				}
 				current.Lease.Slot = slot
 			}
@@ -279,13 +346,13 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 		s.dispatch(ctx, current.Number, current.RunID, slot, func(jobCtx context.Context) error {
 			return s.loop.processExisting(jobCtx, current)
 		})
-		dispatched = true
+		result.dispatched = true
 	}
 
 	if len(mailboxCandidates) > 0 && s.hasFreeSlot() {
 		selected, evaluation, ok, selectErr := s.selectReady(ctx, mailboxCandidates, snapshot)
 		if selectErr != nil {
-			return dispatched, failure.Wrap(failure.Supervisor, "select webhook Issue admission", selectErr)
+			return result, failure.Wrap(failure.Supervisor, "select webhook Issue admission", selectErr)
 		}
 		if ok {
 			slot, slotOK := s.freeSlot()
@@ -294,50 +361,87 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (bool, er
 				s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
 					return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
 				})
-				dispatched = true
+				result.dispatched = true
 			}
 		}
 	}
 	if len(mailboxBatch) > 0 {
 		if err := webhook.AckMailbox(s.loop.Store.Dir, mailboxBatch); err != nil {
-			return dispatched, failure.Wrap(failure.Supervisor, "ack webhook mailbox", err)
+			return result, failure.Wrap(failure.Supervisor, "ack webhook mailbox", err)
 		}
 	}
 
 	if !pollCandidates {
-		return dispatched, nil
+		return result, nil
 	}
 	if !s.hasFreeSlot() {
 		s.pollAt = s.loop.now().Add(s.pollDelay())
-		return dispatched, nil
+		return result, nil
 	}
 	if !s.loop.Config.Queue.ContinueAfterNeedsInput {
 		if hasPendingRequests(snapshot) {
 			s.pollAt = s.loop.now().Add(s.pollDelay())
-			return dispatched, s.markPollingIfIdle(snapshot, "waiting for user input")
+			return result, s.markPollingIfIdle(snapshot, "waiting for user input")
 		}
 	}
 	issues, err := s.listReady(ctx)
 	if err != nil {
-		return dispatched, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
+		return result, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
+	result.githubSucceeded = true
 	s.pollAt = s.loop.now().Add(s.pollDelay())
 	selected, evaluation, ok, selectErr := s.selectReady(ctx, issues, snapshot)
 	if selectErr != nil {
-		return dispatched, failure.Wrap(failure.Supervisor, "select Issue admission", selectErr)
+		return result, failure.Wrap(failure.Supervisor, "select Issue admission", selectErr)
 	}
 	if !ok {
-		return dispatched, s.markPollingIfIdle(snapshot, "")
+		return result, s.markPollingIfIdle(snapshot, "")
 	}
 	slot, ok := s.freeSlot()
 	if !ok {
-		return dispatched, nil
+		return result, nil
 	}
 	runID := state.NewID("run")
 	s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
 		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
 	})
-	return true, nil
+	result.dispatched = true
+	return result, nil
+}
+
+func (s *scheduler) handleCycleError(cause error) error {
+	now := s.loop.now()
+	if observed, limited := cooldownFromError(cause, now); limited {
+		cooldown, err := s.loop.RateLimits.Observe(observed, now)
+		if err != nil {
+			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "persist shared GitHub rate-limit cooldown", err), failure.Supervisor, s.consecutiveFailures+1)
+		}
+		s.consecutiveFailures++
+		s.rateLimitActive = true
+		s.cooldownUntil = cooldown.ResetAt
+		s.pollAt = cooldown.ResetAt
+		s.loop.Logger.Printf("GitHub %s primary rate limit reached; suppressing requests until %s (source=%s)", cooldown.Resource, cooldown.ResetAt.Format(time.RFC3339), cooldown.Source)
+		if err := s.loop.recordSupervisorRateLimit(cause, s.consecutiveFailures, cooldown); err != nil {
+			return BlockedError{Err: failure.Wrap(failure.Supervisor, "persist supervisor rate-limit cooldown", err)}
+		}
+		return nil
+	}
+	kind := failure.KindOf(cause)
+	if kind == failure.Supervisor {
+		return s.loop.blockSupervisor(cause, kind, s.consecutiveFailures+1)
+	}
+	s.consecutiveFailures++
+	s.loop.Logger.Printf("scheduler cycle failed (%d, %s): %v", s.consecutiveFailures, kind, cause)
+	if s.consecutiveFailures >= 5 {
+		return s.loop.blockSupervisor(cause, kind, s.consecutiveFailures)
+	}
+	delay := s.loop.retryDelay(s.consecutiveFailures)
+	if err := s.loop.recordSupervisorRetry(cause, kind, s.consecutiveFailures, delay); err != nil {
+		return BlockedError{Err: failure.Wrap(failure.Supervisor, "persist supervisor retry", err)}
+	}
+	s.pollAt = now.Add(delay)
+	s.cooldownUntil = s.pollAt
+	return nil
 }
 
 func (s *scheduler) pollInterval() time.Duration {
@@ -524,6 +628,9 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 				continue
 			}
 			remote, getErr := s.loop.getIssue(ctx, number)
+			if _, limited := gh.AsRateLimit(getErr); limited {
+				return gh.Issue{}, admission.Evaluation{}, false, getErr
+			}
 			if getErr == nil {
 				dependencies[number] = admission.DependencyState{
 					Exists: true, Accessible: true, Closed: strings.EqualFold(remote.State, "closed"),
@@ -645,6 +752,9 @@ func (s *scheduler) handleEvent(event schedulerEvent) error {
 		delete(s.issueFails, event.IssueNumber)
 		return nil
 	}
+	if _, limited := cooldownFromError(event.Err, s.loop.now()); limited {
+		return event.Err
+	}
 	if failure.KindOf(event.Err) == failure.Supervisor {
 		return event.Err
 	}
@@ -717,6 +827,9 @@ func (s *scheduler) hasMaintenanceJob() bool {
 
 func (s *scheduler) nextRetryDelay() (time.Duration, bool) {
 	now := s.loop.now()
+	if s.cooldownUntil.After(now) {
+		return s.cooldownUntil.Sub(now), true
+	}
 	deadline := time.Time{}
 	for number, value := range s.issueRetry {
 		if _, active := s.active[number]; !active && (deadline.IsZero() || value.Before(deadline)) {
