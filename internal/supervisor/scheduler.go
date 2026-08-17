@@ -395,6 +395,20 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		}
 		seen[number] = true
 		if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
+			if delivery.Event == "issues" && delivery.Action == "collection_exited" {
+				converged, reconcileErr := s.loop.reconcileCollectionExit(ctx, *local, delivery)
+				if reconcileErr != nil {
+					return nil, nil, reconcileErr
+				}
+				if converged {
+					if job, active := s.active[number]; active && job.runID == local.RunID {
+						job.cancel()
+					}
+				}
+				acknowledged = append(acknowledged, delivery)
+				processed[number] = true
+				continue
+			}
 			if terminalWebhookStatus(local.Status) {
 				handled, reconcileErr := s.loop.reconcileTerminalWebhook(ctx, *local, delivery)
 				if reconcileErr != nil {
