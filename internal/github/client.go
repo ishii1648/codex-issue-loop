@@ -199,7 +199,10 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "100", "--json", "number,url,state,isDraft,mergedAt,headRefName,mergeStateStatus,statusCheckRollup").CombinedOutput()
+	// Reconciliation only distinguishes zero, one, or multiple Pull Requests.
+	// Fetching two is sufficient to detect the unsafe multiple-PR case and
+	// avoids requesting 100 expensive statusCheckRollup nodes every poll.
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "number,url,state,isDraft,mergedAt,headRefName,mergeStateStatus,statusCheckRollup").CombinedOutput()
 	if err != nil {
 		return RemoteState{}, c.commandError(ctx, path, fmt.Sprintf("inspect Pull Requests for branch %s", branch), err, out)
 	}
