@@ -163,6 +163,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.resumeBlocked(ctx, l, args)
 	case "recover-publication":
 		return a.recoverPublication(ctx, l, args)
+	case "recover-checks":
+		return a.recoverPullRequestChecks(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -206,6 +208,7 @@ Commands:
   retry         Explicitly resume a blocked Pull Request conflict recovery
   resume-blocked  Explicitly resume a worker environment-blocked Issue
   recover-publication  Recover an eligible failed Issue at the publication boundary
+  recover-checks  Return an externally repaired Pull Request to its saved lifecycle
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree
@@ -1412,7 +1415,11 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	interruptedResume := current.Status == "blocked" && current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" &&
 		(current.EnvironmentResume.Status == "requested" || current.EnvironmentResume.Status == "github_synced")
 	resumeIntent := interruptedResume || pendingResume
-	legacyWorkerBlock := current.BlockedCause == nil && current.FailureKind == "issue" && strings.Contains(current.LastError, "worker blocked")
+	var legacyCause *state.BlockedCause
+	if state.MayHaveLegacyWorkerBlockProvenance(current) {
+		legacyCause, _ = store.LegacyWorkerBlockProvenance(*current)
+	}
+	legacyWorkerBlock := legacyCause != nil
 	if !legacyWorkerBlock && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
 		return exitError{4, fmt.Errorf("Issue #%d is not a resumable worker environment block", *issueNumber)}
 	}
@@ -1526,6 +1533,8 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	previousReason := current.LastError
 	if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
 		previousReason = current.BlockedCause.Reason
+	} else if legacyCause != nil {
+		previousReason = legacyCause.Reason
 	}
 	if !pendingResume {
 		eventType := "environment_resume_requested"
@@ -1535,6 +1544,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		_, err = store.Update(eventType, *issueNumber, current.RunID, map[string]any{
 			"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock, "interrupted_resume": interruptedResume, "base_sha": baseSHA,
 		}, func(s *state.Snapshot) error {
+			if s.StateRevision != snapshot.StateRevision {
+				return fmt.Errorf("Issue #%d durable state changed while environment resume was being prepared", *issueNumber)
+			}
 			item := s.Issues[strconv.Itoa(*issueNumber)]
 			if item == nil || item.RunID != current.RunID || item.Status != "blocked" || item.GitHubSync != "" ||
 				(interruptedResume && (item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != current.EnvironmentResume.Status)) {
@@ -1546,10 +1558,8 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			item.Status = "environment_resume_pending"
 			item.GitHubSync = "environment_resume"
 			if item.BlockedCause == nil && legacyWorkerBlock {
-				item.BlockedCause = &state.BlockedCause{
-					Origin: "worker", Kind: "environment", Resumable: true,
-					Reason: item.LastError, BlockedAt: item.UpdatedAt,
-				}
+				cause := *legacyCause
+				item.BlockedCause = &cause
 			}
 			if item.Lease == nil && (legacyWorkerBlock || interruptedResume) {
 				item.LeaseGeneration++
@@ -1565,7 +1575,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				item.EnvironmentResume.Status = "requested"
 				item.EnvironmentResume.BaseSHA = baseSHA
 			} else {
-				item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: item.LastError, BaseSHA: baseSHA}
+				item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: previousReason, BaseSHA: baseSHA}
 			}
 			item.RetryAfter = nil
 			item.UpdatedAt = now

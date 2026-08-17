@@ -617,14 +617,28 @@ esac
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.Update("issue_blocked", 8, "run_8", nil, func(s *state.Snapshot) error {
+	legacyError := "worker blocked: localhost bind denied"
+	_, err = store.Update("issue_blocked", 8, "run_8", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(s *state.Snapshot) error {
 		s.Issues["8"] = &state.Issue{
 			Number: 8, Status: "blocked", RunID: "run_8", Branch: branch, Worktree: repo,
 			SessionID: "session-8", Session: &state.WorkerSession{Backend: "codex", ID: "session-8"},
 			DeclaredResources: []string{state.RepositoryResource}, ActualResources: []string{state.RepositoryResource},
 			Answers:     []state.AnswerRecord{{RequestID: "req-8", Question: "Continue?", Answer: "yes", AnsweredAt: time.Now().UTC()}},
-			FailureKind: "issue", LastError: "issue: worker blocked: localhost bind denied", UpdatedAt: time.Now().UTC(),
+			FailureKind: "issue", LastError: legacyError, UpdatedAt: time.Now().UTC(),
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("github_state_synced", 8, "run_8", map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("startup_reconciled", 8, "run_8", map[string]string{
+		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
+	}, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["8"].LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
 		return nil
 	})
 	if err != nil {
@@ -666,7 +680,7 @@ esac
 	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.RunID != "run_8" || item.Branch != branch || item.Worktree != repo || item.SessionID != "session-8" || item.Lease == nil {
 		t.Fatalf("item=%+v", item)
 	}
-	if item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" || item.Lease.ResolvedResources[0] != state.RepositoryResource {
+	if item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" || item.BlockedCause.Reason != "localhost bind denied" || item.BlockedCause.BlockedAt.IsZero() || item.EnvironmentResume.PreviousReason != "localhost bind denied" || item.Lease.ResolvedResources[0] != state.RepositoryResource {
 		t.Fatalf("legacy worker block was not normalized conservatively: %+v", item)
 	}
 	if item.Lease.BaseSHA != baseSHA || item.Lease.BaseSHA != durableBaseSHA || item.LeaseGeneration != durableGeneration || item.EnvironmentResume.ID != durableResumeID {
@@ -894,13 +908,18 @@ func TestResumeBlockedFailsClosedWhenConfiguredBaseSHAIsUnavailable(t *testing.T
 		t.Fatal(err)
 	}
 	blockedAt := time.Now().UTC()
-	_, err = store.Update("issue_blocked", 9, "run_9", nil, func(snapshot *state.Snapshot) error {
+	legacyError := "issue: worker blocked: legacy environment"
+	_, err = store.Update("issue_blocked", 9, "run_9", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["9"] = &state.Issue{
 			Number: 9, Status: "blocked", RunID: "run_9", Branch: branch, Worktree: cfg.RepoPath,
-			SessionID: "session-9", FailureKind: "issue", LastError: "issue: worker blocked: legacy environment", UpdatedAt: blockedAt,
+			SessionID: "session-9", FailureKind: "issue", LastError: legacyError, UpdatedAt: blockedAt,
 		}
 		return nil
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("github_state_synced", 9, "run_9", map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1204,7 +1223,6 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	var recoveryID string
 	for attempt := 0; attempt < 2; attempt++ {
 		var out, stderr bytes.Buffer
@@ -1306,6 +1324,267 @@ func TestPublicationRecoveryEligibilityAndPullRequestsFailClosed(t *testing.T) {
 		if err := validatePublicationRecoverySyncState(cfg, syncCurrent, syncRemote); err == nil {
 			t.Fatalf("unsafe synchronization labels were accepted: %v", labels)
 		}
+	}
+}
+
+func TestRecoverChecksReusesExternallyFixedBranchAndIsIdempotent(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	binDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	fakeGH := filepath.Join(binDir, "gh")
+	ghLog := filepath.Join(t.TempDir(), "gh.log")
+
+	gitPath := repo
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", gitPath}, args...)...)
+		out, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	runGit("config", "user.name", "Test")
+	runGit("config", "user.email", "test@example.invalid")
+	runGit("config", "commit.gpgsign", "false")
+	runGit("add", ".agent-loop.yaml")
+	runGit("commit", "-m", "base")
+	runGit("branch", "-M", "main")
+	remoteDir := filepath.Join(t.TempDir(), "remote.git")
+	if out, err := exec.Command("git", "init", "--bare", "-q", remoteDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	runGit("remote", "add", "origin", remoteDir)
+	runGit("push", "-u", "origin", "main")
+	branch := "codex/issue-102-checks"
+	canonicalRoot, err := filepath.EvalSymlinks(l.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedWorktree := filepath.Join(canonicalRoot, "worktrees", "repo-test", "issue-102")
+	if err := os.MkdirAll(filepath.Dir(managedWorktree), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, managedWorktree).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+	gitPath = managedWorktree
+	fixture := filepath.Join(managedWorktree, "format.ts")
+	if err := os.WriteFile(fixture, []byte("const value = 'deno-2.9.5'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "format.ts")
+	runGit("commit", "-m", "worker formatter output")
+	runGit("push", "-u", "origin", branch)
+	oldHead := runGit("rev-parse", "HEAD")
+	if err := os.WriteFile(fixture, []byte("const value = \"deno-2.7.14\";\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "format.ts")
+	runGit("commit", "-m", "apply pinned formatter")
+	runGit("push", "origin", branch)
+	newHead := runGit("rev-parse", "HEAD")
+
+	issueJSON := `{"number":102,"title":"checks","body":"","url":"https://example.test/issues/102","state":"OPEN","labels":[{"name":"codex-loop:failed"}],"assignees":[],"milestone":null,"comments":[]}`
+	writeFakeGH := func(conclusion string) {
+		t.Helper()
+		prJSON := fmt.Sprintf(`[{"number":447,"url":"https://example.test/pr/447","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":%q,"baseRefName":"main","headRefOid":%q,"mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":%q}]}]`, branch, newHead, conclusion)
+		script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue view") printf '%%s\n' '%s' ;;
+  "pr list") printf '%%s\n' '%s' ;;
+  "issue edit"|"issue comment") exit 0 ;;
+  *) exit 2 ;;
+esac
+`, ghLog, issueJSON, prJSON)
+		if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFakeGH("FAILURE")
+	cfg := mustConfig(t, repo)
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	runID := "run_checks_102"
+	_, _, err = store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 102, Title: "checks", RunID: runID, Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+		ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("pull_request_checks_retry_exhausted", 102, runID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["102"]
+		item.Status = "failed"
+		item.Worktree = managedWorktree
+		item.Branch = branch
+		item.PullRequestURL = "https://example.test/pr/447"
+		item.PullRequestNumber = 447
+		item.HeadSHA = oldHead
+		item.Attempts = cfg.Queue.MaxAttempts
+		item.Continuations = cfg.Worker.Profiles["extended"].MaxContinuations
+		item.FailureKind = "issue"
+		item.LastError = "issue: worker retry limit reached: Pull Request checks failed"
+		item.PullRequestChecksFailure = &state.PullRequestChecksFailure{
+			Origin: state.ChecksFailureOriginPullRequest, Phase: state.ChecksFailurePhaseRequired,
+			Code: state.ChecksFailureCodeRetryExhausted, Recoverable: true, RetryExhausted: true,
+			PullRequestURL: item.PullRequestURL, PullRequestNumber: 447, Branch: branch,
+			HeadSHA: oldHead, ChecksStatus: "failure", FailedAt: time.Now().UTC(),
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseArgs := []string{"recover-checks", "--repo", repo, "--issue", "102", "--json"}
+	assertRefused := func(name string, app App, args []string) {
+		t.Helper()
+		var out, stderr bytes.Buffer
+		app.Out, app.Err = &out, &stderr
+		if code := app.Run(context.Background(), args); code == 0 {
+			t.Fatalf("%s unexpectedly succeeded: %s", name, out.String())
+		}
+	}
+	assertRefused("missing confirmation", App{}, baseArgs)
+	_, err = store.Update("fault_active_worker", 102, runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["102"].WorkerPID = 4242
+		snapshot.Issues["102"].WorkerPGID = 4242
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRefused("active worker", App{ProcessController: &appProcessGroups{alive: map[int]bool{4242: true}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-external-fix"))
+	_, err = store.Update("fault_pending_request", 102, runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["102"].WorkerPID = 0
+		snapshot.Issues["102"].WorkerPGID = 0
+		snapshot.PendingRequests["req-102"] = &state.Request{ID: "req-102", IssueNumber: 102, Status: "pending"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRefused("pending request", App{ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-external-fix"))
+	_, err = store.Update("faults_repaired", 102, runID, nil, func(snapshot *state.Snapshot) error {
+		delete(snapshot.PendingRequests, "req-102")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture, []byte("const value = \"dirty\";\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRefused("dirty worktree", App{ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-external-fix"))
+	if err := os.WriteFile(fixture, []byte("const value = \"deno-2.7.14\";\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var failedOut, failedErr bytes.Buffer
+	failedApp := App{Out: &failedOut, Err: &failedErr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	if code := failedApp.Run(context.Background(), append(baseArgs, "--confirm-external-fix")); code != 0 {
+		t.Fatalf("failed checks observation code=%d stdout=%s stderr=%s", code, failedOut.String(), failedErr.String())
+	}
+	failedSnapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedItem := failedSnapshot.Issues["102"]
+	if failedItem.Status != "failed" || failedItem.Lease == nil || failedItem.PullRequestChecksRecovery == nil || failedItem.PullRequestChecksRecovery.Status != "checks_failed" {
+		t.Fatalf("failed replacement checks did not remain terminal: %+v", failedItem)
+	}
+	writeFakeGH("SUCCESS")
+
+	var recoveryID string
+	for attempt := 0; attempt < 2; attempt++ {
+		var out, stderr bytes.Buffer
+		a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+		code := a.Run(context.Background(), []string{"recover-checks", "--repo", repo, "--issue", "102", "--confirm-external-fix", "--json"})
+		if code != 0 {
+			t.Fatalf("attempt=%d code=%d stdout=%s stderr=%s", attempt, code, out.String(), stderr.String())
+		}
+		snapshot, loadErr := store.Load()
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		item := snapshot.Issues["102"]
+		if attempt == 0 {
+			recoveryID = item.PullRequestChecksRecovery.ID
+		}
+		if item.Status != "awaiting_checks" || item.GitHubSync != "" || item.Lease == nil || item.RunID != runID ||
+			item.Attempts != cfg.Queue.MaxAttempts || item.Continuations != cfg.Worker.Profiles["extended"].MaxContinuations ||
+			item.PullRequestChecksRecovery == nil || item.PullRequestChecksRecovery.ID != recoveryID ||
+			item.PullRequestChecksRecovery.OldHeadSHA != oldHead || item.PullRequestChecksRecovery.NewHeadSHA != newHead ||
+			item.PullRequestChecksRecovery.Status != "resumed" {
+			t.Fatalf("recovery was not durable/idempotent: %+v", item)
+		}
+	}
+	calls, err := os.ReadFile(ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "issue comment") != 1 || !strings.Contains(string(calls), "--remove-label codex-loop:failed") || !strings.Contains(string(calls), "codex-issue-loop:checks-recovery:") {
+		t.Fatalf("GitHub recovery was not idempotent:\n%s", calls)
+	}
+}
+
+func TestRecoverChecksAuthoritativeStateValidationFailsClosed(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	current := &state.Issue{
+		Number: 102, Branch: "codex/issue-102-checks", PullRequestURL: "https://example.test/pr/447", PullRequestNumber: 447,
+	}
+	inspection := worktree.Inspection{Head: "new-head", RemoteHead: "new-head"}
+	baseline := gh.RemoteState{
+		Issue: gh.Issue{Number: 102, State: "OPEN", Labels: []string{cfg.GitHub.FailedLabel}},
+		PullRequests: []gh.PullRequest{{
+			Number: 447, URL: current.PullRequestURL, State: "OPEN", HeadRefName: current.Branch,
+			BaseRefName: cfg.Git.BaseBranch, HeadSHA: "new-head", ChecksStatus: "success",
+		}},
+	}
+	clone := func() gh.RemoteState {
+		result := baseline
+		result.Issue.Labels = append([]string(nil), baseline.Issue.Labels...)
+		result.PullRequests = append([]gh.PullRequest(nil), baseline.PullRequests...)
+		return result
+	}
+	tests := []struct {
+		name   string
+		mutate func(*gh.RemoteState)
+	}{
+		{name: "manual exclusion", mutate: func(remote *gh.RemoteState) { remote.Issue.Labels = append(remote.Issue.Labels, "do-not-automate") }},
+		{name: "conflicting running label", mutate: func(remote *gh.RemoteState) {
+			remote.Issue.Labels = append(remote.Issue.Labels, cfg.GitHub.RunningLabel)
+		}},
+		{name: "closed Issue", mutate: func(remote *gh.RemoteState) { remote.Issue.State = "CLOSED" }},
+		{name: "multiple Pull Requests", mutate: func(remote *gh.RemoteState) {
+			remote.PullRequests = append(remote.PullRequests, remote.PullRequests[0])
+		}},
+		{name: "closed Pull Request", mutate: func(remote *gh.RemoteState) { remote.PullRequests[0].State = "CLOSED" }},
+		{name: "changed branch", mutate: func(remote *gh.RemoteState) { remote.PullRequests[0].HeadRefName = "other" }},
+		{name: "changed head", mutate: func(remote *gh.RemoteState) { remote.PullRequests[0].HeadSHA = "other-head" }},
+		{name: "changed base", mutate: func(remote *gh.RemoteState) { remote.PullRequests[0].BaseRefName = "release" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			remote := clone()
+			test.mutate(&remote)
+			if _, err := validatePullRequestChecksRecovery(cfg, current, remote, inspection, true); err == nil {
+				t.Fatal("unsafe authoritative state was accepted")
+			}
+		})
+	}
+	if _, err := validatePullRequestChecksRecovery(cfg, current, baseline, inspection, true); err != nil {
+		t.Fatalf("aligned failed state was rejected: %v", err)
 	}
 }
 

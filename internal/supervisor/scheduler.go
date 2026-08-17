@@ -68,6 +68,7 @@ type scheduler struct {
 	active              map[int]activeJob
 	issueRetry          map[int]time.Time
 	issueFails          map[int]int
+	terminalPoll        map[int]time.Time
 	pollAt              time.Time
 	cooldownUntil       time.Time
 	lastSuppressedReset time.Time
@@ -104,7 +105,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 	}
 	s := &scheduler{
 		loop: l, events: make(chan schedulerEvent, concurrency+1), active: map[int]activeJob{},
-		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, terminalPoll: map[int]time.Time{},
 		consecutiveFailures: current.Supervisor.ConsecutiveFailures,
 		rateLimitActive:     current.Supervisor.RateLimit != nil,
 	}
@@ -379,6 +380,9 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	if !pollCandidates {
 		return result, nil
 	}
+	if s.dispatchTerminalPullRequestReconciliation(ctx, snapshot) {
+		result.dispatched = true
+	}
 	if !s.hasFreeSlot() {
 		s.pollAt = s.loop.now().Add(s.pollDelay())
 		return result, nil
@@ -585,11 +589,61 @@ func terminalWebhookStatus(status string) bool {
 
 func webhookRoutableStatus(status string) bool {
 	switch status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 		return true
 	default:
 		return false
 	}
+}
+
+// dispatchTerminalPullRequestReconciliation checks at most one terminal Issue
+// per queue poll. Per-Issue cooldowns keep sticky/manual blocks from consuming
+// GitHub API budget every cycle while still allowing all candidates to make
+// progress without restarting the repository supervisor.
+func (s *scheduler) dispatchTerminalPullRequestReconciliation(ctx context.Context, snapshot state.Snapshot) bool {
+	if s.hasMaintenanceJob() {
+		return false
+	}
+	if s.terminalPoll == nil {
+		s.terminalPoll = map[int]time.Time{}
+	}
+	now := s.loop.now()
+	candidates := make([]state.Issue, 0)
+	for _, issue := range snapshot.Issues {
+		if issue == nil || !terminalPullRequestCandidate(*issue) {
+			continue
+		}
+		if _, active := s.active[issue.Number]; active {
+			continue
+		}
+		if s.retryPending(issue.Number) {
+			continue
+		}
+		if next := s.terminalPoll[issue.Number]; next.After(now) {
+			continue
+		}
+		candidates = append(candidates, *issue)
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := s.terminalPoll[candidates[i].Number], s.terminalPoll[candidates[j].Number]
+		if !left.Equal(right) {
+			return left.Before(right)
+		}
+		return candidates[i].Number < candidates[j].Number
+	})
+	current := candidates[0]
+	delay := 5 * s.loop.Config.Queue.PollInterval.Duration
+	if delay < 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	s.terminalPoll[current.Number] = now.Add(delay)
+	s.dispatch(ctx, current.Number, current.RunID, -1, func(jobCtx context.Context) error {
+		return s.loop.reconcileTerminalPullRequest(jobCtx, current)
+	})
+	return true
 }
 
 func hasPendingRequests(snapshot state.Snapshot) bool {
@@ -876,7 +930,7 @@ func pendingIssues(snapshot state.Snapshot, now time.Time) []state.Issue {
 }
 
 func pendingIssue(issue state.Issue, now time.Time) bool {
-	if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+	if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "pull_request_checks_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 		return false
 	}
 	return issue.RetryAfter == nil || !issue.RetryAfter.After(now)
@@ -887,7 +941,7 @@ func issueUsesWorkerSlot(issue state.Issue) bool {
 		return false
 	}
 	switch issue.Status {
-	case "awaiting_checks", "awaiting_merge", "publication_recovery_pending":
+	case "awaiting_checks", "awaiting_merge", "publication_recovery_pending", "pull_request_checks_recovery_pending":
 		return false
 	default:
 		return true

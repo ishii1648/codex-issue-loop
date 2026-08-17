@@ -341,6 +341,7 @@ agent-loop <command> [options]
 | `retry` | PR conflictで最終blockedになったIssueを監査付きで`resolving_conflict`へ戻す |
 | `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
 | `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
+| `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -437,13 +438,27 @@ agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
 agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
 ```
 
-`blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは`failure_kind=issue`とsupervisor生成の`worker blocked` errorが一致する場合だけlegacy worker blockとして同じ操作内でprovenanceを正規化し、失われたleaseは最小の`repo:*`として保守的に再予約する。他のleaseと競合すれば拒否する。operatorの明示確認、active process不在、pending request不在、run/worktree/branch/resource lease、GitHub open Issueとblocked label、保存PRの対応を検査する。leaseの`base_sha`が空の場合はconfigured base branchのremote-tracking commitを解決し、保存worktreeのHEADの祖先であることを検証する。解決・検証できなければstateとGitHubを変更せず拒否し、非空の既存`base_sha`は上書きしない。検証したSHAはlease、`environment_resume`、event payloadへ保存し、legacy lease、resume ID、GitHub同期intentとともに1つの`environment_resume_requested` transactionで確定する。dirty changes、session/Goal、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止してもsupervisorが同じintentを再実行し、重複worker/commentを作らず収束する。
+`blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは、`failure_kind=issue`とsupervisor生成の厳密な`worker blocked: ...` errorに加え、durable history上で同一Issue・同一runの`issue_blocked`の直後のsequenceに`github_state_synced(state=blocked)`がある場合だけlegacy worker blockとして扱う。v0.6.9でfixture化された`issue: worker blocked: ...`も後方互換表現として明示的に許可するが、その他の部分一致は認めない。`issue_blocked` eventのtimestampとerror内の元reasonをtyped `blocked_cause`へ正規化する。旧startup reconciliationが直後に残した、同じrunかつ`previous_status=blocked`、`status=blocked`、reasonがmanual blocked label誤分類と完全一致する`startup_reconciled`だけは既知の上書きとして許容する。event chainの欠損、複数候補、別run、sequence gap・順序不正、payload不一致、空時刻、security/manual provenance、その他の後続Issue eventはfail closedとする。
+
+startup reconciliationは上記chainが成立し、現在のGitHub exclusionがsupervisor-owned `blocked` labelだけである場合に限り正規化する。`do-not-automate`等の別exclusionが併存する場合やGitHub `blocked` labelがない場合はmanual exclusionとして扱い、resumable provenanceを生成しない。`resume-blocked`も同じdurable history検証器を使い、markerだけのlegacy stateを認めない。認定後に失われたleaseは最小の`repo:*`として保守的に再予約し、他のleaseと競合すれば拒否する。operatorの明示確認、active process不在、pending request不在、run/worktree/branch/resource lease、GitHub open Issueとblocked label、保存PRの対応を検査する。leaseの`base_sha`が空の場合はconfigured base branchのremote-tracking commitを解決し、保存worktreeのHEADの祖先であることを検証する。解決・検証できなければstateとGitHubを変更せず拒否し、非空の既存`base_sha`は上書きしない。検証したSHAはlease、`environment_resume`、event payloadへ保存し、legacy lease、resume ID、GitHub同期intentとともに1つの`environment_resume_requested` transactionで確定する。dirty changes、session/Goal、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止してもsupervisorが同じintentを再実行し、重複worker/commentを作らず収束する。
 
 startup/periodic reconciliationはinspectionに使ったIssue snapshotと更新transaction内の最新Issueが一致する場合だけ判定を適用し、途中で変化した場合は再inspectionする。`environment_resume_pending`かつ`github_sync=environment_resume`では旧blocked labelを手動exclusionとして扱わず、leaseを保持する。旧実装の競合で`status=blocked`、`environment_resume.status=requested|github_synced`となった場合は、`resume-blocked`が同じresume ID、保存済み`base_sha`、worktree/branch/run、GitHub Issue/PR/label/comment、process/requestを再検証し、leaseを`repo:*`として競合なしに再予約できる場合だけ`environment_resume_recovered`で復旧する。保存済みSHAをstateまたは保持event historyから回復できない場合は、現在のbaseを推測せず拒否する。
 
 PR conflict、手動exclusion、security block、上記markerのないlegacy block、running/completed、closed Issue、missing/inconsistent worktree・branch・PRを拒否する。`retry`と`resume-blocked`は交換可能ではなく、state fileやsupervisor-owned labelの手編集を復旧手順にしない。
 
-### 6.8 終了コード
+### 6.8 recover-checks
+
+```sh
+agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
+```
+
+保存済みPRのrequired checksがfailureとなりworker retry budgetを使い切ったterminal `failed`だけを対象にする。失敗時のPR URL・number・branch・head SHAとretry exhaustionをimmutableなtyped provenanceへ保存し、`status --json`と`watch`はretained leaseでqueueを塞いでいる復旧可能状態を`recoverable_checks_failure`として通知する。
+
+operatorが同じPR branchへ外部commitをpushした後、run、managed worktree、branch、open PR、retained fenced lease、active process不在、pending request不在、cleanかつfully pushedなlocal/remote head、GitHub failed label、manual/security exclusion不在を再検証する。新headが失敗時headと同じ場合やchecksがfailureのままなら再開しない。pendingまたはsuccessではgeneration、confirmation時刻、old/new head SHA、checks結果とGitHub同期intentを先にdurable state/eventへ保存し、failed labelをrunningへ変えて冪等markerを残す。
+
+同期後は同じbranch/PRの`awaiting_checks`へ戻し、通常のDraft解除、auto merge、done/close、merge確認後のlease releaseを再利用する。worker attempts、continuations、run historyをresetせず、新branch、PR、push、worker実行を作らない。GitHub同期途中の停止・再起動は保存intentをauthoritative Issue/PR/head/checksと再照合してから同じmarkerへ収束する。closed-without-merge、head/branch/PR不一致、dirty/unpushed worktree、active worker、pending request、manual/security exclusionはstateとlabelを変更せずfail closedとする。
+
+### 6.9 終了コード
 
 | code | 意味 |
 | --- | --- |

@@ -43,10 +43,13 @@ type fakeGitHub struct {
 	issue                     gh.Issue
 	remote                    *gh.RemoteState
 	claimed, done, needsInput bool
+	doneCalls                 int
 	markedRunning             bool
 	readyPullRequest          bool
 	updatedPullRequest        bool
 	mergedPullRequest         bool
+	checksRecoveryCalls       int
+	checksRecoveryID          string
 	inspectCalls              int
 	claimErr                  error
 	doneErr                   error
@@ -85,6 +88,7 @@ func (f *fakeGitHub) MarkNeedsInput(context.Context, config.Config, int, string,
 	return nil
 }
 func (f *fakeGitHub) MarkDone(context.Context, config.Config, int, string) error {
+	f.doneCalls++
 	if f.doneErr != nil {
 		err := f.doneErr
 		f.doneErr = nil
@@ -100,6 +104,12 @@ func (f *fakeGitHub) MarkRunning(context.Context, config.Config, int) error {
 }
 func (f *fakeGitHub) MarkConflictRetry(context.Context, config.Config, int, string) error {
 	f.markedRunning = true
+	return nil
+}
+func (f *fakeGitHub) MarkPullRequestChecksRecovery(_ context.Context, _ config.Config, _ int, recoveryID string) error {
+	f.markedRunning = true
+	f.checksRecoveryCalls++
+	f.checksRecoveryID = recoveryID
 	return nil
 }
 func (f *fakeGitHub) ReadyPullRequest(context.Context, config.Config, string) error {
@@ -607,6 +617,97 @@ func TestFailedPullRequestChecksReturnWorkerToRetry(t *testing.T) {
 	}
 }
 
+func TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Completion.AutoMerge = true
+	loop.Config.Queue.MaxAttempts = 1
+	runID := "run_checks_recovery"
+	branch := "codex/issue-1-checks"
+	prURL := "https://example.test/pr/1"
+	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: runID, Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+		ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("fixture", 1, runID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "awaiting_checks"
+		item.Worktree = loop.Config.RepoPath
+		item.Branch = branch
+		item.PullRequestURL = prURL
+		item.PullRequestNumber = 1
+		item.Attempts = 1
+		item.ExecutionProfile = "standard"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedPR := gh.PullRequest{Number: 1, URL: prURL, State: "OPEN", IsDraft: true, HeadRefName: branch, BaseRefName: "main", HeadSHA: "old-head", ChecksStatus: "failure"}
+	current, err := loop.issueState(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.failPullRequestChecks(context.Background(), current, failedPR, "Pull Request checks failed: "+prURL); err != nil {
+		t.Fatal(err)
+	}
+	failed, _ := loop.issueState(1)
+	if failed.Status != "failed" || failed.Lease == nil || !state.RecoverablePullRequestChecksFailure(&failed) || failed.PullRequestChecksFailure.HeadSHA != "old-head" {
+		t.Fatalf("typed terminal failure did not retain the lease: %+v", failed)
+	}
+
+	recoveryID := "checks_recovery_1"
+	_, err = loop.Store.Update("pull_request_checks_recovery_requested", 1, runID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "pull_request_checks_recovery_pending"
+		item.GitHubSync = "pull_request_checks_recovery"
+		item.HeadSHA = "new-head"
+		item.PullRequestChecksRecovery = &state.PullRequestChecksRecovery{
+			ID: recoveryID, Status: "requested", Generation: 1, ConfirmedAt: time.Now().UTC(),
+			OldHeadSHA: "old-head", NewHeadSHA: "new-head", ChecksStatus: "success",
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.FailedLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: prURL, State: "OPEN", IsDraft: true, HeadRefName: branch, BaseRefName: "main", HeadSHA: "new-head", MergeStateStatus: "CLEAN", ChecksStatus: "success"}},
+	}
+	pending, _ := loop.issueState(1)
+	if err := loop.processExisting(context.Background(), pending); err != nil {
+		t.Fatal(err)
+	}
+	resumed, _ := loop.issueState(1)
+	if resumed.Status != "awaiting_checks" || resumed.Lease == nil || resumed.Attempts != 1 || resumed.PullRequestChecksRecovery.Status != "resumed" || github.checksRecoveryCalls != 1 || github.checksRecoveryID != recoveryID {
+		t.Fatalf("same PR lifecycle was not resumed safely: issue=%+v github=%+v", resumed, github)
+	}
+
+	github.remote.Issue.Labels = []string{loop.Config.GitHub.RunningLabel}
+	if err := loop.processExisting(context.Background(), resumed); err != nil {
+		t.Fatal(err)
+	}
+	awaitingMerge, _ := loop.issueState(1)
+	if awaitingMerge.Status != "awaiting_merge" || awaitingMerge.Lease == nil || !github.readyPullRequest || !github.mergedPullRequest {
+		t.Fatalf("Draft/auto-merge lifecycle did not retain the lease: %+v", awaitingMerge)
+	}
+	mergedAt := time.Now().UTC()
+	github.remote.PullRequests[0].IsDraft = false
+	github.remote.PullRequests[0].MergedAt = &mergedAt
+	github.remote.PullRequests[0].State = "MERGED"
+	if err := loop.processExisting(context.Background(), awaitingMerge); err != nil {
+		t.Fatal(err)
+	}
+	completed, _ := loop.issueState(1)
+	if completed.Status != "completed" || completed.Lease != nil || !completed.PullRequestMerged {
+		t.Fatalf("merge did not release the retained lease exactly at completion: %+v", completed)
+	}
+}
+
 func TestQueueOnlyWaitsForMergeWhenAutoMergeIsEnabled(t *testing.T) {
 	snapshot := state.Snapshot{Issues: map[string]*state.Issue{
 		"1": {Number: 1, Status: "awaiting_merge"},
@@ -616,6 +717,9 @@ func TestQueueOnlyWaitsForMergeWhenAutoMergeIsEnabled(t *testing.T) {
 	}
 	if !queueBlockedByPullRequest(snapshot, true) {
 		t.Fatal("auto merge wait did not retain queue ownership")
+	}
+	if issueUsesWorkerSlot(state.Issue{Status: "pull_request_checks_recovery_pending", GitHubSync: "pull_request_checks_recovery"}) {
+		t.Fatal("checks recovery synchronization consumed a worker slot")
 	}
 }
 

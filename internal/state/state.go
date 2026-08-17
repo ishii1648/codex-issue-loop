@@ -199,6 +199,43 @@ type PublicationRecovery struct {
 	OriginalUnpushed bool                         `json:"original_unpushed_commits"`
 }
 
+const (
+	ChecksFailureOriginPullRequest  = "pull_request_lifecycle"
+	ChecksFailurePhaseRequired      = "required_checks"
+	ChecksFailureCodeRetryExhausted = "checks_retry_exhausted"
+)
+
+// PullRequestChecksFailure is immutable provenance for the Pull Request head
+// that exhausted the normal worker retry budget. Recovery compares a later
+// authoritative head against this record instead of the mutable observed head.
+type PullRequestChecksFailure struct {
+	Origin            string    `json:"origin"`
+	Phase             string    `json:"phase"`
+	Code              string    `json:"code"`
+	Recoverable       bool      `json:"recoverable"`
+	PullRequestURL    string    `json:"pull_request_url"`
+	PullRequestNumber int       `json:"pull_request_number"`
+	Branch            string    `json:"branch"`
+	HeadSHA           string    `json:"head_sha"`
+	ChecksStatus      string    `json:"checks_status"`
+	RetryExhausted    bool      `json:"retry_exhausted"`
+	FailedAt          time.Time `json:"failed_at"`
+}
+
+// PullRequestChecksRecovery records one operator-confirmed attempt to return
+// an externally repaired head to the existing Pull Request lifecycle. Worker
+// attempts, continuations, run history, and leases are deliberately separate.
+type PullRequestChecksRecovery struct {
+	ID             string    `json:"id"`
+	Status         string    `json:"status"`
+	Generation     int       `json:"generation"`
+	ConfirmedAt    time.Time `json:"confirmed_at"`
+	PreviousReason string    `json:"previous_reason"`
+	OldHeadSHA     string    `json:"old_head_sha"`
+	NewHeadSHA     string    `json:"new_head_sha"`
+	ChecksStatus   string    `json:"checks_status"`
+}
+
 type Issue struct {
 	Number            int                `json:"number"`
 	Title             string             `json:"title"`
@@ -236,6 +273,9 @@ type Issue struct {
 	PublicationFailure *publication.FailureProvenance `json:"publication_failure,omitempty"`
 
 	PublicationRecovery *PublicationRecovery `json:"publication_recovery,omitempty"`
+
+	PullRequestChecksFailure  *PullRequestChecksFailure  `json:"pull_request_checks_failure,omitempty"`
+	PullRequestChecksRecovery *PullRequestChecksRecovery `json:"pull_request_checks_recovery,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -535,6 +575,11 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			return "blocked", true
 		}
 	}
+	for _, issue := range s.Issues {
+		if RecoverablePullRequestChecksFailure(issue) && issue.Lease != nil {
+			return "recoverable_checks_failure", true
+		}
+	}
 	if s.Supervisor.State == "blocked" || s.Supervisor.State == "stopped" {
 		return s.Supervisor.State, true
 	}
@@ -543,13 +588,26 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "publication_recovery_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
+			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "publication_recovery_pending" || issue.Status == "pull_request_checks_recovery_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
 				return "", false
 			}
 		}
 		return "idle", true
 	}
 	return "", false
+}
+
+func RecoverablePullRequestChecksFailure(issue *Issue) bool {
+	if issue == nil {
+		return false
+	}
+	value := issue.PullRequestChecksFailure
+	return issue.Status == "failed" && issue.FailureKind == "issue" && !issue.PullRequestMerged && value != nil && value.Recoverable && value.RetryExhausted &&
+		value.Origin == ChecksFailureOriginPullRequest && value.Phase == ChecksFailurePhaseRequired &&
+		value.Code == ChecksFailureCodeRetryExhausted && value.ChecksStatus == "failure" &&
+		value.PullRequestURL != "" && value.PullRequestURL == issue.PullRequestURL &&
+		value.PullRequestNumber > 0 && value.PullRequestNumber == issue.PullRequestNumber &&
+		value.Branch != "" && value.Branch == issue.Branch && value.HeadSHA != ""
 }
 
 func NewID(prefix string) string {

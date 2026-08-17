@@ -95,6 +95,26 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 			status: "completed", githubSync: "done", reason: "done label",
 		},
 		{
+			name: "checks recovery before label sync survives restart", current: func() state.Issue {
+				value := base
+				value.Status = "pull_request_checks_recovery_pending"
+				value.GitHubSync = "pull_request_checks_recovery"
+				return value
+			}(),
+			remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.FailedLabel}}}, inspection: valid,
+			status: "pull_request_checks_recovery_pending", githubSync: "pull_request_checks_recovery", reason: "waiting for GitHub label synchronization",
+		},
+		{
+			name: "checks recovery after label sync survives restart", current: func() state.Issue {
+				value := base
+				value.Status = "pull_request_checks_recovery_pending"
+				value.GitHubSync = "pull_request_checks_recovery"
+				return value
+			}(),
+			remote: gh.RemoteState{Issue: runningIssue}, inspection: valid,
+			status: "pull_request_checks_recovery_pending", githubSync: "pull_request_checks_recovery", reason: "remains pending",
+		},
+		{
 			name: "legacy completed draft returns to check monitoring", current: func() state.Issue {
 				value := base
 				value.Status = "completed"
@@ -146,6 +166,99 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 				t.Fatalf("decision=%+v", decision)
 			}
 		})
+	}
+}
+
+func TestTerminalPullRequestReconciliationRequiresAuthoritativeSavedMerge(t *testing.T) {
+	cfg := config.Defaults()
+	loop := &Loop{Config: cfg}
+	merged := timePointer()
+	base := state.Issue{
+		Number: 7, Status: "blocked", RunID: "run_7", Branch: "codex/issue-7-test",
+		PullRequestURL: "https://example.test/pull/7", FailureKind: "issue",
+	}
+	automationIssue := gh.Issue{
+		Number: 7, State: "OPEN", Labels: []string{"blocked"},
+		Comments: []string{"<!-- codex-issue-loop:failed:7 -->\nAutomation stopped."},
+	}
+	matching := gh.PullRequest{
+		Number: 7, URL: base.PullRequestURL, State: "MERGED", MergedAt: merged,
+		HeadRefName: base.Branch,
+	}
+	tests := []struct {
+		name       string
+		current    state.Issue
+		remote     gh.RemoteState
+		completed  bool
+		reasonPart string
+	}{
+		{name: "automation blocked merged PR completes", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{matching}}, completed: true, reasonPart: "merge discovered"},
+		{name: "unmerged PR remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.MergedAt = nil; value.State = "OPEN"; return value }()}}, reasonPart: "not merged"},
+		{name: "closed without merge remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.MergedAt = nil; value.State = "CLOSED"; return value }()}}, reasonPart: "closed without merge"},
+		{name: "multiple PRs remain sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{matching, matching}}, reasonPart: "multiple Pull Requests"},
+		{name: "different saved URL remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.URL += "-other"; return value }()}}, reasonPart: "does not match"},
+		{name: "different head remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.HeadRefName += "-other"; return value }()}}, reasonPart: "head does not match"},
+		{name: "manual blocked label remains sticky", current: func() state.Issue { value := base; value.FailureKind = ""; return value }(), remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked"}}, PullRequests: []gh.PullRequest{matching}}, reasonPart: "applied manually"},
+		{name: "manual exclusion remains sticky", current: base, remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked", "do-not-automate"}, Comments: automationIssue.Comments}, PullRequests: []gh.PullRequest{matching}}, reasonPart: "applied manually"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, ok := loop.decideTerminalPullRequestReconciliation(test.current, test.remote)
+			if !ok || (decision.status == "completed") != test.completed || !strings.Contains(decision.reason, test.reasonPart) {
+				t.Fatalf("decision=%+v ok=%v", decision, ok)
+			}
+		})
+	}
+}
+
+func TestPeriodicTerminalReconciliationCompletesAndIsIdempotent(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)}
+	runID := "run_blocked"
+	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Blocked", RunID: runID, Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("blocked_fixture", 1, runID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "blocked"
+		item.Branch = "codex/issue-1-test"
+		item.PullRequestURL = "https://example.test/pull/1"
+		item.FailureKind = "issue"
+		item.LastError = "merge conflict"
+		item.Lease.Owner = owner
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}, Comments: []string{"<!-- codex-issue-loop:failed:1 -->"}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pull/1", State: "MERGED", MergedAt: timePointer(), HeadRefName: "codex/issue-1-test"}},
+	}
+	current, err := loop.issueState(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileTerminalPullRequest(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if item.Status != "completed" || !item.PullRequestMerged || item.Lease != nil || item.GitHubSync != "" || !github.done {
+		t.Fatalf("issue=%+v github.done=%v", item, github.done)
+	}
+	if err := loop.reconcileTerminalPullRequest(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if github.inspectCalls != 1 || github.doneCalls != 1 {
+		t.Fatalf("inspect calls=%d done calls=%d", github.inspectCalls, github.doneCalls)
 	}
 }
 
@@ -379,6 +492,116 @@ func TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t
 	}
 	if github.inspectCalls != 2 {
 		t.Fatalf("inspect calls=%d, want stale inspection plus retry", github.inspectCalls)
+	}
+}
+
+func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	blockedAt := time.Date(2026, 8, 17, 12, 30, 0, 0, time.UTC)
+	loop.Clock = fixedClock{value: blockedAt.Add(time.Hour)}
+	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Legacy block", RunID: "run_legacy", Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+		BaseSHA: "base-sha", ReservedAt: blockedAt.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := "codex/issue-1-legacy-block"
+	legacyError := "worker blocked: localhost listen denied"
+	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "blocked"
+		item.Branch = branch
+		item.Worktree = loop.Config.RepoPath
+		item.FailureKind = "issue"
+		item.LastError = legacyError
+		item.GitHubSync = "blocked"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("github_state_synced", 1, owner.RunID, map[string]string{"state": "blocked"}, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].GitHubSync = ""
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("startup_reconciled", 1, owner.RunID, map[string]string{
+		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
+	}, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedCause, err := loop.Store.LegacyWorkerBlockProvenance(*before.Issues["1"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}}}
+	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: &worktree.Inspection{
+		Exists: true, Valid: true, Branch: branch, LocalBranchExists: true, RemoteBranchExists: true,
+	}}
+
+	if err := loop.reconcileStartup(context.Background(), before); err != nil {
+		t.Fatal(err)
+	}
+	after, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := after.Issues["1"]
+	if item.Status != "blocked" || item.LastError != legacyError || item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" || !item.BlockedCause.Resumable {
+		t.Fatalf("legacy provenance was not normalized: %+v", item)
+	}
+	if item.BlockedCause.Reason != "localhost listen denied" || !item.BlockedCause.BlockedAt.Equal(expectedCause.BlockedAt) {
+		t.Fatalf("legacy reason/time were not preserved: %+v", item.BlockedCause)
+	}
+	if item.Lease == nil || item.Lease.Owner != owner || item.Lease.BaseSHA != "base-sha" {
+		t.Fatalf("legacy resource lease was lost: %+v", item.Lease)
+	}
+}
+
+func TestStartupReconciliationRejectsLegacyChainWithManualExclusion(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	legacyError := "issue: worker blocked: localhost listen denied"
+	_, err := loop.Store.Update("issue_blocked", 1, "run_legacy", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Status: "blocked", RunID: "run_legacy", FailureKind: "issue", LastError: legacyError,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("github_state_synced", 1, "run_legacy", map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked", "do-not-automate"}}}
+
+	if err := loop.reconcileStartup(context.Background(), before); err != nil {
+		t.Fatal(err)
+	}
+	after, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := after.Issues["1"]
+	if item.BlockedCause != nil || item.Status != "blocked" || !strings.Contains(item.LastError, "do not contain only the supervisor-owned blocked label") {
+		t.Fatalf("manual exclusion was normalized as resumable provenance: %+v", item)
 	}
 }
 

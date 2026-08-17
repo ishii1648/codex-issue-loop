@@ -219,7 +219,7 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 `retry`は無関係なblocked原因を初期化せず、保存済みbranchとPRが一致する場合だけ`resolving_conflict`へ戻す。新しいbranch/PRやforce pushは作らない。
 
-workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。導入前のworker blockだけは`failure_kind=issue`とsupervisor生成の`worker blocked` errorからCLIがprovenanceを正規化し、失われたleaseを`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource leaseとGitHub label/PRが一致するときだけ次を使う。v0.6.0以前のlegacy recordでは`lease`または`lease.base_sha`がないことがあるが、stateを手編集しない。
+workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。導入前のworker blockだけは、CLIがdurable event historyにある同一Issue・同一runの隣接した`issue_blocked`（`failure_kind=issue`かつsupervisor生成の厳密な`worker blocked: ...` error。v0.6.9 fixtureの`issue: worker blocked: ...`も互換対象）と`github_state_synced(state=blocked)`を検証し、元reasonとevent timestampをtyped provenanceへ正規化する。その他の部分一致や、旧startup reconciliationによる既知のmanual blocked label誤分類event以外に後続Issue eventがある場合は認定しない。失われたleaseは`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource leaseとGitHub label/PRが一致するときだけ次を使う。v0.6.0以前のlegacy recordでは`lease`または`lease.base_sha`がないことがあるが、stateを手編集しない。
 
 ```sh
 agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
@@ -227,7 +227,7 @@ agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --conf
 
 この操作はconfigured base branchのremote-tracking commitを検証し、leaseを補う場合は非空の`base_sha`も同じtransactionで保存する。`resolve configured base branch`で拒否された場合はGitHub labelとdurable stateは未変更なので、`git -C <saved-worktree> fetch origin <base-branch>`で正しいremote-tracking commitを取得し、`status --json`でblocked状態を再確認して同じコマンドを再実行する。既存の非空`base_sha`は上書きしない。
 
-resumeはdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`lease.base_sha`が非空であることを確認する。GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動するか同じ`resume-blocked`を再実行して収束させる。旧版の競合で`status=blocked`、`environment_resume.status=requested|github_synced`、`lease=null`となった場合も、修正版の同じコマンドがeventに保存したbase SHAとGitHub/worktree/run/PRを再検証し、競合のない`repo:*` leaseを再予約する。event historyからbase SHAを回復できない場合や、`conflict_recovery`、手動`blocked`/`do-not-automate`、security block、active worker、unanswered request、running/completed、closed-without-merge、worktree/branch/PR不整合がある場合は修復・再開せず原因別runbookへ戻る。
+resumeはdirty changes、branch、worktree、session/continuation、回答、resource metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`lease.base_sha`が非空であることを確認する。GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動するか同じ`resume-blocked`を再実行して収束させる。旧版の競合で`status=blocked`、`environment_resume.status=requested|github_synced`、`lease=null`となった場合も、修正版の同じコマンドがeventに保存したbase SHAとGitHub/worktree/run/PRを再検証し、競合のない`repo:*` leaseを再予約する。legacy event chainがない、複数ある、別run、欠損・順序不正・payload改ざん、既知の誤分類以外の後続event、またはevent historyからbase SHAを回復できない場合はfail closedとする。`conflict_recovery`、手動`blocked`/`do-not-automate`、security block、active worker、unanswered request、running/completed、closed-without-merge、worktree/branch/PR不整合がある場合も修復・再開せず原因別runbookへ戻る。
 
 workerがschema-conformingな`completed` resultを保存した後、publisherがcommit/push/PR作成へ到達する前の`durable_base_sha_missing`だけでretry budgetを使い切った場合は、`status --json`で`status=failed`、空の`github_sync`、`publication_failure.origin=publisher`、`phase=pre_publication`、`code=durable_base_sha_missing`、`recoverable=true`を確認する。導入前のlegacy recordは、CLIが同じ厳密なfailure chain、空base SHAの`publication_audit`、上限到達済みworker attempts、保存済みcompleted resultをすべて確認できる場合だけ対象になる。
 
@@ -240,6 +240,16 @@ agent-loop recover-publication --repo /absolute/path/to/repository --issue 123 -
 この操作はconfigured base branchの検証済みcommitをleaseと同じdurable transactionへ保存し、failed labelからrunningへの同期をwrite-aheadで行う。dirty changes、unpushed commit、answers、session、run history、resource metadata、元のworker attempt数は保持し、`publication_recovery`のgeneration・累積attempt・result SHA-256を別に監査記録する。GitHub同期やstate transactionの途中失敗は同じコマンドで冪等に収束させ、publisherは既存commit/remote branch/PRを再利用する。
 
 これは汎用failed retryではない。worker実装失敗、security/manual exclusion、closed-without-merge、PR conflict、open/closed PR不整合、unknown provenance、保存resultやworktreeの変更は拒否する。新branchへの移植、state/labelの手編集、retry budgetのreset、force pushで回避してはならない。
+
+保存済みPRのchecks retry exhaustionで`failed`となり、同じPR branchをoperatorが外部修正した場合は、`status --json`で`pull_request_checks_failure.code=checks_retry_exhausted`、失敗時head SHA、open PR、retained lease、`recoverable_checks_failure`を確認する。worktreeをcleanかつfully pushedにし、新headのrequired checksがpendingまたはgreenであることを確認してから次を実行する。
+
+```sh
+agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
+```
+
+この操作は同じbranch/PRだけを`awaiting_checks`へ戻し、worker retry budgetをresetしない。checksがfailure、head未変更、dirty/unpushed worktree、active worker、pending request、manual/security exclusion、別branch/PR、closed-without-mergeでは拒否する。GitHub同期途中で停止した場合はstateやlabelを編集せず、supervisor再起動または同じコマンドで冪等に収束させる。leaseはmerge確認まで保持される。
+
+実例では、target repositoryがCIでDeno 2.7.14を固定していた一方、worker環境のDeno 2.9.5で3 fileをformatしたため正準形が異なりchecks retryを使い切った。同じbranchへCI固定版Deno 2.7.14のformatter結果をcommit・pushしてgreenを確認し、この限定復旧を使う。再発防止にはworker verificationもrepositoryのpinned toolchainから起動し、host側の新しいformatterを直接使わない。
 
 v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。
 

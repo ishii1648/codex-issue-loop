@@ -31,17 +31,18 @@ func (osProcessInspector) Alive(pid int) bool {
 }
 
 type reconciliationDecision struct {
-	status      string
-	lastError   string
-	branch      string
-	pullRequest string
-	githubSync  string
-	retryAt     *time.Time
-	workerPID   int
-	workerPGID  int
-	prMerged    bool
-	markRunning bool
-	reason      string
+	status       string
+	lastError    string
+	branch       string
+	pullRequest  string
+	githubSync   string
+	retryAt      *time.Time
+	workerPID    int
+	workerPGID   int
+	prMerged     bool
+	markRunning  bool
+	reason       string
+	blockedCause *state.BlockedCause
 }
 
 func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) error {
@@ -93,7 +94,22 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					return fmt.Errorf("reconcile worktree for Issue #%d: %w", number, err)
 				}
 			}
-			decision := l.decideReconciliation(latest, *current, remote, inspection)
+			evaluated := *current
+			legacyProvenance := false
+			onlyBlockedExclusion := l.hasOnlyBlockedExclusion(labelSet(remote.Issue.Labels))
+			if state.MayHaveLegacyWorkerBlockProvenance(current) {
+				if cause, provenanceErr := l.Store.LegacyWorkerBlockProvenance(*current); provenanceErr == nil {
+					legacyProvenance = true
+					if onlyBlockedExclusion {
+						evaluated.BlockedCause = cause
+						evaluated.LastError = "worker blocked: " + cause.Reason
+					}
+				}
+			}
+			decision := l.decideReconciliation(latest, evaluated, remote, inspection)
+			if legacyProvenance && !onlyBlockedExclusion {
+				decision = blockDecision(decision, "GitHub labels do not contain only the supervisor-owned blocked label")
+			}
 			if decision.workerPID == 0 {
 				decision.workerPGID = 0
 			}
@@ -118,7 +134,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 						return err
 					}
 				}
-				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !resumableWorkerBlock(decision.blockedCause) {
 					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
 						return err
 					}
@@ -133,6 +149,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				item.RetryAfter = decision.retryAt
 				item.WorkerPID = decision.workerPID
 				item.WorkerPGID = decision.workerPGID
+				item.BlockedCause = decision.blockedCause
 				item.UpdatedAt = l.now()
 				return nil
 			})
@@ -148,6 +165,10 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 	return nil
 }
 
+func resumableWorkerBlock(cause *state.BlockedCause) bool {
+	return cause != nil && cause.Origin == "worker" && cause.Kind == "environment" && cause.Resumable
+}
+
 func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 	if item == nil {
 		return false
@@ -156,10 +177,12 @@ func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 		return true
 	}
 	switch item.Status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 		return true
 	case "retry_wait":
 		return item.RetryAfter == nil || !item.RetryAfter.After(now)
+	case "blocked":
+		return state.MayHaveLegacyWorkerBlockProvenance(item)
 	default:
 		return false
 	}
@@ -230,7 +253,7 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 				return err
 			}
 		}
-		if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil {
+		if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !resumableWorkerBlock(decision.blockedCause) {
 			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
 				return err
 			}
@@ -276,7 +299,7 @@ func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg confi
 	}
 	if labels[cfg.RunningLabel] {
 		switch current.Status {
-		case "claiming", "claimed", "running", "retry_wait", "resume_pending", "environment_resume_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		case "claiming", "claimed", "running", "retry_wait", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 			return true
 		}
 	}
@@ -288,7 +311,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		status: current.Status, lastError: current.LastError, branch: current.Branch,
 		pullRequest: current.PullRequestURL, githubSync: current.GitHubSync,
 		retryAt: current.RetryAfter, workerPID: current.WorkerPID, workerPGID: current.WorkerPGID, prMerged: current.PullRequestMerged,
-		reason: "state already converged",
+		reason: "state already converged", blockedCause: current.BlockedCause,
 	}
 	labels := labelSet(remote.Issue.Labels)
 	ready := hasAnyLabel(labels, l.Config.GitHub.ReadyLabels)
@@ -297,6 +320,9 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 	done := labels[l.Config.GitHub.DoneLabel]
 	failed := labels[l.Config.GitHub.FailedLabel]
 	excluded := hasAnyLabel(labels, l.Config.GitHub.ExcludeLabels)
+	if terminalDecision, ok := l.decideTerminalPullRequestReconciliation(current, remote); ok && terminalDecision.status == "completed" && terminalDecision.prMerged {
+		return terminalDecision
+	}
 	if current.Status == "completed" && strings.EqualFold(remote.Issue.State, "open") {
 		open := []gh.PullRequest{}
 		for _, pr := range remote.PullRequests {
@@ -340,7 +366,12 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		return decision
 	}
 	if excluded {
-		if current.GitHubSync == "environment_resume" && current.Status == "environment_resume_pending" {
+		if current.Status == "blocked" && current.BlockedCause != nil && current.BlockedCause.Origin == "worker" &&
+			current.BlockedCause.Kind == "environment" && current.BlockedCause.Resumable && l.hasOnlyBlockedExclusion(labels) {
+			decision.status, decision.workerPID, decision.retryAt, decision.githubSync = "blocked", 0, nil, ""
+			decision.reason = "supervisor-owned worker environment block provenance preserved"
+			return decision
+		} else if current.GitHubSync == "environment_resume" && current.Status == "environment_resume_pending" {
 			decision.reason = "explicit environment resume is waiting for GitHub label synchronization"
 		} else if current.GitHubSync == "conflict_retry" && current.Status == "resolving_conflict" {
 			decision.reason = "explicit conflict retry is waiting for GitHub label synchronization"
@@ -356,6 +387,10 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		}
 	}
 	if failed {
+		if current.GitHubSync == "pull_request_checks_recovery" && current.Status == "pull_request_checks_recovery_pending" {
+			decision.reason = "explicit Pull Request checks recovery is waiting for GitHub label synchronization"
+			return decision
+		}
 		if current.GitHubSync == "publication_recovery" && current.Status == "publication_recovery_pending" {
 			decision.reason = "explicit publication recovery is waiting for GitHub label synchronization"
 			return decision
@@ -507,6 +542,11 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		if !running {
 			decision.githubSync = "publication_recovery"
 		}
+	case "pull_request_checks_recovery_pending":
+		decision.reason = "operator-confirmed Pull Request checks recovery remains pending in the saved worktree"
+		if !running {
+			decision.githubSync = "pull_request_checks_recovery"
+		}
 	case "needs_input":
 		decision.reason = "unanswered request remains sticky"
 		if !needsInput {
@@ -526,6 +566,101 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		decision.reason = "open Pull Request discovered and dead worker scheduled for retry"
 	}
 	return decision
+}
+
+func (l *Loop) hasOnlyBlockedExclusion(labels map[string]bool) bool {
+	if hasAnyLabel(labels, l.Config.GitHub.ReadyLabels) || labels[l.Config.GitHub.RunningLabel] ||
+		labels[l.Config.GitHub.NeedsInputLabel] || labels[l.Config.GitHub.FailedLabel] || labels[l.Config.GitHub.DoneLabel] {
+		return false
+	}
+	blocked := false
+	for _, excluded := range l.Config.GitHub.ExcludeLabels {
+		if !labels[excluded] {
+			continue
+		}
+		if !strings.EqualFold(excluded, "blocked") {
+			return false
+		}
+		blocked = true
+	}
+	return blocked
+}
+
+// decideTerminalPullRequestReconciliation is shared by startup and periodic
+// reconciliation. A terminal Issue only converges from an authoritative merge
+// when the single Pull Request returned for the saved branch is exactly the
+// Pull Request recorded in durable state. An exclusion label remains sticky
+// unless it is the automation-owned blocked label evidenced by our comment.
+func (l *Loop) decideTerminalPullRequestReconciliation(current state.Issue, remote gh.RemoteState) (reconciliationDecision, bool) {
+	decision := reconciliationDecision{
+		status: current.Status, lastError: current.LastError, branch: current.Branch,
+		pullRequest: current.PullRequestURL, githubSync: current.GitHubSync,
+		retryAt: current.RetryAfter, workerPID: current.WorkerPID, workerPGID: current.WorkerPGID,
+		prMerged: current.PullRequestMerged, reason: "terminal Issue remains sticky",
+	}
+	if !terminalPullRequestCandidate(current) {
+		return decision, false
+	}
+	if len(remote.PullRequests) != 1 {
+		if len(remote.PullRequests) > 1 {
+			decision.reason = "multiple Pull Requests target the saved branch"
+		} else {
+			decision.reason = "saved Pull Request was not found for the saved branch"
+		}
+		return decision, true
+	}
+	pr := remote.PullRequests[0]
+	if pr.URL != current.PullRequestURL {
+		decision.reason = "Pull Request for the saved branch does not match the saved Pull Request URL"
+		return decision, true
+	}
+	if current.Branch == "" || pr.HeadRefName == "" || pr.HeadRefName != current.Branch {
+		decision.reason = "Pull Request head does not match the saved branch"
+		return decision, true
+	}
+	if pr.MergedAt == nil {
+		if strings.EqualFold(pr.State, "open") {
+			decision.reason = "saved Pull Request is not merged"
+		} else {
+			decision.reason = "saved Pull Request was closed without merge"
+		}
+		return decision, true
+	}
+	if l.hasManualExclusion(remote.Issue, current) {
+		decision.reason = "GitHub exclusion label was applied manually"
+		return decision, true
+	}
+	decision.status = "completed"
+	decision.lastError = ""
+	decision.prMerged = true
+	decision.githubSync = "done"
+	decision.retryAt = nil
+	decision.workerPID = 0
+	decision.workerPGID = 0
+	decision.reason = "saved Pull Request merge discovered for terminal Issue"
+	return decision, true
+}
+
+func terminalPullRequestCandidate(issue state.Issue) bool {
+	if issue.Status != "blocked" && issue.Status != "failed" {
+		return false
+	}
+	return issue.PullRequestURL != "" && !issue.PullRequestMerged && issue.GitHubSync == ""
+}
+
+func (l *Loop) hasManualExclusion(issue gh.Issue, current state.Issue) bool {
+	labels := labelSet(issue.Labels)
+	automationBlocked := hasComment(issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number))
+	for _, excluded := range l.Config.GitHub.ExcludeLabels {
+		if !labels[excluded] {
+			continue
+		}
+		if strings.EqualFold(excluded, "blocked") && automationBlocked {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func blockDecision(decision reconciliationDecision, reason string) reconciliationDecision {

@@ -291,7 +291,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
 		switch issue.Status {
-		case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "publication_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "publication_recovery_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 			if issue.RunID != "" {
 				exclude[issue.RunID] = true
 			}
@@ -311,7 +311,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
-		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "pull_request_checks_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 			continue
 		}
 		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
@@ -600,6 +600,41 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
 	}
 	return l.handleResult(ctx, issue, current, result, err)
+}
+
+func (l *Loop) reconcileTerminalPullRequest(ctx context.Context, scheduled state.Issue) error {
+	current, err := l.issueState(scheduled.Number)
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "refresh terminal Issue state", err)
+	}
+	if !terminalPullRequestCandidate(current) || current.RunID != scheduled.RunID {
+		return nil
+	}
+	remote, err := l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+	if err != nil {
+		return failure.Wrap(failure.Transient, "reconcile terminal Pull Request", err)
+	}
+	decision, ok := l.decideTerminalPullRequestReconciliation(current, remote)
+	if !ok {
+		return nil
+	}
+	if decision.status == "completed" && decision.prMerged {
+		return l.completeIssue(ctx, current, decision.pullRequest, map[string]any{
+			"source": "periodic_terminal_reconciliation", "reason": decision.reason,
+			"pull_requests": remote.PullRequests,
+		})
+	}
+	_, err = l.Store.Update("terminal_pull_request_reconciled", current.Number, current.RunID, map[string]any{
+		"status": current.Status, "reason": decision.reason, "pull_requests": remote.PullRequests,
+	}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.RunID != current.RunID || !terminalPullRequestCandidate(*item) {
+			return nil
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	return failure.Wrap(failure.Supervisor, "persist terminal Pull Request reconciliation", err)
 }
 
 func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.Issue, result worker.Result, runErr error) error {
@@ -1264,7 +1299,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	case "pending", "":
 		return l.schedulePullRequestPoll(current, "waiting for Pull Request checks")
 	case "failure":
-		return l.scheduleRetry(ctx, current, "Pull Request checks failed: "+selected.URL)
+		return l.schedulePullRequestChecksRetry(ctx, current, *selected)
 	case "success":
 		if selected.IsDraft {
 			if err := l.GitHub.ReadyPullRequest(ctx, l.Config, selected.URL); err != nil {
@@ -1297,6 +1332,59 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	default:
 		return failure.Wrap(failure.Supervisor, "inspect Pull Request checks", fmt.Errorf("unknown check status %q", selected.ChecksStatus))
 	}
+}
+
+func (l *Loop) schedulePullRequestChecksRetry(ctx context.Context, issue state.Issue, pr gh.PullRequest) error {
+	reason := "Pull Request checks failed: " + pr.URL
+	canContinue := issue.ExecutionProfile == "extended" && l.canResume(issue) && issue.Continuations < l.maxContinuations()
+	canRetry := issue.Attempts < l.Config.Queue.MaxAttempts
+	if canContinue || canRetry {
+		return l.scheduleRetry(ctx, issue, reason)
+	}
+	return l.failPullRequestChecks(ctx, issue, pr, reason)
+}
+
+func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, pr gh.PullRequest, reason string) error {
+	cause := failure.Wrap(failure.Issue, "worker retry limit reached", errors.New(reason))
+	if current.PullRequestURL == "" || current.Branch == "" || pr.URL != current.PullRequestURL ||
+		pr.HeadRefName != current.Branch || pr.HeadSHA == "" {
+		return l.failIssue(ctx, current.Number, cause, false)
+	}
+	now := l.now()
+	_, err := l.Store.Update("pull_request_checks_retry_exhausted", current.Number, current.RunID, map[string]any{
+		"pull_request_url": pr.URL, "pull_request_number": pr.Number, "head_sha": pr.HeadSHA,
+		"checks_status": pr.ChecksStatus, "attempts": current.Attempts, "continuations": current.Continuations,
+	}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.RunID != current.RunID || item.PullRequestURL != pr.URL || item.Branch != pr.HeadRefName {
+			return fmt.Errorf("Issue #%d changed while recording Pull Request checks exhaustion", current.Number)
+		}
+		item.Status = "failed"
+		item.LastError = cause.Error()
+		item.FailureKind = string(failure.Issue)
+		item.GitHubSync = "failed"
+		item.RetryAfter = nil
+		item.SessionID = ""
+		item.Session = nil
+		item.HeadSHA = pr.HeadSHA
+		item.PullRequestNumber = pr.Number
+		item.PullRequestChecksFailure = &state.PullRequestChecksFailure{
+			Origin: state.ChecksFailureOriginPullRequest, Phase: state.ChecksFailurePhaseRequired,
+			Code: state.ChecksFailureCodeRetryExhausted, Recoverable: true,
+			PullRequestURL: pr.URL, PullRequestNumber: pr.Number, Branch: pr.HeadRefName,
+			HeadSHA: pr.HeadSHA, ChecksStatus: "failure", RetryExhausted: true, FailedAt: now,
+		}
+		item.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist Pull Request checks exhaustion", err)
+	}
+	updated, stateErr := l.issueState(current.Number)
+	if stateErr != nil {
+		return stateErr
+	}
+	return l.syncGitHub(ctx, updated)
 }
 
 func (l *Loop) blockPullRequestLifecycle(ctx context.Context, current state.Issue, prURL, reason string) error {
@@ -1993,6 +2081,18 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		} else {
 			err = l.GitHub.MarkRunning(ctx, l.Config, issue.Number)
 		}
+	case "pull_request_checks_recovery":
+		if issue.PullRequestChecksRecovery == nil {
+			return fmt.Errorf("Issue #%d Pull Request checks recovery metadata is missing", issue.Number)
+		}
+		remote, inspectErr := l.GitHub.Inspect(ctx, l.Config, issue.Number, issue.Branch)
+		if inspectErr != nil {
+			return failure.Wrap(failure.Transient, "reinspect Pull Request checks recovery", inspectErr)
+		}
+		if validateErr := l.validatePullRequestChecksRecoverySync(issue, remote); validateErr != nil {
+			return validateErr
+		}
+		err = l.GitHub.MarkPullRequestChecksRecovery(ctx, l.Config, issue.Number, issue.PullRequestChecksRecovery.ID)
 	case "failed", "blocked":
 		err = l.GitHub.MarkFailed(ctx, l.Config, issue.Number, issue.LastError, issue.GitHubSync == "blocked")
 	default:
@@ -2014,11 +2114,39 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			if issue.GitHubSync == "publication_recovery" && item.PublicationRecovery != nil {
 				item.PublicationRecovery.Status = "github_synced"
 			}
+			if issue.GitHubSync == "pull_request_checks_recovery" && item.PullRequestChecksRecovery != nil {
+				now := l.now()
+				item.Status = "awaiting_checks"
+				item.FailureKind = ""
+				item.LastError = ""
+				item.PullRequestChecksRecovery.Status = "resumed"
+				item.RetryAfter = &now
+			}
 		}
 		item.UpdatedAt = l.now()
 		return nil
 	})
 	return failure.Wrap(failure.Supervisor, "persist GitHub synchronization", err)
+}
+
+func (l *Loop) validatePullRequestChecksRecoverySync(issue state.Issue, remote gh.RemoteState) error {
+	labels := labelSet(remote.Issue.Labels)
+	failed := labels[l.Config.GitHub.FailedLabel]
+	running := labels[l.Config.GitHub.RunningLabel]
+	if !strings.EqualFold(remote.Issue.State, "open") || failed == running ||
+		hasAnyLabel(labels, append(append([]string{l.Config.GitHub.DoneLabel, l.Config.GitHub.NeedsInputLabel}, l.Config.GitHub.ReadyLabels...), l.Config.GitHub.ExcludeLabels...)) {
+		return fmt.Errorf("refuse Pull Request checks recovery synchronization: authoritative Issue labels changed")
+	}
+	if len(remote.PullRequests) != 1 || issue.PullRequestChecksRecovery == nil {
+		return fmt.Errorf("refuse Pull Request checks recovery synchronization: saved Pull Request count changed")
+	}
+	pr := remote.PullRequests[0]
+	if pr.URL != issue.PullRequestURL || pr.Number != issue.PullRequestNumber || !strings.EqualFold(pr.State, "open") || pr.MergedAt != nil ||
+		pr.HeadRefName != issue.Branch || pr.BaseRefName != l.Config.Git.BaseBranch || pr.HeadSHA != issue.PullRequestChecksRecovery.NewHeadSHA ||
+		(pr.ChecksStatus != "pending" && pr.ChecksStatus != "success") {
+		return fmt.Errorf("refuse Pull Request checks recovery synchronization: authoritative Pull Request, head, or checks changed")
+	}
+	return nil
 }
 
 func (l *Loop) issueState(number int) (state.Issue, error) {

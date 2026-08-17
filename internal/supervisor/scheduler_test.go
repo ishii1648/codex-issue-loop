@@ -948,6 +948,55 @@ func TestSchedulerContinuesAfterNeedsInputWhenConfigured(t *testing.T) {
 	s.cancelAndDrain()
 }
 
+func TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Queue.Concurrency = 2
+	loop.Clock = fixedClock{value: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)}
+	loop.Random = fixedRandom(0.5)
+	loop.Logger = log.New(io.Discard, "", 0)
+	_, err := loop.Store.Update("terminal_fixture", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Status: "blocked", RunID: "run_1", Branch: "codex/issue-1-test",
+			PullRequestURL: "https://example.test/pull/1", FailureKind: "issue",
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}, Comments: []string{"<!-- codex-issue-loop:failed:1 -->"}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pull/1", State: "MERGED", MergedAt: timePointer(), HeadRefName: "codex/issue-1-test"}},
+	}
+	runningCanceled := false
+	s := &scheduler{
+		loop: loop, events: make(chan schedulerEvent, 2),
+		active: map[int]activeJob{
+			2: {runID: "run_2", slot: 0, cancel: func() { runningCanceled = true }},
+			3: {runID: "run_3", slot: 1, cancel: func() { runningCanceled = true }},
+		},
+		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, terminalPoll: map[int]time.Time{},
+	}
+	if result, err := s.schedule(context.Background(), true); err != nil || !result.dispatched {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	select {
+	case event := <-s.events:
+		if err := s.handleEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for terminal reconciliation")
+	}
+	if runningCanceled || s.active[2].runID != "run_2" || s.active[3].runID != "run_3" {
+		t.Fatalf("unrelated worker changed: canceled=%v active=%v", runningCanceled, s.active)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil || snapshot.Issues["1"].Status != "completed" {
+		t.Fatalf("status=%+v err=%v", snapshot.Issues["1"], err)
+	}
+}
+
 func (w *blockingPoolWorker) Resume(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, prompt string, started worker.Started) (worker.Result, error) {
 	return w.Run(ctx, cfg, issue, current, prompt, started)
 }

@@ -153,6 +153,38 @@ esac
 	}
 }
 
+func TestMarkPullRequestChecksRecoveryOnlyTransitionsSupervisorLabels(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	logPath := filepath.Join(dir, "calls.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue edit"|"issue comment") exit 0 ;;
+  "issue view") printf '%%s\n' '' ;;
+  *) exit 2 ;;
+esac
+`, logPath)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	if err := (CLI{Path: fake}).MarkPullRequestChecksRecovery(context.Background(), cfg, 7, "checks_recovery_1"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(calls)
+	if !strings.Contains(text, "--add-label codex-loop:running") || !strings.Contains(text, "--remove-label codex-loop:failed") ||
+		strings.Contains(text, "--remove-label blocked") || strings.Contains(text, "--remove-label do-not-automate") ||
+		!strings.Contains(text, "codex-issue-loop:checks-recovery:checks_recovery_1") {
+		t.Fatalf("unexpected checks recovery calls:\n%s", text)
+	}
+}
+
 func TestPullRequestChecksStatus(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -217,6 +249,14 @@ esac
 	}
 	if strings.Count(string(calls), "issue edit") != 2 || strings.Count(string(calls), "issue comment") != 2 {
 		t.Fatalf("unexpected calls:\n%s", calls)
+	}
+	for _, label := range []string{cfg.GitHub.FailedLabel, "blocked"} {
+		if !strings.Contains(string(calls), "--remove-label "+label) {
+			t.Fatalf("completion did not remove %q label:\n%s", label, calls)
+		}
+	}
+	if strings.Contains(string(calls), "--remove-label do-not-automate") {
+		t.Fatalf("completion removed manual exclusion label:\n%s", calls)
 	}
 }
 
