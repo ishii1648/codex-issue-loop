@@ -250,6 +250,19 @@ type PullRequestChecksRecovery struct {
 	ChecksStatus   string    `json:"checks_status"`
 }
 
+// WorkerWorkspace is immutable provenance captured before the first worker
+// spawn. Continuations must reproduce every field before a backend is invoked.
+type WorkerWorkspace struct {
+	Path         string    `json:"path"`
+	Branch       string    `json:"branch"`
+	RepoID       string    `json:"repo_id"`
+	Repository   string    `json:"repository"`
+	RepositoryID int64     `json:"repository_id,omitempty"`
+	GitCommonDir string    `json:"git_common_dir"`
+	MainCheckout string    `json:"main_checkout"`
+	CapturedAt   time.Time `json:"captured_at"`
+}
+
 // MergedPullRequestAdoption records an operator-confirmed association between
 // a terminal Issue and the single merged Pull Request for its saved branch.
 // It exists only for publication that happened outside the supervisor after a
@@ -283,6 +296,7 @@ type Issue struct {
 	PublicationAudit  *publication.Audit `json:"publication_audit,omitempty"`
 	Branch            string             `json:"branch,omitempty"`
 	Worktree          string             `json:"worktree,omitempty"`
+	Workspace         *WorkerWorkspace   `json:"workspace,omitempty"`
 	Attempts          int                `json:"attempts"`
 	Continuations     int                `json:"continuations"`
 	ExecutionProfile  string             `json:"execution_profile,omitempty"`

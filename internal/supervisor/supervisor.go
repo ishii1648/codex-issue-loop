@@ -32,6 +32,7 @@ import (
 type WorktreeManager interface {
 	Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error)
 	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
+	ValidateLaunch(context.Context, config.Config, string, string) (worktree.LaunchValidation, error)
 	ContentDigest(context.Context, string) (string, error)
 }
 
@@ -71,6 +72,18 @@ type BlockedError struct{ Err error }
 
 func (e BlockedError) Error() string { return "supervisor blocked: " + e.Err.Error() }
 func (e BlockedError) Unwrap() error { return e.Err }
+
+type workerWorkspaceError struct {
+	expected   string
+	validation worktree.LaunchValidation
+	cause      error
+}
+
+func (e *workerWorkspaceError) Error() string {
+	return fmt.Sprintf("worker workspace validation failed for %s: %v", e.expected, e.cause)
+}
+
+func (e *workerWorkspaceError) Unwrap() error { return e.cause }
 
 func (l *Loop) Run(ctx context.Context) error {
 	lock, err := l.Store.AcquireSupervisorLock()
@@ -436,9 +449,25 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 	if err != nil {
 		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "prepare Issue worktree", err), false)
 	}
-	_, err = l.Store.Update("worker_started", issue.Number, runID, map[string]any{"worktree": wt.Path, "branch": wt.Branch, "identity": l.WorkerIdentity}, func(s *state.Snapshot) error {
+	launch, err := l.Worktrees.ValidateLaunch(ctx, l.Config, wt.Path, wt.Branch)
+	if err != nil || !launch.Valid {
+		if err == nil {
+			err = fmt.Errorf("worktree validator did not establish a valid launch boundary")
+		}
+		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "validate initial Issue worktree", err), false)
+	}
+	workspace := state.WorkerWorkspace{
+		Path: launch.CanonicalCWD, Branch: launch.Branch,
+		RepoID: l.Store.RepoID, Repository: l.Config.GitHub.Repo, RepositoryID: l.Config.GitHub.RepositoryID,
+		GitCommonDir: launch.CommonDir, MainCheckout: launch.MainCheckout, CapturedAt: l.now(),
+	}
+	_, err = l.Store.Update("worker_started", issue.Number, runID, map[string]any{
+		"worktree": wt.Path, "branch": wt.Branch, "identity": l.WorkerIdentity,
+		"expected_cwd": launch.CanonicalCWD, "workspace_validation": launch,
+	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
-		item.Status, item.Worktree, item.Branch, item.UpdatedAt = "running", wt.Path, wt.Branch, l.now()
+		item.Status, item.Worktree, item.Branch, item.UpdatedAt = "running", launch.CanonicalCWD, wt.Branch, l.now()
+		item.Workspace = &workspace
 		item.WorkerIdentity = stateIdentity(l.WorkerIdentity)
 		return nil
 	})
@@ -450,8 +479,8 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 		return err
 	}
 	workerCfg := l.Config
-	workerCfg.RepoPath = wt.Path
-	result, runErr := l.runWorker(ctx, workerCfg, issue, current, "", l.recordWorkerPID(issue.Number, current.RunID))
+	workerCfg.RepoPath = workspace.Path
+	result, runErr := l.runWorker(ctx, workerCfg, issue, current, "", l.recordWorkerPID(current))
 	return l.handleResult(ctx, issue, current, result, runErr)
 }
 
@@ -496,12 +525,12 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		instruction := "Continue after the user's recorded answer. Implement the decision, verify the work, and return the schema-conforming result."
 		var result worker.Result
 		if l.canResume(current) {
-			result, err = l.resumeWorker(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current.Number, current.RunID))
+			result, err = l.resumeWorker(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current))
 		} else {
 			if current.SessionID != "" {
 				instruction = "The saved session belongs to a different worker backend. Start a fresh session in the existing worktree and use durable state.\n\n" + instruction
 			}
-			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
@@ -535,9 +564,9 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		var result worker.Result
 		if l.canResume(current) {
-			result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+			result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
 		} else {
-			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
@@ -563,7 +592,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if current.LastError != "" {
 			instruction += " Retry reason: " + current.LastError
 		}
-		result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+		result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
 	} else {
 		previousOwner := state.LeaseOwner{}
 		if current.Lease != nil {
@@ -600,7 +629,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if current.LastError != "" {
 			instruction += " Retry reason: " + current.LastError
 		}
-		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current.Number, current.RunID))
+		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
 	}
 	return l.handleResult(ctx, issue, current, result, err)
 }
@@ -641,6 +670,10 @@ func (l *Loop) reconcileTerminalPullRequest(ctx context.Context, scheduled state
 }
 
 func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.Issue, result worker.Result, runErr error) error {
+	var workspaceErr *workerWorkspaceError
+	if errors.As(runErr, &workspaceErr) {
+		return l.blockWorkerWorkspace(ctx, current, workspaceErr)
+	}
 	profile := result.ExecutionProfile
 	if profile == "" {
 		profile = "extended"
@@ -794,6 +827,43 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
 	}
+}
+
+func (l *Loop) blockWorkerWorkspace(ctx context.Context, expected state.Issue, validationErr *workerWorkspaceError) error {
+	reason := validationErr.Error()
+	payload := map[string]any{
+		"expected_cwd": validationErr.expected,
+		"validation":   validationErr.validation,
+		"error":        reason,
+		"run_id":       expected.RunID,
+	}
+	_, err := l.Store.Update("worker_workspace_rejected", expected.Number, expected.RunID, payload, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(expected.Number)]
+		if item == nil || item.RunID != expected.RunID {
+			return fmt.Errorf("Issue #%d run changed while rejecting worker workspace", expected.Number)
+		}
+		item.Status = "blocked"
+		item.LastError = reason
+		item.FailureKind = string(failure.Issue)
+		item.GitHubSync = "blocked"
+		item.WorkerPID = 0
+		item.WorkerPGID = 0
+		item.RetryAfter = nil
+		item.BlockedCause = &state.BlockedCause{
+			Origin: "supervisor", Kind: "worker_workspace", Resumable: false,
+			Reason: reason, BlockedAt: l.now(),
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist rejected worker workspace", err)
+	}
+	updated, err := l.issueState(expected.Number)
+	if err != nil {
+		return err
+	}
+	return l.syncGitHub(ctx, updated)
 }
 
 func (l *Loop) recordPublicationFailure(current state.Issue, cause error) error {
@@ -1584,11 +1654,15 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 	}
 	workerCfg := l.Config
 	workerCfg.RepoPath = current.Worktree
-	result, runErr := l.runWorker(ctx, workerCfg, issue, current, worker.BuildConflictPrompt(current), l.recordWorkerPID(current.Number, runID))
+	result, runErr := l.runWorker(ctx, workerCfg, issue, current, worker.BuildConflictPrompt(current), l.recordWorkerPID(current))
 	return l.handleConflictResult(ctx, issue, current, result, runErr)
 }
 
 func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current state.Issue, result worker.Result, runErr error) error {
+	var workspaceErr *workerWorkspaceError
+	if errors.As(runErr, &workspaceErr) {
+		return l.blockWorkerWorkspace(ctx, current, workspaceErr)
+	}
 	profile := result.ExecutionProfile
 	if profile == "" {
 		profile = "extended"
@@ -1871,27 +1945,127 @@ func (l *Loop) completeIssue(ctx context.Context, current state.Issue, prURL str
 
 func deadlinePointer(value time.Time) *time.Time { return &value }
 
-func (l *Loop) recordWorkerPID(number int, runID string) worker.Started {
-	return func(pid int) error {
-		if pid <= 0 {
-			return fmt.Errorf("Issue #%d run %s reported invalid worker PID %d", number, runID, pid)
+func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expected state.Issue) (worktree.LaunchValidation, error) {
+	validation := worktree.LaunchValidation{ExpectedCWD: cfg.RepoPath, Checks: map[string]bool{}}
+	fresh, err := l.issueState(expected.Number)
+	if err != nil {
+		return validation, &workerWorkspaceError{expected: cfg.RepoPath, validation: validation, cause: err}
+	}
+	fail := func(cause error) (worktree.LaunchValidation, error) {
+		return validation, &workerWorkspaceError{expected: cfg.RepoPath, validation: validation, cause: cause}
+	}
+	if fresh.RunID == "" || fresh.RunID != expected.RunID {
+		return fail(fmt.Errorf("run changed from %q to %q", expected.RunID, fresh.RunID))
+	}
+	validation.Checks["run_id"] = true
+	if fresh.SessionID != expected.SessionID {
+		return fail(fmt.Errorf("session changed before spawn"))
+	}
+	validation.Checks["session_id"] = true
+	if fresh.Worktree == "" || fresh.Worktree != expected.Worktree || fresh.Worktree != cfg.RepoPath {
+		return fail(fmt.Errorf("saved worktree path changed before spawn"))
+	}
+	validation.Checks["saved_path"] = true
+	if fresh.Branch == "" || fresh.Branch != expected.Branch {
+		return fail(fmt.Errorf("saved worktree branch changed before spawn"))
+	}
+	validation.Checks["saved_branch_state"] = true
+	if fresh.Lease == nil || expected.Lease == nil {
+		return fail(fmt.Errorf("active resource lease is missing"))
+	}
+	if fresh.LeaseGeneration == 0 || fresh.LeaseGeneration != expected.LeaseGeneration || fresh.Lease.Owner != expected.Lease.Owner ||
+		fresh.Lease.Owner.RunID != fresh.RunID || fresh.Lease.Owner.Generation != fresh.LeaseGeneration {
+		return fail(fmt.Errorf("resource lease owner generation changed before spawn"))
+	}
+	validation.Checks["lease_owner_generation"] = true
+
+	local, inspectErr := l.Worktrees.ValidateLaunch(ctx, l.Config, fresh.Worktree, fresh.Branch)
+	for name, passed := range local.Checks {
+		validation.Checks[name] = passed
+	}
+	validation.CanonicalCWD = local.CanonicalCWD
+	validation.TopLevel = local.TopLevel
+	validation.Branch = local.Branch
+	validation.CommonDir = local.CommonDir
+	validation.MainCheckout = local.MainCheckout
+	if inspectErr != nil {
+		return fail(inspectErr)
+	}
+	validation.Valid = local.Valid
+	if !validation.Valid {
+		return fail(fmt.Errorf("worktree validator did not establish a valid launch boundary"))
+	}
+
+	workspace := fresh.Workspace
+	if workspace == nil {
+		return fail(fmt.Errorf("saved workspace provenance is missing"))
+	} else if workspace.Path != validation.CanonicalCWD || workspace.Branch != validation.Branch || workspace.RepoID != l.Store.RepoID ||
+		workspace.Repository != l.Config.GitHub.Repo || workspace.RepositoryID != l.Config.GitHub.RepositoryID ||
+		workspace.GitCommonDir != validation.CommonDir || workspace.MainCheckout != validation.MainCheckout {
+		return fail(fmt.Errorf("saved workspace provenance does not match the launch target"))
+	}
+	validation.Checks["saved_provenance"] = true
+
+	payload := map[string]any{
+		"expected_cwd": validation.CanonicalCWD, "validation": validation,
+		"run_id": fresh.RunID, "session_present": fresh.SessionID != "", "lease_owner": fresh.Lease.Owner,
+	}
+	_, err = l.Store.Update("worker_workspace_validated", fresh.Number, fresh.RunID, payload, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(fresh.Number)]
+		if item == nil || item.RunID != fresh.RunID || item.Worktree != fresh.Worktree || item.Branch != fresh.Branch || item.SessionID != fresh.SessionID ||
+			item.Lease == nil || item.Lease.Owner != fresh.Lease.Owner || item.LeaseGeneration != fresh.LeaseGeneration {
+			return fmt.Errorf("Issue #%d launch provenance changed during validation", fresh.Number)
 		}
-		_, err := l.Store.Update("worker_process_started", number, runID, map[string]int{"pid": pid, "pgid": pid}, func(s *state.Snapshot) error {
+		if item.Workspace == nil || *item.Workspace != *workspace {
+			return fmt.Errorf("Issue #%d workspace provenance changed during validation", fresh.Number)
+		}
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return fail(err)
+	}
+	return validation, nil
+}
+
+func (l *Loop) recordWorkerPID(expected state.Issue) worker.Started {
+	return func(start worker.ProcessStart) error {
+		number, runID := expected.Number, expected.RunID
+		validation := worktree.LaunchValidation{
+			ExpectedCWD: start.ExpectedCWD, CanonicalCWD: start.ActualCWD,
+			Checks: map[string]bool{"spawn_cwd": start.ExpectedCWD != "" && start.ActualCWD == start.ExpectedCWD},
+		}
+		fail := func(cause error) error {
+			return &workerWorkspaceError{expected: start.ExpectedCWD, validation: validation, cause: cause}
+		}
+		if start.PID <= 0 || start.PGID != start.PID {
+			return fail(fmt.Errorf("Issue #%d run %s reported invalid worker process identity", number, runID))
+		}
+		if start.ExpectedCWD == "" || start.ActualCWD != start.ExpectedCWD {
+			return fail(fmt.Errorf("Issue #%d run %s spawned with cwd %q, expected %q", number, runID, start.ActualCWD, start.ExpectedCWD))
+		}
+		_, err := l.Store.Update("worker_process_started", number, runID, start, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(number)]
 			if item == nil || item.RunID != runID {
 				return fmt.Errorf("Issue #%d run %s is no longer active", number, runID)
 			}
-			if item.Lease != nil && item.Lease.Owner.RunID != runID {
-				return fmt.Errorf("Issue #%d run %s does not own its resource lease", number, runID)
+			if expected.Lease == nil || item.Lease == nil || item.Lease.Owner != expected.Lease.Owner || item.LeaseGeneration != expected.LeaseGeneration {
+				return fmt.Errorf("Issue #%d run %s resource lease owner generation changed before process audit", number, runID)
 			}
-			item.WorkerPID = pid
+			if item.Workspace == nil || item.Workspace.Path != start.ExpectedCWD {
+				return fmt.Errorf("Issue #%d run %s has no matching saved workspace provenance", number, runID)
+			}
+			item.WorkerPID = start.PID
 			// All worker backends start their command with Setpgid=true, making
 			// the process PID the process-group ID used for cancellation.
-			item.WorkerPGID = pid
+			item.WorkerPGID = start.PGID
 			item.UpdatedAt = l.now()
 			return nil
 		})
-		return err
+		if err != nil {
+			return fail(err)
+		}
+		return nil
 	}
 }
 

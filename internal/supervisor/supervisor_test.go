@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +21,46 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
+
+type workspaceMutationWorker struct {
+	mainPath string
+	runs     int
+	resumes  int
+	paths    []string
+}
+
+func (w *workspaceMutationWorker) result(cfg config.Config) (worker.Result, error) {
+	if cfg.RepoPath == w.mainPath {
+		return worker.Result{}, fmt.Errorf("worker received dirty main checkout as cwd")
+	}
+	w.paths = append(w.paths, cfg.RepoPath)
+	if err := os.WriteFile(filepath.Join(cfg.RepoPath, "continuation.txt"), []byte(fmt.Sprintf("invocations=%d\n", len(w.paths))), 0o600); err != nil {
+		return worker.Result{}, err
+	}
+	return worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "continue",
+		SessionID: "session-workspace", Tests: []worker.Test{}, Retry: &worker.Retry{Reason: "continue"},
+	}, nil
+}
+
+func (w *workspaceMutationWorker) Run(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+	w.runs++
+	return w.result(cfg)
+}
+
+func (w *workspaceMutationWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+	w.resumes++
+	return w.result(cfg)
+}
+
+func testGitOutput(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
 
 func TestSessionResumeNeverCrossesBackendNamespace(t *testing.T) {
 	loop := Loop{Config: config.Defaults()}
@@ -196,11 +237,34 @@ func (f fakeWorktree) Inspect(context.Context, config.Config, string, string) (w
 	}
 	return worktree.Inspection{Exists: true, Valid: true, Branch: "codex/issue-1-test", LocalBranchExists: true, RemoteBranchExists: true}, nil
 }
+func (f fakeWorktree) ValidateLaunch(_ context.Context, cfg config.Config, path, branch string) (worktree.LaunchValidation, error) {
+	return worktree.LaunchValidation{
+		Valid: true, ExpectedCWD: path, CanonicalCWD: path, TopLevel: path, Branch: branch,
+		CommonDir: filepath.Join(cfg.RepoPath, ".git"), MainCheckout: cfg.RepoPath,
+		Checks: map[string]bool{"fixture": true},
+	}, nil
+}
 func (f fakeWorktree) ContentDigest(context.Context, string) (string, error) { return f.digest, nil }
 
 type fakeWorker struct {
 	result worker.Result
 	err    error
+}
+
+func fixtureLease(runID string) *state.ResourceLease {
+	return &state.ResourceLease{
+		Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: 0,
+		DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: time.Now().UTC(),
+	}
+}
+
+func fixtureWorkspace(loop *Loop, path, branch string) *state.WorkerWorkspace {
+	return &state.WorkerWorkspace{
+		Path: path, Branch: branch, RepoID: loop.Store.RepoID,
+		Repository: loop.Config.GitHub.Repo, RepositoryID: loop.Config.GitHub.RepositoryID,
+		GitCommonDir: filepath.Join(loop.Config.RepoPath, ".git"), MainCheckout: loop.Config.RepoPath,
+		CapturedAt: time.Now().UTC(),
+	}
 }
 
 type fakePublisher struct {
@@ -454,6 +518,7 @@ func TestEnvironmentResumeContinuesSameSessionAndWorktree(t *testing.T) {
 		item.Status = "environment_resume_pending"
 		item.Worktree = worktreePath
 		item.Branch = "codex/issue-1-test"
+		item.Workspace = fixtureWorkspace(loop, worktreePath, item.Branch)
 		item.ExecutionProfile = "extended"
 		item.SessionID = "session-blocked"
 		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-blocked"}
@@ -478,6 +543,165 @@ func TestEnvironmentResumeContinuesSameSessionAndWorktree(t *testing.T) {
 	snapshot, _ := loop.Store.Load()
 	if item := snapshot.Issues["1"]; item.RunID != "run_environment" || item.Worktree != worktreePath || item.SessionID != "session-blocked" || item.Lease == nil {
 		t.Fatalf("resume replaced durable state: %+v", item)
+	}
+}
+
+func TestRetryContinuationKeepsDirtyBehindMainCheckoutUntouched(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	mainCheckout := filepath.Join(root, "main")
+	updater := filepath.Join(root, "updater")
+	testGitOutput(t, "init", "--bare", "-q", remote)
+	testGitOutput(t, "clone", "-q", remote, mainCheckout)
+	for _, pair := range [][2]string{{"user.name", "Test"}, {"user.email", "test@example.test"}, {"commit.gpgsign", "false"}} {
+		testGitOutput(t, "-C", mainCheckout, "config", pair[0], pair[1])
+	}
+	if err := os.WriteFile(filepath.Join(mainCheckout, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testGitOutput(t, "-C", mainCheckout, "add", "tracked.txt")
+	testGitOutput(t, "-C", mainCheckout, "commit", "-q", "-m", "base")
+	testGitOutput(t, "-C", mainCheckout, "branch", "-M", "main")
+	testGitOutput(t, "-C", mainCheckout, "push", "-q", "-u", "origin", "main")
+	testGitOutput(t, "clone", "-q", "--branch", "main", remote, updater)
+	for _, pair := range [][2]string{{"user.name", "Test"}, {"user.email", "test@example.test"}, {"commit.gpgsign", "false"}} {
+		testGitOutput(t, "-C", updater, "config", pair[0], pair[1])
+	}
+	if err := os.WriteFile(filepath.Join(updater, "remote.txt"), []byte("newer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testGitOutput(t, "-C", updater, "add", "remote.txt")
+	testGitOutput(t, "-C", updater, "commit", "-q", "-m", "newer")
+	testGitOutput(t, "-C", updater, "push", "-q", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(mainCheckout, "tracked.txt"), []byte("dirty main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainCheckout, "staged.txt"), []byte("staged main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testGitOutput(t, "-C", mainCheckout, "add", "staged.txt")
+	if err := os.WriteFile(filepath.Join(mainCheckout, "untracked.txt"), []byte("untracked main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mainHead := testGitOutput(t, "-C", mainCheckout, "rev-parse", "HEAD")
+	mainStatus := testGitOutput(t, "-C", mainCheckout, "status", "--porcelain=v1", "--untracked-files=all")
+	mainIndex := testGitOutput(t, "-C", mainCheckout, "diff", "--cached", "--binary")
+	mainFiles := testGitOutput(t, "-C", mainCheckout, "diff", "--binary")
+
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.GitHub.RepositoryID = 123
+	cfg.RepoPath = mainCheckout
+	cfg.Git.WorktreeRoot = filepath.Join(root, "worktrees")
+	cfg.Worker.Profiles["extended"] = config.Profile{MaxContinuations: 2}
+	store := state.Store{Dir: filepath.Join(root, "state"), RepoID: "repo-fixture", RepoPath: mainCheckout}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	github := &fakeGitHub{issue: gh.Issue{Number: 1, Title: "Continue safely", Body: "fixture", Labels: cfg.GitHub.ReadyLabels}}
+	runtime := &workspaceMutationWorker{mainPath: mainCheckout}
+	loop := &Loop{
+		Config: cfg, Store: store, GitHub: github,
+		Worktrees: worktree.Manager{StateRoot: store.Dir, GitPath: "git"}, Worker: runtime,
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("initial worked=%v err=%v", worked, err)
+	}
+	_, err := store.Update("retry_due", 1, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("continuation worked=%v err=%v", worked, err)
+	}
+	if runtime.runs != 1 || runtime.resumes != 1 || len(runtime.paths) != 2 || runtime.paths[0] != runtime.paths[1] || runtime.paths[0] == mainCheckout {
+		t.Fatalf("runtime=%+v", runtime)
+	}
+	if behind := testGitOutput(t, "-C", mainCheckout, "rev-list", "--count", "HEAD..origin/main"); behind != "1" {
+		t.Fatalf("main checkout is no longer the behind fixture: %s", behind)
+	}
+	if got := testGitOutput(t, "-C", mainCheckout, "rev-parse", "HEAD"); got != mainHead {
+		t.Fatalf("main HEAD changed: got=%s want=%s", got, mainHead)
+	}
+	if got := testGitOutput(t, "-C", mainCheckout, "status", "--porcelain=v1", "--untracked-files=all"); got != mainStatus {
+		t.Fatalf("main status changed:\ngot:\n%s\nwant:\n%s", got, mainStatus)
+	}
+	if got := testGitOutput(t, "-C", mainCheckout, "diff", "--cached", "--binary"); got != mainIndex {
+		t.Fatal("main index changed")
+	}
+	if got := testGitOutput(t, "-C", mainCheckout, "diff", "--binary"); got != mainFiles {
+		t.Fatal("main files changed")
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if item.Workspace == nil || item.Workspace.Path != runtime.paths[0] || item.Workspace.GitCommonDir == "" {
+		t.Fatalf("workspace provenance=%+v", item.Workspace)
+	}
+	events, err := os.ReadFile(store.EventsPath())
+	if err != nil || !strings.Contains(string(events), `"type":"worker_workspace_validated"`) || !strings.Contains(string(events), `"expected_cwd"`) {
+		t.Fatalf("workspace audit event missing: err=%v events=%s", err, events)
+	}
+}
+
+func TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges(t *testing.T) {
+	retry := worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "continue",
+		SessionID: "session-provenance", Tests: []worker.Test{}, Retry: &worker.Retry{Reason: "continue"},
+	}
+	loop, github := testLoop(t, retry)
+	scripted := &scriptedWorker{results: []worker.Result{retry, retry}}
+	loop.Worker = scripted
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("initial worked=%v err=%v", worked, err)
+	}
+	_, err := loop.Store.Update("tamper_workspace_provenance", 1, "", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.RetryAfter = nil
+		item.Workspace.GitCommonDir = filepath.Join(t.TempDir(), ".git")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("continuation worked=%v err=%v", worked, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if scripted.runs != 1 || scripted.resumes != 0 {
+		t.Fatalf("backend was invoked after rejection: runs=%d resumes=%d", scripted.runs, scripted.resumes)
+	}
+	if item.Status != "blocked" || item.Lease == nil || item.SessionID != "session-provenance" || item.Workspace == nil ||
+		item.BlockedCause == nil || item.BlockedCause.Kind != "worker_workspace" || item.BlockedCause.Resumable {
+		t.Fatalf("rejected continuation state=%+v", item)
+	}
+	github.issue.State = "OPEN"
+	github.issue.Labels = []string{"blocked"}
+	beforeRestart := snapshot
+	if err := loop.reconcileStartup(context.Background(), beforeRestart); err != nil {
+		t.Fatal(err)
+	}
+	afterRestart, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item = afterRestart.Issues["1"]
+	if item.Lease == nil || item.SessionID != "session-provenance" || item.Workspace == nil {
+		t.Fatalf("restart discarded rejected continuation boundary: %+v", item)
+	}
+	events, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || !strings.Contains(string(events), `"type":"worker_workspace_rejected"`) || !strings.Contains(string(events), `"expected_cwd"`) {
+		t.Fatalf("workspace rejection event missing: err=%v events=%s", err, events)
 	}
 }
 
@@ -878,9 +1102,11 @@ func TestDirtyPullRequestStartsConflictRecoveryWithoutCheckRuns(t *testing.T) {
 			loop.Config.Completion.AutoMerge = true
 			prURL := "https://example.test/pr/1"
 			_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(s *state.Snapshot) error {
+				branch := "codex/issue-1-test"
 				s.Issues["1"] = &state.Issue{
 					Number: 1, Title: "Test", Status: "awaiting_checks", RunID: "run_1",
-					Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, PullRequestURL: prURL,
+					Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+					LeaseGeneration: 1, Lease: fixtureLease("run_1"), PullRequestURL: prURL,
 					Attempts: 1, UpdatedAt: time.Now().UTC(),
 				}
 				return nil
@@ -974,9 +1200,11 @@ func TestDirtyPullRequestRunsDurableConflictWorkerAndReturnsToChecks(t *testing.
 	loop.Config.Completion.AutoMerge = true
 	prURL := "https://example.test/pr/1"
 	_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(s *state.Snapshot) error {
+		branch := "codex/issue-1-test"
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: "awaiting_checks", RunID: "run_1",
-			Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, PullRequestURL: prURL,
+			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch), PullRequestURL: prURL,
+			LeaseGeneration: 1, Lease: fixtureLease("run_1"),
 			Attempts: 1, UpdatedAt: time.Now().UTC(),
 			ConflictRecovery: &state.ConflictRecovery{
 				PullRequestURL: prURL, TargetBaseSHA: "base-old", OriginalHeadSHA: "older-head",
@@ -1088,9 +1316,11 @@ func TestConflictWorkerNeedsInputKeepsConflictResumeTarget(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
 	_, err := loop.Store.Update("fixture", 1, "conflict_1", nil, func(s *state.Snapshot) error {
+		branch := "codex/issue-1-test"
 		s.Issues["1"] = &state.Issue{
-			Number: 1, Status: "resolving_conflict", RunID: "conflict_1", Branch: "codex/issue-1-test",
-			Worktree: loop.Config.RepoPath, PullRequestURL: "https://example.test/pr/1", UpdatedAt: time.Now().UTC(),
+			Number: 1, Status: "resolving_conflict", RunID: "conflict_1", Branch: branch,
+			Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			LeaseGeneration: 1, Lease: fixtureLease("conflict_1"), PullRequestURL: "https://example.test/pr/1", UpdatedAt: time.Now().UTC(),
 			ConflictRecovery: &state.ConflictRecovery{
 				PullRequestURL: "https://example.test/pr/1", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
 				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, BaseUpdates: 1,
@@ -1308,12 +1538,16 @@ func TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit(t *testing.T) {
 
 func TestFaultSupervisorRestartResumesWithDurableAnswers(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done", Git: &worker.GitResult{}}
-	loop, _ := testLoop(t, result)
+	loop, github := testLoop(t, result)
+	github.issue.State = "OPEN"
+	github.issue.Labels = []string{loop.Config.GitHub.RunningLabel}
 	now := time.Now().UTC()
 	_, err := loop.Store.Update("answer_recorded", 1, "run_1", nil, func(s *state.Snapshot) error {
+		branch := "codex/issue-1-test"
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: "resume_pending", RunID: "run_1",
-			Worktree: loop.Config.RepoPath, SessionID: "session-123", Attempts: 1,
+			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			SessionID: "session-123", Attempts: 1, LeaseGeneration: 1, Lease: fixtureLease("run_1"),
 			ExecutionProfile: "extended", UpdatedAt: now,
 			Answers: []state.AnswerRecord{
 				{RequestID: "req_1", Question: "Which API?", Answer: "Use v2", AnsweredAt: now},
@@ -1331,6 +1565,13 @@ func TestFaultSupervisorRestartResumesWithDurableAnswers(t *testing.T) {
 	restarted := &Loop{
 		Config: loop.Config, Store: loop.Store, GitHub: loop.GitHub,
 		Worktrees: loop.Worktrees, Worker: recorder,
+	}
+	before, err := restarted.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.reconcileStartup(context.Background(), before); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := restarted.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)

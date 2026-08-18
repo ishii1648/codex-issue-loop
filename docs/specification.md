@@ -631,6 +631,8 @@ codex exec \
 
 実際の引数は起動前に `codex exec --help` とversion capabilityを検査する。構造化された初回実行を安全に行えないversionでは推測で継続せず、supervisorの開始を拒否する。session resumeだけが利用できない場合は、同じIssue worktree、run ID、永続化された回答履歴を使って新規sessionを起動する。session IDはJSONL内の`thread_id`、`session_id`、および既知のnested形式を受け付ける。
 
+初回とすべてのcontinuationはprocess spawn直前に、保存済みworktree pathとbranch、Git common dir、GitHub repository identity、main checkoutではないこと、symlinkを含まないことをlocalに再検証する。同じtransaction境界でrun ID、session ID、active lease owner generationも照合する。初回に保存したworkspace provenanceが欠損または一致しないcontinuationではworkerを起動せず、session、lease、worktree provenanceを保持した非resumableな`blocked`へ移す。backend process開始後はOS spawnへ渡したexpected/actual cwdをPID/PGIDとともに`worker_process_started`へ記録する。この契約はCodex、Codex App Server、Claude Code、OpenCodeとresume非対応fallbackに共通である。
+
 ### 11.2 preflightとexecution profile
 
 preflightは別プロセスではなく、初回worker promptに含める論理フェーズとする。workerは最初に受け入れ条件、変更範囲、依存関係、検証方法、リスク、反復回数の見込みを整理し、`standard` または `extended` を選択した後、そのまま実装へ進む。

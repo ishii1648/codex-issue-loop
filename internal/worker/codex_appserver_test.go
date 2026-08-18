@@ -30,12 +30,23 @@ func TestCodexAppServerExtendedContract(t *testing.T) {
 		Exec: Codex{StateDir: dir, RuntimeVersion: "0.147.0"}, StateDir: dir, RuntimeVersion: "0.147.0",
 	}
 	current := state.Issue{RunID: "run_goal", SessionID: "thread_saved", ExecutionProfile: "extended"}
-	result, err := adapter.Resume(context.Background(), cfg, gh.Issue{Number: 53, Title: "Goal adapter"}, current, "continue", nil)
+	var spawn ProcessStart
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := adapter.Resume(context.Background(), cfg, gh.Issue{Number: 53, Title: "Goal adapter"}, current, "continue", func(start ProcessStart) error {
+		spawn = start
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Status != "completed" || result.SessionID != "thread_saved" || result.Identity.Provider != "app-server-goal" {
 		t.Fatalf("result=%+v", result)
+	}
+	if spawn.ExpectedCWD != canonicalDir || spawn.ActualCWD != canonicalDir {
+		t.Fatalf("App Server spawn=%+v", spawn)
 	}
 	if result.Goal == nil || result.Goal.Status != "complete" || result.Goal.TokensUsed != 34 || result.Goal.InputTokens != 21 || result.Goal.OutputTokens != 13 || result.Goal.TimeBudgetSeconds != 1800 {
 		t.Fatalf("goal=%+v", result.Goal)

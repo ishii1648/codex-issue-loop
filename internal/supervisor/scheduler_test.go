@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -884,9 +886,12 @@ func TestSchedulerCancellationStopsAllWorkers(t *testing.T) {
 	}
 	loop.Worker = pool
 	_, err := loop.Store.Update("scheduler_fixture", 1, "run_cancel", nil, func(snapshot *state.Snapshot) error {
+		branch := "codex/issue-1-test"
 		snapshot.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: "retry_wait", RunID: "run_cancel",
-			Worktree: loop.Config.RepoPath, Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
+			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			LeaseGeneration: 1, Lease: fixtureLease("run_cancel"),
+			Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
 		}
 		return nil
 	})
@@ -1013,13 +1018,15 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	_, err := loop.Store.Update("scheduler_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
 		for number, resource := range map[int]string{1: "one", 2: "two", 3: "three"} {
 			runID := "run_" + resource
+			branch := "codex/issue-1-test"
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
 				Number: number, Title: "Test", Status: "retry_wait", RunID: runID,
 				LeaseGeneration: 1, Lease: &state.ResourceLease{
 					Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: 0,
 					DeclaredResources: []string{}, ResolvedResources: []string{resource}, ReservedAt: loop.now(),
 				},
-				Worktree: loop.Config.RepoPath, Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
+				Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+				Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
 			}
 		}
 		return nil
@@ -1135,6 +1142,8 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 					item := snapshot.Issues[strconv.Itoa(number)]
 					item.Status = "resume_pending"
 					item.Worktree = loop.Config.RepoPath
+					item.Branch = "codex/issue-1-test"
+					item.Workspace = fixtureWorkspace(loop, item.Worktree, item.Branch)
 					item.ExecutionProfile = "standard"
 					item.Lease.Owner = owner
 					return nil
@@ -1233,13 +1242,37 @@ func TestWorkerProcessCallbackFencesRunAndPersistsProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := loop.recordWorkerPID(1, "run_stale")(1234); err == nil {
+	_, err = loop.Store.Update("workspace_fixture", 1, "run_current", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Worktree = loop.Config.RepoPath
+		item.Branch = "codex/issue-1-test"
+		item.Workspace = fixtureWorkspace(loop, item.Worktree, item.Branch)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := loop.issueState(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := worker.ProcessStart{PID: 1234, PGID: 1234, ExpectedCWD: loop.Config.RepoPath, ActualCWD: loop.Config.RepoPath}
+	stale := current
+	stale.RunID = "run_stale"
+	if err := loop.recordWorkerPID(stale)(valid); err == nil {
 		t.Fatal("stale run callback was accepted")
 	}
-	if err := loop.recordWorkerPID(1, "run_current")(0); err == nil {
+	invalid := valid
+	invalid.PID, invalid.PGID = 0, 0
+	if err := loop.recordWorkerPID(current)(invalid); err == nil {
 		t.Fatal("invalid PID callback was accepted")
 	}
-	if err := loop.recordWorkerPID(1, "run_current")(1234); err != nil {
+	mismatched := valid
+	mismatched.ActualCWD = t.TempDir()
+	if err := loop.recordWorkerPID(current)(mismatched); err == nil {
+		t.Fatal("mismatched spawn cwd was accepted")
+	}
+	if err := loop.recordWorkerPID(current)(valid); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := loop.Store.Load()
@@ -1248,5 +1281,9 @@ func TestWorkerProcessCallbackFencesRunAndPersistsProcessGroup(t *testing.T) {
 	}
 	if snapshot.Issues["1"].WorkerPID != 1234 || snapshot.Issues["1"].WorkerPGID != 1234 {
 		t.Fatalf("process identity=%+v", snapshot.Issues["1"])
+	}
+	events, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || !strings.Contains(string(events), `"actual_cwd":"`+loop.Config.RepoPath+`"`) {
+		t.Fatalf("spawn cwd audit missing: err=%v events=%s", err, events)
 	}
 }

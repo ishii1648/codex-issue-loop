@@ -100,15 +100,24 @@ printf '%s\n' '{"version":1,"status":"completed","execution_profile":"standard",
 	cfg.Worker.Command = fake
 	current := state.Issue{RunID: "run_1", Attempts: 1}
 	startedPID := 0
-	result, err := (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1, Title: "Test"}, current, "", func(pid int) error {
-		startedPID = pid
+	spawnCWD := ""
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1, Title: "Test"}, current, "", func(start ProcessStart) error {
+		startedPID = start.PID
+		if start.ExpectedCWD != start.ActualCWD {
+			return fmt.Errorf("spawn cwd mismatch: %+v", start)
+		}
+		spawnCWD = start.ActualCWD
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SessionID != "session-123" || result.Status != "completed" || startedPID <= 0 {
-		t.Fatalf("result=%+v startedPID=%d", result, startedPID)
+	if result.SessionID != "session-123" || result.Status != "completed" || startedPID <= 0 || spawnCWD != canonicalDir {
+		t.Fatalf("result=%+v startedPID=%d spawnCWD=%q", result, startedPID, spawnCWD)
 	}
 }
 
@@ -124,8 +133,8 @@ func TestFaultWorkerKillReturnsRecoverableProcessError(t *testing.T) {
 	cfg.Worker.Command = fake
 	ctx, cancel := context.WithCancel(context.Background())
 	pid := 0
-	_, err := (Codex{StateDir: dir}).Run(ctx, cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_kill", Attempts: 1}, "", func(startedPID int) error {
-		pid = startedPID
+	_, err := (Codex{StateDir: dir}).Run(ctx, cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_kill", Attempts: 1}, "", func(start ProcessStart) error {
+		pid = start.PID
 		cancel()
 		return nil
 	})
@@ -158,9 +167,9 @@ while :; do :; done
 	cfg.Worker.Timeout.Duration = 100 * time.Millisecond
 	cfg.Worker.TimeoutGrace.Duration = time.Second
 	workerPID, workerPGID := 0, 0
-	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_grace", Attempts: 1}, "", func(pid int) error {
-		workerPID = pid
-		workerPGID, _ = syscall.Getpgid(pid)
+	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_grace", Attempts: 1}, "", func(start ProcessStart) error {
+		workerPID = start.PID
+		workerPGID, _ = syscall.Getpgid(start.PID)
 		return waitForTestFile(ready, testProcessReadyTimeout)
 	})
 	if workerPGID != workerPID {
@@ -200,7 +209,7 @@ func TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace(t *testing.T) 
 	cfg.GitHub.Repo, cfg.RepoPath, cfg.Worker.Command = "owner/repo", dir, fake
 	cfg.Worker.Timeout.Duration = 100 * time.Millisecond
 	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
-	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_force", Attempts: 1}, "", func(int) error {
+	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_force", Attempts: 1}, "", func(ProcessStart) error {
 		return waitForTestFile(childPath, testProcessReadyTimeout)
 	})
 	var termination *TerminationError

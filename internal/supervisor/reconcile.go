@@ -150,7 +150,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 						return err
 					}
 				}
-				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !resumableWorkerBlock(decision.blockedCause) {
+				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !retainsWorkerBoundary(decision.blockedCause) {
 					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
 						return err
 					}
@@ -183,6 +183,14 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 
 func resumableWorkerBlock(cause *state.BlockedCause) bool {
 	return cause != nil && cause.Origin == "worker" && cause.Kind == "environment" && cause.Resumable
+}
+
+func workspaceSafetyBlock(cause *state.BlockedCause) bool {
+	return cause != nil && cause.Origin == "supervisor" && cause.Kind == "worker_workspace" && !cause.Resumable
+}
+
+func retainsWorkerBoundary(cause *state.BlockedCause) bool {
+	return resumableWorkerBlock(cause) || workspaceSafetyBlock(cause)
 }
 
 func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
@@ -270,7 +278,7 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 				return err
 			}
 		}
-		if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !resumableWorkerBlock(decision.blockedCause) {
+		if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !retainsWorkerBoundary(decision.blockedCause) {
 			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
 				return err
 			}
@@ -383,7 +391,11 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		return decision
 	}
 	if excluded {
-		if current.Status == "blocked" && current.BlockedCause != nil && current.BlockedCause.Origin == "worker" &&
+		if current.Status == "blocked" && workspaceSafetyBlock(current.BlockedCause) && l.hasOnlyBlockedExclusion(labels) {
+			decision.status, decision.workerPID, decision.retryAt, decision.githubSync = "blocked", 0, nil, ""
+			decision.reason = "supervisor-owned worker workspace safety block preserved"
+			return decision
+		} else if current.Status == "blocked" && current.BlockedCause != nil && current.BlockedCause.Origin == "worker" &&
 			current.BlockedCause.Kind == "environment" && current.BlockedCause.Resumable && l.hasOnlyBlockedExclusion(labels) {
 			decision.status, decision.workerPID, decision.retryAt, decision.githubSync = "blocked", 0, nil, ""
 			decision.reason = "supervisor-owned worker environment block provenance preserved"
