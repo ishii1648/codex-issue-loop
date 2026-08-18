@@ -552,6 +552,52 @@ func TestStartupReconciliationParksExistingTypedEnvironmentBlock(t *testing.T) {
 	}
 }
 
+func TestStartupReconciliationParksExistingNeedsInputLease(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Processes = fakeProcesses{}
+	now := time.Date(2026, 8, 18, 7, 0, 0, 0, time.UTC)
+	loop.Clock = fixedClock{value: now}
+	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Existing input", RunID: "run_input", Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+		BaseSHA: "base-input", ReservedAt: now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := "codex/issue-1-input"
+	_, err = loop.Store.Update("input_requested", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "needs_input"
+		item.Branch = branch
+		item.Worktree = loop.Config.RepoPath
+		item.Workspace = fixtureWorkspace(loop, loop.Config.RepoPath, branch)
+		item.SessionID = "session-input"
+		snapshot.PendingRequests["req_input"] = &state.Request{ID: "req_input", IssueNumber: 1, Question: "Continue?", Status: "pending", CreatedAt: now.Add(-time.Minute)}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := loop.Store.Load()
+	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.NeedsInputLabel}}}
+	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: &worktree.Inspection{
+		Exists: true, Valid: true, Branch: branch, LocalBranchExists: true, RemoteBranchExists: true,
+	}}
+	if err := loop.reconcileStartup(context.Background(), before); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := loop.Store.Load()
+	item := after.Issues["1"]
+	request := after.PendingRequests["req_input"]
+	if item.Status != "needs_input" || item.Lease != nil || item.ResourcePark == nil || item.ResourcePark.Kind != state.ResourceParkKindNeedsInput || item.ResourcePark.RequestID != request.ID || item.ResourcePark.OriginalLease.Owner != owner {
+		t.Fatalf("needs-input lease was not parked: item=%+v request=%+v", item, request)
+	}
+	if request.RunID != item.RunID || request.ResourceParkID != item.ResourcePark.ID || request.ReleasedOwner == nil || *request.ReleasedOwner != owner || item.SessionID != "session-input" || item.Worktree != loop.Config.RepoPath || item.Branch != branch {
+		t.Fatalf("startup park changed request/continuation provenance: item=%+v request=%+v", item, request)
+	}
+}
+
 func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	blockedAt := time.Date(2026, 8, 17, 12, 30, 0, 0, time.UTC)

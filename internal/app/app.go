@@ -156,7 +156,7 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 	case "watch":
 		return a.watch(ctx, l, args)
 	case "answer":
-		return a.answer(l, args)
+		return a.answer(ctx, l, args)
 	case "retry":
 		return a.retryConflict(ctx, l, args)
 	case "resume-blocked":
@@ -1141,7 +1141,7 @@ func (a App) watch(ctx context.Context, l layout.Layout, args []string) error {
 	return a.output(*jsonOut, result)
 }
 
-func (a App) answer(l layout.Layout, args []string) error {
+func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 	const maxAnswerBytes = 16 * 1024
 	fs := flag.NewFlagSet("answer", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
@@ -1209,9 +1209,35 @@ func (a App) answer(l layout.Layout, args []string) error {
 		if currentRequest.Answer != answer {
 			return exitError{4, fmt.Errorf("request %s already has a different answer", *requestID)}
 		}
-		return a.output(*jsonOut, map[string]any{"request_id": *requestID, "recorded": true})
+		return a.answerOutput(*jsonOut, currentSnapshot, cfg.Queue.Concurrency, currentRequest)
 	}
-	_, err = store.Update("answer_recorded", currentRequest.IssueNumber, "", map[string]string{"request_id": *requestID}, func(s *state.Snapshot) error {
+	if currentRequest.Status != "pending" {
+		return exitError{4, fmt.Errorf("request %s is not pending", *requestID)}
+	}
+	currentIssue := currentSnapshot.Issues[fmt.Sprint(currentRequest.IssueNumber)]
+	if currentIssue == nil {
+		return exitError{4, fmt.Errorf("Issue #%d is missing from state", currentRequest.IssueNumber)}
+	}
+	parkedNeedsInput := currentRequest.ResumeStatus == ""
+	if parkedNeedsInput {
+		pendingForIssue := 0
+		for _, request := range currentSnapshot.PendingRequests {
+			if request != nil && request.IssueNumber == currentIssue.Number && request.Status == "pending" {
+				pendingForIssue++
+			}
+		}
+		if pendingForIssue != 1 {
+			return exitError{4, fmt.Errorf("Issue #%d has ambiguous pending requests", currentIssue.Number)}
+		}
+		if currentIssue.Status != "needs_input" || currentIssue.WorkerPID != 0 || currentIssue.WorkerPGID != 0 || currentIssue.Lease != nil {
+			return exitError{4, fmt.Errorf("Issue #%d is not a stopped parked needs-input continuation", currentIssue.Number)}
+		}
+		if err := state.ValidateNeedsInputPark(currentIssue, currentRequest); err != nil {
+			return exitError{4, err}
+		}
+	}
+	payload := map[string]any{"request_id": *requestID}
+	updated, err := store.Update("answer_recorded", currentRequest.IssueNumber, currentIssue.RunID, payload, func(s *state.Snapshot) error {
 		request := s.PendingRequests[*requestID]
 		if request == nil {
 			return exitError{4, fmt.Errorf("unknown request ID %s", *requestID)}
@@ -1222,6 +1248,9 @@ func (a App) answer(l layout.Layout, args []string) error {
 			}
 			return exitError{4, fmt.Errorf("request %s already has a different answer", *requestID)}
 		}
+		if request.Status != "pending" {
+			return exitError{4, fmt.Errorf("request %s is not pending", *requestID)}
+		}
 		now := time.Now().UTC()
 		request.Status, request.Answer, request.AnsweredAt = "answered", answer, &now
 		issue := s.Issues[fmt.Sprint(request.IssueNumber)]
@@ -1230,7 +1259,40 @@ func (a App) answer(l layout.Layout, args []string) error {
 		}
 		resumeStatus := request.ResumeStatus
 		if resumeStatus == "" {
-			resumeStatus = "resume_pending"
+			pendingForIssue := 0
+			for _, candidate := range s.PendingRequests {
+				if candidate != nil && candidate.IssueNumber == issue.Number && candidate.Status == "pending" {
+					pendingForIssue++
+				}
+			}
+			if pendingForIssue != 0 {
+				return exitError{4, fmt.Errorf("Issue #%d has ambiguous pending requests", issue.Number)}
+			}
+			if issue.Status != "needs_input" || issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease != nil {
+				return exitError{4, fmt.Errorf("Issue #%d changed before its answer was recorded", issue.Number)}
+			}
+			if err := state.ValidateNeedsInputPark(issue, request); err != nil {
+				return exitError{4, err}
+			}
+			resumeStatus = "answer_claim_waiting"
+			if slot, ok := availableLeaseSlot(s, cfg.Queue.Concurrency, issue.ResourcePark.OriginalLease.Slot, issue.Number); ok {
+				owner, resumeErr := state.ResumeParkedLease(s, issue.Number, issue.ResourcePark.ID, slot, now)
+				if resumeErr == nil {
+					resumeStatus = "resume_pending"
+					payload["lease_owner"] = owner
+					payload["lease_slot"] = slot
+				} else {
+					var conflict state.LeaseConflictError
+					if !errors.As(resumeErr, &conflict) {
+						return resumeErr
+					}
+					payload["claim_waiting"] = true
+					payload["blocked_by_issue"] = conflict.IssueNumber
+				}
+			} else {
+				payload["claim_waiting"] = true
+				payload["blocked_by_worker_slot"] = true
+			}
 		}
 		issue.Status, issue.RetryAfter, issue.UpdatedAt = resumeStatus, nil, now
 		if resumeStatus == "resolving_conflict" {
@@ -1242,7 +1304,31 @@ func (a App) answer(l layout.Layout, args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.output(*jsonOut, map[string]any{"request_id": *requestID, "recorded": true})
+	_ = ctx // answer is a durable local transaction; the supervisor owns remote reconciliation.
+	return a.answerOutput(*jsonOut, updated, cfg.Queue.Concurrency, updated.PendingRequests[*requestID])
+}
+
+func (a App) answerOutput(jsonOut bool, snapshot state.Snapshot, concurrency int, request *state.Request) error {
+	output := map[string]any{"request_id": request.ID, "recorded": true}
+	issue := snapshot.Issues[strconv.Itoa(request.IssueNumber)]
+	if issue != nil {
+		output["status"] = issue.Status
+		if issue.ResourcePark != nil && issue.ResourcePark.Kind == state.ResourceParkKindNeedsInput {
+			output["resource_park_id"] = issue.ResourcePark.ID
+			output["claim_waiting"] = issue.Status == "answer_claim_waiting"
+			if issue.Lease != nil {
+				output["lease_owner"] = issue.Lease.Owner
+			}
+			status := buildStatus(launchd.Status{}, snapshot, concurrency)
+			for _, candidate := range status.ResourceAdmission.ClaimWaitingCandidates {
+				if candidate.IssueNumber == issue.Number {
+					output["blocked_by"] = candidate.BlockedBy
+					break
+				}
+			}
+		}
+	}
+	return a.output(jsonOut, output)
 }
 
 func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) error {

@@ -117,6 +117,8 @@ sleep 3
 
 workerが外部環境前提を理由にtyped `blocked`を返すと、supervisorはPID/PGID不在を確認し、run・worktree・branch・dirty changes・session/Goal・answers・resource/base provenanceを`resource_park`へ保持したままactive leaseだけを自動parkします。GitHubは`blocked`のままですが、後続queueは同じresourceを予約できます。`status --json`の`resource_admission.resource_parks`で保存claimとpark状態、`claim_waiting_candidates`でresumeを妨げるIssue/resource/slotを確認できます。
 
+通常workerが`needs_input`を返した場合も、pending requestとrequest IDをrun・元lease ownerへ結び付け、PID/PGID消失後に同じtransactionでleaseをparkします。GitHubの`codex-loop:needs-input`は回答まで維持されるため、質問、worktree、dirty changes、branch、session/Goal、base SHAを残したまま無関係なready queueを継続できます。`answer`は保存provenanceを検証し、競合がなければ新generationを1回だけ取得します。競合中は回答を`answer_claim_waiting`として保存し、相手lease解放後に自動再取得します。
+
 前提をoperatorが解消し、active processがないことを確認した後だけ、次の明示操作で同じworktree・branch・sessionから再開します。park済みclaimは他Issueのactive leaseとworker slotを同じtransactionで再検証し、新しいowner generationを1回だけ取得します。競合中は他Issueのleaseを奪わず拒否します。PR conflict、手動exclusion、security block、failed、completed/closed Issueには適用されません。
 
 ```sh
@@ -216,6 +218,8 @@ printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
   --message-file - \
   --json
 ```
+
+出力が`claim_waiting: true`なら回答は保存済みです。`status --json`の`resource_admission.claim_waiting_candidates[].blocked_by`を確認し、相手Issueの通常処理を待ちます。`ready`/`running` labelやstate fileを手動編集せず、同じ回答を別requestへ再送しないでください。
 
 ### 4. 停止・再開する
 

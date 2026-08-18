@@ -167,7 +167,7 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
   --json
 ```
 
-記録後、同じrequest IDがansweredになったことをstatusで確認し、1回のwatchへ戻る。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
+記録後、同じrequest IDがansweredになったことをstatusで確認する。`claim_waiting: true`または`status=answer_claim_waiting`なら回答は消えていない。`resource_admission.resource_parks`の保存run/claimと`claim_waiting_candidates[].blocked_by`を確認し、競合Issueの通常解放を待って1回のwatchへ戻る。ready/running label、state、leaseを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
 ### 停止
 

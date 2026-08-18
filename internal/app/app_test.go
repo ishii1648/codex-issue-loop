@@ -119,6 +119,34 @@ func mustConfig(t *testing.T, repo string) config.Config {
 	return cfg
 }
 
+func addParkedNeedsInput(t *testing.T, snapshot *state.Snapshot, issue *state.Issue, request *state.Request, slot int) {
+	t.Helper()
+	if issue.RunID == "" {
+		issue.RunID = fmt.Sprintf("run_%d", issue.Number)
+	}
+	now := request.CreatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	owner := state.LeaseOwner{RunID: issue.RunID, Generation: 1}
+	issue.Status = "needs_input"
+	issue.LeaseGeneration = 1
+	issue.Lease = &state.ResourceLease{
+		Owner: owner, Slot: slot, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-sha", ReservedAt: now,
+	}
+	parkID := "park_" + request.ID
+	if err := state.ParkIssueLease(issue, owner, parkID, now); err != nil {
+		t.Fatal(err)
+	}
+	issue.ResourcePark.Kind = state.ResourceParkKindNeedsInput
+	issue.ResourcePark.RequestID = request.ID
+	request.RunID = issue.RunID
+	request.ResourceParkID = parkID
+	request.ReleasedOwner = &owner
+	snapshot.Issues[strconv.Itoa(issue.Number)] = issue
+	snapshot.PendingRequests[request.ID] = request
+}
+
 func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
@@ -134,8 +162,7 @@ func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 	}
 	_, err = store.Update("input_requested", 4, "run", nil, func(s *state.Snapshot) error {
 		s.Supervisor.State = "running"
-		s.Issues["4"] = &state.Issue{Number: 4, Status: "needs_input"}
-		s.PendingRequests["req_1"] = &state.Request{ID: "req_1", IssueNumber: 4, Question: "Choose", Status: "pending"}
+		addParkedNeedsInput(t, s, &state.Issue{Number: 4, RunID: "run_4"}, &state.Request{ID: "req_1", IssueNumber: 4, Question: "Choose", Status: "pending"}, 0)
 		return nil
 	})
 	if err != nil {
@@ -181,8 +208,7 @@ func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
 	}
 	_, err = store.Update("input_requested", 89, "run_89", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Supervisor.State = "running"
-		snapshot.Issues["89"] = &state.Issue{Number: 89, RunID: "run_89", Status: "needs_input"}
-		snapshot.PendingRequests[firstRequest.ID] = firstRequest
+		addParkedNeedsInput(t, snapshot, &state.Issue{Number: 89, RunID: "run_89"}, firstRequest, 0)
 		return nil
 	})
 	if err != nil {
@@ -433,10 +459,11 @@ func TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID(t *testing.T) {
 	}
 	_, err = store.Update("input_requested", 0, "", nil, func(snapshot *state.Snapshot) error {
 		for _, number := range []int{4, 7} {
-			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{Number: number, RunID: fmt.Sprintf("run_%d", number), Status: "needs_input"}
+			request := &state.Request{ID: fmt.Sprintf("req_%d", number), IssueNumber: number, Question: fmt.Sprintf("%d?", number), Status: "pending"}
+			addParkedNeedsInput(t, snapshot, &state.Issue{Number: number, RunID: fmt.Sprintf("run_%d", number)}, request, number-4)
 		}
-		snapshot.PendingRequests["req_4"] = &state.Request{ID: "req_4", IssueNumber: 4, Question: "Four?", Status: "pending"}
-		snapshot.PendingRequests["req_7"] = &state.Request{ID: "req_7", IssueNumber: 7, Question: "Seven?", Status: "pending"}
+		snapshot.PendingRequests["req_4"].Question = "Four?"
+		snapshot.PendingRequests["req_7"].Question = "Seven?"
 		return nil
 	})
 	if err != nil {
@@ -456,6 +483,69 @@ func TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID(t *testing.T) {
 	}
 	if snapshot.PendingRequests["req_7"].Status != "answered" || snapshot.Issues["7"].Status != "resume_pending" || len(snapshot.Issues["7"].Answers) != 1 {
 		t.Fatalf("target request or Issue not updated: request=%+v issue=%+v", snapshot.PendingRequests["req_7"], snapshot.Issues["7"])
+	}
+}
+
+func TestAnswerDurablyWaitsWithoutStealingConflictingLease(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 18, 5, 0, 0, 0, time.UTC)
+	var competingOwner state.LeaseOwner
+	_, err = store.Update("fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		addParkedNeedsInput(t, snapshot, &state.Issue{Number: 4, RunID: "run_4"}, &state.Request{
+			ID: "req_4", IssueNumber: 4, Question: "Continue?", Status: "pending", CreatedAt: now,
+		}, 0)
+		competingOwner = state.LeaseOwner{RunID: "run_5", Generation: 1}
+		snapshot.Issues["5"] = &state.Issue{
+			Number: 5, RunID: "run_5", Status: "running", LeaseGeneration: 1,
+			Lease: &state.ResourceLease{Owner: competingOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-5", ReservedAt: now},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	a := App{In: bytes.NewBuffer(nil), Out: &out, Err: &stderr}
+	args := []string{"answer", "--repo", repo, "--request-id", "req_4", "--message", "continue", "--json"}
+	if code := a.Run(context.Background(), args); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(out.String(), `"claim_waiting": true`) || !strings.Contains(out.String(), `"issue_number": 5`) {
+		t.Fatalf("structured waiting output=%s", out.String())
+	}
+	afterFirst, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue := afterFirst.Issues["4"]; issue.Status != "answer_claim_waiting" || issue.Lease != nil || issue.ResourcePark.Status != "parked" || len(issue.Answers) != 1 {
+		t.Fatalf("answered Issue=%+v", issue)
+	}
+	if request := afterFirst.PendingRequests["req_4"]; request.Status != "answered" || request.Answer != "continue" {
+		t.Fatalf("request=%+v", request)
+	}
+	if lease := afterFirst.Issues["5"].Lease; lease == nil || lease.Owner != competingOwner {
+		t.Fatalf("competing lease was changed: %+v", lease)
+	}
+	revision := afterFirst.StateRevision
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), args); code != 0 {
+		t.Fatalf("idempotent code=%d stderr=%s", code, stderr.String())
+	}
+	afterSecond, _ := store.Load()
+	if afterSecond.StateRevision != revision || len(afterSecond.Issues["4"].Answers) != 1 || afterSecond.Issues["5"].Lease.Owner != competingOwner {
+		t.Fatalf("idempotent answer changed state: before=%d after=%d", revision, afterSecond.StateRevision)
 	}
 }
 

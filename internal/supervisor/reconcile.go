@@ -118,9 +118,14 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
 				}
 			}
-			parkReconciledLease := current.Status == "blocked" && current.GitHubSync == "" && current.Lease != nil && current.ResourcePark == nil &&
+			parkEnvironmentLease := current.Status == "blocked" && current.GitHubSync == "" && current.Lease != nil && current.ResourcePark == nil &&
 				current.PullRequestURL == "" && current.WorkerPID == 0 && current.WorkerPGID == 0 && decision.status == "blocked" &&
 				decision.githubSync == "" && decision.pullRequest == "" && resumableWorkerBlock(decision.blockedCause) && onlyBlockedExclusion
+			request := singlePendingRequest(latest, number)
+			parkInputLease := current.Status == "needs_input" && current.GitHubSync == "" && current.Lease != nil && current.ResourcePark == nil &&
+				current.PullRequestURL == "" && current.WorkerPID == 0 && current.WorkerPGID == 0 && decision.status == "needs_input" &&
+				decision.githubSync == "" && decision.pullRequest == "" && request != nil && request.ResumeStatus == "" && current.ConflictRecovery == nil
+			parkReconciledLease := parkEnvironmentLease || parkInputLease
 			parkID := ""
 			parkedAt := time.Time{}
 			if parkReconciledLease {
@@ -144,13 +149,33 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					if err := state.ParkIssueLease(item, current.Lease.Owner, parkID, parkedAt); err != nil {
 						return err
 					}
+					if parkInputLease {
+						latestRequest := s.PendingRequests[request.ID]
+						if latestRequest == nil || !reflect.DeepEqual(latestRequest, request) {
+							return errReconciliationStateChanged
+						}
+						owner := item.ResourcePark.OriginalLease.Owner
+						item.ResourcePark.Kind = state.ResourceParkKindNeedsInput
+						item.ResourcePark.RequestID = request.ID
+						latestRequest.RunID = item.RunID
+						latestRequest.ResourceParkID = parkID
+						latestRequest.ReleasedOwner = &owner
+					} else {
+						item.ResourcePark.Kind = state.ResourceParkKindEnvironmentBlock
+					}
 				}
 				if decision.status == "completed" && item.Lease != nil {
+					if item.ResourcePark != nil && item.ResourcePark.Status == "resuming" {
+						item.ResourcePark.Status = "resumed"
+					}
 					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
 						return err
 					}
 				}
 				if (decision.status == "failed" || decision.status == "blocked") && decision.pullRequest == "" && item.Lease != nil && !retainsWorkerBoundary(decision.blockedCause) {
+					if item.ResourcePark != nil && item.ResourcePark.Status == "resuming" {
+						item.ResourcePark.Status = "resumed"
+					}
 					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
 						return err
 					}
@@ -201,13 +226,15 @@ func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 		return true
 	}
 	switch item.Status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+	case "claiming", "claimed", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 		return true
 	case "retry_wait":
 		return item.RetryAfter == nil || !item.RetryAfter.After(now)
 	case "blocked":
 		return state.MayHaveLegacyWorkerBlockProvenance(item) ||
 			(item.Lease != nil && item.ResourcePark == nil && item.PullRequestURL == "" && resumableWorkerBlock(item.BlockedCause))
+	case "needs_input":
+		return item.Lease != nil && item.ResourcePark == nil && item.PullRequestURL == "" && item.WorkerPID == 0 && item.WorkerPGID == 0
 	default:
 		return false
 	}
@@ -328,7 +355,7 @@ func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg confi
 			return true
 		}
 	}
-	return labels[cfg.NeedsInputLabel] && current.Status == "needs_input"
+	return labels[cfg.NeedsInputLabel] && (current.Status == "needs_input" || current.Status == "answer_claim_waiting" || current.Status == "resume_pending")
 }
 
 func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) reconciliationDecision {
@@ -564,6 +591,8 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		}
 	case "resume_pending":
 		decision.reason = "recorded answer remains pending for resume"
+	case "answer_claim_waiting":
+		decision.reason = "recorded answer is waiting for its parked resource claim"
 	case "environment_resume_pending":
 		decision.reason = "operator-confirmed environment resume remains pending in the saved worktree"
 	case "publication_recovery_pending":
@@ -736,6 +765,22 @@ func pendingRequest(snapshot state.Snapshot, issueNumber int) *state.Request {
 		}
 	}
 	return nil
+}
+
+func singlePendingRequest(snapshot state.Snapshot, issueNumber int) *state.Request {
+	var found *state.Request
+	for _, request := range snapshot.PendingRequests {
+		if request == nil || request.IssueNumber != issueNumber || request.Status != "pending" {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		copy := *request
+		copy.Options = append([]state.Option(nil), request.Options...)
+		found = &copy
+	}
+	return found
 }
 
 var _ ProcessInspector = osProcessInspector{}

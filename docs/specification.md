@@ -422,8 +422,12 @@ agent-loop answer --request-id req_... --message-file -
 処理:
 
 1. request IDと未回答状態を検証する
-2. 回答を原子的に保存する
-3. `answer_recorded` イベントを追記する
+2. 通常worker requestでは保存run、park ID、元lease owner、PID/PGID不在を検証する
+3. 回答を原子的に保存し、競合がなければ新generationのleaseを同じtransactionで1回だけ取得する
+4. 競合中は他Issueのleaseを変更せず`answer_claim_waiting`にする
+5. `answer_recorded` イベントを追記する
+
+通常workerの`needs_input`は`input_requested` transactionでrequest provenanceと元lease全体を`resource_park`へ移し、GitHub needs-inputを維持したままadmissionから外す。回答済みclaim待機はresource/slotが空くまでschedulerのworker dispatch対象にせず、解放event後に同じrequest/run/parkを再検証して`resume_pending`へ進める。manual/security、PR conflict、publication監査、active worker、複数request、未知のlegacy stateはfail closedとする。continuationは保存workspaceと新lease owner generationをspawn直前に再検証する。
 
 ### 6.6 retry
 

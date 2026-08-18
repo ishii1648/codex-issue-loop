@@ -11,6 +11,27 @@ import (
 
 const RepositoryResource = "repo:*"
 
+const (
+	ResourceParkKindEnvironmentBlock = "environment_block"
+	ResourceParkKindNeedsInput       = "needs_input"
+)
+
+// LeaseConflictError identifies an admission conflict without weakening the
+// validation errors used for malformed park provenance. Callers may durably
+// retain an answered claim in a waiting state only for this typed error.
+type LeaseConflictError struct {
+	IssueNumber int
+	Slot        int
+	Resource    bool
+}
+
+func (e LeaseConflictError) Error() string {
+	if e.Resource {
+		return fmt.Sprintf("parked resources conflict with active lease for Issue #%d", e.IssueNumber)
+	}
+	return fmt.Sprintf("worker slot %d is already occupied by Issue #%d", e.Slot, e.IssueNumber)
+}
+
 type LeaseReservation struct {
 	IssueNumber       int
 	Title             string
@@ -229,10 +250,10 @@ func ResumeParkedLease(snapshot *Snapshot, issueNumber int, parkID string, slot 
 			continue
 		}
 		if issueOccupiesWorkerSlot(other) && other.Lease.Slot == slot {
-			return LeaseOwner{}, fmt.Errorf("worker slot %d is already occupied by Issue #%d", slot, other.Number)
+			return LeaseOwner{}, LeaseConflictError{IssueNumber: other.Number, Slot: slot}
 		}
 		if resourcesConflict(claim.ResolvedResources, other.Lease.ResolvedResources) {
-			return LeaseOwner{}, fmt.Errorf("parked resources conflict with active lease for Issue #%d", other.Number)
+			return LeaseOwner{}, LeaseConflictError{IssueNumber: other.Number, Resource: true}
 		}
 	}
 	issue.LeaseGeneration++
@@ -245,6 +266,25 @@ func ResumeParkedLease(snapshot *Snapshot, issueNumber int, parkID string, slot 
 	park.ResumedAt = resumedAt.UTC()
 	park.ResumeOwner = &owner
 	return owner, nil
+}
+
+// ValidateNeedsInputPark binds an answerable request to the exact run, park,
+// and released lease owner captured when the worker stopped. This keeps an old
+// or cross-Issue request ID from being used to reacquire a resource claim.
+func ValidateNeedsInputPark(issue *Issue, request *Request) error {
+	if issue == nil || request == nil || request.IssueNumber != issue.Number {
+		return fmt.Errorf("needs-input request does not match its Issue")
+	}
+	park := issue.ResourcePark
+	if park == nil || park.Kind != ResourceParkKindNeedsInput || park.RequestID != request.ID ||
+		request.ResourceParkID != park.ID || request.RunID != issue.RunID || request.ReleasedOwner == nil ||
+		*request.ReleasedOwner != park.OriginalLease.Owner {
+		return fmt.Errorf("Issue #%d needs-input request provenance is inconsistent", issue.Number)
+	}
+	if issue.RunID == "" || park.OriginalLease.Owner.RunID != issue.RunID || park.OriginalLease.Owner.Generation == 0 {
+		return fmt.Errorf("Issue #%d needs-input resource provenance is inconsistent", issue.Number)
+	}
+	return nil
 }
 
 // ResourcesConflict is used by read-only operator diagnostics. Mutating
@@ -328,7 +368,7 @@ func issueOccupiesWorkerSlot(issue *Issue) bool {
 		return false
 	}
 	switch issue.Status {
-	case "claiming", "claimed", "running", "environment_resume_pending", "resolving_conflict":
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
 		return true
 	default:
 		return false
@@ -362,6 +402,17 @@ func validateResourceLeases(snapshot Snapshot) error {
 			}
 			if park.Status != "parked" && park.Status != "resuming" && park.Status != "resumed" {
 				return fmt.Errorf("Issue #%d has invalid resource park status %q", issue.Number, park.Status)
+			}
+			if park.Kind != "" && park.Kind != ResourceParkKindEnvironmentBlock && park.Kind != ResourceParkKindNeedsInput {
+				return fmt.Errorf("Issue #%d has unknown resource park kind %q", issue.Number, park.Kind)
+			}
+			if park.Kind == ResourceParkKindNeedsInput {
+				request := snapshot.PendingRequests[park.RequestID]
+				if err := ValidateNeedsInputPark(issue, request); err != nil {
+					return err
+				}
+			} else if park.RequestID != "" {
+				return fmt.Errorf("Issue #%d non-input resource park has a request ID", issue.Number)
 			}
 			if park.Status == "parked" && (issue.LeaseGeneration != original.Owner.Generation || issue.Lease != nil || park.ResumeOwner != nil || !park.ResumedAt.IsZero()) {
 				return fmt.Errorf("Issue #%d parked resource claim is still active", issue.Number)

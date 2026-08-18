@@ -129,7 +129,7 @@ active leaseを古いschemaへrollbackする必要はない。binary/schema roll
 
 - resource leaseは単一host内だけで有効であり、複数hostから同じrepositoryを処理してはならない。
 - `repo:*`へ縮退したunknown/exclusive Issueは単独実行され、concurrency 2でも並列化されない。
-- `needs_input`、retry、checks、open PRはworker slotを解放してもresource leaseを保持する。
+- 通常workerの`needs_input`はworker slotとactive resource leaseを解放してclaimをparkする。publication/PR conflictの`needs_input`、retry、checks、open PRはresource leaseを保持する。
 - GitHub publicationはrepository単位で直列化されるため、workerが2件完了してもcommit/push/PR操作は同時実行しない。
 - throughputより安全性を優先し、resource claim不足はpublish前監査で`needs_input`へ遷移する。
 - 実際のCPU、memory、disk、Codex利用枠はIssue内容とhost状態に依存し、自動testだけでは上限を決められない。

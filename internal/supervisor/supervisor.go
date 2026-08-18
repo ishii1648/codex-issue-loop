@@ -304,7 +304,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
 		switch issue.Status {
-		case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "publication_recovery_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		case "claiming", "claimed", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending", "publication_recovery_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 			if issue.RunID != "" {
 				exclude[issue.RunID] = true
 			}
@@ -324,7 +324,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
-		if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "pull_request_checks_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+		if issue.Status != "claiming" && issue.Status != "answer_claim_waiting" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "pull_request_checks_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 			continue
 		}
 		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
@@ -504,7 +504,15 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	if current.Status == "claiming" {
 		return l.claimAndRun(ctx, issue, current.RunID)
 	}
+	if current.Status == "answer_claim_waiting" {
+		return l.reacquireAnsweredClaim(ctx, issue, current)
+	}
 	if current.Status == "resume_pending" {
+		if current.ResourcePark != nil && current.ResourcePark.Kind == state.ResourceParkKindNeedsInput {
+			if reason := l.answeredResumeRemoteMismatch(issue, current); reason != "" {
+				return l.rejectAnsweredContinuation(current, reason)
+			}
+		}
 		if err := l.GitHub.MarkRunning(ctx, l.Config, current.Number); err != nil {
 			return failure.Wrap(failure.Transient, "mark resumed Issue running", err)
 		}
@@ -512,8 +520,14 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		current.RetryAfter = nil
 		_, err = l.Store.Update("worker_started", current.Number, current.RunID, map[string]string{"mode": "user_answer_resume"}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
+			if item == nil || item.Status != "resume_pending" || item.GitHubSync != "" || item.Lease == nil {
+				return fmt.Errorf("Issue #%d answered continuation is no longer pending", current.Number)
+			}
 			item.Status = "running"
 			item.RetryAfter = nil
+			if item.ResourcePark != nil && item.ResourcePark.Kind == state.ResourceParkKindNeedsInput && item.ResourcePark.Status == "resuming" {
+				item.ResourcePark.Status = "resumed"
+			}
 			item.UpdatedAt = l.now()
 			return nil
 		})
@@ -796,14 +810,33 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	case "needs_input":
 		requestID := state.NewID("req")
 		q := result.Question
-		_, err := l.Store.Update("input_requested", issue.Number, current.RunID, q, func(s *state.Snapshot) error {
+		parkID := state.NewID("park")
+		parkedAt := l.now()
+		owner := state.LeaseOwner{}
+		if current.Lease != nil {
+			owner = current.Lease.Owner
+		}
+		_, err := l.Store.Update("input_requested", issue.Number, current.RunID, map[string]any{
+			"question": q, "request_id": requestID, "resource_park_id": parkID,
+			"released_owner": owner, "parked_at": parkedAt,
+		}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
+			if item == nil || item.RunID != current.RunID || item.WorkerPID != 0 || item.WorkerPGID != 0 ||
+				item.Lease == nil || item.Lease.Owner != owner || item.ConflictRecovery != nil {
+				return fmt.Errorf("Issue #%d no longer has a parkable needs-input worker boundary", issue.Number)
+			}
+			if err := state.ParkIssueLease(item, owner, parkID, parkedAt); err != nil {
+				return err
+			}
+			item.ResourcePark.Kind = state.ResourceParkKindNeedsInput
+			item.ResourcePark.RequestID = requestID
 			item.Status, item.UpdatedAt = "needs_input", l.now()
 			item.FailureKind = ""
 			item.GitHubSync = "needs_input"
 			s.PendingRequests[requestID] = &state.Request{
 				ID: requestID, IssueNumber: issue.Number, Question: q.Text, Reason: q.Reason,
 				Recommended: q.RecommendedOption, Options: q.Options, AllowFreeText: q.AllowFreeText,
+				RunID: current.RunID, ResourceParkID: parkID, ReleasedOwner: &owner,
 				Status: "pending", CreatedAt: l.now(),
 			}
 			return nil
@@ -826,6 +859,139 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		return l.blockWorkerEnvironment(ctx, issue.Number, result.Summary)
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
+	}
+}
+
+func (l *Loop) answeredResumeRemoteMismatch(issue gh.Issue, current state.Issue) string {
+	labels := labelSet(issue.Labels)
+	needsInput := labels[l.Config.GitHub.NeedsInputLabel]
+	running := labels[l.Config.GitHub.RunningLabel]
+	if !strings.EqualFold(issue.State, "open") {
+		return "GitHub Issue is no longer open"
+	}
+	if needsInput == running {
+		return "GitHub needs-input/running labels are ambiguous"
+	}
+	if labels[l.Config.GitHub.DoneLabel] || labels[l.Config.GitHub.FailedLabel] ||
+		hasAnyLabel(labels, append(append([]string{}, l.Config.GitHub.ReadyLabels...), l.Config.GitHub.ExcludeLabels...)) {
+		return "GitHub Issue has an incompatible manual, terminal, or ready label"
+	}
+	if current.PullRequestURL != "" {
+		return "answered continuation unexpectedly has a saved Pull Request"
+	}
+	return ""
+}
+
+func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) error {
+	now := l.now()
+	_, err := l.Store.Update("answered_resume_rejected", current.Number, current.RunID, map[string]string{"reason": reason}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.Status != "resume_pending" || item.RunID != current.RunID || item.Lease == nil || current.Lease == nil || item.Lease.Owner != current.Lease.Owner {
+			return fmt.Errorf("Issue #%d answered continuation changed before rejection", current.Number)
+		}
+		if item.ResourcePark == nil || item.ResourcePark.Kind != state.ResourceParkKindNeedsInput || item.ResourcePark.Status != "resuming" {
+			return fmt.Errorf("Issue #%d answered continuation park is inconsistent", current.Number)
+		}
+		item.ResourcePark.Status = "resumed"
+		if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
+			return err
+		}
+		item.Status = "blocked"
+		item.LastError = "answered continuation rejected: " + reason
+		item.FailureKind = string(failure.Issue)
+		item.BlockedCause = &state.BlockedCause{Origin: "supervisor", Kind: "answer_resume", Resumable: false, Reason: reason, BlockedAt: now}
+		item.RetryAfter = nil
+		item.UpdatedAt = now
+		return nil
+	})
+	return failure.Wrap(failure.Supervisor, "persist rejected answered continuation", err)
+}
+
+var errAnsweredClaimWaiting = errors.New("answered needs-input claim is still waiting")
+
+func (l *Loop) reacquireAnsweredClaim(ctx context.Context, remoteIssue gh.Issue, current state.Issue) error {
+	if current.WorkerPID != 0 || current.WorkerPGID != 0 || current.Lease != nil || current.ResourcePark == nil ||
+		current.ResourcePark.Kind != state.ResourceParkKindNeedsInput || current.ResourcePark.Status != "parked" || current.PullRequestURL != "" {
+		return nil
+	}
+	labels := labelSet(remoteIssue.Labels)
+	if !strings.EqualFold(remoteIssue.State, "open") || !labels[l.Config.GitHub.NeedsInputLabel] || labels[l.Config.GitHub.RunningLabel] ||
+		labels[l.Config.GitHub.DoneLabel] || labels[l.Config.GitHub.FailedLabel] ||
+		hasAnyLabel(labels, append(append([]string{}, l.Config.GitHub.ReadyLabels...), l.Config.GitHub.ExcludeLabels...)) {
+		return nil
+	}
+	if l.Worktrees == nil || current.Worktree == "" || current.Branch == "" {
+		return nil
+	}
+	inspection, err := l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
+	if err != nil || !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists {
+		return nil
+	}
+	now := l.now()
+	_, err = l.Store.Update("answered_claim_acquired", current.Number, current.RunID, map[string]any{
+		"request_id": current.ResourcePark.RequestID, "resource_park_id": current.ResourcePark.ID,
+	}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.Status != "answer_claim_waiting" || item.RunID != current.RunID || item.WorkerPID != 0 || item.WorkerPGID != 0 || item.Lease != nil {
+			return errAnsweredClaimWaiting
+		}
+		request := snapshot.PendingRequests[item.ResourcePark.RequestID]
+		if request == nil || request.Status != "answered" {
+			return fmt.Errorf("Issue #%d answered request is missing", current.Number)
+		}
+		if err := state.ValidateNeedsInputPark(item, request); err != nil {
+			return err
+		}
+		slot, ok := availableSnapshotLeaseSlot(snapshot, l.Config.Queue.Concurrency, item.ResourcePark.OriginalLease.Slot, item.Number)
+		if !ok {
+			return errAnsweredClaimWaiting
+		}
+		if _, resumeErr := state.ResumeParkedLease(snapshot, item.Number, item.ResourcePark.ID, slot, now); resumeErr != nil {
+			var conflict state.LeaseConflictError
+			if errors.As(resumeErr, &conflict) {
+				return errAnsweredClaimWaiting
+			}
+			return resumeErr
+		}
+		item.Status = "resume_pending"
+		item.RetryAfter = nil
+		item.UpdatedAt = now
+		return nil
+	})
+	if errors.Is(err, errAnsweredClaimWaiting) {
+		return nil
+	}
+	return failure.Wrap(failure.Supervisor, "reacquire answered needs-input claim", err)
+}
+
+func availableSnapshotLeaseSlot(snapshot *state.Snapshot, limit, preferred, issueNumber int) (int, bool) {
+	if limit < 1 {
+		limit = 1
+	}
+	used := map[int]bool{}
+	for _, other := range snapshot.Issues {
+		if other == nil || other.Number == issueNumber || other.Lease == nil || !durableWorkerSlotOccupied(other.Status) {
+			continue
+		}
+		used[other.Lease.Slot] = true
+	}
+	if preferred >= 0 && preferred < limit && !used[preferred] {
+		return preferred, true
+	}
+	for slot := 0; slot < limit; slot++ {
+		if !used[slot] {
+			return slot, true
+		}
+	}
+	return -1, false
+}
+
+func durableWorkerSlotOccupied(status string) bool {
+	switch status {
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1258,7 +1424,7 @@ func (l *Loop) requestResourceCorrection(ctx context.Context, current state.Issu
 				{ID: "revise_diff", Label: "Revise the diff"},
 				{ID: "abandon", Label: "Abandon this work"},
 			},
-			AllowFreeText: true, Status: "pending", CreatedAt: l.now(),
+			AllowFreeText: true, ResumeStatus: "resume_pending", Status: "pending", CreatedAt: l.now(),
 		}
 		return nil
 	})
@@ -2197,6 +2363,7 @@ func (l *Loop) blockWorkerEnvironment(ctx context.Context, number int, reason st
 		if err := state.ParkIssueLease(item, owner, parkID, parkedAt); err != nil {
 			return err
 		}
+		item.ResourcePark.Kind = state.ResourceParkKindEnvironmentBlock
 		item.Status = "blocked"
 		item.LastError = cause.Error()
 		item.FailureKind = string(failure.Issue)
