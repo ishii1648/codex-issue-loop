@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func interruptedWorkspaceResumeFixture(t *testing.T) (Store, Issue, []byte) {
@@ -30,7 +32,7 @@ func interruptedWorkspaceResumeFixture(t *testing.T) (Store, Issue, []byte) {
 }
 
 func TestInterruptedWorkspaceResumeEvidenceFromZeitreise442Full27EventFixture(t *testing.T) {
-	store, issue, _ := interruptedWorkspaceResumeFixture(t)
+	store, issue, data := interruptedWorkspaceResumeFixture(t)
 	evidence, err := store.InterruptedWorkspaceResumeEvidence(issue)
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +43,85 @@ func TestInterruptedWorkspaceResumeEvidenceFromZeitreise442Full27EventFixture(t 
 		evidence.LeaseOwner != issue.Lease.Owner || evidence.LeaseSlot != issue.Lease.Slot || !evidence.LegacyLeaseRecovered ||
 		issue.SessionID != "" || issue.Session != nil {
 		t.Fatalf("evidence=%+v issue=%+v", evidence, issue)
+	}
+	var request Event
+	if err := json.Unmarshal(fixtureEventLines(data)[21], &request); err != nil {
+		t.Fatal(err)
+	}
+	if delay := request.Timestamp.Sub(issue.EnvironmentResume.ConfirmedAt); delay != 28*time.Millisecond+433*time.Microsecond {
+		t.Fatalf("request timestamp delay=%s", delay)
+	}
+}
+
+func TestInterruptedWorkspaceResumeEvidenceTimestampContract(t *testing.T) {
+	tests := []struct {
+		name      string
+		timestamp string
+		wantOK    bool
+	}{
+		{name: "equal compatibility", timestamp: "2026-08-18T06:02:12.482456Z", wantOK: true},
+		{name: "before", timestamp: "2026-08-18T06:02:12.482455Z"},
+		{name: "too late", timestamp: "2026-08-18T06:02:13.482457Z"},
+		{name: "zero", timestamp: "0001-01-01T00:00:00Z"},
+		{name: "invalid format", timestamp: "not-a-timestamp"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, issue, data := interruptedWorkspaceResumeFixture(t)
+			data = bytes.Replace(data, []byte(`"timestamp":"2026-08-18T06:02:12.510889Z"`), []byte(`"timestamp":"`+test.timestamp+`"`), 1)
+			if err := os.WriteFile(store.EventsPath(), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := store.InterruptedWorkspaceResumeEvidence(issue)
+			if test.wantOK && err != nil {
+				t.Fatalf("compatible timestamp was rejected: %v", err)
+			}
+			if !test.wantOK && err == nil {
+				t.Fatal("invalid timestamp was accepted")
+			}
+			if !test.wantOK && test.name != "invalid format" && !strings.Contains(err.Error(), "timestamp boundary") {
+				t.Fatalf("timestamp diagnostic=%v", err)
+			}
+		})
+	}
+}
+
+func TestInterruptedWorkspaceResumeEvidenceReportsFull27Boundary(t *testing.T) {
+	tests := []struct {
+		name string
+		from string
+		to   string
+		want string
+	}{
+		{
+			name: "timestamp", from: `"timestamp":"2026-08-18T06:02:12.510889Z"`,
+			to: `"timestamp":"2026-08-18T06:02:13.482457Z"`, want: "timestamp boundary",
+		},
+		{
+			name: "remote branch exists", from: `"RemoteBranchExists":false`,
+			to: `"RemoteBranchExists":true`, want: "reconciliation remote boundary",
+		},
+		{
+			name: "request payload", from: `"current_base_sha":"2222222222222222222222222222222222222222"`,
+			to: `"current_base_sha":"ffffffffffffffffffffffffffffffffffffffff"`, want: "request payload boundary",
+		},
+		{
+			name: "marker", from: `"resume_id":"resume_0733cc3d177d05f3","state":"environment_resume"`,
+			to: `"state":"environment_resume"`, want: "marker boundary",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, issue, data := interruptedWorkspaceResumeFixture(t)
+			data = bytes.Replace(data, []byte(test.from), []byte(test.to), 1)
+			if err := os.WriteFile(store.EventsPath(), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := store.InterruptedWorkspaceResumeEvidence(issue)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("boundary diagnostic=%v want=%q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -190,7 +271,16 @@ func TestInterruptedWorkspaceResumeEvidenceRejectsTamperedOrReorderedHistory(t *
 			return bytes.Replace(data, []byte(`"Head":"3333333333333333333333333333333333333333","Dirty"`), []byte(`"Head":"3333333333333333333333333333333333333333","RemoteHead":"3333333333333333333333333333333333333333","Dirty"`), 1)
 		}},
 		{name: "remote fields missing too late", mutate: func(data []byte) []byte {
-			return bytes.Replace(data, []byte(`,"RemoteHead":"3333333333333333333333333333333333333333"`), nil, 1)
+			return bytes.Replace(data, []byte(`,"RemoteHead":""`), nil, 1)
+		}},
+		{name: "remote branch unexpectedly exists", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"RemoteBranchExists":false`), []byte(`"RemoteBranchExists":true`), 1)
+		}},
+		{name: "late remote branch consistent", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"RemoteConsistent":false`), []byte(`"RemoteConsistent":true`), 1)
+		}},
+		{name: "late remote HEAD non-empty", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"RemoteHead":""`), []byte(`"RemoteHead":"3333333333333333333333333333333333333333"`), 1)
 		}},
 		{name: "pull requests array", mutate: func(data []byte) []byte {
 			return bytes.Replace(data, []byte(`"pull_requests":null`), []byte(`"pull_requests":[]`), 1)

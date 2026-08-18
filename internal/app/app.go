@@ -1560,6 +1560,10 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if interruptedWorkspaceRecovery && interruptedWorkspaceEvidence.WorktreeHead != "" && inspection.Head != interruptedWorkspaceEvidence.WorktreeHead {
 		return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume worktree HEAD changed; state was not changed", *issueNumber)}
 	}
+	if interruptedWorkspaceRecovery && interruptedWorkspaceEvidence.WorktreeHead != "" &&
+		(!inspection.Dirty || inspection.RemoteBranchExists || inspection.RemoteHead != "" || inspection.RemoteConsistent) {
+		return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume worktree is not the exact dirty local-only branch; state was not changed", *issueNumber)}
+	}
 	launchValidator := a.validateResumeWorkspace
 	if launchValidator == nil {
 		launchValidator = func(ctx context.Context, manager worktree.Manager, cfg config.Config, path, branch string) (worktree.LaunchValidation, error) {
