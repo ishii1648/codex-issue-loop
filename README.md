@@ -135,7 +135,7 @@ worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missin
 
 このコマンドは汎用failed retryではありません。manual exclusion、worker failure、security block、PR conflict、closed Issue、unknown failure provenance、missing/changed resultやworktreeをfail closedで拒否します。
 
-保存済みPRのrequired checks失敗でretry budgetを使い切ったIssueは、同じbranchへ外部修正をpushした後だけ、明示操作で既存PR lifecycleへ戻せます。旧headと異なるclean・fully pushedなhead、open Issue/PR、typed failure provenance、retained leaseを検証し、worker retry budgetはresetしません。
+保存済みPRのrequired checks失敗でretry budgetを使い切ったIssueは、同じbranchへ外部修正をpushした後だけ、明示操作で既存PR lifecycleへ戻せます。旧headと異なるclean・fully pushedなhead、same-repositoryのopen Issue/PR、typed failure provenance、retained leaseを検証し、worker retry budgetはresetしません。v0.6.20のpublisher decode bug後にfinal retryでprovenanceが失われたrecordだけは、欠落・重複・順序・run/generation・PR identityをdurable eventsから完全に再構成できる場合に限り同じ経路へ復帰できます。
 
 ```sh
 "$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --confirm-external-fix --json

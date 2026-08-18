@@ -261,7 +261,7 @@ agent-loop recover-publication --repo /absolute/path/to/repository --issue 123 -
 agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
 ```
 
-この操作は同じbranch/PRだけを`awaiting_checks`へ戻し、worker retry budgetをresetしない。checksがfailure、head未変更、dirty/unpushed worktree、active worker、pending request、manual/security exclusion、別branch/PR、closed-without-mergeでは拒否する。GitHub同期途中で停止した場合はstateやlabelを編集せず、supervisor再起動または同じコマンドで冪等に収束させる。leaseはmerge確認まで保持される。
+この操作はsame-repositoryの同じbranch/PRだけを`awaiting_checks`へ戻し、worker retry budgetをresetしない。v0.6.20のpublisher decode bug後にprovenanceを失ったrecordは、完全なlegacy durable event chainがある場合だけ互換復旧する。checksがfailure、head未変更、dirty/unpushed worktree、active worker、pending request、manual/security exclusion、fork、別branch/PR、closed-without-mergeでは拒否する。GitHub同期途中で停止した場合はstateやlabelを編集せず、supervisor再起動または同じコマンドで冪等に収束させる。leaseはmerge確認まで保持される。
 
 terminal state後にoperatorが保存branchからPRを作成・merge済みで、durable stateの`pull_request_url`が空のままretained leaseがqueueを止めている場合は、statusとGitHubのPRを確認して次を使う。
 

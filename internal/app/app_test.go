@@ -2616,7 +2616,7 @@ func TestRecoverChecksReusesExternallyFixedBranchAndIsIdempotent(t *testing.T) {
 	issueJSON := `{"number":102,"title":"checks","body":"","url":"https://example.test/issues/102","state":"OPEN","labels":[{"name":"codex-loop:failed"}],"assignees":[],"milestone":null,"comments":[]}`
 	writeFakeGH := func(conclusion string) {
 		t.Helper()
-		prJSON := fmt.Sprintf(`[{"number":447,"url":"https://example.test/pr/447","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":%q,"baseRefName":"main","headRefOid":%q,"mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":%q}]}]`, branch, newHead, conclusion)
+		prJSON := fmt.Sprintf(`[{"number":447,"url":"https://example.test/pr/447","state":"OPEN","isDraft":true,"mergedAt":null,"headRefName":%q,"baseRefName":"main","headRefOid":%q,"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"},"mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":%q}]}]`, branch, newHead, conclusion)
 		script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$1 $2" in
@@ -2774,7 +2774,7 @@ func TestRecoverChecksAuthoritativeStateValidationFailsClosed(t *testing.T) {
 		Issue: gh.Issue{Number: 102, State: "OPEN", Labels: []string{cfg.GitHub.FailedLabel}},
 		PullRequests: []gh.PullRequest{{
 			Number: 447, URL: current.PullRequestURL, State: "OPEN", HeadRefName: current.Branch,
-			BaseRefName: cfg.Git.BaseBranch, HeadSHA: "new-head", ChecksStatus: "success",
+			BaseRefName: cfg.Git.BaseBranch, HeadSHA: "new-head", ChecksStatus: "success", HeadRepository: cfg.GitHub.Repo,
 		}},
 	}
 	clone := func() gh.RemoteState {
@@ -2799,6 +2799,7 @@ func TestRecoverChecksAuthoritativeStateValidationFailsClosed(t *testing.T) {
 		{name: "changed branch", mutate: func(remote *gh.RemoteState) { remote.PullRequests[0].HeadRefName = "other" }},
 		{name: "changed head", mutate: func(remote *gh.RemoteState) { remote.PullRequests[0].HeadSHA = "other-head" }},
 		{name: "changed base", mutate: func(remote *gh.RemoteState) { remote.PullRequests[0].BaseRefName = "release" }},
+		{name: "fork", mutate: func(remote *gh.RemoteState) { remote.PullRequests[0].HeadRepository = "attacker/repo" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -66,10 +66,15 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	if current.Status != "failed" || current.GitHubSync != "" {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and failed before checks recovery (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
-	if !state.RecoverablePullRequestChecksFailure(current) {
-		return exitError{4, fmt.Errorf("Issue #%d does not have recoverable typed Pull Request checks retry exhaustion provenance", *issueNumber)}
-	}
+	legacyCompatibility := false
 	failureRecord := current.PullRequestChecksFailure
+	if !state.RecoverablePullRequestChecksFailure(current) {
+		failureRecord, err = store.LegacyPullRequestChecksFailure(*current, cfg.GitHub.Repo, cfg.Git.BaseBranch)
+		if err != nil {
+			return exitError{4, fmt.Errorf("Issue #%d does not have recoverable typed or exact legacy Pull Request checks retry exhaustion provenance: %w", *issueNumber, err)}
+		}
+		legacyCompatibility = true
+	}
 	if current.FailureKind != "issue" || current.PullRequestMerged || current.PullRequestURL != failureRecord.PullRequestURL ||
 		current.PullRequestNumber != failureRecord.PullRequestNumber || current.Branch != failureRecord.Branch {
 		return exitError{4, fmt.Errorf("Issue #%d Pull Request checks failure provenance is inconsistent with durable state", *issueNumber)}
@@ -77,11 +82,12 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	if !state.ValidID(current.RunID, "run_") || current.Worktree == "" || current.Branch == "" || current.PullRequestURL == "" {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, branch, and Pull Request", *issueNumber)}
 	}
-	if current.Lease == nil || current.Lease.Owner.RunID != current.RunID || current.Lease.Owner.Generation == 0 ||
-		len(current.Lease.DeclaredResources) == 0 || len(current.Lease.ResolvedResources) == 0 {
+	if current.Lease == nil || current.LeaseGeneration == 0 || current.Lease.Owner.RunID != current.RunID ||
+		current.Lease.Owner.Generation != current.LeaseGeneration ||
+		(!legacyCompatibility && len(current.Lease.DeclaredResources) == 0) || len(current.Lease.ResolvedResources) == 0 {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain its fenced resource lease", *issueNumber)}
 	}
-	if current.ConflictRecovery != nil || current.PublicationRecovery != nil || current.PublicationFailure != nil || current.BlockedCause != nil {
+	if (!legacyCompatibility && (current.ConflictRecovery != nil || current.BlockedCause != nil)) || current.PublicationRecovery != nil || current.PublicationFailure != nil {
 		return exitError{4, fmt.Errorf("Issue #%d has an incompatible manual, worker, security, publication, or conflict recovery state", *issueNumber)}
 	}
 	controller := a.ProcessController
@@ -130,6 +136,9 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	if pr.ChecksStatus != "pending" && pr.ChecksStatus != "success" && pr.ChecksStatus != "failure" {
 		return exitError{4, fmt.Errorf("Pull Request returned unknown checks status %q", pr.ChecksStatus)}
 	}
+	if legacyCompatibility && pr.ChecksStatus == "failure" {
+		return exitError{4, fmt.Errorf("legacy Pull Request checks recovery requires pending or successful replacement checks")}
+	}
 	now := time.Now().UTC()
 	generation := 1
 	if current.PullRequestChecksRecovery != nil {
@@ -166,6 +175,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	_, err = store.Update("pull_request_checks_recovery_requested", *issueNumber, current.RunID, map[string]any{
 		"recovery_id": recovery.ID, "generation": generation, "old_head_sha": recovery.OldHeadSHA,
 		"new_head_sha": recovery.NewHeadSHA, "checks_status": recovery.ChecksStatus, "operator_confirmed": true,
+		"legacy_compatibility": legacyCompatibility,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(*issueNumber)]
 		if item == nil || !reflect.DeepEqual(item, current) {
@@ -174,6 +184,10 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		item.Status = "pull_request_checks_recovery_pending"
 		item.GitHubSync = "pull_request_checks_recovery"
 		item.PullRequestChecksRecovery = recovery
+		if legacyCompatibility {
+			reconstructed := *failureRecord
+			item.PullRequestChecksFailure = &reconstructed
+		}
 		item.HeadSHA = pr.HeadSHA
 		item.RetryAfter = nil
 		item.UpdatedAt = now
@@ -219,7 +233,7 @@ func validatePullRequestChecksRecovery(cfg config.Config, current *state.Issue, 
 	}
 	pr := remote.PullRequests[0]
 	if pr.URL != current.PullRequestURL || pr.Number != current.PullRequestNumber || !strings.EqualFold(pr.State, "open") || pr.MergedAt != nil ||
-		pr.HeadRefName != current.Branch || pr.BaseRefName != cfg.Git.BaseBranch || pr.HeadSHA == "" ||
+		pr.HeadRefName != current.Branch || pr.BaseRefName != cfg.Git.BaseBranch || !strings.EqualFold(pr.HeadRepository, cfg.GitHub.Repo) || pr.HeadSHA == "" ||
 		pr.HeadSHA != inspection.Head || pr.HeadSHA != inspection.RemoteHead {
 		return gh.PullRequest{}, fmt.Errorf("saved Pull Request, branch, worktree, and remote head do not match")
 	}
@@ -244,7 +258,7 @@ func syncPullRequestChecksRecovery(ctx context.Context, store state.Store, cfg c
 	running := labels[strings.ToLower(cfg.GitHub.RunningLabel)]
 	if !strings.EqualFold(remote.Issue.State, "open") || failed == running ||
 		pr.URL != current.PullRequestURL || pr.Number != current.PullRequestNumber || !strings.EqualFold(pr.State, "open") || pr.MergedAt != nil ||
-		pr.HeadRefName != current.Branch || pr.BaseRefName != cfg.Git.BaseBranch || pr.HeadSHA != current.PullRequestChecksRecovery.NewHeadSHA ||
+		pr.HeadRefName != current.Branch || pr.BaseRefName != cfg.Git.BaseBranch || !strings.EqualFold(pr.HeadRepository, cfg.GitHub.Repo) || pr.HeadSHA != current.PullRequestChecksRecovery.NewHeadSHA ||
 		(pr.ChecksStatus != "pending" && pr.ChecksStatus != "success") {
 		return fmt.Errorf("refuse Pull Request checks recovery synchronization: authoritative Issue, Pull Request, head, or checks changed")
 	}
