@@ -325,7 +325,11 @@ func TestPublishFormatsCleanExistingPullRequestUsingAuthoritativeBase(t *testing
 	authoritativeBase := runGit(t, baseUpdate, "rev-parse", "HEAD")
 	fakeGH := filepath.Join(root, "gh")
 	script := `#!/bin/sh
-printf '[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"codex/issue-100-existing","headRefOid":"%s","headRepository":{"nameWithOwner":"owner/repo"}}]\n' "$PUBLISH_TEST_BASE" "$PUBLISH_TEST_HEAD"
+case "$*" in
+  *headRepositoryOwner*) ;;
+  *) exit 3 ;;
+esac
+printf '[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"codex/issue-100-existing","headRefOid":"%s","headRepository":{"id":"R_kgDOTdsezg","name":"repo"},"headRepositoryOwner":{"login":"owner"}}]\n' "$PUBLISH_TEST_BASE" "$PUBLISH_TEST_HEAD"
 `
 	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -350,8 +354,9 @@ printf '[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mer
 
 func TestPublishRefusesUnsafeExistingPullRequestStateBeforeFormatting(t *testing.T) {
 	for _, test := range []struct {
-		name  string
-		build func(base, head, branch string) string
+		name       string
+		build      func(base, head, branch string) string
+		wantDetail string
 	}{
 		{name: "closed-without-merge", build: func(base, head, branch string) string {
 			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"CLOSED","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"nameWithOwner":"owner/repo"}}]`, base, branch, head)
@@ -362,6 +367,27 @@ func TestPublishRefusesUnsafeExistingPullRequestStateBeforeFormatting(t *testing
 		}},
 		{name: "wrong-branch", build: func(base, head, _ string) string {
 			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"other-branch","headRefOid":"%s","headRepository":{"nameWithOwner":"owner/repo"}}]`, base, head)
+		}},
+		{name: "wrong-base", build: func(base, head, branch string) string {
+			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"release","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"}}]`, base, branch, head)
+		}},
+		{name: "fork", wantDetail: "repository=attacker/repo", build: func(base, head, branch string) string {
+			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"attacker"}}]`, base, branch, head)
+		}},
+		{name: "different-repository", wantDetail: "repository=owner/other", build: func(base, head, branch string) string {
+			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"name":"other"},"headRepositoryOwner":{"login":"owner"}}]`, base, branch, head)
+		}},
+		{name: "missing-owner", wantDetail: "repository= head=", build: func(base, head, branch string) string {
+			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"name":"repo"}}]`, base, branch, head)
+		}},
+		{name: "missing-repository", wantDetail: "repository= head=", build: func(base, head, branch string) string {
+			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepositoryOwner":{"login":"owner"}}]`, base, branch, head)
+		}},
+		{name: "missing-base-sha", wantDetail: "missing authoritative base or head SHA", build: func(_, head, branch string) string {
+			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"","headRefName":"%s","headRefOid":"%s","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"}}]`, branch, head)
+		}},
+		{name: "missing-head-sha", wantDetail: "missing authoritative base or head SHA", build: func(base, _, branch string) string {
+			return fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"}}]`, base, branch)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -390,6 +416,9 @@ func TestPublishRefusesUnsafeExistingPullRequestStateBeforeFormatting(t *testing
 			var mismatch publication.PullRequestMismatchError
 			if !errors.As(err, &mismatch) || audit.Reason != publication.ReasonPullRequestMismatch {
 				t.Fatalf("unsafe PR was not refused: audit=%+v err=%v", audit, err)
+			}
+			if test.wantDetail != "" && !strings.Contains(mismatch.Detail, test.wantDetail) {
+				t.Fatalf("mismatch detail=%q, want substring %q", mismatch.Detail, test.wantDetail)
 			}
 			data, readErr := os.ReadFile(filepath.Join(repo, "unsafe.go"))
 			if readErr != nil || !bytes.Equal(data, original) || runGit(t, repo, "rev-parse", "HEAD") != head {

@@ -37,9 +37,7 @@ type pullRequest struct {
 	BaseRefOID  string  `json:"baseRefOid"`
 	HeadRefName string  `json:"headRefName"`
 	HeadRefOID  string  `json:"headRefOid"`
-	HeadRepo    struct {
-		NameWithOwner string `json:"nameWithOwner"`
-	} `json:"headRepository"`
+	gh.PullRequestHeadRepository
 }
 
 func (m Manager) validateExistingPullRequest(ctx context.Context, cfg config.Config, git, worktreePath, branch, savedURL, fallbackBase string) (string, *pullRequest, error) {
@@ -47,7 +45,7 @@ func (m Manager) validateExistingPullRequest(ctx context.Context, cfg config.Con
 	if ghPath == "" {
 		ghPath = "gh"
 	}
-	out, err := m.run(ctx, ghPath, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "3", "--json", "url,state,mergedAt,baseRefName,baseRefOid,headRefName,headRefOid,headRepository")
+	out, err := m.run(ctx, ghPath, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "3", "--json", "url,state,mergedAt,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,headRepositoryOwner")
 	if err != nil {
 		return "", nil, publication.PullRequestMismatchError{Detail: "inspect existing Pull Request: " + err.Error()}
 	}
@@ -82,8 +80,9 @@ func (m Manager) validateExistingPullRequest(ctx context.Context, cfg config.Con
 	if !strings.EqualFold(pr.State, "open") {
 		return "", nil, publication.PullRequestMismatchError{Detail: "Pull Request is not open"}
 	}
-	if pr.HeadRefName != branch || pr.BaseRefName != cfg.Git.BaseBranch || !strings.EqualFold(pr.HeadRepo.NameWithOwner, cfg.GitHub.Repo) {
-		return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("Pull Request refs do not match: repository=%s head=%s base=%s", pr.HeadRepo.NameWithOwner, pr.HeadRefName, pr.BaseRefName)}
+	headRepository := pr.PullRequestHeadRepository.FullName()
+	if pr.HeadRefName != branch || pr.BaseRefName != cfg.Git.BaseBranch || !strings.EqualFold(headRepository, cfg.GitHub.Repo) {
+		return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("Pull Request refs do not match: repository=%s head=%s base=%s", headRepository, pr.HeadRefName, pr.BaseRefName)}
 	}
 	if pr.BaseRefOID == "" || pr.HeadRefOID == "" {
 		return "", nil, publication.PullRequestMismatchError{Detail: "Pull Request is missing authoritative base or head SHA"}

@@ -224,13 +224,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		MergeCommit *struct {
 			OID string `json:"oid"`
 		} `json:"mergeCommit"`
-		HeadRepository *struct {
-			NameWithOwner string `json:"nameWithOwner"`
-			Name          string `json:"name"`
-		} `json:"headRepository"`
-		HeadRepositoryOwner *struct {
-			Login string `json:"login"`
-		} `json:"headRepositoryOwner"`
+		PullRequestHeadRepository
 		MergeStateStatus  string        `json:"mergeStateStatus"`
 		StatusCheckRollup []checkRollup `json:"statusCheckRollup"`
 	}
@@ -238,15 +232,9 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		return RemoteState{}, fmt.Errorf("decode Pull Requests for branch %s: %w", branch, err)
 	}
 	for _, item := range raw {
-		mergeCommitSHA, headRepository := "", ""
+		mergeCommitSHA := ""
 		if item.MergeCommit != nil {
 			mergeCommitSHA = item.MergeCommit.OID
-		}
-		if item.HeadRepository != nil {
-			headRepository = item.HeadRepository.NameWithOwner
-			if headRepository == "" && item.HeadRepositoryOwner != nil && item.HeadRepositoryOwner.Login != "" && item.HeadRepository.Name != "" {
-				headRepository = item.HeadRepositoryOwner.Login + "/" + item.HeadRepository.Name
-			}
 		}
 		state.PullRequests = append(state.PullRequests, PullRequest{
 			Number: item.Number, URL: item.URL, State: item.State, IsDraft: item.IsDraft,
@@ -257,7 +245,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
 			MergeSHA:         mergeCommitSHA,
 			MergeCommitSHA:   mergeCommitSHA,
-			HeadRepository:   headRepository,
+			HeadRepository:   item.PullRequestHeadRepository.FullName(),
 		})
 	}
 	sort.Slice(state.PullRequests, func(i, j int) bool { return state.PullRequests[i].Number > state.PullRequests[j].Number })
