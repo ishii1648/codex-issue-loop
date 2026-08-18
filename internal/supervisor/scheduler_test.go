@@ -1115,7 +1115,7 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 		{
 			name:    "one worker needs input while the other completes",
 			results: map[int]worker.Result{1: needsInput, 2: completed("two done")},
-			want:    map[int]string{1: "needs_input", 2: "completed"}, leases: map[int]bool{1: true, 2: false}, pending: 1,
+			want:    map[int]string{1: "needs_input", 2: "completed"}, leases: map[int]bool{1: false, 2: false}, pending: 1,
 		},
 	}
 	for _, test := range tests {

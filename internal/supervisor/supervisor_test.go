@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1385,8 +1386,8 @@ func TestRunOncePersistsQuestion(t *testing.T) {
 		t.Fatal("GitHub was not marked needs-input")
 	}
 	snapshot, _ := loop.Store.Load()
-	if snapshot.Issues["1"].Status != "needs_input" || snapshot.Issues["1"].Lease == nil {
-		t.Fatalf("status=%s", snapshot.Issues["1"].Status)
+	if snapshot.Issues["1"].Status != "needs_input" || snapshot.Issues["1"].Lease != nil || snapshot.Issues["1"].ResourcePark == nil || snapshot.Issues["1"].ResourcePark.Kind != state.ResourceParkKindNeedsInput {
+		t.Fatalf("issue=%+v", snapshot.Issues["1"])
 	}
 	if goal := snapshot.Issues["1"].Goal; goal == nil || goal.Status != "blocked" || goal.TokensUsed != 123 || goal.TimeBudgetSeconds != 3600 {
 		t.Fatalf("goal=%+v", goal)
@@ -1395,9 +1396,87 @@ func TestRunOncePersistsQuestion(t *testing.T) {
 		t.Fatalf("requests=%d", len(snapshot.PendingRequests))
 	}
 	for id, request := range snapshot.PendingRequests {
-		if request.ID != id || request.Question != "Choose?" {
+		if request.ID != id || request.Question != "Choose?" || request.ResourceParkID != snapshot.Issues["1"].ResourcePark.ID || request.ReleasedOwner == nil {
 			t.Fatalf("request=%+v", request)
 		}
+	}
+}
+
+func TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Queue.Concurrency = 1
+	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.NeedsInputLabel}}
+	now := time.Date(2026, 8, 18, 6, 0, 0, 0, time.UTC)
+	originalOwner := state.LeaseOwner{RunID: "run_1", Generation: 1}
+	competingOwner := state.LeaseOwner{RunID: "run_2", Generation: 1}
+	answer := state.AnswerRecord{RequestID: "req_1", Question: "Continue?", Answer: "yes", AnsweredAt: now}
+	_, err := loop.Store.Update("fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		branch := "codex/issue-1-test"
+		item := &state.Issue{
+			Number: 1, Title: "Test", Status: "needs_input", RunID: "run_1", LeaseGeneration: 1,
+			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			SessionID: "session-1", Session: &state.WorkerSession{Backend: "codex", ID: "session-1"},
+			Goal:     &state.WorkerGoal{ThreadID: "session-1", Objective: "finish", Status: "blocked"},
+			Attempts: 2, Continuations: 1, Answers: []state.AnswerRecord{answer},
+			Lease: &state.ResourceLease{Owner: originalOwner, Slot: 0, DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-1", ReservedAt: now},
+		}
+		if parkErr := state.ParkIssueLease(item, originalOwner, "park_1", now.Add(time.Minute)); parkErr != nil {
+			return parkErr
+		}
+		item.ResourcePark.Kind = state.ResourceParkKindNeedsInput
+		item.ResourcePark.RequestID = "req_1"
+		item.Status = "answer_claim_waiting"
+		snapshot.Issues["1"] = item
+		snapshot.PendingRequests["req_1"] = &state.Request{
+			ID: "req_1", IssueNumber: 1, Question: "Continue?", RunID: "run_1", ResourceParkID: "park_1",
+			ReleasedOwner: &originalOwner, Status: "answered", Answer: "yes", CreatedAt: now, AnsweredAt: &now,
+		}
+		snapshot.Issues["2"] = &state.Issue{
+			Number: 2, Status: "running", RunID: "run_2", LeaseGeneration: 1,
+			Lease: &state.ResourceLease{Owner: competingOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-2", ReservedAt: now},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := loop.Store.Load()
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	waiting, _ := loop.Store.Load()
+	if waiting.Issues["1"].Status != "answer_claim_waiting" || waiting.Issues["1"].Lease != nil || waiting.Issues["2"].Lease.Owner != competingOwner {
+		t.Fatalf("conflicting wait changed a lease: %+v", waiting.Issues)
+	}
+	_, err = loop.Store.Update("competing_completed", 2, "run_2", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["2"]
+		if releaseErr := state.ReleaseIssueLease(item, competingOwner); releaseErr != nil {
+			return releaseErr
+		}
+		item.Status = "completed"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	resumed, _ := loop.Store.Load()
+	item := resumed.Issues["1"]
+	if item.Status != "resume_pending" || item.Lease == nil || item.Lease.Owner.Generation != originalOwner.Generation+1 || item.ResourcePark.Status != "resuming" || item.ResourcePark.ResumeOwner == nil || *item.ResourcePark.ResumeOwner != item.Lease.Owner {
+		t.Fatalf("resumed Issue=%+v", item)
+	}
+	if item.RunID != before.Issues["1"].RunID || item.Worktree != before.Issues["1"].Worktree || item.Branch != before.Issues["1"].Branch || item.SessionID != before.Issues["1"].SessionID || item.Attempts != 2 || item.Continuations != 1 || !reflect.DeepEqual(item.Answers, before.Issues["1"].Answers) || !reflect.DeepEqual(item.ResourcePark.OriginalLease, before.Issues["1"].ResourcePark.OriginalLease) {
+		t.Fatalf("continuation provenance changed: before=%+v after=%+v", before.Issues["1"], item)
+	}
+	github.issue.State = "CLOSED"
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("closed Issue rejection worked=%v err=%v", worked, err)
+	}
+	rejected, _ := loop.Store.Load()
+	if item := rejected.Issues["1"]; item.Status != "blocked" || item.Lease != nil || item.ResourcePark.Status != "resumed" || item.BlockedCause == nil || item.BlockedCause.Kind != "answer_resume" {
+		t.Fatalf("closed answered continuation was not rejected: %+v", item)
 	}
 }
 

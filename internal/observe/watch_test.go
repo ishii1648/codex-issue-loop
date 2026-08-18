@@ -62,6 +62,38 @@ func TestWatchReturnsEveryPendingRequestInRequestIDOrder(t *testing.T) {
 	}
 }
 
+func TestWatchReportsAnsweredClaimWaitingWithParkSnapshot(t *testing.T) {
+	store := newWatchStore(t)
+	now := time.Date(2026, 8, 18, 8, 0, 0, 0, time.UTC)
+	owner := state.LeaseOwner{RunID: "run_1", Generation: 1}
+	_, err := store.Update("answer_recorded", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		request := &state.Request{
+			ID: "req_1", IssueNumber: 1, Question: "Continue?", RunID: owner.RunID, ResourceParkID: "park_1",
+			ReleasedOwner: &owner, Status: "answered", Answer: "yes", CreatedAt: now, AnsweredAt: &now,
+		}
+		snapshot.PendingRequests[request.ID] = request
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, RunID: owner.RunID, Status: "answer_claim_waiting", LeaseGeneration: 1,
+			ResourcePark: &state.ResourceLeasePark{
+				ID: "park_1", Kind: state.ResourceParkKindNeedsInput, RequestID: request.ID, Status: "parked", ParkedAt: now,
+				OriginalLease: state.ResourceLease{Owner: owner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-1", ReservedAt: now},
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Wait(context.Background(), store, time.Second, 0, false)
+	if err != nil || result.Reason != "answer_claim_waiting" || len(result.PendingRequests) != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	park := result.Snapshot.Issues["1"].ResourcePark
+	if park == nil || park.RequestID != "req_1" || park.OriginalLease.BaseSHA != "base-1" || result.Snapshot.PendingRequests["req_1"].Status != "answered" {
+		t.Fatalf("watch lost parked answer provenance: %+v", result)
+	}
+}
+
 func TestFaultReadSubscribeReadRace(t *testing.T) {
 	store := newWatchStore(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

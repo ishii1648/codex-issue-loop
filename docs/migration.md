@@ -56,7 +56,7 @@ agent-loop start --repo /absolute/path/to/repository
 
 `migrate --rollback`は管理対象backupだけを受け付け、manifestのrestore先と全fileのSHA-256を検証する。schemaがinstall backupの対応versionと一致しない状態で`rollback`するとCLIは拒否する。migration backupとinstall backupのどちらかが欠ける場合は、片方だけを戻さず現versionで停止したまま復旧方針を決める。
 
-v4 stateにactive resource leaseが1件でもある間は、v3へrollbackできない。`needs_input`、retry待ち、checks/merge待ちもactive leaseである。対応Issueをterminalへ収束させてleaseが原子的に解放されたことをpreviewで確認してからrollbackする。
+v4 stateにactive resource leaseが1件でもある間は、v3へrollbackできない。retry待ち、checks/merge待ち、publication/PR conflictの`needs_input`もactive leaseである。通常workerの`needs_input`はpark済みclaimとしてactive admissionから外れるが、v3ではそのprovenanceを表現できないため、未解決の`resource_park`がある場合もrollbackしない。対応Issueをterminalへ収束させ、active leaseとpark済みclaimが解消されたことをpreviewで確認してからrollbackする。
 
 ## 旧credential file
 

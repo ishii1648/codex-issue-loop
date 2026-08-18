@@ -109,7 +109,7 @@ Codex Goalは、一つの具体的な目的と検証可能な完了条件を追�
 
 命名、局所的な実装、既存規約から推測できる事項、容易に戻せる内部構造については質問せず進める。また、`standard` / `extended` の分類をユーザーへ質問しない。
 
-`needs_input` は一過性の通知ではない。request IDと質問内容を永続状態へ保存し、ユーザーが回答するまでattention状態を保持する。監視taskが切断されても質問は失われない。
+`needs_input` は一過性の通知ではない。request IDと質問内容を永続状態へ保存し、通常workerではactive leaseをpark済みclaimへ移して、ユーザーが回答するまでattention状態とcontinuationを保持する。監視taskが切断されても質問は失われない。
 
 ## 8. 監視を取りこぼさない仕組み
 

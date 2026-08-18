@@ -648,7 +648,7 @@ func SelectReady(issues []Issue, snapshotIssues map[string]string, queue config.
 	ineligible := map[int]string{}
 	for _, issue := range issues {
 		status := snapshotIssues[fmt.Sprint(issue.Number)]
-		if status == "running" || status == "claimed" || status == "needs_input" || status == "completed" || status == "blocked" || status == "resolving_conflict" {
+		if status == "running" || status == "claimed" || status == "needs_input" || status == "answer_claim_waiting" || status == "resume_pending" || status == "completed" || status == "blocked" || status == "resolving_conflict" {
 			ineligible[issue.Number] = status
 		}
 	}

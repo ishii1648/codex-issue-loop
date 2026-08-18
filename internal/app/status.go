@@ -2,6 +2,7 @@ package app
 
 import (
 	"sort"
+	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
@@ -23,15 +24,24 @@ type resourceAdmissionStatus struct {
 }
 
 type parkedClaimStatus struct {
-	IssueNumber int               `json:"issue_number"`
-	RunID       string            `json:"run_id"`
-	ParkID      string            `json:"park_id"`
-	Status      string            `json:"status"`
-	Owner       state.LeaseOwner  `json:"released_owner"`
-	ResumeOwner *state.LeaseOwner `json:"resume_owner,omitempty"`
-	Slot        int               `json:"saved_slot"`
-	Resources   []string          `json:"saved_resources"`
-	BlockedBy   []resourceBlocker `json:"blocked_by"`
+	IssueNumber       int               `json:"issue_number"`
+	RunID             string            `json:"run_id"`
+	ParkID            string            `json:"park_id"`
+	Status            string            `json:"status"`
+	Kind              string            `json:"kind,omitempty"`
+	RequestID         string            `json:"request_id,omitempty"`
+	RequestStatus     string            `json:"request_status,omitempty"`
+	ClaimWaiting      bool              `json:"claim_waiting"`
+	Owner             state.LeaseOwner  `json:"released_owner"`
+	ResumeOwner       *state.LeaseOwner `json:"resume_owner,omitempty"`
+	Slot              int               `json:"saved_slot"`
+	DeclaredResources []string          `json:"saved_declared_resources"`
+	Resources         []string          `json:"saved_resources"`
+	ActualResources   []string          `json:"saved_actual_resources,omitempty"`
+	BaseSHA           string            `json:"saved_base_sha,omitempty"`
+	ReservedAt        time.Time         `json:"saved_reserved_at"`
+	ParkedAt          time.Time         `json:"parked_at"`
+	BlockedBy         []resourceBlocker `json:"blocked_by"`
 }
 
 type resourceBlocker struct {
@@ -96,8 +106,16 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 		}
 		claim := parkedClaimStatus{
 			IssueNumber: issue.Number, RunID: issue.RunID, ParkID: issue.ResourcePark.ID, Status: issue.ResourcePark.Status,
+			Kind: issue.ResourcePark.Kind, RequestID: issue.ResourcePark.RequestID, ClaimWaiting: issue.Status == "answer_claim_waiting",
 			Owner: issue.ResourcePark.OriginalLease.Owner, ResumeOwner: issue.ResourcePark.ResumeOwner, Slot: issue.ResourcePark.OriginalLease.Slot,
-			Resources: append([]string(nil), issue.ResourcePark.OriginalLease.ResolvedResources...), BlockedBy: []resourceBlocker{},
+			DeclaredResources: append([]string(nil), issue.ResourcePark.OriginalLease.DeclaredResources...),
+			Resources:         append([]string(nil), issue.ResourcePark.OriginalLease.ResolvedResources...),
+			ActualResources:   append([]string(nil), issue.ResourcePark.OriginalLease.ActualResources...),
+			BaseSHA:           issue.ResourcePark.OriginalLease.BaseSHA, ReservedAt: issue.ResourcePark.OriginalLease.ReservedAt,
+			ParkedAt: issue.ResourcePark.ParkedAt, BlockedBy: []resourceBlocker{},
+		}
+		if request := snapshot.PendingRequests[issue.ResourcePark.RequestID]; request != nil {
+			claim.RequestStatus = request.Status
 		}
 		if issue.ResourcePark.Status == "parked" {
 			blockers := map[int]*resourceBlocker{}
@@ -135,7 +153,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 		}
 		sort.Slice(claim.BlockedBy, func(i, j int) bool { return claim.BlockedBy[i].IssueNumber < claim.BlockedBy[j].IssueNumber })
 		parked = append(parked, claim)
-		if len(claim.BlockedBy) > 0 {
+		if len(claim.BlockedBy) > 0 || claim.ClaimWaiting {
 			waiting = append(waiting, claim)
 		}
 	}
@@ -165,7 +183,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 
 func occupiesWorkerSlot(status string) bool {
 	switch status {
-	case "claiming", "claimed", "running", "environment_resume_pending", "resolving_conflict":
+	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
 		return true
 	default:
 		return false

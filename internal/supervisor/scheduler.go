@@ -299,7 +299,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		if cooldown.ResetAt.After(s.pollAt) {
 			s.pollAt = cooldown.ResetAt
 		}
-		dueIssues := len(pendingIssues(snapshot, now)) > 0
+		dueIssues := len(pendingIssues(snapshot, now, s.loop.Config.Queue.Concurrency)) > 0
 		if (dueIssues || pollCandidates && s.hasFreeSlot()) && !cooldown.ResetAt.Equal(s.lastSuppressedReset) {
 			updated, stillActive, suppressErr := s.loop.RateLimits.Suppress(now)
 			if suppressErr != nil {
@@ -329,7 +329,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		}
 	}
 
-	for _, current := range pendingIssues(snapshot, now) {
+	for _, current := range pendingIssues(snapshot, now, s.loop.Config.Queue.Concurrency) {
 		if _, running := s.active[current.Number]; running || s.retryPending(current.Number) {
 			continue
 		}
@@ -589,7 +589,7 @@ func terminalWebhookStatus(status string) bool {
 
 func webhookRoutableStatus(status string) bool {
 	switch status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+	case "claiming", "claimed", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 		return true
 	default:
 		return false
@@ -712,7 +712,7 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 			activeLeaseNumbers[issue.Number] = true
 		}
 		switch issue.Status {
-		case "running", "claimed", "needs_input", "completed", "blocked", "resolving_conflict":
+		case "running", "claimed", "needs_input", "answer_claim_waiting", "resume_pending", "completed", "blocked", "resolving_conflict":
 			ineligible[issue.Number] = issue.Status
 		}
 	}
@@ -927,10 +927,10 @@ func (s *scheduler) markPollingIfIdle(snapshot state.Snapshot, message string) e
 	return s.loop.markPolling(message)
 }
 
-func pendingIssues(snapshot state.Snapshot, now time.Time) []state.Issue {
+func pendingIssues(snapshot state.Snapshot, now time.Time, concurrency int) []state.Issue {
 	result := make([]state.Issue, 0, len(snapshot.Issues))
 	for _, issue := range snapshot.Issues {
-		if issue == nil || !pendingIssue(*issue, now) {
+		if issue == nil || !pendingIssue(*issue, now) || (issue.Status == "answer_claim_waiting" && !answeredClaimAvailable(snapshot, *issue, concurrency)) {
 			continue
 		}
 		result = append(result, *issue)
@@ -940,10 +940,29 @@ func pendingIssues(snapshot state.Snapshot, now time.Time) []state.Issue {
 }
 
 func pendingIssue(issue state.Issue, now time.Time) bool {
-	if issue.Status != "claiming" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "pull_request_checks_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+	if issue.Status != "claiming" && issue.Status != "answer_claim_waiting" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "pull_request_checks_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
 		return false
 	}
 	return issue.RetryAfter == nil || !issue.RetryAfter.After(now)
+}
+
+func answeredClaimAvailable(snapshot state.Snapshot, issue state.Issue, concurrency int) bool {
+	if issue.ResourcePark == nil || issue.ResourcePark.Kind != state.ResourceParkKindNeedsInput || issue.ResourcePark.Status != "parked" || issue.Lease != nil {
+		return false
+	}
+	copy := snapshot
+	if _, ok := availableSnapshotLeaseSlot(&copy, concurrency, issue.ResourcePark.OriginalLease.Slot, issue.Number); !ok {
+		return false
+	}
+	for _, other := range snapshot.Issues {
+		if other == nil || other.Number == issue.Number || other.Lease == nil {
+			continue
+		}
+		if state.ResourcesConflict(issue.ResourcePark.OriginalLease.ResolvedResources, other.Lease.ResolvedResources) {
+			return false
+		}
+	}
+	return true
 }
 
 func issueUsesWorkerSlot(issue state.Issue) bool {

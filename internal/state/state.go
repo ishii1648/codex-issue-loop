@@ -116,6 +116,8 @@ type ResourceLease struct {
 // operators without participating in resource admission.
 type ResourceLeasePark struct {
 	ID            string        `json:"id"`
+	Kind          string        `json:"kind,omitempty"`
+	RequestID     string        `json:"request_id,omitempty"`
 	Status        string        `json:"status"`
 	OriginalLease ResourceLease `json:"original_lease"`
 	ParkedAt      time.Time     `json:"parked_at"`
@@ -336,18 +338,21 @@ type Option struct {
 }
 
 type Request struct {
-	ID            string     `json:"id"`
-	IssueNumber   int        `json:"issue_number"`
-	Question      string     `json:"question"`
-	Reason        string     `json:"reason,omitempty"`
-	Recommended   string     `json:"recommended_option,omitempty"`
-	Options       []Option   `json:"options,omitempty"`
-	AllowFreeText bool       `json:"allow_free_text"`
-	ResumeStatus  string     `json:"resume_status,omitempty"`
-	Status        string     `json:"status"`
-	Answer        string     `json:"answer,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	AnsweredAt    *time.Time `json:"answered_at,omitempty"`
+	ID             string      `json:"id"`
+	IssueNumber    int         `json:"issue_number"`
+	Question       string      `json:"question"`
+	Reason         string      `json:"reason,omitempty"`
+	Recommended    string      `json:"recommended_option,omitempty"`
+	Options        []Option    `json:"options,omitempty"`
+	AllowFreeText  bool        `json:"allow_free_text"`
+	ResumeStatus   string      `json:"resume_status,omitempty"`
+	RunID          string      `json:"run_id,omitempty"`
+	ResourceParkID string      `json:"resource_park_id,omitempty"`
+	ReleasedOwner  *LeaseOwner `json:"released_owner,omitempty"`
+	Status         string      `json:"status"`
+	Answer         string      `json:"answer,omitempty"`
+	CreatedAt      time.Time   `json:"created_at"`
+	AnsweredAt     *time.Time  `json:"answered_at,omitempty"`
 }
 
 type Recovery struct {
@@ -626,6 +631,11 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 		}
 	}
 	for _, issue := range s.Issues {
+		if issue != nil && issue.Status == "answer_claim_waiting" {
+			return "answer_claim_waiting", true
+		}
+	}
+	for _, issue := range s.Issues {
 		if RecoverablePullRequestChecksFailure(issue) && issue.Lease != nil {
 			return "recoverable_checks_failure", true
 		}
@@ -638,7 +648,7 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "publication_recovery_pending" || issue.Status == "pull_request_checks_recovery_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
+			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "answer_claim_waiting" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "publication_recovery_pending" || issue.Status == "pull_request_checks_recovery_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
 				return "", false
 			}
 		}
