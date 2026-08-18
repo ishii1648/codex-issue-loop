@@ -391,6 +391,154 @@ func TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner(t *testing.T) {
 	}
 }
 
+func TestResumedResourceParkAllowsRetryLeaseTransferAndRelease(t *testing.T) {
+	store := newStore(t)
+	now := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	_, originalOwner, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 146, RunID: "run_resumed", Slot: 0,
+		DeclaredResources: []string{"scheduler"}, ResolvedResources: []string{"scheduler"},
+		BaseSHA: "base-146", ReservedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("issue_blocked", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
+		issue := snapshot.Issues["146"]
+		issue.Status = "blocked"
+		return ParkIssueLease(issue, originalOwner, "park_146", now.Add(time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var resumeOwner LeaseOwner
+	if _, err := store.Update("environment_resume_started", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
+		var resumeErr error
+		resumeOwner, resumeErr = ResumeParkedLease(snapshot, 146, "park_146", 0, now.Add(2*time.Minute))
+		if resumeErr != nil {
+			return resumeErr
+		}
+		issue := snapshot.Issues["146"]
+		issue.Status = "retry_wait"
+		issue.ResourcePark.Status = "resumed"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var retryOwner LeaseOwner
+	if _, err := store.Update("worker_started", 146, "run_retry", nil, func(snapshot *Snapshot) error {
+		issue := snapshot.Issues["146"]
+		var transferErr error
+		retryOwner, transferErr = TransferIssueLease(issue, resumeOwner, "run_retry")
+		if transferErr != nil {
+			return transferErr
+		}
+		issue.RunID = "run_retry"
+		issue.Status = "running"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	transferred, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := transferred.Issues["146"]
+	if retryOwner.Generation != resumeOwner.Generation+1 || issue.Lease == nil || issue.Lease.Owner != retryOwner ||
+		issue.ResourcePark.Status != "resumed" || issue.ResourcePark.OriginalLease.Owner != originalOwner ||
+		issue.ResourcePark.ResumeOwner == nil || *issue.ResourcePark.ResumeOwner != resumeOwner || issue.Lease.BaseSHA != "base-146" {
+		t.Fatalf("retry transfer lost resumed park provenance: owner=%+v issue=%+v", retryOwner, issue)
+	}
+	if _, err := store.ReleaseLease(146, retryOwner, "retry complete"); err != nil {
+		t.Fatal(err)
+	}
+	released, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue = released.Issues["146"]
+	if issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.Status != "resumed" ||
+		issue.ResourcePark.OriginalLease.Owner != originalOwner || issue.ResourcePark.ResumeOwner == nil || *issue.ResourcePark.ResumeOwner != resumeOwner {
+		t.Fatalf("retry completion lost terminal park provenance: %+v", issue)
+	}
+}
+
+func TestFaultConcurrentResumedParkRetryTransferCreatesOneFencedOwner(t *testing.T) {
+	store := newStore(t)
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	_, originalOwner, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 146, RunID: "run_resumed", Slot: 0,
+		ResolvedResources: []string{"scheduler"}, ReservedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("issue_blocked", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
+		issue := snapshot.Issues["146"]
+		issue.Status = "blocked"
+		return ParkIssueLease(issue, originalOwner, "park_146", now.Add(time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var resumeOwner LeaseOwner
+	if _, err := store.Update("environment_resume_started", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
+		var resumeErr error
+		resumeOwner, resumeErr = ResumeParkedLease(snapshot, 146, "park_146", 0, now.Add(2*time.Minute))
+		if resumeErr != nil {
+			return resumeErr
+		}
+		issue := snapshot.Issues["146"]
+		issue.Status = "retry_wait"
+		issue.ResourcePark.Status = "resumed"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errors := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, runID := range []string{"run_retry_a", "run_retry_b"} {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, updateErr := store.Update("worker_started", 146, runID, nil, func(snapshot *Snapshot) error {
+				issue := snapshot.Issues["146"]
+				if _, transferErr := TransferIssueLease(issue, resumeOwner, runID); transferErr != nil {
+					return transferErr
+				}
+				issue.RunID = runID
+				issue.Status = "running"
+				return nil
+			})
+			errors <- updateErr
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errors)
+	succeeded := 0
+	failed := 0
+	for err := range errors {
+		if err == nil {
+			succeeded++
+		} else if strings.Contains(err.Error(), "stale lease owner") {
+			failed++
+		} else {
+			t.Fatalf("unexpected concurrent transfer error: %v", err)
+		}
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := loaded.Issues["146"]
+	if succeeded != 1 || failed != 1 || issue.LeaseGeneration != resumeOwner.Generation+1 || issue.Lease == nil ||
+		issue.ResourcePark == nil || issue.ResourcePark.Status != "resumed" || issue.ResourcePark.ResumeOwner == nil || *issue.ResourcePark.ResumeOwner != resumeOwner {
+		t.Fatalf("concurrent retry transfer did not converge: succeeded=%d failed=%d issue=%+v", succeeded, failed, issue)
+	}
+}
+
 func TestResourceParkValidationFailsClosed(t *testing.T) {
 	now := time.Date(2026, 8, 17, 11, 0, 0, 0, time.UTC)
 	valid := Issue{
@@ -420,6 +568,67 @@ func TestResourceParkValidationFailsClosed(t *testing.T) {
 			test.mutate(&issue)
 			if err := validateResourceLeases(Snapshot{Issues: map[string]*Issue{"1": &issue}}); err == nil {
 				t.Fatal("malformed resource park was accepted")
+			}
+		})
+	}
+}
+
+func TestResumedResourceParkValidationFailsClosed(t *testing.T) {
+	now := time.Date(2026, 8, 18, 11, 0, 0, 0, time.UTC)
+	originalOwner := LeaseOwner{RunID: "run_resumed", Generation: 1}
+	resumeOwner := LeaseOwner{RunID: "run_resumed", Generation: 2}
+	valid := Issue{
+		Number: 1, Status: "retry_wait", RunID: "run_resumed", LeaseGeneration: 2,
+		Lease: &ResourceLease{
+			Owner: resumeOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{"scheduler"}, ReservedAt: now.Add(2 * time.Minute),
+		},
+		ResourcePark: &ResourceLeasePark{
+			ID: "park_1", Status: "resumed", ParkedAt: now, ResumedAt: now.Add(2 * time.Minute), ResumeOwner: &resumeOwner,
+			OriginalLease: ResourceLease{Owner: originalOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{"scheduler"}, ReservedAt: now},
+		},
+	}
+	transferred := valid
+	transferred.RunID = "run_retry"
+	transferred.LeaseGeneration = 3
+	transferredLease := *valid.Lease
+	transferredLease.Owner = LeaseOwner{RunID: "run_retry", Generation: 3}
+	transferred.Lease = &transferredLease
+	if err := validateResourceLeases(Snapshot{Issues: map[string]*Issue{"1": &transferred}}); err != nil {
+		t.Fatalf("valid retry transfer was rejected: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Issue)
+	}{
+		{name: "resume owner changed run", mutate: func(issue *Issue) { issue.ResourcePark.ResumeOwner.RunID = "run_other" }},
+		{name: "same generation changed owner", mutate: func(issue *Issue) {
+			issue.RunID = "run_other"
+			issue.Lease.Owner.RunID = "run_other"
+		}},
+		{name: "released same generation changed run", mutate: func(issue *Issue) {
+			issue.RunID = "run_other"
+			issue.Lease = nil
+		}},
+		{name: "active lease predates resume", mutate: func(issue *Issue) {
+			issue.LeaseGeneration = 3
+			issue.RunID = "run_retry"
+			issue.Lease.Owner = LeaseOwner{RunID: "run_retry", Generation: 1}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := valid
+			lease := *valid.Lease
+			issue.Lease = &lease
+			park := *valid.ResourcePark
+			parkOriginal := valid.ResourcePark.OriginalLease
+			park.OriginalLease = parkOriginal
+			owner := *valid.ResourcePark.ResumeOwner
+			park.ResumeOwner = &owner
+			issue.ResourcePark = &park
+			test.mutate(&issue)
+			if err := validateResourceLeases(Snapshot{Issues: map[string]*Issue{"1": &issue}}); err == nil {
+				t.Fatal("ambiguous resumed resource park was accepted")
 			}
 		})
 	}
