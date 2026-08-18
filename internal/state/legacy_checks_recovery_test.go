@@ -124,7 +124,7 @@ func legacyChecksIssue() Issue {
 		Number: 91, Status: "failed", RunID: "run_final", Worktree: "/tmp/legacy-checks", Branch: "codex/issue-91-legacy",
 		Attempts: 3, PullRequestURL: "https://example.test/pr/91", PullRequestNumber: 91,
 		HeadSHA: "1111111111111111111111111111111111111111", FailureKind: "issue",
-		LastError:       "issue: worker retry limit reached: final verification failed",
+		LastError:       "worker retry limit reached: final verification failed",
 		LeaseGeneration: 3,
 		Lease:           &ResourceLease{Owner: LeaseOwner{RunID: "run_final", Generation: 3}, DeclaredResources: []string{RepositoryResource}, ResolvedResources: []string{RepositoryResource}},
 		ConflictRecovery: &ConflictRecovery{

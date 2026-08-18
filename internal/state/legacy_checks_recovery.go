@@ -194,7 +194,7 @@ func validateLegacyChecksChain(history []Event, issue Issue, repository, baseBra
 		FailureKind string `json:"failure_kind"`
 	}
 	if json.Unmarshal(history[14].Payload, &terminalFailure) != nil || terminalFailure.FailureKind != "issue" ||
-		!strings.HasPrefix(terminalFailure.Error, "issue: worker retry limit reached: ") || terminalFailure.Error != issue.LastError ||
+		!strings.HasPrefix(terminalFailure.Error, "worker retry limit reached: ") || terminalFailure.Error != issue.LastError ||
 		!exactStringPayload(history[15].Payload, "state", "failed") {
 		return nil, fmt.Errorf("legacy final worker retry exhaustion is inconsistent")
 	}
