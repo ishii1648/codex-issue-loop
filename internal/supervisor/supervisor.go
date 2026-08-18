@@ -573,8 +573,15 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		workerCfg := l.Config
 		workerCfg.RepoPath = current.Worktree
 		instruction := "The operator confirmed that the external environment prerequisite is resolved. Continue in the existing worktree, preserve all valid dirty changes and prior metadata, rerun the blocked verification, and return the schema-conforming result."
-		if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
-			instruction += " Previous environment block: " + current.BlockedCause.Reason
+		previousReason := ""
+		if current.EnvironmentResume != nil {
+			previousReason = current.EnvironmentResume.PreviousReason
+		}
+		if previousReason == "" && current.BlockedCause != nil {
+			previousReason = current.BlockedCause.Reason
+		}
+		if previousReason != "" {
+			instruction += " Previous environment block: " + previousReason
 		}
 		var result worker.Result
 		if l.canResume(current) {

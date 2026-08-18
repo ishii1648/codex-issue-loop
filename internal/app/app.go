@@ -1501,6 +1501,15 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	}
 	interruptedResume := current.Status == "blocked" && current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" &&
 		(current.EnvironmentResume.Status == "requested" || current.EnvironmentResume.Status == "github_synced")
+	interruptedWorkspaceRecovery := false
+	var interruptedWorkspaceEvidence *state.InterruptedWorkspaceResumeEvidence
+	if state.MayHaveInterruptedWorkspaceResumeEvidence(current) {
+		interruptedWorkspaceEvidence, err = store.InterruptedWorkspaceResumeEvidence(*current)
+		if err != nil {
+			return exitError{4, fmt.Errorf("verify interrupted missing-workspace environment resume: %w; state was not changed", err)}
+		}
+		interruptedWorkspaceRecovery = true
+	}
 	resumeIntent := interruptedResume || pendingResume || idempotentResume
 	var legacyCause *state.BlockedCause
 	var legacyRecovery *state.LegacyWorkerBlockRecovery
@@ -1511,7 +1520,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		}
 	}
 	legacyWorkerBlock := legacyCause != nil
-	if !legacyWorkerBlock && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
+	if !legacyWorkerBlock && !interruptedWorkspaceRecovery && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
 		return exitError{4, fmt.Errorf("Issue #%d is not a resumable worker environment block", *issueNumber)}
 	}
 	if current.ConflictRecovery != nil {
@@ -1606,6 +1615,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if err != nil {
 		return exitError{4, err}
 	}
+	if interruptedWorkspaceRecovery && (baseSHA != interruptedWorkspaceEvidence.BaseSHA || currentBaseSHA != interruptedWorkspaceEvidence.CurrentBaseSHA) {
+		return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume base SHA provenance changed; state was not changed", *issueNumber)}
+	}
 	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
 	remote, err := client.Inspect(ctx, cfg, *issueNumber, current.Branch)
 	if err != nil {
@@ -1633,7 +1645,18 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	}
 	runningLabel := labels[strings.ToLower(cfg.GitHub.RunningLabel)]
 	blocked := labels[blockedLabel]
-	if resumeIntent {
+	if interruptedWorkspaceRecovery {
+		resumeMarker := "<!-- codex-issue-loop:environment-resume:" + current.EnvironmentResume.ID + " -->"
+		failureMarker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", *issueNumber)
+		resumedComment, failedComment := false, false
+		for _, comment := range remote.Issue.Comments {
+			resumedComment = resumedComment || strings.Contains(comment, resumeMarker)
+			failedComment = failedComment || strings.Contains(comment, failureMarker)
+		}
+		if !blocked || runningLabel || !resumedComment || !failedComment {
+			return exitError{4, fmt.Errorf("Issue #%d GitHub state does not prove the interrupted missing-workspace resume", *issueNumber)}
+		}
+	} else if resumeIntent {
 		switch current.EnvironmentResume.Status {
 		case "requested":
 			if blocked == runningLabel {
@@ -1678,7 +1701,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		GitCommonDir: launch.CommonDir, MainCheckout: launch.MainCheckout, CapturedAt: now,
 	}
 	previousReason := current.LastError
-	if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
+	if interruptedWorkspaceRecovery {
+		previousReason = interruptedWorkspaceEvidence.PreviousReason
+	} else if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
 		previousReason = current.BlockedCause.Reason
 	} else if legacyCause != nil {
 		previousReason = legacyCause.Reason
@@ -1692,6 +1717,8 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			"resume_id": resumeID, "previous_reason": previousReason, "resource_park_id": resourceParkID(current), "parked_lease_reacquired": parkedClaim,
 			"legacy_worker_block": legacyWorkerBlock, "legacy_lease_recovered": legacyRecovery != nil, "interrupted_resume": interruptedResume,
 			"base_sha": baseSHA, "current_base_sha": currentBaseSHA,
+			"interrupted_workspace_recovery": interruptedWorkspaceRecovery,
+			"interrupted_blocked_cause":      current.BlockedCause,
 			"workspace_recovery": map[string]any{
 				"old_provenance_missing": workspaceBackfill,
 				"operator_confirmation":  map[string]any{"confirm_prerequisite_resolved": true},
@@ -1777,6 +1804,17 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			}
 			item.Status = "environment_resume_pending"
 			item.GitHubSync = "environment_resume"
+			if interruptedWorkspaceRecovery {
+				blockedAt := item.EnvironmentResume.ConfirmedAt
+				if item.ResourcePark != nil && !item.ResourcePark.ParkedAt.IsZero() {
+					blockedAt = item.ResourcePark.ParkedAt
+				}
+				item.BlockedCause = &state.BlockedCause{
+					Origin: "worker", Kind: "environment", Resumable: true,
+					Reason: interruptedWorkspaceEvidence.PreviousReason, BlockedAt: blockedAt,
+				}
+				item.LastError = interruptedWorkspaceEvidence.PreviousReason
+			}
 			if item.BlockedCause == nil && legacyWorkerBlock {
 				cause := *legacyCause
 				item.BlockedCause = &cause
