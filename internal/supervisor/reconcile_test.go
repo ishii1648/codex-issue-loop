@@ -508,6 +508,16 @@ func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing
 		t.Fatal(err)
 	}
 	branch := "codex/issue-1-legacy-block"
+	_, err = loop.Store.Update("worker_started", 1, owner.RunID, map[string]string{"worktree": loop.Config.RepoPath, "branch": branch}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "running"
+		item.Branch = branch
+		item.Worktree = loop.Config.RepoPath
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	legacyError := "worker blocked: localhost listen denied"
 	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["1"]
@@ -532,8 +542,9 @@ func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing
 	_, err = loop.Store.Update("startup_reconciled", 1, owner.RunID, map[string]string{
 		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
 	}, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"].LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
-		return nil
+		item := snapshot.Issues["1"]
+		item.LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
+		return state.ReleaseIssueLease(item, owner)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -565,8 +576,12 @@ func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing
 	if item.BlockedCause.Reason != "localhost listen denied" || !item.BlockedCause.BlockedAt.Equal(expectedCause.BlockedAt) {
 		t.Fatalf("legacy reason/time were not preserved: %+v", item.BlockedCause)
 	}
-	if item.Lease == nil || item.Lease.Owner != owner || item.Lease.BaseSHA != "base-sha" {
-		t.Fatalf("legacy resource lease was lost: %+v", item.Lease)
+	if item.Lease != nil {
+		t.Fatalf("legacy lease released by the old reconciliation unexpectedly returned: %+v", item.Lease)
+	}
+	recovery, err := loop.Store.LegacyWorkerBlockRecoveryEvidence(*item)
+	if err != nil || recovery.BaseSHA != "base-sha" || !reflect.DeepEqual(&recovery.Cause, item.BlockedCause) {
+		t.Fatalf("typed legacy recovery evidence=%+v err=%v", recovery, err)
 	}
 }
 

@@ -617,15 +617,36 @@ esac
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
+	_, owner, err := store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 8, Title: "Network", RunID: "run_8", Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+		BaseSHA: baseSHA, ReservedAt: time.Now().UTC().Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("worker_started", 8, owner.RunID, map[string]string{"worktree": repo, "branch": branch}, func(s *state.Snapshot) error {
+		item := s.Issues["8"]
+		item.Status = "running"
+		item.Branch = branch
+		item.Worktree = repo
+		item.SessionID = "session-8"
+		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-8"}
+		item.DeclaredResources = []string{state.RepositoryResource}
+		item.ActualResources = []string{state.RepositoryResource}
+		item.Answers = []state.AnswerRecord{{RequestID: "req-8", Question: "Continue?", Answer: "yes", AnsweredAt: time.Now().UTC()}}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	legacyError := "worker blocked: localhost bind denied"
 	_, err = store.Update("issue_blocked", 8, "run_8", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(s *state.Snapshot) error {
-		s.Issues["8"] = &state.Issue{
-			Number: 8, Status: "blocked", RunID: "run_8", Branch: branch, Worktree: repo,
-			SessionID: "session-8", Session: &state.WorkerSession{Backend: "codex", ID: "session-8"},
-			DeclaredResources: []string{state.RepositoryResource}, ActualResources: []string{state.RepositoryResource},
-			Answers:     []state.AnswerRecord{{RequestID: "req-8", Question: "Continue?", Answer: "yes", AnsweredAt: time.Now().UTC()}},
-			FailureKind: "issue", LastError: legacyError, UpdatedAt: time.Now().UTC(),
-		}
+		item := s.Issues["8"]
+		item.Status = "blocked"
+		item.FailureKind = "issue"
+		item.LastError = legacyError
+		item.UpdatedAt = time.Now().UTC()
 		return nil
 	})
 	if err != nil {
@@ -638,10 +659,55 @@ esac
 	_, err = store.Update("startup_reconciled", 8, "run_8", map[string]string{
 		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
 	}, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["8"].LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
+		item := snapshot.Issues["8"]
+		item.LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
+		return state.ReleaseIssueLease(item, owner)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedCause := &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "localhost bind denied"}
+	legacySnapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyCause, err := store.LegacyWorkerBlockProvenance(*legacySnapshot.Issues["8"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedCause.BlockedAt = historyCause.BlockedAt
+	_, err = store.Update("startup_reconciled", 8, "run_8", map[string]string{
+		"previous_status": "blocked", "status": "blocked", "reason": "supervisor-owned worker environment block provenance preserved",
+	}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["8"]
+		item.LastError = legacyError
+		item.BlockedCause = typedCause
 		return nil
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	_, competingOwner, err := store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 99, Title: "Competing", RunID: "run_99", Slot: 1,
+		ResolvedResources: []string{"host"}, BaseSHA: baseSHA, ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflicted, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conflictOut, conflictErr bytes.Buffer
+	conflictApp := App{Out: &conflictOut, Err: &conflictErr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	if code := conflictApp.Run(context.Background(), []string{"resume-blocked", "--repo", repo, "--issue", "8", "--confirm-prerequisite-resolved", "--json"}); code == 0 || !strings.Contains(conflictErr.String(), "cannot recover repo:*") {
+		t.Fatalf("competing lease was accepted: code=%d stdout=%s stderr=%s", code, conflictOut.String(), conflictErr.String())
+	}
+	afterConflict, err := store.Load()
+	if err != nil || afterConflict.StateRevision != conflicted.StateRevision || afterConflict.Issues["8"].Lease != nil {
+		t.Fatalf("rejected competing lease changed recovery state: before=%d after=%d issue=%+v err=%v", conflicted.StateRevision, afterConflict.StateRevision, afterConflict.Issues["8"], err)
+	}
+	if _, err := store.ReleaseLease(99, competingOwner, "test conflict cleared"); err != nil {
 		t.Fatal(err)
 	}
 	blockedSnapshot, err := store.Load()
@@ -696,7 +762,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(calls), "--remove-label blocked") || strings.Contains(string(calls), "--remove-label do-not-automate") || !strings.Contains(string(calls), "codex-issue-loop:environment-resume:") {
+	if !strings.Contains(string(calls), "--remove-label blocked") || strings.Contains(string(calls), "--remove-label do-not-automate") || strings.Count(string(calls), "codex-issue-loop:environment-resume:") != 1 {
 		t.Fatalf("calls=%s", calls)
 	}
 	result, audit, err := (publish.Manager{GitPath: "/usr/bin/git", GHPath: fakeGH}).Publish(
@@ -858,7 +924,7 @@ esac
 	}
 }
 
-func TestResumeBlockedFailsClosedWhenConfiguredBaseSHAIsUnavailable(t *testing.T) {
+func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -877,8 +943,8 @@ func TestResumeBlockedFailsClosedWhenConfiguredBaseSHAIsUnavailable(t *testing.T
 	remotePath := filepath.Join(filepath.Dir(repo), "missing-base-remote.git")
 	runGitApp(t, filepath.Dir(repo), "init", "--bare", remotePath)
 	runGitApp(t, repo, "remote", "add", "origin", remotePath)
-	// Only the worker branch exists remotely. In particular, origin/main is
-	// unavailable and must not be replaced with HEAD as a publication base.
+	// Only the worker branch exists remotely. Recovery must use the invalid
+	// durable lease base below rather than silently replacing it with HEAD.
 	runGitApp(t, repo, "push", "-u", "origin", branch)
 
 	ghLog := filepath.Join(filepath.Dir(repo), "missing-base-gh-calls.log")
@@ -907,13 +973,33 @@ func TestResumeBlockedFailsClosedWhenConfiguredBaseSHAIsUnavailable(t *testing.T
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
+	missingBaseSHA := strings.Repeat("0", 40)
+	_, owner, err := store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 9, Title: "Missing base", RunID: "run_9", Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, BaseSHA: missingBaseSHA, ReservedAt: time.Now().UTC().Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("worker_started", 9, owner.RunID, map[string]string{"worktree": cfg.RepoPath, "branch": branch}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["9"]
+		item.Status = "running"
+		item.Branch = branch
+		item.Worktree = cfg.RepoPath
+		item.SessionID = "session-9"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	blockedAt := time.Now().UTC()
 	legacyError := "issue: worker blocked: legacy environment"
 	_, err = store.Update("issue_blocked", 9, "run_9", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["9"] = &state.Issue{
-			Number: 9, Status: "blocked", RunID: "run_9", Branch: branch, Worktree: cfg.RepoPath,
-			SessionID: "session-9", FailureKind: "issue", LastError: legacyError, UpdatedAt: blockedAt,
-		}
+		item := snapshot.Issues["9"]
+		item.Status = "blocked"
+		item.FailureKind = "issue"
+		item.LastError = legacyError
+		item.UpdatedAt = blockedAt
 		return nil
 	})
 	if err != nil {
@@ -923,15 +1009,28 @@ func TestResumeBlockedFailsClosedWhenConfiguredBaseSHAIsUnavailable(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = store.Update("startup_reconciled", 9, owner.RunID, map[string]string{
+		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
+	}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["9"]
+		item.LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
+		return state.ReleaseIssueLease(item, owner)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	before, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.LegacyWorkerBlockRecoveryEvidence(*before.Issues["9"]); err != nil {
+		t.Fatalf("legacy recovery fixture is invalid: %v", err)
+	}
 	var out, stderr bytes.Buffer
 	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
 	code := a.Run(context.Background(), []string{"resume-blocked", "--repo", cfg.RepoPath, "--issue", "9", "--confirm-prerequisite-resolved", "--json"})
-	if code == 0 || !strings.Contains(stderr.String(), "resolve configured base branch") {
-		t.Fatalf("missing configured base was not rejected: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	if code == 0 || !strings.Contains(stderr.String(), "verify publication base SHA") || !strings.Contains(stderr.String(), missingBaseSHA) {
+		t.Fatalf("missing recovered lease base was not rejected: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
 	after, err := store.Load()
 	if err != nil {

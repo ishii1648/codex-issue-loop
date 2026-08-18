@@ -1419,8 +1419,12 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		(current.EnvironmentResume.Status == "requested" || current.EnvironmentResume.Status == "github_synced")
 	resumeIntent := interruptedResume || pendingResume
 	var legacyCause *state.BlockedCause
-	if state.MayHaveLegacyWorkerBlockProvenance(current) {
+	var legacyRecovery *state.LegacyWorkerBlockRecovery
+	if state.MayHaveLegacyWorkerBlockRecoveryProvenance(current) {
 		legacyCause, _ = store.LegacyWorkerBlockProvenance(*current)
+		if current.Lease == nil {
+			legacyRecovery, _ = store.LegacyWorkerBlockRecoveryEvidence(*current)
+		}
 	}
 	legacyWorkerBlock := legacyCause != nil
 	if !legacyWorkerBlock && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
@@ -1429,7 +1433,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if current.ConflictRecovery != nil {
 		return exitError{4, fmt.Errorf("Issue #%d is a Pull Request conflict block; use agent-loop retry", *issueNumber)}
 	}
-	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && !legacyWorkerBlock && !interruptedResume) {
+	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && legacyRecovery == nil && !interruptedResume) {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
 	}
 	controller := a.ProcessController
@@ -1463,7 +1467,13 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		}
 		current.EnvironmentResume.BaseSHA = baseSHA
 	}
-	baseSHA, err := environmentResumeBaseSHA(ctx, entry.Commands["git"], cfg, current, inspection)
+	publicationState := current
+	if current.Lease == nil && legacyRecovery != nil {
+		copy := *current
+		copy.Lease = &state.ResourceLease{BaseSHA: legacyRecovery.BaseSHA}
+		publicationState = &copy
+	}
+	baseSHA, err := environmentResumeBaseSHA(ctx, entry.Commands["git"], cfg, publicationState, inspection)
 	if err != nil {
 		return exitError{4, err}
 	}
@@ -1545,7 +1555,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			eventType = "environment_resume_recovered"
 		}
 		_, err = store.Update(eventType, *issueNumber, current.RunID, map[string]any{
-			"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock, "interrupted_resume": interruptedResume, "base_sha": baseSHA,
+			"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock, "legacy_lease_recovered": legacyRecovery != nil, "interrupted_resume": interruptedResume, "base_sha": baseSHA,
 		}, func(s *state.Snapshot) error {
 			if s.StateRevision != snapshot.StateRevision {
 				return fmt.Errorf("Issue #%d durable state changed while environment resume was being prepared", *issueNumber)
@@ -1558,13 +1568,39 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			if item.Worktree != current.Worktree || item.Branch != current.Branch || item.PullRequestURL != current.PullRequestURL || !reflect.DeepEqual(item.Lease, current.Lease) {
 				return fmt.Errorf("Issue #%d worktree, branch, Pull Request, or resource lease changed while environment resume was being prepared", *issueNumber)
 			}
+			transactionPGID := item.WorkerPGID
+			if transactionPGID <= 1 {
+				transactionPGID = item.WorkerPID
+			}
+			if !reflect.DeepEqual(item.BlockedCause, current.BlockedCause) || item.WorkerPID != current.WorkerPID || item.WorkerPGID != current.WorkerPGID ||
+				controller.Alive(item.WorkerPID) || controller.GroupAlive(transactionPGID) {
+				return fmt.Errorf("Issue #%d block provenance or worker process changed while environment resume was being prepared", *issueNumber)
+			}
+			for _, request := range s.PendingRequests {
+				if request != nil && request.IssueNumber == *issueNumber && request.Status == "pending" {
+					return fmt.Errorf("Issue #%d gained a pending manual answer request while environment resume was being prepared", *issueNumber)
+				}
+			}
+			if item.Lease == nil && legacyRecovery != nil {
+				if legacyRecovery.BaseSHA != baseSHA || !reflect.DeepEqual(&legacyRecovery.Cause, legacyCause) ||
+					(item.BlockedCause != nil && !reflect.DeepEqual(item.BlockedCause, &legacyRecovery.Cause)) {
+					return fmt.Errorf("Issue #%d legacy recovery evidence changed while environment resume was being prepared", *issueNumber)
+				}
+			}
+			if item.Lease == nil && (legacyRecovery != nil || interruptedResume) {
+				for _, other := range s.Issues {
+					if other != nil && other.Number != item.Number && other.Lease != nil {
+						return fmt.Errorf("Issue #%d cannot recover repo:* while Issue #%d retains a resource lease", *issueNumber, other.Number)
+					}
+				}
+			}
 			item.Status = "environment_resume_pending"
 			item.GitHubSync = "environment_resume"
 			if item.BlockedCause == nil && legacyWorkerBlock {
 				cause := *legacyCause
 				item.BlockedCause = &cause
 			}
-			if item.Lease == nil && (legacyWorkerBlock || interruptedResume) {
+			if item.Lease == nil && (legacyRecovery != nil || interruptedResume) {
 				item.LeaseGeneration++
 				owner := state.LeaseOwner{RunID: item.RunID, Generation: item.LeaseGeneration}
 				item.Lease = &state.ResourceLease{
