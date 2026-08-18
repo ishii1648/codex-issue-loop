@@ -1651,12 +1651,14 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if interruptedWorkspaceRecovery {
 		resumeMarker := "<!-- codex-issue-loop:environment-resume:" + current.EnvironmentResume.ID + " -->"
 		failureMarker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", *issueNumber)
-		resumedComment, failedComment := false, false
+		resumeMarkers, expectedResumeMarkers, failureMarkers, expectedFailureMarkers := 0, 0, 0, 0
 		for _, comment := range remote.Issue.Comments {
-			resumedComment = resumedComment || strings.Contains(comment, resumeMarker)
-			failedComment = failedComment || strings.Contains(comment, failureMarker)
+			resumeMarkers += strings.Count(comment, "<!-- codex-issue-loop:environment-resume:")
+			expectedResumeMarkers += strings.Count(comment, resumeMarker)
+			failureMarkers += strings.Count(comment, "<!-- codex-issue-loop:failed:")
+			expectedFailureMarkers += strings.Count(comment, failureMarker)
 		}
-		if !blocked || runningLabel || !resumedComment || !failedComment {
+		if !blocked || runningLabel || resumeMarkers != 1 || expectedResumeMarkers != 1 || failureMarkers != 1 || expectedFailureMarkers != 1 {
 			return exitError{4, fmt.Errorf("Issue #%d GitHub state does not prove the interrupted missing-workspace resume", *issueNumber)}
 		}
 	} else if resumeIntent {

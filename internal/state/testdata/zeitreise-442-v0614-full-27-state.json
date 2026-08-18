@@ -1,0 +1,42 @@
+{
+  "number": 442,
+  "title": "Sanitized zeitreise issue",
+  "status": "blocked",
+  "run_id": "run_adaf3142bd207b24",
+  "attempts": 1,
+  "continuations": 2,
+  "execution_profile": "extended",
+  "lease_generation": 2,
+  "lease": {
+    "owner": {"run_id": "run_adaf3142bd207b24", "generation": 2},
+    "slot": 0,
+    "declared_resources": [],
+    "resolved_resources": ["repo:*"],
+    "base_sha": "1111111111111111111111111111111111111111",
+    "reserved_at": "2026-08-17T12:33:00Z"
+  },
+  "declared_resources": ["repo:*"],
+  "branch": "codex/issue-442-sanitized",
+  "worktree": "/sanitized/worktrees/zeitreise/issue-442",
+  "session_id": "session_fixture_zeitreise_442",
+  "session": {"backend": "codex", "id": "session_fixture_zeitreise_442"},
+  "worker_identity": {"backend": "codex", "runtime_version": "sanitized-version", "provider": "openai", "requested_model": "sanitized-model", "resolved_model": "sanitized-model"},
+  "failure_kind": "issue",
+  "last_error": "worker workspace validation failed for /sanitized/worktrees/zeitreise/issue-442: saved workspace provenance is missing",
+  "blocked_cause": {
+    "origin": "supervisor",
+    "kind": "worker_workspace",
+    "resumable": false,
+    "reason": "worker workspace validation failed for /sanitized/worktrees/zeitreise/issue-442: saved workspace provenance is missing",
+    "blocked_at": "2026-08-17T12:33:04Z"
+  },
+  "environment_resume": {
+    "id": "resume_0733cc3d177d05f3",
+    "status": "running",
+    "confirmed_at": "2026-08-17T12:33:00Z",
+    "previous_reason": "localhost listen denied",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "current_base_sha": "2222222222222222222222222222222222222222"
+  },
+  "updated_at": "2026-08-17T12:33:04Z"
+}
