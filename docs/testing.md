@@ -43,8 +43,10 @@ make test-race
 | disk容量reserveでのblocked化 | `TestFaultDiskSafetyReserveBlocksSupervisor` |
 | localhost-only configの閉じたallowlistと不整合拒否 | `TestLoadLocalhostOnlyCommandNetworkIsClosedAndOptIn` |
 | Codex proxy/tool隔離argvとcapability検出 | `TestCodexLocalhostNetworkArgumentsAreFailClosed`、`TestCodexProbeDetectsLocalhostNetworkProxyCapability` |
-| worker環境blockedのsession/resource保持と同一worktree resume | `TestWorkerEnvironmentBlockPreservesContinuationAndResourceState`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
-| operator resumeの冪等性・dirty保持・手動block拒否・typed legacy lost lease回復 | `TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestTypedLegacyWorkerBlockRecoveryFromMissingLeaseFixture`、`TestTypedLegacyWorkerBlockRequiresExactDurableCause`、`TestLegacyWorkerBlockRecoveryRequiresSameRunLeaseWorktreeAndBranch`、`TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
+| worker環境blockedのlease park、continuation保持、後続`repo:*` queue継続 | `TestWorkerEnvironmentBlockParksLeaseAndPreservesContinuationState`、`TestWorkerEnvironmentBlockParkAllowsFollowingRepositoryIssue`、`TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration` |
+| 既存typed blockのstartup parkとGitHub block同期crash冪等性 | `TestStartupReconciliationParksExistingTypedEnvironmentBlock`、`TestFaultWorkerEnvironmentParkSurvivesGitHubSyncCrashIdempotently` |
+| park済みoperator resumeの競合拒否・新generation・dirty/session/Goal/answer保持・GitHub同期crash冪等性 | `TestFaultResumeBlockedReacquiresParkedLeaseOnceAcrossGitHubSyncFailure`、`TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
+| park/legacy resumeのfail-closed・typed legacy lost lease回復 | `TestResourceParkValidationFailsClosed`、`TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestTypedLegacyWorkerBlockRecoveryFromMissingLeaseFixture`、`TestTypedLegacyWorkerBlockRequiresExactDurableCause`、`TestLegacyWorkerBlockRecoveryRequiresSameRunLeaseWorktreeAndBranch`、`TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
 | 手動merge済みPR adoptionのfail-closed検証・lease解放・冪等性 | `TestValidateMergedPullRequestAdoptionFailsClosed`、`TestAdoptMergedPullRequestReleasesLeaseAndIsIdempotent` |
 
 ## 追加の部分障害と境界
@@ -55,6 +57,7 @@ make test-race
 | GitHub label/comment同期の途中停止 | `TestFaultPartialLabelCommentSyncCanBeRetried`、`TestFaultGitHubSyncPartialFailureIsRetried` |
 | merged PR adoptionのdone同期前停止とsupervisor再起動 | `TestRestartCompletesRequestedMergedPullRequestAdoption` |
 | environment resume保存とstartup/periodic reconciliationの競合 | `TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume`、`TestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume` |
+| park resumeのresource/slot raceと二重owner防止 | `TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
 | checks retry exhaustion後の外部head修正・fail-closed復旧・merge時lease解放 | `TestRecoverChecksReusesExternallyFixedBranchAndIsIdempotent`、`TestRecoverChecksAuthoritativeStateValidationFailsClosed`、`TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge` |
 | push後に未記録のPR | `TestFaultStartupReconciliationPersistsDiscoveredPullRequest` |
 | registry add/resolve/remove | `TestFaultRegistryAddResolveRemoveAndAmbiguity` |
@@ -88,6 +91,6 @@ concurrency 2のfault matrix、self-hosting canary、resource計測、concurrenc
 | state・event・file mode | `TestStateAndEventsNeverPersistSecrets`、`TestWritePlistUsesAbsoluteCommandsAndEscapesPaths` |
 | GitHubコメント・CLI error | `TestGitHubCommentsAndErrorsRedactSecrets` |
 | path traversal・symbolic link | `TestWorktreeRejectsTraversalAndSymbolicLink`、`TestLoadRejectsUnsafePathsRefsAndSecretNames` |
-| schema v3の旧配送data除去・rollback・旧credential保持 | `TestApplyMigratesV3FixturesAndRestoreRecoversOriginalBytes`、`TestV4ActiveLeaseBlocksRollback` |
+| schema v3の旧配送data除去・active lease/parked continuationのrollback拒否・旧credential保持 | `TestApplyMigratesV3FixturesAndRestoreRecoversOriginalBytes`、`TestV4ActiveLeaseAndParkedContinuationBlockRollback` |
 
 既知の到達可能な依存脆弱性は`make vuln-check`で検査し、Pull Requestと`main`のCIで必須にする。

@@ -110,6 +110,19 @@ type ResourceLease struct {
 	ReservedAt        time.Time  `json:"reserved_at"`
 }
 
+// ResourceLeasePark is the durable continuation boundary for a resumable
+// worker environment block. OriginalLease is an immutable copy of the released
+// active lease; keeping it separate from Issue.Lease makes it visible to
+// operators without participating in resource admission.
+type ResourceLeasePark struct {
+	ID            string        `json:"id"`
+	Status        string        `json:"status"`
+	OriginalLease ResourceLease `json:"original_lease"`
+	ParkedAt      time.Time     `json:"parked_at"`
+	ResumedAt     time.Time     `json:"resumed_at,omitempty"`
+	ResumeOwner   *LeaseOwner   `json:"resume_owner,omitempty"`
+}
+
 // ConflictAttempt is an append-only audit record for one autonomous conflict
 // recovery worker invocation. A new base SHA starts a new per-base budget while
 // preserving the earlier records.
@@ -168,6 +181,7 @@ type EnvironmentResume struct {
 	ConfirmedAt    time.Time `json:"confirmed_at"`
 	PreviousReason string    `json:"previous_reason"`
 	BaseSHA        string    `json:"base_sha,omitempty"`
+	CurrentBaseSHA string    `json:"current_base_sha,omitempty"`
 }
 
 type PublicationRecoveryAttempt struct {
@@ -263,6 +277,7 @@ type Issue struct {
 	RunID             string             `json:"run_id,omitempty"`
 	LeaseGeneration   uint64             `json:"lease_generation,omitempty"`
 	Lease             *ResourceLease     `json:"lease,omitempty"`
+	ResourcePark      *ResourceLeasePark `json:"resource_park,omitempty"`
 	DeclaredResources []string           `json:"declared_resources,omitempty"`
 	ActualResources   []string           `json:"actual_resources,omitempty"`
 	PublicationAudit  *publication.Audit `json:"publication_audit,omitempty"`

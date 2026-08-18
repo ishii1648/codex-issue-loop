@@ -518,6 +518,9 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			if item.EnvironmentResume != nil {
 				item.EnvironmentResume.Status = "running"
 			}
+			if item.ResourcePark != nil && item.ResourcePark.Status == "resuming" {
+				item.ResourcePark.Status = "resumed"
+			}
 			item.UpdatedAt = l.now()
 			return nil
 		})
@@ -1994,16 +1997,32 @@ func (l *Loop) blockWorkerEnvironment(ctx context.Context, number int, reason st
 		return err
 	}
 	cause := failure.Wrap(failure.Issue, "worker blocked", errors.New(reason))
-	_, err = l.Store.Update("issue_blocked", number, current.RunID, map[string]string{
+	parkID := state.NewID("park")
+	parkedAt := l.now()
+	owner := state.LeaseOwner{}
+	if current.Lease != nil {
+		owner = current.Lease.Owner
+	}
+	_, err = l.Store.Update("issue_blocked", number, current.RunID, map[string]any{
 		"error": cause.Error(), "failure_kind": string(failure.Issue), "blocked_origin": "worker", "blocked_kind": "environment",
+		"resource_park_id": parkID, "released_owner": owner, "parked_at": parkedAt,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(number)]
 		if item == nil || item.RunID != current.RunID {
 			return fmt.Errorf("Issue #%d run changed while recording worker block", number)
 		}
-		// Keep the lease, session, Goal, answers, worktree, branch, dirty files,
-		// and resource metadata. They are the continuation boundary used by the
-		// explicit operator resume operation.
+		if item.WorkerPID != 0 || item.WorkerPGID != 0 {
+			return fmt.Errorf("Issue #%d worker process identity still exists while parking resources", number)
+		}
+		if item.Lease == nil || item.Lease.Owner != owner {
+			return fmt.Errorf("Issue #%d does not own a consistent resource lease to park", number)
+		}
+		// Move the full lease into a non-admitting park record. Session, Goal,
+		// answers, worktree, branch, dirty files, and Issue resource metadata stay
+		// untouched as the continuation boundary.
+		if err := state.ParkIssueLease(item, owner, parkID, parkedAt); err != nil {
+			return err
+		}
 		item.Status = "blocked"
 		item.LastError = cause.Error()
 		item.FailureKind = string(failure.Issue)

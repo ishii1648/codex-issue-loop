@@ -62,7 +62,7 @@
 - 対象はmacOSのユーザーLaunchAgentのみである。
 - LaunchDaemonと自動ログインは採用せず、logout・再起動は運用時確認とする。[ADR-0001](adr/0001-macos-execution-model.md)を参照する。
 - 1 repositoryにつき`queue.concurrency`までworkerを並列実行する。resource definitionがない既存設定は`repo:*` leaseにより安全に直列化される。
-- schema v3のresource leaseはIssueごとにslot、resource、run ownerを保持し、scheduler再起動時は全active/open-PR Issueを照合して排他を復元する。`area:` resource claimとIssue本文の`depends_on` metadataは[Resource admission契約](resource-admission.md)に従う。
+- schema v3のresource leaseはIssueごとにslot、resource、run ownerを保持し、scheduler再起動時は全active/open-PR Issueを照合して排他を復元する。typed worker environment blockはcontinuationと元lease provenanceを`resource_park`へ保持したままactive admissionから外し、限定resume時だけ新generationで再取得する。`area:` resource claimとIssue本文の`depends_on` metadataは[Resource admission契約](resource-admission.md)に従う。
 - 同じrepositoryを複数hostから処理しない。
 - local `flock`はhostをまたぐ排他ではない。複数hostを登録するだけでは安全にならず、[ADR-0002](adr/0002-concurrency-and-multi-host.md)のcoordinatorとpublication gatewayが実装されるまで禁止する。
 - GitHub labelは自動作成しない。

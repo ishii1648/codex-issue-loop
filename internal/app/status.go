@@ -9,11 +9,35 @@ import (
 )
 
 type statusResult struct {
-	Launchd         launchd.Status   `json:"launchd"`
-	WorkerPool      workerPoolStatus `json:"worker_pool"`
-	PendingRequests []*state.Request `json:"pending_requests"`
-	State           state.Snapshot   `json:"state"`
-	Broker          *brokerStatus    `json:"broker,omitempty"`
+	Launchd           launchd.Status          `json:"launchd"`
+	WorkerPool        workerPoolStatus        `json:"worker_pool"`
+	ResourceAdmission resourceAdmissionStatus `json:"resource_admission"`
+	PendingRequests   []*state.Request        `json:"pending_requests"`
+	State             state.Snapshot          `json:"state"`
+	Broker            *brokerStatus           `json:"broker,omitempty"`
+}
+
+type resourceAdmissionStatus struct {
+	ResourceParks          []parkedClaimStatus `json:"resource_parks"`
+	ClaimWaitingCandidates []parkedClaimStatus `json:"claim_waiting_candidates"`
+}
+
+type parkedClaimStatus struct {
+	IssueNumber int               `json:"issue_number"`
+	RunID       string            `json:"run_id"`
+	ParkID      string            `json:"park_id"`
+	Status      string            `json:"status"`
+	Owner       state.LeaseOwner  `json:"released_owner"`
+	ResumeOwner *state.LeaseOwner `json:"resume_owner,omitempty"`
+	Slot        int               `json:"saved_slot"`
+	Resources   []string          `json:"saved_resources"`
+	BlockedBy   []resourceBlocker `json:"blocked_by"`
+}
+
+type resourceBlocker struct {
+	IssueNumber int      `json:"issue_number"`
+	Resources   []string `json:"resources"`
+	Reasons     []string `json:"reasons"`
 }
 
 type brokerStatus struct {
@@ -64,6 +88,59 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 	}
 	sort.Slice(issues, func(i, j int) bool { return issues[i].IssueNumber < issues[j].IssueNumber })
 	requests := make([]*state.Request, 0)
+	parked := make([]parkedClaimStatus, 0)
+	waiting := make([]parkedClaimStatus, 0)
+	for _, issue := range snapshot.Issues {
+		if issue == nil || issue.ResourcePark == nil {
+			continue
+		}
+		claim := parkedClaimStatus{
+			IssueNumber: issue.Number, RunID: issue.RunID, ParkID: issue.ResourcePark.ID, Status: issue.ResourcePark.Status,
+			Owner: issue.ResourcePark.OriginalLease.Owner, ResumeOwner: issue.ResourcePark.ResumeOwner, Slot: issue.ResourcePark.OriginalLease.Slot,
+			Resources: append([]string(nil), issue.ResourcePark.OriginalLease.ResolvedResources...), BlockedBy: []resourceBlocker{},
+		}
+		if issue.ResourcePark.Status == "parked" {
+			blockers := map[int]*resourceBlocker{}
+			occupiedSlots := 0
+			for _, other := range snapshot.Issues {
+				if other == nil || other.Number == issue.Number || other.Lease == nil {
+					continue
+				}
+				if state.ResourcesConflict(claim.Resources, other.Lease.ResolvedResources) {
+					blockers[other.Number] = &resourceBlocker{IssueNumber: other.Number, Resources: append([]string(nil), other.Lease.ResolvedResources...), Reasons: []string{"resource_conflict"}}
+				}
+				if occupiesWorkerSlot(other.Status) {
+					occupiedSlots++
+				}
+			}
+			if limit < 1 {
+				limit = 1
+			}
+			if occupiedSlots >= limit {
+				for _, other := range snapshot.Issues {
+					if other == nil || other.Number == issue.Number || other.Lease == nil || !occupiesWorkerSlot(other.Status) {
+						continue
+					}
+					blocker := blockers[other.Number]
+					if blocker == nil {
+						blocker = &resourceBlocker{IssueNumber: other.Number, Resources: append([]string(nil), other.Lease.ResolvedResources...)}
+						blockers[other.Number] = blocker
+					}
+					blocker.Reasons = append(blocker.Reasons, "worker_slot")
+				}
+			}
+			for _, blocker := range blockers {
+				claim.BlockedBy = append(claim.BlockedBy, *blocker)
+			}
+		}
+		sort.Slice(claim.BlockedBy, func(i, j int) bool { return claim.BlockedBy[i].IssueNumber < claim.BlockedBy[j].IssueNumber })
+		parked = append(parked, claim)
+		if len(claim.BlockedBy) > 0 {
+			waiting = append(waiting, claim)
+		}
+	}
+	sort.Slice(parked, func(i, j int) bool { return parked[i].IssueNumber < parked[j].IssueNumber })
+	sort.Slice(waiting, func(i, j int) bool { return waiting[i].IssueNumber < waiting[j].IssueNumber })
 	for _, request := range snapshot.PendingRequests {
 		if request == nil || request.Status != "pending" {
 			continue
@@ -78,16 +155,17 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 		available = 0
 	}
 	return statusResult{
-		Launchd:         launchStatus,
-		WorkerPool:      workerPoolStatus{Active: len(issues), Limit: limit, Available: available, Issues: issues},
-		PendingRequests: requests,
-		State:           snapshot,
+		Launchd:           launchStatus,
+		WorkerPool:        workerPoolStatus{Active: len(issues), Limit: limit, Available: available, Issues: issues},
+		ResourceAdmission: resourceAdmissionStatus{ResourceParks: parked, ClaimWaitingCandidates: waiting},
+		PendingRequests:   requests,
+		State:             snapshot,
 	}
 }
 
 func occupiesWorkerSlot(status string) bool {
 	switch status {
-	case "claiming", "claimed", "running", "resolving_conflict":
+	case "claiming", "claimed", "running", "environment_resume_pending", "resolving_conflict":
 		return true
 	default:
 		return false

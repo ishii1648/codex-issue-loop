@@ -564,7 +564,10 @@ func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
 			}
 		}
 		var issues map[string]struct {
-			Lease json.RawMessage `json:"lease"`
+			Lease        json.RawMessage `json:"lease"`
+			ResourcePark *struct {
+				Status string `json:"status"`
+			} `json:"resource_park"`
 		}
 		if err := json.Unmarshal(object["issues"], &issues); err != nil {
 			return err
@@ -572,6 +575,9 @@ func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
 		for number, issue := range issues {
 			if len(issue.Lease) > 0 && string(issue.Lease) != "null" {
 				return fmt.Errorf("rollback blocked: active resource lease for Issue #%s in %s", number, entry.Source)
+			}
+			if issue.ResourcePark != nil && (issue.ResourcePark.Status == "parked" || issue.ResourcePark.Status == "resuming") {
+				return fmt.Errorf("rollback blocked: parked resource continuation for Issue #%s in %s", number, entry.Source)
 			}
 		}
 	}

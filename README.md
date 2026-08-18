@@ -115,13 +115,15 @@ sleep 3
 "$agent_loop_bin" retry --repo "$PWD" --issue 123 --json
 ```
 
-workerが外部環境前提を理由に返した`blocked`は、前提をoperatorが解消し、active processがないことを確認した後だけ、別の明示操作で同じworktree・branch・sessionから再開します。PR conflict、手動exclusion、security block、completed/closed Issueには適用されません。
+workerが外部環境前提を理由にtyped `blocked`を返すと、supervisorはPID/PGID不在を確認し、run・worktree・branch・dirty changes・session/Goal・answers・resource/base provenanceを`resource_park`へ保持したままactive leaseだけを自動parkします。GitHubは`blocked`のままですが、後続queueは同じresourceを予約できます。`status --json`の`resource_admission.resource_parks`で保存claimとpark状態、`claim_waiting_candidates`でresumeを妨げるIssue/resource/slotを確認できます。
+
+前提をoperatorが解消し、active processがないことを確認した後だけ、次の明示操作で同じworktree・branch・sessionから再開します。park済みclaimは他Issueのactive leaseとworker slotを同じtransactionで再検証し、新しいowner generationを1回だけ取得します。競合中は他Issueのleaseを奪わず拒否します。PR conflict、手動exclusion、security block、failed、completed/closed Issueには適用されません。
 
 ```sh
 "$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
 ```
 
-legacy stateでleaseが欠けている場合も、configured base branchの検証済みcommit SHAと保守的な`repo:*` leaseを同じtransactionで補います。base SHAを検証できない場合はstateとGitHub labelを変更せず拒否するため、state fileを編集せずremote-tracking branchを復旧して再実行します。
+park済みstateでは元のresource集合、base SHA、reservation provenanceを使い、legacy stateでleaseが欠けている場合だけ、既存の厳密なdurable history検証後に保守的な`repo:*` leaseを補います。base SHAを検証できない場合はstateとGitHub labelを変更せず拒否するため、state fileを編集せずremote-tracking branchを復旧して再実行します。
 
 worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missing`として最終`failed`になったIssueは、保存済みcompleted resultとdirty worktreeが一致する場合だけpublication-only recoveryを明示要求できます。workerは再実行せず、元のattempt budget、run、worktree、branch、回答、session、resource metadataを保持します。
 

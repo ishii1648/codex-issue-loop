@@ -152,7 +152,7 @@ func TestUnsupportedVersionIsRejectedWithoutBackup(t *testing.T) {
 	}
 }
 
-func TestV4ActiveLeaseBlocksRollback(t *testing.T) {
+func TestV4ActiveLeaseAndParkedContinuationBlockRollback(t *testing.T) {
 	l, repo, _ := writeV3Fixture(t, false)
 	statePath := filepath.Join(l.RepoDir("repo-1"), "state.json")
 	v3 := fmt.Sprintf(`{"version":3,"repo_id":"repo-1","repo_path":%q,"state_revision":1,"supervisor":{"state":"running","updated_at":"2026-08-16T00:00:00Z"},"issues":{"63":{"number":63,"title":"active","status":"needs_input","run_id":"run_63","attempts":1,"continuations":0,"updated_at":"2026-08-16T00:02:00Z","lease_generation":1,"lease":{"owner":{"run_id":"run_63","generation":1},"slot":0,"declared_resources":[],"resolved_resources":["repo:*"],"reserved_at":"2026-08-16T00:02:00Z"}}},"pending_requests":{},"notifications":{"needs_input:req-1":{"id":"needs_input:req-1","status":"pending"}}}`+"\n", repo)
@@ -179,7 +179,22 @@ func TestV4ActiveLeaseBlocksRollback(t *testing.T) {
 	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "active resource lease") {
 		t.Fatalf("active lease rollback was accepted: %v", err)
 	}
-	if _, err := (state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}).ReleaseLease(63, issue.Lease.Owner, "test terminal transition"); err != nil {
+	store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
+	if _, err := store.Update("issue_blocked", 63, issue.RunID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["63"]
+		item.Status = "blocked"
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "test", BlockedAt: time.Now().UTC()}
+		return state.ParkIssueLease(item, item.Lease.Owner, "park_63", time.Now().UTC())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "parked resource continuation") {
+		t.Fatalf("parked continuation rollback was accepted: %v", err)
+	}
+	if _, err := store.Update("test_park_completed", 63, issue.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["63"].ResourcePark = nil
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := (Migrator{Layout: l}).Restore(result.Backup)

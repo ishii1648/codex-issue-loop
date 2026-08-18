@@ -118,16 +118,32 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
 				}
 			}
+			parkReconciledLease := current.Status == "blocked" && current.GitHubSync == "" && current.Lease != nil && current.ResourcePark == nil &&
+				current.PullRequestURL == "" && current.WorkerPID == 0 && current.WorkerPGID == 0 && decision.status == "blocked" &&
+				decision.githubSync == "" && decision.pullRequest == "" && resumableWorkerBlock(decision.blockedCause) && onlyBlockedExclusion
+			parkID := ""
+			parkedAt := time.Time{}
+			if parkReconciledLease {
+				parkID = state.NewID("park")
+				parkedAt = l.now()
+			}
 			_, err = l.Store.Update("startup_reconciled", number, current.RunID, map[string]any{
-				"previous_status": current.Status,
-				"status":          decision.status,
-				"reason":          decision.reason,
-				"worktree":        inspection,
-				"pull_requests":   remote.PullRequests,
+				"previous_status":       current.Status,
+				"status":                decision.status,
+				"reason":                decision.reason,
+				"worktree":              inspection,
+				"pull_requests":         remote.PullRequests,
+				"resource_park_id":      parkID,
+				"resource_park_created": parkReconciledLease,
 			}, func(s *state.Snapshot) error {
 				item := s.Issues[strconv.Itoa(number)]
 				if !reflect.DeepEqual(item, current) {
 					return errReconciliationStateChanged
+				}
+				if parkReconciledLease {
+					if err := state.ParkIssueLease(item, current.Lease.Owner, parkID, parkedAt); err != nil {
+						return err
+					}
 				}
 				if decision.status == "completed" && item.Lease != nil {
 					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
@@ -182,7 +198,8 @@ func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 	case "retry_wait":
 		return item.RetryAfter == nil || !item.RetryAfter.After(now)
 	case "blocked":
-		return state.MayHaveLegacyWorkerBlockProvenance(item)
+		return state.MayHaveLegacyWorkerBlockProvenance(item) ||
+			(item.Lease != nil && item.ResourcePark == nil && item.PullRequestURL == "" && resumableWorkerBlock(item.BlockedCause))
 	default:
 		return false
 	}

@@ -25,6 +25,13 @@ func TestStatusSummarizesMultipleWorkersResourcesAndRequests(t *testing.T) {
 				Lease: &state.ResourceLease{Owner: state.LeaseOwner{RunID: "run_3", Generation: 1}, Slot: 0, ResolvedResources: []string{"reconcile"}, ReservedAt: now},
 			},
 			"4": {Number: 4, RunID: "run_4", Status: "needs_input"},
+			"5": {
+				Number: 5, RunID: "run_5", Status: "blocked", LeaseGeneration: 1,
+				ResourcePark: &state.ResourceLeasePark{
+					ID: "park_5", Status: "parked", ParkedAt: now,
+					OriginalLease: state.ResourceLease{Owner: state.LeaseOwner{RunID: "run_5", Generation: 1}, Slot: 2, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now},
+				},
+			},
 		},
 		PendingRequests: map[string]*state.Request{
 			"req_z": {ID: "req_z", IssueNumber: 9, Status: "answered"},
@@ -41,6 +48,13 @@ func TestStatusSummarizesMultipleWorkersResourcesAndRequests(t *testing.T) {
 	}
 	if len(result.PendingRequests) != 2 || result.PendingRequests[0].ID != "req_a" || result.PendingRequests[1].ID != "req_b" {
 		t.Fatalf("requests=%+v", result.PendingRequests)
+	}
+	if len(result.ResourceAdmission.ResourceParks) != 1 || result.ResourceAdmission.ResourceParks[0].IssueNumber != 5 || len(result.ResourceAdmission.ClaimWaitingCandidates) != 1 {
+		t.Fatalf("resource_admission=%+v", result.ResourceAdmission)
+	}
+	waiting := result.ResourceAdmission.ClaimWaitingCandidates[0]
+	if len(waiting.BlockedBy) != 2 || waiting.BlockedBy[0].IssueNumber != 3 || waiting.BlockedBy[1].IssueNumber != 9 || waiting.BlockedBy[1].Reasons[0] != "resource_conflict" {
+		t.Fatalf("claim waiting blockers=%+v", waiting.BlockedBy)
 	}
 	if result.State.Supervisor.RateLimit == nil || result.State.Supervisor.RateLimit.Resource != "graphql" || result.State.Supervisor.RateLimit.SuppressedRetryCount != 17 {
 		t.Fatalf("rate_limit=%+v", result.State.Supervisor.RateLimit)
