@@ -18,9 +18,9 @@
   "declared_resources": ["repo:*"],
   "branch": "codex/issue-442-sanitized",
   "worktree": "/sanitized/worktrees/zeitreise/issue-442",
-  "session_id": "session_fixture_zeitreise_442",
-  "session": {"backend": "codex", "id": "session_fixture_zeitreise_442"},
-  "worker_identity": {"backend": "codex", "runtime_version": "sanitized-version", "provider": "openai", "requested_model": "sanitized-model", "resolved_model": "sanitized-model"},
+  "session_id": null,
+  "session": null,
+  "worker_identity": {"backend": "codex", "runtime_version": "sanitized-version"},
   "failure_kind": "issue",
   "last_error": "worker workspace validation failed for /sanitized/worktrees/zeitreise/issue-442: saved workspace provenance is missing",
   "blocked_cause": {

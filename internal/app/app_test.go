@@ -88,7 +88,7 @@ func (w *resumedWorkspaceWorker) Run(_ context.Context, cfg config.Config, _ gh.
 	w.prompts = append(w.prompts, prompt)
 	w.sessions = append(w.sessions, issue.SessionID)
 	w.runs++
-	return worker.Result{Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "fixture retry", Retry: &worker.Retry{Reason: "fixture retry"}}, nil
+	return worker.Result{Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "fixture retry", SessionID: "session_new_workspace_recovery", Identity: worker.Identity{Backend: "codex"}, Retry: &worker.Retry{Reason: "fixture retry"}}, nil
 }
 
 func (w *resumedWorkspaceWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, issue state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
@@ -249,7 +249,7 @@ func persistInterruptedMissingWorkspaceResume(t *testing.T, store state.Store, n
 	return resumeOwner
 }
 
-func persistZeitreise442Full27EventResumeFixture(t *testing.T, store state.Store, number int, runID, worktreePath, branch, baseSHA, currentBaseSHA, resumeID string) state.LeaseOwner {
+func persistZeitreise442Full27EventResumeFixture(t *testing.T, store state.Store, number int, runID, worktreePath, branch, baseSHA, worktreeHead, currentBaseSHA, resumeID string) state.LeaseOwner {
 	t.Helper()
 	events, err := os.ReadFile("../state/testdata/zeitreise-442-v0614-full-27-events.jsonl")
 	if err != nil {
@@ -265,10 +265,10 @@ func persistZeitreise442Full27EventResumeFixture(t *testing.T, store state.Store
 		{"/sanitized/zeitreise", store.RepoPath},
 		{"codex/issue-442-sanitized", branch},
 		{"1111111111111111111111111111111111111111", baseSHA},
+		{"3333333333333333333333333333333333333333", worktreeHead},
 		{"2222222222222222222222222222222222222222", currentBaseSHA},
 		{"run_adaf3142bd207b24", runID},
 		{"resume_0733cc3d177d05f3", resumeID},
-		{"session_fixture_zeitreise_442", "session_interrupted_workspace"},
 		{"repo_zeitreise", store.RepoID},
 		{`"issue_number":442`, fmt.Sprintf(`"issue_number":%d`, number)},
 		{`"number": 442`, fmt.Sprintf(`"number": %d`, number)},
@@ -1387,7 +1387,16 @@ func TestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree(t *te
 		t.Fatal(err)
 	}
 	runGitApp(t, repo, "worktree", "add", "-b", branch, managedWorktree, baseSHA)
+	if err := os.WriteFile(filepath.Join(managedWorktree, "worker-head.txt"), []byte("published worker head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, managedWorktree, "add", "worker-head.txt")
+	runGitApp(t, managedWorktree, "commit", "-m", "worker head")
 	runGitApp(t, managedWorktree, "push", "-u", "origin", branch)
+	worktreeHead := runGitOutputApp(t, managedWorktree, "rev-parse", "HEAD")
+	if worktreeHead == baseSHA {
+		t.Fatal("fixture worktree HEAD must differ from the original publication base")
+	}
 	if err := os.WriteFile(filepath.Join(managedWorktree, "dirty-v0614.txt"), []byte("preserve interrupted resume\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1405,15 +1414,22 @@ func TestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree(t *te
 	missingResumeMarkerPath := filepath.Join(root, "interrupted-workspace-missing-resume-marker")
 	missingFailureMarkerPath := filepath.Join(root, "interrupted-workspace-missing-failure-marker")
 	extraMarkerPath := filepath.Join(root, "interrupted-workspace-extra-marker")
+	markerOverridePath := filepath.Join(root, "interrupted-workspace-marker-override.json")
+	resumeComment := strconv.Quote("<!-- codex-issue-loop:environment-resume:" + resumeID + " -->")
+	originalFailureComment := strconv.Quote(failureComment(150, "worker blocked: localhost listen denied"))
+	workspaceFailureComment := strconv.Quote(failureComment(150, fmt.Sprintf("worker workspace validation failed for %s: saved workspace provenance is missing", managedWorktree)))
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1 $2" in
-  "issue view") if [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MISSING_RESUME_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; elif [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MISSING_FAILURE_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"}]}'; elif [ -e "$AGENT_LOOP_TEST_INTERRUPTED_EXTRA_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"},{"body":"<!-- codex-issue-loop:environment-resume:unexpected -->"},{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; else printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"},{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; fi ;;
+  "issue view") if [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MARKER_OVERRIDE" ]; then /bin/cat "$AGENT_LOOP_TEST_INTERRUPTED_MARKER_OVERRIDE"; elif [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MISSING_RESUME_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":%s},{"body":%s},{"body":%s}]}'; elif [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MISSING_FAILURE_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":%s},{"body":%s},{"body":%s}]}'; elif [ -e "$AGENT_LOOP_TEST_INTERRUPTED_EXTRA_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":%s},{"body":%s},{"body":%s},{"body":%s},{"body":%s}]}'; else printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":%s},{"body":%s},{"body":%s},{"body":%s}]}'; fi ;;
   "pr list") printf '%%s\n' '[]' ;;
   "issue edit") if [ ! -e "$AGENT_LOOP_TEST_INTERRUPTED_GH_FAIL_ONCE" ]; then : > "$AGENT_LOOP_TEST_INTERRUPTED_GH_FAIL_ONCE"; exit 1; fi; exit 0 ;;
   "issue comment") exit 0 ;;
   *) exit 2 ;;
 esac
-`, resumeID, resumeID, resumeID)
+`, resumeComment, originalFailureComment, workspaceFailureComment,
+		resumeComment, resumeComment, originalFailureComment,
+		resumeComment, resumeComment, resumeComment, originalFailureComment, workspaceFailureComment,
+		resumeComment, resumeComment, originalFailureComment, workspaceFailureComment)
 	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1421,6 +1437,7 @@ esac
 	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_MISSING_RESUME_MARKER", missingResumeMarkerPath)
 	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_MISSING_FAILURE_MARKER", missingFailureMarkerPath)
 	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_EXTRA_MARKER", extraMarkerPath)
+	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_MARKER_OVERRIDE", markerOverridePath)
 	cfg := mustConfig(t, repo)
 	entry := registry.Entry{
 		RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo,
@@ -1431,7 +1448,7 @@ esac
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	owner := persistZeitreise442Full27EventResumeFixture(t, store, 150, "run_interrupted_workspace", managedWorktree, branch, baseSHA, currentBaseSHA, resumeID)
+	owner := persistZeitreise442Full27EventResumeFixture(t, store, 150, "run_interrupted_workspace", managedWorktree, branch, baseSHA, worktreeHead, currentBaseSHA, resumeID)
 	seeded, err := store.Load()
 	if err != nil || seeded.Issues["150"] == nil {
 		t.Fatalf("full 27-event fixture was not installed: issue=%+v err=%v", seeded.Issues["150"], err)
@@ -1439,6 +1456,23 @@ esac
 
 	args := []string{"resume-blocked", "--repo", repo, "--issue", "150", "--confirm-prerequisite-resolved", "--json"}
 	controller := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
+	if err := os.WriteFile(filepath.Join(managedWorktree, "later-head.txt"), []byte("head moved after reconciliation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, managedWorktree, "add", "later-head.txt")
+	runGitApp(t, managedWorktree, "commit", "-m", "move worker head after reconciliation")
+	runGitApp(t, managedWorktree, "push", "origin", branch)
+	newWorktreeHead := runGitOutputApp(t, managedWorktree, "rev-parse", "HEAD")
+	var headOut, headErr bytes.Buffer
+	if code := (App{Out: &headOut, Err: &headErr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(headErr.String(), "worktree HEAD changed") {
+		t.Fatalf("changed worktree HEAD was accepted: code=%d stdout=%s stderr=%s", code, headOut.String(), headErr.String())
+	}
+	afterHeadMismatch, err := store.Load()
+	if err != nil || afterHeadMismatch.StateRevision != seeded.StateRevision || afterHeadMismatch.Issues["150"].Workspace != nil || afterHeadMismatch.Issues["150"].Lease.Owner != owner {
+		t.Fatalf("worktree HEAD rejection changed state: before=%d after=%d issue=%+v err=%v", seeded.StateRevision, afterHeadMismatch.StateRevision, afterHeadMismatch.Issues["150"], err)
+	}
+	worktreeHead = newWorktreeHead
+	owner = persistZeitreise442Full27EventResumeFixture(t, store, 150, "run_interrupted_workspace", managedWorktree, branch, baseSHA, worktreeHead, currentBaseSHA, resumeID)
 	if err := os.WriteFile(missingResumeMarkerPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1486,6 +1520,51 @@ esac
 	}
 	if err := os.Remove(extraMarkerPath); err != nil {
 		t.Fatal(err)
+	}
+	marker := "<!-- codex-issue-loop:environment-resume:" + resumeID + " -->"
+	originalFailure := failureComment(150, "worker blocked: localhost listen denied")
+	workspaceFailure := failureComment(150, fmt.Sprintf("worker workspace validation failed for %s: saved workspace provenance is missing", managedWorktree))
+	writeMarkerOverride := func(t *testing.T, comments ...string) {
+		t.Helper()
+		commentObjects := make([]map[string]string, 0, len(comments))
+		for _, comment := range comments {
+			commentObjects = append(commentObjects, map[string]string{"body": comment})
+		}
+		fixture := map[string]any{
+			"number": 150, "title": "Interrupted workspace", "body": "", "url": "https://example.test/issues/150", "state": "OPEN",
+			"labels": []map[string]string{{"name": "blocked"}}, "assignees": []any{}, "milestone": nil, "comments": commentObjects,
+		}
+		data, marshalErr := json.Marshal(fixture)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := os.WriteFile(markerOverridePath, append(data, '\n'), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	markerCases := []struct {
+		name     string
+		comments []string
+	}{
+		{name: "three failure markers", comments: []string{marker, marker, originalFailure, workspaceFailure, failureComment(150, "unexpected third reason")}},
+		{name: "extra unique failure marker", comments: []string{marker, marker, originalFailure, workspaceFailure, failureIDMarker("unexpected marker without base marker")}},
+		{name: "different resume ID", comments: []string{marker, marker, "<!-- codex-issue-loop:environment-resume:resume_other -->", originalFailure, workspaceFailure}},
+		{name: "failure reason mismatch", comments: []string{marker, marker, originalFailure, failureComment(150, "wrong workspace rejection reason")}},
+	}
+	for _, markerCase := range markerCases {
+		t.Run(markerCase.name, func(t *testing.T) {
+			writeMarkerOverride(t, markerCase.comments...)
+			defer os.Remove(markerOverridePath)
+			markerOut.Reset()
+			markerErr.Reset()
+			if code := (App{Out: &markerOut, Err: &markerErr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(markerErr.String(), "GitHub state does not prove") {
+				t.Fatalf("invalid GitHub markers were accepted: code=%d stdout=%s stderr=%s", code, markerOut.String(), markerErr.String())
+			}
+			after, loadErr := store.Load()
+			if loadErr != nil || after.StateRevision != beforeMarkerMismatch.StateRevision || after.Issues["150"].Workspace != nil || after.Issues["150"].Lease.Owner != owner {
+				t.Fatalf("GitHub marker rejection changed state: before=%d after=%d issue=%+v err=%v", beforeMarkerMismatch.StateRevision, after.StateRevision, after.Issues["150"], loadErr)
+			}
+		})
 	}
 	var ready sync.WaitGroup
 	ready.Add(2)
@@ -1552,14 +1631,14 @@ esac
 	recoveredOwner := pendingOwner
 	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.Workspace == nil ||
 		item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != "github_synced" ||
-		item.Lease == nil || item.Lease.Owner != recoveredOwner || item.LeaseGeneration != recoveredOwner.Generation ||
-		item.SessionID != "session_interrupted_workspace" || item.Session == nil || item.Session.ID != item.SessionID ||
+		item.Lease == nil || item.Lease.Owner != recoveredOwner || item.LeaseGeneration != recoveredOwner.Generation || item.Lease.BaseSHA != baseSHA || worktreeHead == baseSHA ||
+		item.SessionID != "" || item.Session != nil ||
 		item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" ||
 		!item.BlockedCause.Resumable || item.BlockedCause.Reason != item.EnvironmentResume.PreviousReason {
 		t.Fatalf("interrupted workspace recovery did not converge atomically: %+v", item)
 	}
-	if got := runGitOutputApp(t, managedWorktree, "rev-parse", "HEAD"); got != baseSHA {
-		t.Fatalf("worker HEAD changed during recovery: got=%s want=%s", got, baseSHA)
+	if got := runGitOutputApp(t, managedWorktree, "rev-parse", "HEAD"); got != worktreeHead {
+		t.Fatalf("worker HEAD changed during recovery: got=%s want=%s base=%s", got, worktreeHead, baseSHA)
 	}
 	if data, err := os.ReadFile(filepath.Join(managedWorktree, "dirty-v0614.txt")); err != nil || string(data) != "preserve interrupted resume\n" {
 		t.Fatalf("dirty worktree changed: data=%q err=%v", data, err)
@@ -1585,8 +1664,13 @@ esac
 		t.Fatalf("same-worktree spawn worked=%v err=%v", worked, err)
 	}
 	if len(runtime.paths) != 1 || runtime.paths[0] != managedWorktree || len(runtime.prompts) != 1 || !strings.Contains(runtime.prompts[0], "localhost listen denied") ||
-		runtime.runs != 0 || runtime.resumes != 1 || len(runtime.sessions) != 1 || runtime.sessions[0] != "session_interrupted_workspace" {
-		t.Fatalf("worker did not resume the original workspace/session/reason: paths=%v sessions=%v runs=%d resumes=%d prompts=%v", runtime.paths, runtime.sessions, runtime.runs, runtime.resumes, runtime.prompts)
+		runtime.runs != 1 || runtime.resumes != 0 || len(runtime.sessions) != 1 || runtime.sessions[0] != "" {
+		t.Fatalf("worker did not start a fresh session in the original workspace: paths=%v sessions=%v runs=%d resumes=%d prompts=%v", runtime.paths, runtime.sessions, runtime.runs, runtime.resumes, runtime.prompts)
+	}
+	spawned, err := store.Load()
+	if err != nil || spawned.Issues["150"].SessionID != "session_new_workspace_recovery" || spawned.Issues["150"].Session == nil ||
+		spawned.Issues["150"].Session.ID != "session_new_workspace_recovery" {
+		t.Fatalf("fresh worker session provenance was not saved: issue=%+v err=%v", spawned.Issues["150"], err)
 	}
 	events, err := os.ReadFile(store.EventsPath())
 	if err != nil || strings.Count(string(events), `"type":"environment_resume_recovered"`) != 1 ||

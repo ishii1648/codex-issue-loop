@@ -37,7 +37,9 @@ func TestInterruptedWorkspaceResumeEvidenceFromZeitreise442Full27EventFixture(t 
 	}
 	if evidence.ResumeID != issue.EnvironmentResume.ID || evidence.PreviousReason != issue.EnvironmentResume.PreviousReason ||
 		evidence.BaseSHA != issue.EnvironmentResume.BaseSHA || evidence.CurrentBaseSHA != issue.EnvironmentResume.CurrentBaseSHA ||
-		evidence.LeaseOwner != issue.Lease.Owner || evidence.LeaseSlot != issue.Lease.Slot || !evidence.LegacyLeaseRecovered {
+		evidence.WorktreeHead != "3333333333333333333333333333333333333333" || evidence.WorktreeHead == evidence.BaseSHA ||
+		evidence.LeaseOwner != issue.Lease.Owner || evidence.LeaseSlot != issue.Lease.Slot || !evidence.LegacyLeaseRecovered ||
+		issue.SessionID != "" || issue.Session != nil {
 		t.Fatalf("evidence=%+v issue=%+v", evidence, issue)
 	}
 }
@@ -85,7 +87,8 @@ func TestInterruptedWorkspaceResumeCandidateFailsClosedForOtherSupervisorBlocks(
 		{name: "workspace already saved", mutate: func(issue *Issue) { issue.Workspace = &WorkerWorkspace{Path: issue.Worktree} }},
 		{name: "lease generation changed", mutate: func(issue *Issue) { issue.LeaseGeneration++ }},
 		{name: "resume reason missing", mutate: func(issue *Issue) { issue.EnvironmentResume.PreviousReason = "" }},
-		{name: "session missing", mutate: func(issue *Issue) { issue.SessionID = "" }},
+		{name: "session ID only", mutate: func(issue *Issue) { issue.SessionID = "session_synthesized" }},
+		{name: "session object only", mutate: func(issue *Issue) { issue.Session = &WorkerSession{Backend: "codex", ID: "session_synthesized"} }},
 		{name: "resource park on running resume", mutate: func(issue *Issue) { issue.ResourcePark = &ResourceLeasePark{ID: "unexpected"} }},
 	}
 	for _, test := range tests {
@@ -161,6 +164,42 @@ func TestInterruptedWorkspaceResumeEvidenceRejectsTamperedOrReorderedHistory(t *
 		}},
 		{name: "unexpected request marker", mutate: func(data []byte) []byte {
 			return bytes.Replace(data, []byte(`"resume_id":"resume_0733cc3d177d05f3"}}`), []byte(`"resume_id":"resume_0733cc3d177d05f3","unexpected_marker":true}}`), 1)
+		}},
+		{name: "new initial worker field", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"identity":{"backend":"codex"`), []byte(`"expected_cwd":"/sanitized/worktrees/zeitreise/issue-442","identity":{"backend":"codex"`), 1)
+		}},
+		{name: "missing initial worker field", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"branch":"codex/issue-442-sanitized",`), nil, 1)
+		}},
+		{name: "missing legacy identity field", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`,"runtime_version":"sanitized-version"`), nil, 1)
+		}},
+		{name: "new worker process field", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"payload":{"pgid":41001`), []byte(`"payload":{"expected_cwd":"/sanitized/worktrees/zeitreise/issue-442","pgid":41001`), 1)
+		}},
+		{name: "missing worker process field", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`,"pid":41001`), nil, 1)
+		}},
+		{name: "reconciliation HEAD mismatch", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte("3333333333333333333333333333333333333333"), []byte("4444444444444444444444444444444444444444"), 1)
+		}},
+		{name: "HEAD confused with publication base", mutate: func(data []byte) []byte {
+			return bytes.ReplaceAll(data, []byte("3333333333333333333333333333333333333333"), []byte("1111111111111111111111111111111111111111"))
+		}},
+		{name: "remote fields appear too early", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"Head":"3333333333333333333333333333333333333333","Dirty"`), []byte(`"Head":"3333333333333333333333333333333333333333","RemoteHead":"3333333333333333333333333333333333333333","Dirty"`), 1)
+		}},
+		{name: "remote fields missing too late", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`,"RemoteHead":"3333333333333333333333333333333333333333"`), nil, 1)
+		}},
+		{name: "pull requests array", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"pull_requests":null`), []byte(`"pull_requests":[]`), 1)
+		}},
+		{name: "new reconciliation field", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"reason":"GitHub exclusion label was applied manually","status"`), []byte(`"reason":"GitHub exclusion label was applied manually","resource_park_created":false,"status"`), 1)
+		}},
+		{name: "missing reconciliation field", mutate: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"previous_status":"blocked",`), nil, 1)
 		}},
 		{name: "superseded after blocked sync", mutate: func(data []byte) []byte {
 			return append(data, []byte(`{"version":4,"event_id":"event_sanitized_3792","sequence":3792,"timestamp":"2026-08-17T12:33:06Z","repo_id":"repo_zeitreise","issue_number":442,"run_id":"run_adaf3142bd207b24","type":"worker_completed","payload":{}}`+"\n")...)
@@ -265,7 +304,12 @@ func TestInterruptedWorkspaceResumeEvidenceRejectsCurrentStateMismatches(t *test
 			issue.LastError = issue.BlockedCause.Reason
 		}},
 		{name: "branch", mutate: func(issue *Issue) { issue.Branch = "codex/other" }},
-		{name: "session", mutate: func(issue *Issue) { issue.SessionID = "session_other" }},
+		{name: "session ID only", mutate: func(issue *Issue) { issue.SessionID = "session_other" }},
+		{name: "session object only", mutate: func(issue *Issue) { issue.Session = &WorkerSession{Backend: "codex", ID: "session_other"} }},
+		{name: "synthesized session pair", mutate: func(issue *Issue) {
+			issue.SessionID = "session_other"
+			issue.Session = &WorkerSession{Backend: "codex", ID: "session_other"}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
