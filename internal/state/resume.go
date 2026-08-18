@@ -21,6 +21,10 @@ type InterruptedWorkspaceResumeEvidence struct {
 	CurrentBaseSHA string
 	LeaseOwner     LeaseOwner
 	LeaseSlot      int
+	// LegacyLeaseRecovered identifies the exact v0.6.14 path that restored a
+	// legacy worker-block lease without a resource park before launch failed.
+	// That path must be fenced again when the workspace provenance is repaired.
+	LegacyLeaseRecovered bool
 }
 
 // MayHaveInterruptedWorkspaceResumeEvidence is intentionally an exact, cheap
@@ -28,7 +32,7 @@ type InterruptedWorkspaceResumeEvidence struct {
 // verifies the matching event chain.
 func MayHaveInterruptedWorkspaceResumeEvidence(issue *Issue) bool {
 	if issue == nil || issue.Status != "blocked" || issue.GitHubSync != "" || issue.Workspace != nil ||
-		issue.RunID == "" || issue.Worktree == "" || issue.Branch == "" ||
+		issue.RunID == "" || issue.Worktree == "" || issue.Branch == "" || issue.SessionID == "" || issue.Session == nil || issue.Session.ID != issue.SessionID ||
 		issue.ConflictRecovery != nil || issue.PublicationRecovery != nil || issue.PullRequestChecksRecovery != nil || issue.MergedPullRequestAdoption != nil ||
 		issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease == nil || issue.LeaseGeneration == 0 ||
 		issue.Lease.Owner.RunID != issue.RunID || issue.Lease.Owner.Generation != issue.LeaseGeneration ||
@@ -38,7 +42,7 @@ func MayHaveInterruptedWorkspaceResumeEvidence(issue *Issue) bool {
 		return false
 	}
 	resume := issue.EnvironmentResume
-	if resume.ID == "" || (resume.Status != "requested" && resume.Status != "github_synced") || resume.ConfirmedAt.IsZero() ||
+	if resume.ID == "" || (resume.Status != "requested" && resume.Status != "github_synced" && resume.Status != "running") || resume.ConfirmedAt.IsZero() ||
 		resume.PreviousReason == "" || resume.BaseSHA == "" || resume.CurrentBaseSHA == "" || issue.Lease.BaseSHA != resume.BaseSHA {
 		return false
 	}
@@ -47,6 +51,9 @@ func MayHaveInterruptedWorkspaceResumeEvidence(issue *Issue) bool {
 		return false
 	}
 	if issue.ResourcePark != nil {
+		if resume.Status == "running" {
+			return false
+		}
 		park := issue.ResourcePark
 		if park.ID == "" || park.Kind != ResourceParkKindEnvironmentBlock ||
 			(park.Status != "resuming" && park.Status != "resumed") || park.ResumeOwner == nil ||
@@ -72,7 +79,13 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 	evidence := &InterruptedWorkspaceResumeEvidence{}
 	stage := 0
 	for _, event := range events {
-		if event.IssueNumber != issue.Number || event.RunID != issue.RunID {
+		if event.IssueNumber != issue.Number {
+			continue
+		}
+		if event.RunID != issue.RunID {
+			if stage != 0 {
+				return nil, fmt.Errorf("Issue #%d interrupted resume was superseded by run %s at sequence %d", issue.Number, event.RunID, event.Sequence)
+			}
 			continue
 		}
 		if stage == 0 {
@@ -80,14 +93,17 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 				continue
 			}
 			var payload struct {
-				ResumeID         string     `json:"resume_id"`
-				PreviousReason   string     `json:"previous_reason"`
-				ResourceParkID   string     `json:"resource_park_id"`
-				ParkedReacquired bool       `json:"parked_lease_reacquired"`
-				BaseSHA          string     `json:"base_sha"`
-				CurrentBaseSHA   string     `json:"current_base_sha"`
-				LeaseOwner       LeaseOwner `json:"lease_owner"`
-				LeaseSlot        int        `json:"lease_slot"`
+				ResumeID          string     `json:"resume_id"`
+				PreviousReason    string     `json:"previous_reason"`
+				ResourceParkID    string     `json:"resource_park_id"`
+				ParkedReacquired  bool       `json:"parked_lease_reacquired"`
+				BaseSHA           string     `json:"base_sha"`
+				CurrentBaseSHA    string     `json:"current_base_sha"`
+				LeaseOwner        LeaseOwner `json:"lease_owner"`
+				LeaseSlot         int        `json:"lease_slot"`
+				LegacyWorkerBlock bool       `json:"legacy_worker_block"`
+				LegacyRecovered   bool       `json:"legacy_lease_recovered"`
+				InterruptedResume bool       `json:"interrupted_resume"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return nil, fmt.Errorf("decode interrupted environment resume event at sequence %d: %w", event.Sequence, err)
@@ -99,14 +115,29 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 			if issue.ResourcePark != nil {
 				parkID = issue.ResourcePark.ID
 			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(event.Payload, &fields); err != nil {
+				return nil, fmt.Errorf("decode interrupted environment resume fields at sequence %d: %w", event.Sequence, err)
+			}
+			legacyRecovered := payload.LegacyRecovered && payload.LegacyWorkerBlock && !payload.InterruptedResume &&
+				parkID == "" && payload.ResourceParkID == "" && !payload.ParkedReacquired
+			if legacyRecovered {
+				if resume.Status != "running" || fields["lease_owner"] != nil || fields["lease_slot"] != nil ||
+					issue.Lease.Slot != 0 || len(issue.Lease.ResolvedResources) != 1 || issue.Lease.ResolvedResources[0] != RepositoryResource ||
+					!exactV0614RecoveredLeaseChain(events, event.Sequence, issue) {
+					return nil, fmt.Errorf("Issue #%d v0.6.14 recovered-lease resume does not have exact current lease and legacy event provenance", issue.Number)
+				}
+			} else if resume.Status == "running" || payload.LeaseOwner != issue.Lease.Owner || payload.LeaseSlot != issue.Lease.Slot {
+				return nil, fmt.Errorf("Issue #%d interrupted environment resume lease provenance is inconsistent", issue.Number)
+			}
 			if evidence.ResumeID != "" || payload.PreviousReason != resume.PreviousReason || payload.BaseSHA != resume.BaseSHA ||
-				payload.CurrentBaseSHA != resume.CurrentBaseSHA || payload.LeaseOwner != issue.Lease.Owner ||
-				payload.LeaseSlot != issue.Lease.Slot || payload.ResourceParkID != parkID || payload.ParkedReacquired != (parkID != "") {
+				payload.CurrentBaseSHA != resume.CurrentBaseSHA || payload.ResourceParkID != parkID || payload.ParkedReacquired != (parkID != "") {
 				return nil, fmt.Errorf("Issue #%d interrupted environment resume event does not match current resume, SHA, park, or lease provenance", issue.Number)
 			}
 			evidence = &InterruptedWorkspaceResumeEvidence{
 				ResumeID: payload.ResumeID, PreviousReason: payload.PreviousReason, BaseSHA: payload.BaseSHA,
-				CurrentBaseSHA: payload.CurrentBaseSHA, LeaseOwner: payload.LeaseOwner, LeaseSlot: payload.LeaseSlot,
+				CurrentBaseSHA: payload.CurrentBaseSHA, LeaseOwner: issue.Lease.Owner, LeaseSlot: issue.Lease.Slot,
+				LegacyLeaseRecovered: legacyRecovered,
 			}
 			stage = 1
 			continue
@@ -114,8 +145,20 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 
 		switch stage {
 		case 1:
-			if event.Type != "github_state_synced" || !eventPayloadHasState(event.Payload, "environment_resume", resume.ID) {
+			if evidence.LegacyLeaseRecovered {
+				if event.Type != "github_state_synced" || !eventPayloadHasExactState(event.Payload, "environment_resume", "") {
+					return nil, fmt.Errorf("Issue #%d v0.6.14 interrupted resume has no resume-ID-less GitHub synchronization event", issue.Number)
+				}
+				stage = 6
+				continue
+			}
+			if event.Type != "github_state_synced" || !eventPayloadHasExactState(event.Payload, "environment_resume", resume.ID) {
 				return nil, fmt.Errorf("Issue #%d interrupted environment resume has no exact GitHub resume synchronization event", issue.Number)
+			}
+			stage = 2
+		case 6:
+			if event.Type != "github_state_synced" || !eventPayloadHasExactState(event.Payload, "environment_resume", resume.ID) {
+				return nil, fmt.Errorf("Issue #%d v0.6.14 interrupted resume has no resume-ID-bearing GitHub synchronization event", issue.Number)
 			}
 			stage = 2
 		case 2:
@@ -132,7 +175,7 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 			}
 			stage = 4
 		case 4:
-			if event.Type != "github_state_synced" || !eventPayloadHasState(event.Payload, "blocked", "") {
+			if event.Type != "github_state_synced" || !eventPayloadHasExactState(event.Payload, "blocked", "") {
 				return nil, fmt.Errorf("Issue #%d interrupted workspace block has no exact GitHub blocked synchronization event", issue.Number)
 			}
 			stage = 5
@@ -148,12 +191,86 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 	return evidence, nil
 }
 
-func eventPayloadHasState(raw json.RawMessage, state, resumeID string) bool {
+// exactV0614RecoveredLeaseChain binds the owner/slot omitted by the affected
+// request payload to the only write pattern that could have produced them.
+// The six immediately preceding same-Issue events are intentionally exact;
+// accepting any subset would turn ordinary running resumes into recovery
+// authority.
+func exactV0614RecoveredLeaseChain(events []Event, requestSequence uint64, issue Issue) bool {
+	prior := make([]Event, 0, 6)
+	for _, event := range events {
+		if event.Sequence >= requestSequence || event.IssueNumber != issue.Number || event.Type == "event_log_checkpoint" {
+			continue
+		}
+		prior = append(prior, event)
+	}
+	if len(prior) < 6 {
+		return false
+	}
+	wantTypes := []string{"lease_reserved", "worker_started", "issue_blocked", "github_state_synced", "startup_reconciled", "startup_reconciled"}
+	chainStart := len(prior) - 6
+	for _, event := range prior[:chainStart] {
+		if event.RunID != issue.RunID {
+			continue
+		}
+		for _, eventType := range wantTypes {
+			if event.Type == eventType {
+				return false
+			}
+		}
+	}
+	prior = prior[chainStart:]
+	for index, event := range prior {
+		if event.Type != wantTypes[index] || event.RunID != issue.RunID {
+			return false
+		}
+	}
+	var lease struct {
+		Owner             LeaseOwner `json:"owner"`
+		Slot              int        `json:"slot"`
+		ResolvedResources []string   `json:"resolved_resources"`
+		BaseSHA           string     `json:"base_sha"`
+		ReservedAt        string     `json:"reserved_at"`
+	}
+	if json.Unmarshal(prior[0].Payload, &lease) != nil || issue.LeaseGeneration < 2 ||
+		lease.Owner != (LeaseOwner{RunID: issue.RunID, Generation: issue.LeaseGeneration - 1}) ||
+		lease.Slot != issue.Lease.Slot || len(lease.ResolvedResources) != 1 || lease.ResolvedResources[0] != RepositoryResource ||
+		lease.BaseSHA != issue.Lease.BaseSHA || strings.TrimSpace(lease.ReservedAt) == "" {
+		return false
+	}
+	var started struct{ Worktree, Branch string }
+	if json.Unmarshal(prior[1].Payload, &started) != nil || started.Worktree != issue.Worktree || started.Branch != issue.Branch {
+		return false
+	}
+	var blocked struct {
+		Error       string `json:"error"`
+		FailureKind string `json:"failure_kind"`
+	}
+	if json.Unmarshal(prior[2].Payload, &blocked) != nil || blocked.FailureKind != "issue" || blocked.Error != "worker blocked: "+issue.EnvironmentResume.PreviousReason {
+		return false
+	}
+	if !eventPayloadHasExactState(prior[3].Payload, "blocked", "") {
+		return false
+	}
+	return eventPayloadHasReconciliation(prior[4].Payload, "GitHub exclusion label was applied manually") &&
+		eventPayloadHasReconciliation(prior[5].Payload, legacyNormalizedReason)
+}
+
+func eventPayloadHasExactState(raw json.RawMessage, state, resumeID string) bool {
 	var payload struct {
 		State    string `json:"state"`
 		ResumeID string `json:"resume_id"`
 	}
-	return json.Unmarshal(raw, &payload) == nil && payload.State == state && (resumeID == "" || payload.ResumeID == resumeID)
+	return json.Unmarshal(raw, &payload) == nil && payload.State == state && payload.ResumeID == resumeID
+}
+
+func eventPayloadHasReconciliation(raw json.RawMessage, reason string) bool {
+	var payload struct {
+		PreviousStatus string `json:"previous_status"`
+		Status         string `json:"status"`
+		Reason         string `json:"reason"`
+	}
+	return json.Unmarshal(raw, &payload) == nil && payload.PreviousStatus == "blocked" && payload.Status == "blocked" && payload.Reason == reason
 }
 
 func eventPayloadHasMode(raw json.RawMessage, mode string) bool {

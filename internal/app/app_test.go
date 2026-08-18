@@ -76,19 +76,26 @@ func (resumedWorkspaceGitHub) MergePullRequest(context.Context, config.Config, s
 }
 
 type resumedWorkspaceWorker struct {
-	paths   []string
-	prompts []string
+	paths    []string
+	prompts  []string
+	sessions []string
+	runs     int
+	resumes  int
 }
 
-func (w *resumedWorkspaceWorker) Run(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
+func (w *resumedWorkspaceWorker) Run(_ context.Context, cfg config.Config, _ gh.Issue, issue state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
 	w.paths = append(w.paths, cfg.RepoPath)
 	w.prompts = append(w.prompts, prompt)
+	w.sessions = append(w.sessions, issue.SessionID)
+	w.runs++
 	return worker.Result{Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "fixture retry", Retry: &worker.Retry{Reason: "fixture retry"}}, nil
 }
 
-func (w *resumedWorkspaceWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
+func (w *resumedWorkspaceWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, issue state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
 	w.paths = append(w.paths, cfg.RepoPath)
 	w.prompts = append(w.prompts, prompt)
+	w.sessions = append(w.sessions, issue.SessionID)
+	w.resumes++
 	return worker.Result{Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "fixture retry", Retry: &worker.Retry{Reason: "fixture retry"}}, nil
 }
 
@@ -130,37 +137,57 @@ func persistInterruptedMissingWorkspaceResume(t *testing.T, store state.Store, n
 		t.Fatal(err)
 	}
 	previousReason := "localhost listen denied"
-	parkID := "park_interrupted_workspace"
-	if _, err := store.Update("worker_environment_blocked", number, runID, map[string]string{"reason": previousReason, "resource_park_id": parkID}, func(snapshot *state.Snapshot) error {
+	if _, err := store.Update("worker_started", number, runID, map[string]string{"worktree": worktreePath, "branch": branch}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(number)]
-		item.Status = "blocked"
+		item.Status = "running"
 		item.Worktree = worktreePath
 		item.Branch = branch
 		item.SessionID = "session_interrupted_workspace"
 		item.Session = &state.WorkerSession{Backend: "codex", ID: item.SessionID}
-		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: previousReason, BlockedAt: confirmedAt.Add(-time.Minute)}
-		if err := state.ParkIssueLease(item, originalOwner, parkID, confirmedAt.Add(-time.Minute)); err != nil {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	blockedAt := confirmedAt.Add(-time.Minute)
+	if _, err := store.Update("issue_blocked", number, runID, map[string]string{"error": "worker blocked: " + previousReason, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(number)]
+		if err := state.ReleaseIssueLease(item, originalOwner); err != nil {
 			return err
 		}
-		item.ResourcePark.Kind = state.ResourceParkKindEnvironmentBlock
+		item.Status = "blocked"
+		item.FailureKind = "issue"
+		item.LastError = "worker blocked: " + previousReason
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("github_state_synced", number, runID, map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("startup_reconciled", number, runID, map[string]string{"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually"}, func(*state.Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("startup_reconciled", number, runID, map[string]string{"previous_status": "blocked", "status": "blocked", "reason": "supervisor-owned worker environment block provenance preserved"}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(number)]
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: previousReason, BlockedAt: blockedAt}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	resumePayload := map[string]any{
-		"resume_id": resumeID, "previous_reason": previousReason, "resource_park_id": parkID,
-		"parked_lease_reacquired": true, "base_sha": baseSHA, "current_base_sha": currentBaseSHA,
+		"resume_id": resumeID, "previous_reason": previousReason, "resource_park_id": "",
+		"parked_lease_reacquired": false, "legacy_worker_block": true, "legacy_lease_recovered": true,
+		"interrupted_resume": false, "base_sha": baseSHA, "current_base_sha": currentBaseSHA,
 	}
 	var resumeOwner state.LeaseOwner
 	_, err = store.Update("environment_resume_requested", number, runID, resumePayload, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(number)]
-		var resumeErr error
-		resumeOwner, resumeErr = state.ResumeParkedLease(snapshot, number, parkID, 0, confirmedAt)
-		if resumeErr != nil {
-			return resumeErr
+		item.LeaseGeneration++
+		resumeOwner = state.LeaseOwner{RunID: runID, Generation: item.LeaseGeneration}
+		item.Lease = &state.ResourceLease{
+			Owner: resumeOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource},
+			BaseSHA: baseSHA, ReservedAt: confirmedAt,
 		}
-		resumePayload["lease_owner"] = resumeOwner
-		resumePayload["lease_slot"] = item.Lease.Slot
 		item.Status = "environment_resume_pending"
 		item.EnvironmentResume = &state.EnvironmentResume{
 			ID: resumeID, Status: "requested", ConfirmedAt: confirmedAt, PreviousReason: previousReason,
@@ -169,6 +196,9 @@ func persistInterruptedMissingWorkspaceResume(t *testing.T, store state.Store, n
 		return nil
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("github_state_synced", number, runID, map[string]string{"state": "environment_resume"}, func(*state.Snapshot) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Update("github_state_synced", number, runID, map[string]string{"state": "environment_resume", "resume_id": resumeID}, func(snapshot *state.Snapshot) error {
@@ -180,7 +210,7 @@ func persistInterruptedMissingWorkspaceResume(t *testing.T, store state.Store, n
 	if _, err := store.Update("worker_started", number, runID, map[string]string{"mode": "environment_block_resume"}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(number)]
 		item.Status = "running"
-		item.ResourcePark.Status = "resumed"
+		item.EnvironmentResume.Status = "running"
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -208,8 +238,7 @@ func persistInterruptedMissingWorkspaceResume(t *testing.T, store state.Store, n
 		item.BlockedCause = &state.BlockedCause{
 			Origin: "supervisor", Kind: "worker_workspace", Resumable: false, Reason: reason, BlockedAt: time.Now().UTC(),
 		}
-		// The affected durable record retained the active explicit resume marker.
-		item.EnvironmentResume.Status = "github_synced"
+		// The affected durable record retained the running explicit resume marker.
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -1325,17 +1354,22 @@ func TestFaultInterruptedV0614MissingWorkspaceResumeBackfillsAndSpawnsSameWorktr
 
 	resumeID := "resume_0733cc3d177d05f3"
 	fakeGH := filepath.Join(root, "bin", "gh-interrupted-workspace")
+	failOncePath := filepath.Join(root, "interrupted-workspace-gh-failed-once")
+	missingMarkerPath := filepath.Join(root, "interrupted-workspace-missing-marker")
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1 $2" in
-  "issue view") printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"},{"body":"<!-- codex-issue-loop:failed:150 -->"}]}' ;;
+  "issue view") if [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MISSING_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; else printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"},{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; fi ;;
   "pr list") printf '%%s\n' '[]' ;;
-  "issue edit"|"issue comment") exit 0 ;;
+  "issue edit") if [ ! -e "$AGENT_LOOP_TEST_INTERRUPTED_GH_FAIL_ONCE" ]; then : > "$AGENT_LOOP_TEST_INTERRUPTED_GH_FAIL_ONCE"; exit 1; fi; exit 0 ;;
+  "issue comment") exit 0 ;;
   *) exit 2 ;;
 esac
 `, resumeID)
 	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_GH_FAIL_ONCE", failOncePath)
+	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_MISSING_MARKER", missingMarkerPath)
 	cfg := mustConfig(t, repo)
 	entry := registry.Entry{
 		RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo,
@@ -1350,6 +1384,24 @@ esac
 
 	args := []string{"resume-blocked", "--repo", repo, "--issue", "150", "--confirm-prerequisite-resolved", "--json"}
 	controller := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
+	if err := os.WriteFile(missingMarkerPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeMarkerMismatch, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var markerOut, markerErr bytes.Buffer
+	if code := (App{Out: &markerOut, Err: &markerErr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(markerErr.String(), "GitHub state does not prove") {
+		t.Fatalf("missing GitHub resume marker was accepted: code=%d stdout=%s stderr=%s", code, markerOut.String(), markerErr.String())
+	}
+	afterMarkerMismatch, err := store.Load()
+	if err != nil || afterMarkerMismatch.StateRevision != beforeMarkerMismatch.StateRevision || afterMarkerMismatch.Issues["150"].Workspace != nil || afterMarkerMismatch.Issues["150"].Lease.Owner != owner {
+		t.Fatalf("GitHub marker rejection changed state: before=%d after=%d issue=%+v err=%v", beforeMarkerMismatch.StateRevision, afterMarkerMismatch.StateRevision, afterMarkerMismatch.Issues["150"], err)
+	}
+	if err := os.Remove(missingMarkerPath); err != nil {
+		t.Fatal(err)
+	}
 	var ready sync.WaitGroup
 	ready.Add(2)
 	release := make(chan struct{})
@@ -1375,25 +1427,48 @@ esac
 	ready.Wait()
 	close(release)
 	succeeded := 0
+	durableFailure := 0
+	revisionFailure := 0
 	for range 2 {
 		result := <-results
 		if result.code == 0 {
 			succeeded++
-		} else if !strings.Contains(result.stderr, "durable state changed") {
+		} else if strings.Contains(result.stderr, "durable resume remains pending") {
+			durableFailure++
+		} else if strings.Contains(result.stderr, "durable state changed") {
+			revisionFailure++
+		} else {
 			t.Fatalf("parallel recovery failed without a revision fence: %+v", result)
 		}
 	}
-	if succeeded != 1 {
-		t.Fatalf("parallel recovery successes=%d, want exactly one", succeeded)
+	if succeeded != 0 || durableFailure != 1 || revisionFailure != 1 {
+		t.Fatalf("parallel crash boundary results: success=%d durable-failure=%d revision-failure=%d", succeeded, durableFailure, revisionFailure)
+	}
+	pending, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingItem := pending.Issues["150"]
+	pendingOwner := state.LeaseOwner{RunID: owner.RunID, Generation: owner.Generation + 1}
+	if pendingItem.Status != "environment_resume_pending" || pendingItem.GitHubSync != "environment_resume" || pendingItem.Workspace == nil ||
+		pendingItem.EnvironmentResume == nil || pendingItem.EnvironmentResume.Status != "requested" || pendingItem.Lease == nil ||
+		pendingItem.Lease.Owner != pendingOwner || pendingItem.LeaseGeneration != pendingOwner.Generation {
+		t.Fatalf("exact v0.6.14 crash boundary partially persisted recovery: %+v", pendingItem)
+	}
+	var resumeOut, resumeErr bytes.Buffer
+	if code := (App{Out: &resumeOut, Err: &resumeErr, ProcessController: controller}).Run(context.Background(), args); code != 0 {
+		t.Fatalf("crash-boundary retry failed: code=%d stdout=%s stderr=%s", code, resumeOut.String(), resumeErr.String())
 	}
 	recovered, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	item := recovered.Issues["150"]
+	recoveredOwner := pendingOwner
 	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.Workspace == nil ||
 		item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != "github_synced" ||
-		item.Lease == nil || item.Lease.Owner != owner || item.LeaseGeneration != owner.Generation ||
+		item.Lease == nil || item.Lease.Owner != recoveredOwner || item.LeaseGeneration != recoveredOwner.Generation ||
+		item.SessionID != "session_interrupted_workspace" || item.Session == nil || item.Session.ID != item.SessionID ||
 		item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" ||
 		!item.BlockedCause.Resumable || item.BlockedCause.Reason != item.EnvironmentResume.PreviousReason {
 		t.Fatalf("interrupted workspace recovery did not converge atomically: %+v", item)
@@ -1410,7 +1485,7 @@ esac
 		t.Fatalf("idempotent retry code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
 	retried, err := store.Load()
-	if err != nil || retried.StateRevision != revision || retried.Issues["150"].Lease.Owner != owner {
+	if err != nil || retried.StateRevision != revision || retried.Issues["150"].Lease.Owner != recoveredOwner {
 		t.Fatalf("idempotent retry duplicated recovery: before=%d after=%d issue=%+v err=%v", revision, retried.StateRevision, retried.Issues["150"], err)
 	}
 
@@ -1424,8 +1499,9 @@ esac
 	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
 		t.Fatalf("same-worktree spawn worked=%v err=%v", worked, err)
 	}
-	if len(runtime.paths) != 1 || runtime.paths[0] != managedWorktree || len(runtime.prompts) != 1 || !strings.Contains(runtime.prompts[0], "localhost listen denied") {
-		t.Fatalf("worker did not resume the original workspace/reason: paths=%v prompts=%v", runtime.paths, runtime.prompts)
+	if len(runtime.paths) != 1 || runtime.paths[0] != managedWorktree || len(runtime.prompts) != 1 || !strings.Contains(runtime.prompts[0], "localhost listen denied") ||
+		runtime.runs != 0 || runtime.resumes != 1 || len(runtime.sessions) != 1 || runtime.sessions[0] != "session_interrupted_workspace" {
+		t.Fatalf("worker did not resume the original workspace/session/reason: paths=%v sessions=%v runs=%d resumes=%d prompts=%v", runtime.paths, runtime.sessions, runtime.runs, runtime.resumes, runtime.prompts)
 	}
 	events, err := os.ReadFile(store.EventsPath())
 	if err != nil || strings.Count(string(events), `"type":"environment_resume_recovered"`) != 1 ||

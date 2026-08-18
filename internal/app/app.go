@@ -1509,6 +1509,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			return exitError{4, fmt.Errorf("verify interrupted missing-workspace environment resume: %w; state was not changed", err)}
 		}
 		interruptedWorkspaceRecovery = true
+		// A running EnvironmentResume is only an interrupted intent after the
+		// exact v0.6.14 durable chain above has established that authority.
+		interruptedResume = true
 	}
 	resumeIntent := interruptedResume || pendingResume || idempotentResume
 	var legacyCause *state.BlockedCause
@@ -1715,8 +1718,10 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		}
 		resumePayload := map[string]any{
 			"resume_id": resumeID, "previous_reason": previousReason, "resource_park_id": resourceParkID(current), "parked_lease_reacquired": parkedClaim,
-			"legacy_worker_block": legacyWorkerBlock, "legacy_lease_recovered": legacyRecovery != nil, "interrupted_resume": interruptedResume,
-			"base_sha": baseSHA, "current_base_sha": currentBaseSHA,
+			"legacy_worker_block":    legacyWorkerBlock || (interruptedWorkspaceEvidence != nil && interruptedWorkspaceEvidence.LegacyLeaseRecovered),
+			"legacy_lease_recovered": legacyRecovery != nil || (interruptedWorkspaceEvidence != nil && interruptedWorkspaceEvidence.LegacyLeaseRecovered),
+			"interrupted_resume":     interruptedResume,
+			"base_sha":               baseSHA, "current_base_sha": currentBaseSHA,
 			"interrupted_workspace_recovery": interruptedWorkspaceRecovery,
 			"interrupted_blocked_cause":      current.BlockedCause,
 			"workspace_recovery": map[string]any{
@@ -1773,6 +1778,30 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 						return fmt.Errorf("Issue #%d cannot recover repo:* while Issue #%d retains a resource lease", *issueNumber, other.Number)
 					}
 				}
+			}
+			if interruptedWorkspaceEvidence != nil && interruptedWorkspaceEvidence.LegacyLeaseRecovered {
+				if item.Lease == nil || item.Lease.Owner != interruptedWorkspaceEvidence.LeaseOwner ||
+					item.Lease.Slot != interruptedWorkspaceEvidence.LeaseSlot || item.LeaseGeneration != interruptedWorkspaceEvidence.LeaseOwner.Generation {
+					return fmt.Errorf("Issue #%d v0.6.14 recovered lease changed while workspace recovery was being prepared", *issueNumber)
+				}
+				for _, other := range s.Issues {
+					if other == nil || other.Number == item.Number || other.Lease == nil {
+						continue
+					}
+					if occupiesWorkerSlot(other.Status) && other.Lease.Slot == item.Lease.Slot {
+						return fmt.Errorf("Issue #%d cannot fence recovered slot %d while Issue #%d occupies it", *issueNumber, item.Lease.Slot, other.Number)
+					}
+					if state.ResourcesConflict(item.Lease.ResolvedResources, other.Lease.ResolvedResources) {
+						return fmt.Errorf("Issue #%d cannot fence recovered resources while Issue #%d retains a conflicting lease", *issueNumber, other.Number)
+					}
+				}
+				owner, transferErr := state.TransferIssueLease(item, interruptedWorkspaceEvidence.LeaseOwner, item.RunID)
+				if transferErr != nil {
+					return fmt.Errorf("Issue #%d cannot fence v0.6.14 recovered lease: %w", *issueNumber, transferErr)
+				}
+				resumePayload["lease_owner"] = owner
+				resumePayload["lease_slot"] = item.Lease.Slot
+				resumePayload["previous_lease_owner"] = interruptedWorkspaceEvidence.LeaseOwner
 			}
 			if parkedClaim {
 				if item.ResourcePark == nil || current.ResourcePark == nil || !reflect.DeepEqual(item.ResourcePark, current.ResourcePark) {
@@ -1879,9 +1908,11 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		"dirty": inspection.Dirty, "unpushed_commits": inspection.UnpushedCommits,
 		"workspace_provenance_backfilled": workspaceBackfill,
 	}
+	if leaseOwner != nil {
+		output["lease_owner"] = leaseOwner
+	}
 	if parkID != "" {
 		output["resource_park_id"] = parkID
-		output["lease_owner"] = leaseOwner
 	}
 	return a.output(*jsonOut, output)
 }
