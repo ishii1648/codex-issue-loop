@@ -48,7 +48,7 @@ make test-race
 | needs-input park、回答provenance、競合中のdurable answer、解放後の1回だけの再取得 | `TestRunOncePersistsQuestion`、`TestAnswerDurablyWaitsWithoutStealingConflictingLease`、`TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce` |
 | park済みoperator resumeの競合拒否・新generation・dirty/session/Goal/answer保持・GitHub同期crash冪等性 | `TestFaultResumeBlockedReacquiresParkedLeaseOnceAcrossGitHubSyncFailure`、`TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
 | park/legacy resumeのfail-closed・typed legacy lost lease回復 | `TestResourceParkValidationFailsClosed`、`TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestTypedLegacyWorkerBlockRecoveryFromMissingLeaseFixture`、`TestTypedLegacyWorkerBlockRequiresExactDurableCause`、`TestLegacyWorkerBlockRecoveryRequiresSameRunLeaseWorktreeAndBranch`、`TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
-| exact v0.6.14 missing-Workspace interrupted resume（running status、owner/slotなしlegacy request、resume IDなし→ありsync）の限定回復・改変拒否・新generation・並行/crash fence・same-worktree spawn | `TestInterruptedWorkspaceResumeEvidenceFromV0614Fixture`、`TestInterruptedWorkspaceResumeCandidateFailsClosedForOtherSupervisorBlocks`、`TestInterruptedWorkspaceResumeEvidenceRejectsTamperedOrReorderedHistory`、`TestInterruptedWorkspaceResumeEvidenceRejectsCurrentStateMismatches`、`TestFaultInterruptedV0614MissingWorkspaceResumeBackfillsAndSpawnsSameWorktree` |
+| exact v0.6.14 missing-Workspace interrupted resume（全27 events、running status、owner/slotなしlegacy request、resume IDなし→ありsync）の限定回復・改変拒否・generation 2→3・並行/crash fence・same-worktree spawn | `TestInterruptedWorkspaceResumeEvidenceFromZeitreise442Full27EventFixture`、`TestInterruptedWorkspaceResumeEvidenceRetainsSyntheticShortFixtureCompatibility`、`TestInterruptedWorkspaceResumeCandidateFailsClosedForOtherSupervisorBlocks`、`TestInterruptedWorkspaceResumeEvidenceRejectsTamperedOrReorderedHistory`、`TestInterruptedWorkspaceResumeEvidenceRejectsCurrentStateMismatches`、`TestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree` |
 | 手動merge済みPR adoptionのfail-closed検証・lease解放・冪等性 | `TestValidateMergedPullRequestAdoptionFailsClosed`、`TestAdoptMergedPullRequestReleasesLeaseAndIsIdempotent` |
 
 ## 追加の部分障害と境界
@@ -77,6 +77,8 @@ make test-race
 | worktree cleanup/purge・安全条件・監査 | `TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval`、`TestPurgeRequiresExactConfirmationAndCanRemoveDirtyWorktree` |
 
 障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
+
+`internal/state/testdata/zeitreise-442-v0614-full-27-events.jsonl`と`zeitreise-442-v0614-full-27-state.json`は、zeitreise #442の同一runに残ったproduction recordを由来とするrelease-gate fixtureである。path、SHA、ID、PID、時刻、title、retry reason、worker identityの値だけを安全な値へ置換し、27 eventsのtype、order、payload shape、original generation 1→legacy recovery generation 2は保持する。`zeitreise-442-v0614-missing-workspace-resume-*`はPR #153で導入した12-event synthetic short fixtureとして互換性確認にだけ残し、short fixtureの成功だけではrelease gateを満たさない。
 
 Codex Desktopのquestion notification、macOS通知権限、Activityの回答待ち、pinした`codex-issue-loop` / `zeitreise`監視chatの責務分離はrepository内の自動testでは再現しない。[Codex Desktop監視task運用](codex-desktop-monitoring.md)の実機受け入れ手順で検証する。
 

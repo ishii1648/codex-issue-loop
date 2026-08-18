@@ -249,6 +249,53 @@ func persistInterruptedMissingWorkspaceResume(t *testing.T, store state.Store, n
 	return resumeOwner
 }
 
+func persistZeitreise442Full27EventResumeFixture(t *testing.T, store state.Store, number int, runID, worktreePath, branch, baseSHA, currentBaseSHA, resumeID string) state.LeaseOwner {
+	t.Helper()
+	events, err := os.ReadFile("../state/testdata/zeitreise-442-v0614-full-27-events.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueData, err := os.ReadFile("../state/testdata/zeitreise-442-v0614-full-27-state.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacements := [][2]string{
+		{"/sanitized/worktrees/zeitreise/issue-442", worktreePath},
+		{"/sanitized/zeitreise/.git", filepath.Join(store.RepoPath, ".git")},
+		{"/sanitized/zeitreise", store.RepoPath},
+		{"codex/issue-442-sanitized", branch},
+		{"1111111111111111111111111111111111111111", baseSHA},
+		{"2222222222222222222222222222222222222222", currentBaseSHA},
+		{"run_adaf3142bd207b24", runID},
+		{"resume_0733cc3d177d05f3", resumeID},
+		{"session_fixture_zeitreise_442", "session_interrupted_workspace"},
+		{"repo_zeitreise", store.RepoID},
+		{`"issue_number":442`, fmt.Sprintf(`"issue_number":%d`, number)},
+		{`"number": 442`, fmt.Sprintf(`"number": %d`, number)},
+	}
+	for _, replacement := range replacements {
+		events = bytes.ReplaceAll(events, []byte(replacement[0]), []byte(replacement[1]))
+		issueData = bytes.ReplaceAll(issueData, []byte(replacement[0]), []byte(replacement[1]))
+	}
+	checkpoint := fmt.Sprintf(`{"version":4,"event_id":"event_fixture_checkpoint","sequence":3764,"timestamp":"2026-08-17T12:19:59Z","repo_id":%q,"type":"event_log_checkpoint","payload":{"archived_through":3764}}`+"\n", store.RepoID)
+	events = append([]byte(checkpoint), events...)
+	var issue state.Issue
+	if err := json.Unmarshal(issueData, &issue); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.StateRevision = 3791
+	snapshot.Issues[strconv.Itoa(number)] = &issue
+	writeJSONFixture(t, store.StatePath(), snapshot)
+	if err := os.WriteFile(store.EventsPath(), events, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return issue.Lease.Owner
+}
+
 func testEnvironment(t *testing.T) (string, layout.Layout) {
 	t.Helper()
 	root := t.TempDir()
@@ -1296,7 +1343,7 @@ esac
 	}
 }
 
-func TestFaultInterruptedV0614MissingWorkspaceResumeBackfillsAndSpawnsSameWorktree(t *testing.T) {
+func TestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1355,21 +1402,25 @@ func TestFaultInterruptedV0614MissingWorkspaceResumeBackfillsAndSpawnsSameWorktr
 	resumeID := "resume_0733cc3d177d05f3"
 	fakeGH := filepath.Join(root, "bin", "gh-interrupted-workspace")
 	failOncePath := filepath.Join(root, "interrupted-workspace-gh-failed-once")
-	missingMarkerPath := filepath.Join(root, "interrupted-workspace-missing-marker")
+	missingResumeMarkerPath := filepath.Join(root, "interrupted-workspace-missing-resume-marker")
+	missingFailureMarkerPath := filepath.Join(root, "interrupted-workspace-missing-failure-marker")
+	extraMarkerPath := filepath.Join(root, "interrupted-workspace-extra-marker")
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1 $2" in
-  "issue view") if [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MISSING_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; else printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"},{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; fi ;;
+  "issue view") if [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MISSING_RESUME_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; elif [ -e "$AGENT_LOOP_TEST_INTERRUPTED_MISSING_FAILURE_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"}]}'; elif [ -e "$AGENT_LOOP_TEST_INTERRUPTED_EXTRA_MARKER" ]; then printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"},{"body":"<!-- codex-issue-loop:environment-resume:unexpected -->"},{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; else printf '%%s\n' '{"number":150,"title":"Interrupted workspace","body":"","url":"https://example.test/issues/150","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"<!-- codex-issue-loop:environment-resume:%s -->"},{"body":"<!-- codex-issue-loop:failed:150 -->"}]}'; fi ;;
   "pr list") printf '%%s\n' '[]' ;;
   "issue edit") if [ ! -e "$AGENT_LOOP_TEST_INTERRUPTED_GH_FAIL_ONCE" ]; then : > "$AGENT_LOOP_TEST_INTERRUPTED_GH_FAIL_ONCE"; exit 1; fi; exit 0 ;;
   "issue comment") exit 0 ;;
   *) exit 2 ;;
 esac
-`, resumeID)
+`, resumeID, resumeID, resumeID)
 	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_GH_FAIL_ONCE", failOncePath)
-	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_MISSING_MARKER", missingMarkerPath)
+	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_MISSING_RESUME_MARKER", missingResumeMarkerPath)
+	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_MISSING_FAILURE_MARKER", missingFailureMarkerPath)
+	t.Setenv("AGENT_LOOP_TEST_INTERRUPTED_EXTRA_MARKER", extraMarkerPath)
 	cfg := mustConfig(t, repo)
 	entry := registry.Entry{
 		RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo,
@@ -1380,11 +1431,15 @@ esac
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	owner := persistInterruptedMissingWorkspaceResume(t, store, 150, "run_interrupted_workspace", managedWorktree, branch, baseSHA, currentBaseSHA, resumeID)
+	owner := persistZeitreise442Full27EventResumeFixture(t, store, 150, "run_interrupted_workspace", managedWorktree, branch, baseSHA, currentBaseSHA, resumeID)
+	seeded, err := store.Load()
+	if err != nil || seeded.Issues["150"] == nil {
+		t.Fatalf("full 27-event fixture was not installed: issue=%+v err=%v", seeded.Issues["150"], err)
+	}
 
 	args := []string{"resume-blocked", "--repo", repo, "--issue", "150", "--confirm-prerequisite-resolved", "--json"}
 	controller := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
-	if err := os.WriteFile(missingMarkerPath, nil, 0o600); err != nil {
+	if err := os.WriteFile(missingResumeMarkerPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	beforeMarkerMismatch, err := store.Load()
@@ -1399,7 +1454,37 @@ esac
 	if err != nil || afterMarkerMismatch.StateRevision != beforeMarkerMismatch.StateRevision || afterMarkerMismatch.Issues["150"].Workspace != nil || afterMarkerMismatch.Issues["150"].Lease.Owner != owner {
 		t.Fatalf("GitHub marker rejection changed state: before=%d after=%d issue=%+v err=%v", beforeMarkerMismatch.StateRevision, afterMarkerMismatch.StateRevision, afterMarkerMismatch.Issues["150"], err)
 	}
-	if err := os.Remove(missingMarkerPath); err != nil {
+	if err := os.Remove(missingResumeMarkerPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(missingFailureMarkerPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	markerOut.Reset()
+	markerErr.Reset()
+	if code := (App{Out: &markerOut, Err: &markerErr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(markerErr.String(), "GitHub state does not prove") {
+		t.Fatalf("missing GitHub failure marker was accepted: code=%d stdout=%s stderr=%s", code, markerOut.String(), markerErr.String())
+	}
+	afterFailureMarkerMismatch, err := store.Load()
+	if err != nil || afterFailureMarkerMismatch.StateRevision != beforeMarkerMismatch.StateRevision || afterFailureMarkerMismatch.Issues["150"].Workspace != nil || afterFailureMarkerMismatch.Issues["150"].Lease.Owner != owner {
+		t.Fatalf("GitHub failure marker rejection changed state: before=%d after=%d issue=%+v err=%v", beforeMarkerMismatch.StateRevision, afterFailureMarkerMismatch.StateRevision, afterFailureMarkerMismatch.Issues["150"], err)
+	}
+	if err := os.Remove(missingFailureMarkerPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(extraMarkerPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	markerOut.Reset()
+	markerErr.Reset()
+	if code := (App{Out: &markerOut, Err: &markerErr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(markerErr.String(), "GitHub state does not prove") {
+		t.Fatalf("extra GitHub resume marker was accepted: code=%d stdout=%s stderr=%s", code, markerOut.String(), markerErr.String())
+	}
+	afterExtraMarker, err := store.Load()
+	if err != nil || afterExtraMarker.StateRevision != beforeMarkerMismatch.StateRevision || afterExtraMarker.Issues["150"].Workspace != nil || afterExtraMarker.Issues["150"].Lease.Owner != owner {
+		t.Fatalf("extra GitHub marker rejection changed state: before=%d after=%d issue=%+v err=%v", beforeMarkerMismatch.StateRevision, afterExtraMarker.StateRevision, afterExtraMarker.Issues["150"], err)
+	}
+	if err := os.Remove(extraMarkerPath); err != nil {
 		t.Fatal(err)
 	}
 	var ready sync.WaitGroup
