@@ -2165,9 +2165,8 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 	workspace := fresh.Workspace
 	if workspace == nil {
 		return fail(fmt.Errorf("saved workspace provenance is missing"))
-	} else if workspace.Path != validation.CanonicalCWD || workspace.Branch != validation.Branch || workspace.RepoID != l.Store.RepoID ||
-		workspace.Repository != l.Config.GitHub.Repo || workspace.RepositoryID != l.Config.GitHub.RepositoryID ||
-		workspace.GitCommonDir != validation.CommonDir || workspace.MainCheckout != validation.MainCheckout {
+	} else if !workspace.Matches(validation.CanonicalCWD, validation.Branch, l.Store.RepoID, l.Config.GitHub.Repo,
+		l.Config.GitHub.RepositoryID, validation.CommonDir, validation.MainCheckout) {
 		return fail(fmt.Errorf("saved workspace provenance does not match the launch target"))
 	}
 	validation.Checks["saved_provenance"] = true

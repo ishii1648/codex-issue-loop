@@ -25,6 +25,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
@@ -41,6 +42,23 @@ func (f *appProcessGroups) SignalGroup(pgid int, signal syscall.Signal) error {
 	f.signals[pgid] = append(f.signals[pgid], signal)
 	f.alive[pgid] = false
 	return nil
+}
+
+// legacyResumeTestApp keeps older resume tests focused on lease/GitHub
+// behavior even though those fixtures historically used the main checkout as
+// their saved worktree. Strict workspace-boundary behavior has dedicated real
+// linked-worktree tests below.
+func legacyResumeTestApp(out, stderr *bytes.Buffer, controller supervisor.ProcessGroupController) App {
+	return App{
+		Out: out, Err: stderr, ProcessController: controller,
+		validateResumeWorkspace: func(_ context.Context, _ worktree.Manager, cfg config.Config, path, branch string) (worktree.LaunchValidation, error) {
+			return worktree.LaunchValidation{
+				Valid: true, ExpectedCWD: path, CanonicalCWD: path, TopLevel: path, Branch: branch,
+				CommonDir: filepath.Join(cfg.RepoPath, ".git"), MainCheckout: cfg.RepoPath,
+				Checks: map[string]bool{"legacy_fixture": true},
+			}, nil
+		},
+	}
 }
 
 func testEnvironment(t *testing.T) (string, layout.Layout) {
@@ -789,7 +807,7 @@ esac
 		t.Fatal(err)
 	}
 	var conflictOut, conflictErr bytes.Buffer
-	conflictApp := App{Out: &conflictOut, Err: &conflictErr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	conflictApp := legacyResumeTestApp(&conflictOut, &conflictErr, &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}})
 	if code := conflictApp.Run(context.Background(), []string{"resume-blocked", "--repo", repo, "--issue", "8", "--confirm-prerequisite-resolved", "--json"}); code == 0 || !strings.Contains(conflictErr.String(), "cannot recover repo:*") {
 		t.Fatalf("competing lease was accepted: code=%d stdout=%s stderr=%s", code, conflictOut.String(), conflictErr.String())
 	}
@@ -809,7 +827,7 @@ esac
 	var durableGeneration uint64
 	for attempt := 0; attempt < 3; attempt++ {
 		var out, stderr bytes.Buffer
-		a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+		a := legacyResumeTestApp(&out, &stderr, &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}})
 		code := a.Run(context.Background(), []string{"resume-blocked", "--repo", repo, "--issue", "8", "--confirm-prerequisite-resolved", "--json"})
 		if attempt == 0 {
 			if code == 0 {
@@ -866,6 +884,227 @@ esac
 	}
 	if remoteHead := runGitOutputApp(t, repo, "rev-parse", "origin/"+branch); remoteHead != result.Commit {
 		t.Fatalf("remote branch=%s, want published commit %s", remoteHead, result.Commit)
+	}
+}
+
+func TestFaultResumeBlockedBackfillsMissingWorkspaceProvenanceForDirtyBehindManagedWorktree(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(repo)
+	managedRoot := filepath.Join(root, "managed-worktrees")
+	if err := os.MkdirAll(managedRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	managedRoot, err := filepath.EvalSymlinks(managedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configFile, err := os.OpenFile(filepath.Join(repo, config.FileName), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(configFile, "git:\n  worktree_root: %q\n", managedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "config", "user.name", "Test User")
+	runGitApp(t, repo, "config", "user.email", "test@example.com")
+	runGitApp(t, repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "add", ".agent-loop.yaml", "README.md")
+	runGitApp(t, repo, "commit", "-m", "base")
+	runGitApp(t, repo, "branch", "-M", "main")
+	remotePath := filepath.Join(root, "workspace-recovery-remote.git")
+	runGitApp(t, root, "init", "--bare", remotePath)
+	runGitApp(t, repo, "remote", "add", "origin", remotePath)
+	runGitApp(t, repo, "push", "-u", "origin", "main")
+	baseSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
+	branch := "codex/issue-148-workspace-recovery"
+	managedWorktree := filepath.Join(managedRoot, "repo-fixture", "issue-148")
+	if err := os.MkdirAll(filepath.Dir(managedWorktree), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "worktree", "add", "-b", branch, managedWorktree, baseSHA)
+	runGitApp(t, managedWorktree, "push", "-u", "origin", branch)
+	if err := os.WriteFile(filepath.Join(managedWorktree, "dirty-unpublished.txt"), []byte("preserve exactly\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "main-ahead.txt"), []byte("new base work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "add", "main-ahead.txt")
+	runGitApp(t, repo, "commit", "-m", "main advances")
+	runGitApp(t, repo, "push", "origin", "main")
+	currentBaseSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
+
+	fakeGH := filepath.Join(root, "bin", "gh-workspace-recovery")
+	failOncePath := filepath.Join(root, "workspace-recovery-failed-once")
+	script := `#!/bin/sh
+case "$1 $2" in
+  "issue view") printf '%s\n' '{"number":148,"title":"Workspace recovery","body":"","url":"https://example.test/issues/148","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[]}' ;;
+  "pr list") printf '%s\n' '[]' ;;
+  "issue edit") if [ ! -e "$AGENT_LOOP_TEST_GH_FAIL_ONCE" ]; then : > "$AGENT_LOOP_TEST_GH_FAIL_ONCE"; exit 1; fi; exit 0 ;;
+  "issue comment") exit 0 ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_LOOP_TEST_GH_FAIL_ONCE", failOncePath)
+	cfg := mustConfig(t, repo)
+	entry := registry.Entry{
+		RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo,
+		Commands: map[string]string{"git": "/usr/bin/git", "gh": fakeGH},
+	}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: cfg.RepoPath}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	_, owner, err := store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 148, Title: "Workspace recovery", RunID: "run_workspace_recovery", Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, BaseSHA: baseSHA, ReservedAt: time.Now().UTC().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedAt := time.Now().UTC().Add(-time.Minute)
+	_, err = store.Update("issue_blocked", 148, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["148"]
+		item.Status = "blocked"
+		item.Worktree = managedWorktree
+		item.Branch = branch
+		item.SessionID = "session-workspace-recovery"
+		item.Session = &state.WorkerSession{Backend: "codex", ID: item.SessionID}
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: blockedAt}
+		item.LastError = "worker blocked: network unavailable"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Issues["148"].Workspace != nil {
+		t.Fatalf("fixture unexpectedly has workspace provenance: %+v", before.Issues["148"].Workspace)
+	}
+
+	args := []string{"resume-blocked", "--repo", repo, "--issue", "148", "--confirm-prerequisite-resolved", "--json"}
+	controller := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
+	var out, stderr bytes.Buffer
+	raceApp := App{
+		Out: &out, Err: &stderr, ProcessController: controller,
+		validateResumeWorkspace: func(ctx context.Context, manager worktree.Manager, cfg config.Config, path, branch string) (worktree.LaunchValidation, error) {
+			validation, validateErr := manager.ValidateLaunch(ctx, cfg, path, branch)
+			if validateErr != nil {
+				return validation, validateErr
+			}
+			_, updateErr := store.Update("test_concurrent_workspace_recovery", 148, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+				snapshot.Issues["148"].UpdatedAt = time.Now().UTC()
+				return nil
+			})
+			return validation, updateErr
+		},
+	}
+	if code := raceApp.Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "durable state changed") {
+		t.Fatalf("concurrent state change was not fenced: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	afterRace, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRace.Issues["148"].Status != "blocked" || afterRace.Issues["148"].Workspace != nil || afterRace.Issues["148"].EnvironmentResume != nil || afterRace.Issues["148"].Lease.Owner != owner {
+		t.Fatalf("fenced recovery partially mutated lifecycle/provenance: %+v", afterRace.Issues["148"])
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "durable resume remains pending") {
+		t.Fatalf("injected synchronization fault did not preserve recovery: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	pending, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := pending.Issues["148"]
+	if item.Status != "environment_resume_pending" || item.GitHubSync != "environment_resume" || item.Workspace == nil || item.Lease == nil {
+		t.Fatalf("workspace and lifecycle were not persisted together: %+v", item)
+	}
+	validation, err := (worktree.Manager{StateRoot: l.Root, GitPath: "/usr/bin/git"}).ValidateLaunch(context.Background(), cfg, managedWorktree, branch)
+	if err != nil || !item.Workspace.Matches(validation.CanonicalCWD, validation.Branch, entry.RepoID, cfg.GitHub.Repo, cfg.GitHub.RepositoryID, validation.CommonDir, validation.MainCheckout) {
+		t.Fatalf("backfill does not satisfy spawn validator: workspace=%+v validation=%+v err=%v", item.Workspace, validation, err)
+	}
+	if item.Lease.BaseSHA != baseSHA || item.EnvironmentResume.CurrentBaseSHA != currentBaseSHA || item.Worktree != managedWorktree || item.Branch != branch {
+		t.Fatalf("resume changed original base/worktree/branch: %+v", item)
+	}
+	if got := runGitOutputApp(t, managedWorktree, "rev-parse", "HEAD"); got != baseSHA {
+		t.Fatalf("dirty behind-main worktree was rebased or moved: got=%s want=%s", got, baseSHA)
+	}
+	if data, err := os.ReadFile(filepath.Join(managedWorktree, "dirty-unpublished.txt")); err != nil || string(data) != "preserve exactly\n" {
+		t.Fatalf("dirty worktree content changed: data=%q err=%v", data, err)
+	}
+	events, err := os.ReadFile(store.EventsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventText := string(events)
+	for _, evidence := range []string{
+		`"type":"environment_resume_requested"`, `"old_provenance_missing":true`, `"confirm_prerequisite_resolved":true`,
+		`"expected"`, `"actual"`, `"git_common_dir"`, `"repository_identity":true`, `"not_main_checkout":true`,
+	} {
+		if !strings.Contains(eventText, evidence) {
+			t.Fatalf("workspace recovery audit is missing %s: %s", evidence, eventText)
+		}
+	}
+
+	out.Reset()
+	stderr.Reset()
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code != 0 {
+		t.Fatalf("restart convergence failed: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	converged, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := converged.StateRevision
+	ownerAfterRecovery := converged.Issues["148"].Lease.Owner
+	out.Reset()
+	stderr.Reset()
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code != 0 || !strings.Contains(out.String(), `"idempotent": true`) {
+		t.Fatalf("idempotent retry failed: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	idempotent, err := store.Load()
+	if err != nil || idempotent.StateRevision != revision || idempotent.Issues["148"].Lease.Owner != ownerAfterRecovery {
+		t.Fatalf("idempotent retry duplicated lifecycle/lease: before=%d after=%d issue=%+v err=%v", revision, idempotent.StateRevision, idempotent.Issues["148"], err)
+	}
+
+	_, err = store.Update("test_workspace_mismatch", 148, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["148"].Workspace.GitCommonDir = filepath.Join(t.TempDir(), ".git")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatched, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "does not match") {
+		t.Fatalf("existing provenance mismatch was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	afterMismatch, err := store.Load()
+	if err != nil || afterMismatch.StateRevision != mismatched.StateRevision || afterMismatch.Issues["148"].Workspace.GitCommonDir != mismatched.Issues["148"].Workspace.GitCommonDir {
+		t.Fatalf("mismatch rejection changed state: before=%d after=%d issue=%+v err=%v", mismatched.StateRevision, afterMismatch.StateRevision, afterMismatch.Issues["148"], err)
 	}
 }
 
@@ -961,7 +1200,7 @@ esac
 	}
 
 	var out, stderr bytes.Buffer
-	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	a := legacyResumeTestApp(&out, &stderr, &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}})
 	args := []string{"resume-blocked", "--repo", cfg.RepoPath, "--issue", "8", "--confirm-prerequisite-resolved", "--json"}
 	broken, err := store.Load()
 	if err != nil {
@@ -1117,7 +1356,7 @@ func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testi
 		t.Fatalf("legacy recovery fixture is invalid: %v", err)
 	}
 	var out, stderr bytes.Buffer
-	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	a := legacyResumeTestApp(&out, &stderr, &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}})
 	code := a.Run(context.Background(), []string{"resume-blocked", "--repo", cfg.RepoPath, "--issue", "9", "--confirm-prerequisite-resolved", "--json"})
 	if code == 0 || !strings.Contains(stderr.String(), "verify publication base SHA") || !strings.Contains(stderr.String(), missingBaseSHA) {
 		t.Fatalf("missing recovered lease base was not rejected: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
@@ -1219,7 +1458,7 @@ esac
 		t.Fatal(err)
 	}
 	var out, stderr bytes.Buffer
-	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	a := legacyResumeTestApp(&out, &stderr, &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}})
 	if code := a.Run(context.Background(), []string{"resume-blocked", "--repo", cfg.RepoPath, "--issue", "10", "--confirm-prerequisite-resolved", "--json"}); code != 0 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
@@ -1350,7 +1589,7 @@ esac
 	args := []string{"resume-blocked", "--repo", cfg.RepoPath, "--issue", "11", "--confirm-prerequisite-resolved", "--json"}
 	controller := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
 	var out, stderr bytes.Buffer
-	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "Issue #12") {
+	if code := legacyResumeTestApp(&out, &stderr, controller).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "Issue #12") {
 		t.Fatalf("competing parked resume was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
 	afterConflict, err := store.Load()
@@ -1370,7 +1609,7 @@ esac
 	controller.alive[4311] = true
 	out.Reset()
 	stderr.Reset()
-	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "active worker") {
+	if code := legacyResumeTestApp(&out, &stderr, controller).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "active worker") {
 		t.Fatalf("active worker was accepted: code=%d stderr=%s", code, stderr.String())
 	}
 	controller.alive[4311] = false
@@ -1384,7 +1623,7 @@ esac
 	}
 	out.Reset()
 	stderr.Reset()
-	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "pending manual answer") {
+	if code := legacyResumeTestApp(&out, &stderr, controller).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "pending manual answer") {
 		t.Fatalf("pending request was accepted: code=%d stderr=%s", code, stderr.String())
 	}
 	if _, err := store.Update("test_request_answered", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
@@ -1398,7 +1637,7 @@ esac
 	}
 	out.Reset()
 	stderr.Reset()
-	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "is not open") {
+	if code := legacyResumeTestApp(&out, &stderr, controller).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "is not open") {
 		t.Fatalf("closed Issue was accepted: code=%d stderr=%s", code, stderr.String())
 	}
 	if err := os.Remove(closedPath); err != nil {
@@ -1407,7 +1646,7 @@ esac
 
 	out.Reset()
 	stderr.Reset()
-	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "durable resume remains pending") {
+	if code := legacyResumeTestApp(&out, &stderr, controller).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "durable resume remains pending") {
 		t.Fatalf("GitHub sync fault was not retained: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
 	pending, err := store.Load()
@@ -1424,7 +1663,7 @@ esac
 	for attempt := 0; attempt < 2; attempt++ {
 		out.Reset()
 		stderr.Reset()
-		if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code != 0 {
+		if code := legacyResumeTestApp(&out, &stderr, controller).Run(context.Background(), args); code != 0 {
 			t.Fatalf("resume retry %d failed: code=%d stdout=%s stderr=%s", attempt, code, out.String(), stderr.String())
 		}
 	}
