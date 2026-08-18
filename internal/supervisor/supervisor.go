@@ -2528,7 +2528,7 @@ func (l *Loop) validatePullRequestChecksRecoverySync(issue state.Issue, remote g
 	}
 	pr := remote.PullRequests[0]
 	if pr.URL != issue.PullRequestURL || pr.Number != issue.PullRequestNumber || !strings.EqualFold(pr.State, "open") || pr.MergedAt != nil ||
-		pr.HeadRefName != issue.Branch || pr.BaseRefName != l.Config.Git.BaseBranch || pr.HeadSHA != issue.PullRequestChecksRecovery.NewHeadSHA ||
+		pr.HeadRefName != issue.Branch || pr.BaseRefName != l.Config.Git.BaseBranch || !strings.EqualFold(pr.HeadRepository, l.Config.GitHub.Repo) || pr.HeadSHA != issue.PullRequestChecksRecovery.NewHeadSHA ||
 		(pr.ChecksStatus != "pending" && pr.ChecksStatus != "success") {
 		return fmt.Errorf("refuse Pull Request checks recovery synchronization: authoritative Pull Request, head, or checks changed")
 	}

@@ -1155,9 +1155,18 @@ func TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge(t 
 	}
 	github.remote = &gh.RemoteState{
 		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.FailedLabel}},
-		PullRequests: []gh.PullRequest{{Number: 1, URL: prURL, State: "OPEN", IsDraft: true, HeadRefName: branch, BaseRefName: "main", HeadSHA: "new-head", MergeStateStatus: "CLEAN", ChecksStatus: "success"}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: prURL, State: "OPEN", IsDraft: true, HeadRefName: branch, BaseRefName: "main", HeadSHA: "new-head", MergeStateStatus: "CLEAN", ChecksStatus: "success", HeadRepository: loop.Config.GitHub.Repo}},
 	}
 	pending, _ := loop.issueState(1)
+	github.remote.PullRequests[0].HeadRepository = "attacker/repo"
+	if err := loop.processExisting(context.Background(), pending); err == nil {
+		t.Fatal("fork Pull Request was accepted during recovery reconciliation")
+	}
+	stillPending, _ := loop.issueState(1)
+	if stillPending.Status != "pull_request_checks_recovery_pending" || stillPending.GitHubSync != "pull_request_checks_recovery" {
+		t.Fatalf("fork rejection mutated recovery state: %+v", stillPending)
+	}
+	github.remote.PullRequests[0].HeadRepository = loop.Config.GitHub.Repo
 	if err := loop.processExisting(context.Background(), pending); err != nil {
 		t.Fatal(err)
 	}

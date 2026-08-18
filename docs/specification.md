@@ -471,7 +471,9 @@ agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --conf
 
 保存済みPRのrequired checksがfailureとなりworker retry budgetを使い切ったterminal `failed`だけを対象にする。失敗時のPR URL・number・branch・head SHAとretry exhaustionをimmutableなtyped provenanceへ保存し、`status --json`と`watch`はretained leaseでqueueを塞いでいる復旧可能状態を`recoverable_checks_failure`として通知する。
 
-operatorが同じPR branchへ外部commitをpushした後、run、managed worktree、branch、open PR、retained fenced lease、active process不在、pending request不在、cleanかつfully pushedなlocal/remote head、GitHub failed label、manual/security exclusion不在を再検証する。新headが失敗時headと同じ場合やchecksがfailureのままなら再開しない。pendingまたはsuccessではgeneration、confirmation時刻、old/new head SHA、checks結果とGitHub同期intentを先にdurable state/eventへ保存し、failed labelをrunningへ変えて冪等markerを残す。
+v0.6.20が作成した限定legacy recordでは、conflict publication、同headのchecks failure、repair worker completion、`repository=`が空のpublisher `pull_request_mismatch`、publication retry、別lease generationのfinal retry exhaustion、failed sync、同一open PRを観測する1件以上のterminal reconciliationが同じdurable event historyに一意かつ順序どおり存在する場合だけtyped provenanceを再構成する。event欠落・重複・順序不整合、cross-run/generation、PR URL・number・branch・base・head不一致、fork、別publisher failure、active conflict recoveryは副作用なく拒否する。
+
+operatorが同じPR branchへ外部commitをpushした後、run、managed worktree、branch、configured repositoryをhead repositoryとするopen PR、retained fenced lease、active process不在、pending request不在、cleanかつfully pushedなlocal/remote head、GitHub failed label、manual/security exclusion不在を再検証する。新headが失敗時headと同じ場合やchecksがfailureのままなら再開しない。pendingまたはsuccessではgeneration、confirmation時刻、old/new head SHA、checks結果とGitHub同期intentを先にdurable state/eventへ保存し、failed labelをrunningへ変えて冪等markerを残す。
 
 同期後は同じbranch/PRの`awaiting_checks`へ戻し、通常のDraft解除、auto merge、done/close、merge確認後のlease releaseを再利用する。worker attempts、continuations、run historyをresetせず、新branch、PR、push、worker実行を作らない。GitHub同期途中の停止・再起動は保存intentをauthoritative Issue/PR/head/checksと再照合してから同じmarkerへ収束する。closed-without-merge、head/branch/PR不一致、dirty/unpushed worktree、active worker、pending request、manual/security exclusionはstateとlabelを変更せずfail closedとする。
 
