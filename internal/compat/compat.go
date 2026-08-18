@@ -60,7 +60,9 @@ func ProbeCodex(ctx context.Context, path string) Report {
 	report.VersionOK = AtLeast(report.Version, report.Minimum)
 
 	execHelp, execErr := exec.CommandContext(ctx, path, "exec", "--help").CombinedOutput()
-	resumeHelp, resumeErr := exec.CommandContext(ctx, path, "exec", "resume", "--help").CombinedOutput()
+	// Probe the exact parent-option placement used by the adapter. --cd belongs
+	// to `exec`, not `exec resume`, and must be accepted before the subcommand.
+	resumeHelp, resumeErr := exec.CommandContext(ctx, path, "exec", "--cd", ".", "resume", "--help").CombinedOutput()
 	features, featuresErr := exec.CommandContext(ctx, path, "features", "list").CombinedOutput()
 	base := execErr == nil && containsAll(string(execHelp), "--json", "--output-schema", "--output-last-message", "--sandbox", "--cd")
 	resume := resumeErr == nil && containsAll(string(resumeHelp), "--json", "--output-schema", "--output-last-message")

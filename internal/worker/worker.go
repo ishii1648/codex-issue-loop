@@ -162,6 +162,10 @@ func (c Codex) Resume(ctx context.Context, cfg config.Config, issue gh.Issue, cu
 
 func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber int, runID, sessionID, prompt string, started Started) (Result, error) {
 	identity := Identity{Backend: c.ID(), RuntimeVersion: c.RuntimeVersion, RequestedModel: cfg.Worker.Model, ResolvedModel: cfg.Worker.Model, Variant: cfg.Worker.Variant}
+	workspace, err := config.CanonicalRepoPath(cfg.RepoPath)
+	if err != nil {
+		return Result{Identity: identity}, fmt.Errorf("resolve Codex workspace: %w", err)
+	}
 	runDir := filepath.Join(c.StateDir, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return Result{}, err
@@ -190,7 +194,10 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 
 	ctx, cancel := context.WithTimeout(parent, cfg.Worker.Timeout.Duration)
 	defer cancel()
-	args := codexExecBaseArgs(cfg)
+	// --cd is an exec option, so it must precede the resume subcommand. Keep the
+	// process cwd aligned with it below: cwd selects files for the CLI process,
+	// while --cd selects Codex's workspace and writable project root.
+	args := append(codexExecBaseArgs(cfg), "--cd", workspace)
 	if sessionID != "" {
 		args = append(args, "resume", "--json", "--output-schema", schemaPath, "--output-last-message", resultPath)
 		if cfg.Worker.Model != "" {
@@ -198,8 +205,6 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 		}
 		args = append(args, sessionID, "-")
 	} else {
-		args = append(args, "--cd", cfg.RepoPath)
-		// The caller passes the worktree in cfg.RepoPath for worker execution.
 		args = append(args, "--json", "--output-schema", schemaPath, "--output-last-message", resultPath)
 		if cfg.Worker.Model != "" {
 			args = append(args, "--model", cfg.Worker.Model)
@@ -208,6 +213,7 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	}
 	command := cfg.Worker.EffectiveCommand()
 	cmd := exec.Command(command, args...)
+	cmd.Dir = workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(prompt)
 	safeStdout := redact.NewLineWriterWithSecrets(stdout, c.Secrets)
