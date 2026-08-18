@@ -1381,6 +1381,87 @@ func TestDirtyPullRequestRunsDurableConflictWorkerAndReturnsToChecks(t *testing.
 	}
 }
 
+func TestZeitreise442V0619ResumedNeedsInputStartsFencedConflictWorker(t *testing.T) {
+	fixtureState, err := os.ReadFile("testdata/zeitreise-442-v0619-needs-input-conflict-state.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureEvents, err := os.ReadFile("testdata/zeitreise-442-v0619-needs-input-conflict-events.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "state.json"), fixtureState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "events.jsonl"), fixtureEvents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: stateDir, RepoID: "repo_zeitreise", RepoPath: "/sanitized/zeitreise"}
+	before, err := store.Load()
+	if err != nil {
+		t.Fatalf("v0.6.19 fixture was rejected: %v", err)
+	}
+	beforeIssue := before.Issues["442"]
+	request := before.PendingRequests["req_b24ba2cd328c461f"]
+	if beforeIssue == nil || request == nil || beforeIssue.Lease == nil || beforeIssue.Lease.Owner.Generation != 4 ||
+		beforeIssue.ResourcePark == nil || beforeIssue.ResourcePark.OriginalLease.Owner.Generation != 3 ||
+		beforeIssue.ResourcePark.ResumeOwner == nil || beforeIssue.ResourcePark.ResumeOwner.Generation != 4 {
+		t.Fatalf("fixture lost needs-input resume provenance: issue=%+v request=%+v", beforeIssue, request)
+	}
+
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "ishii1648/zeitreise"
+	cfg.RepoPath = "/sanitized/zeitreise"
+	github := &fakeGitHub{issue: gh.Issue{Number: 442, Title: beforeIssue.Title, State: "OPEN", Labels: []string{cfg.GitHub.RunningLabel}}}
+	resolver := &fakeConflictResolver{preparation: conflict.Preparation{
+		TargetBaseSHA: beforeIssue.ConflictRecovery.TargetBaseSHA,
+		ConflictFiles: append([]string(nil), beforeIssue.ConflictRecovery.ConflictFiles...),
+	}}
+	recorder := &recordingWorker{result: worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "fixture stops after worker launch",
+		Tests: []worker.Test{}, Retry: &worker.Retry{Reason: "fixture stops after worker launch"},
+	}}
+	loop := &Loop{
+		Config: cfg, Store: store, GitHub: github, Conflicts: resolver, Worker: recorder,
+		Worktrees: fakeWorktree{path: beforeIssue.Worktree},
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("conflict recovery worked=%v err=%v", worked, err)
+	}
+	after, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := after.Issues["442"]
+	if len(recorder.runPrompts) != 1 || resolver.prepareCalls != 1 {
+		t.Fatalf("conflict worker was not started exactly once: resolver=%+v prompts=%d", resolver, len(recorder.runPrompts))
+	}
+	if item.RunID == beforeIssue.RunID || !strings.HasPrefix(item.RunID, "conflict_") || item.LeaseGeneration != 5 ||
+		item.Lease == nil || item.Lease.Owner != (state.LeaseOwner{RunID: item.RunID, Generation: 5}) {
+		t.Fatalf("conflict lease transfer was not fenced: %+v", item)
+	}
+	if item.ResourcePark == nil || item.ResourcePark.Status != "resumed" ||
+		item.ResourcePark.OriginalLease.Owner != beforeIssue.ResourcePark.OriginalLease.Owner ||
+		item.ResourcePark.ResumeOwner == nil || *item.ResourcePark.ResumeOwner != *beforeIssue.ResourcePark.ResumeOwner ||
+		after.PendingRequests[request.ID].RunID != request.RunID || after.PendingRequests[request.ID].ReleasedOwner == nil ||
+		*after.PendingRequests[request.ID].ReleasedOwner != *request.ReleasedOwner {
+		t.Fatalf("historical needs-input provenance changed: before=%+v after=%+v", beforeIssue, item)
+	}
+	if len(item.ConflictRecovery.History) != 1 || item.ConflictRecovery.History[0].Status != "retryable_failure" ||
+		!strings.Contains(recorder.runPrompts[0], "sanitized/conflict-file.ts") {
+		t.Fatalf("conflict attempt or prompt was not preserved: recovery=%+v prompt=%q", item.ConflictRecovery, recorder.runPrompts[0])
+	}
+	events, err := os.ReadFile(store.EventsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(events), `"type":"conflict_recovery_attempt_started"`) ||
+		!strings.Contains(string(events), `"lease_owner":{"generation":5,"run_id":"`+item.RunID+`"}`) {
+		t.Fatalf("fenced conflict attempt event was not persisted: %s", events)
+	}
+}
+
 func TestConflictRecoveryRestartRecognizesPublishedCommitWithoutDuplicateWorkerOrPush(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	prURL := "https://example.test/pr/1"

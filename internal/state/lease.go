@@ -268,21 +268,37 @@ func ResumeParkedLease(snapshot *Snapshot, issueNumber int, parkID string, slot 
 	return owner, nil
 }
 
-// ValidateNeedsInputPark binds an answerable request to the exact run, park,
-// and released lease owner captured when the worker stopped. This keeps an old
-// or cross-Issue request ID from being used to reacquire a resource claim.
+// ValidateNeedsInputPark binds an answerable request to the exact park and
+// released lease owner captured when the worker stopped. Active claims remain
+// bound to the current run. A resumed park is historical provenance, so its
+// source run is instead recovered from the immutable request/original/resume
+// owner chain while later run changes are authorized by fencing generations.
 func ValidateNeedsInputPark(issue *Issue, request *Request) error {
 	if issue == nil || request == nil || request.IssueNumber != issue.Number {
 		return fmt.Errorf("needs-input request does not match its Issue")
 	}
 	park := issue.ResourcePark
 	if park == nil || park.Kind != ResourceParkKindNeedsInput || park.RequestID != request.ID ||
-		request.ResourceParkID != park.ID || request.RunID != issue.RunID || request.ReleasedOwner == nil ||
+		request.ResourceParkID != park.ID || request.ReleasedOwner == nil ||
 		*request.ReleasedOwner != park.OriginalLease.Owner {
 		return fmt.Errorf("Issue #%d needs-input request provenance is inconsistent", issue.Number)
 	}
-	if issue.RunID == "" || park.OriginalLease.Owner.RunID != issue.RunID || park.OriginalLease.Owner.Generation == 0 {
+	originalOwner := park.OriginalLease.Owner
+	if request.RunID == "" || originalOwner.RunID != request.RunID || originalOwner.Generation == 0 {
 		return fmt.Errorf("Issue #%d needs-input resource provenance is inconsistent", issue.Number)
+	}
+	if park.Status != "resumed" {
+		if issue.RunID == "" || request.RunID != issue.RunID {
+			return fmt.Errorf("Issue #%d needs-input resource provenance is inconsistent", issue.Number)
+		}
+		return nil
+	}
+	if request.Status != "answered" || park.ResumeOwner == nil || park.ResumeOwner.RunID != request.RunID ||
+		park.ResumeOwner.Generation <= originalOwner.Generation || park.ResumeOwner.Generation > issue.LeaseGeneration {
+		return fmt.Errorf("Issue #%d resumed needs-input provenance is inconsistent", issue.Number)
+	}
+	if issue.LeaseGeneration == park.ResumeOwner.Generation && issue.RunID != park.ResumeOwner.RunID {
+		return fmt.Errorf("Issue #%d resumed needs-input run changed without a fenced lease transfer", issue.Number)
 	}
 	return nil
 }
