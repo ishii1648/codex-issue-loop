@@ -319,6 +319,7 @@ type recordingWorker struct {
 type scriptedWorker struct {
 	results []worker.Result
 	errors  []error
+	states  []state.Issue
 	runs    int
 	resumes int
 	cursor  int
@@ -338,13 +339,15 @@ func (s *scriptedWorker) next() (worker.Result, error) {
 	return result, err
 }
 
-func (s *scriptedWorker) Run(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
+func (s *scriptedWorker) Run(_ context.Context, _ config.Config, _ gh.Issue, issue state.Issue, _ string, _ worker.Started) (worker.Result, error) {
 	s.runs++
+	s.states = append(s.states, issue)
 	return s.next()
 }
 
-func (s *scriptedWorker) Resume(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
+func (s *scriptedWorker) Resume(_ context.Context, _ config.Config, _ gh.Issue, issue state.Issue, _ string, _ worker.Started) (worker.Result, error) {
 	s.resumes++
+	s.states = append(s.states, issue)
 	return s.next()
 }
 
@@ -544,6 +547,129 @@ func TestEnvironmentResumeContinuesSameSessionAndWorktree(t *testing.T) {
 	snapshot, _ := loop.Store.Load()
 	if item := snapshot.Issues["1"]; item.RunID != "run_environment" || item.Worktree != worktreePath || item.SessionID != "session-blocked" || item.Lease == nil {
 		t.Fatalf("resume replaced durable state: %+v", item)
+	}
+}
+
+func TestFaultResumedEnvironmentParkRetriesAcrossRestartAndReleasesLease(t *testing.T) {
+	retry := worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "verification pending",
+		SessionID: "session-blocked", Retry: &worker.Retry{Reason: "verification pending"},
+	}
+	completed := worker.Result{
+		Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done",
+		Git: &worker.GitResult{},
+	}
+	loop, github := testLoop(t, retry)
+	loop.Config.Queue.Concurrency = 1
+	loop.Config.Queue.MaxAttempts = 3
+	loop.Config.Worker.Profiles["extended"] = config.Profile{MaxContinuations: 1}
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	_, originalOwner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run_environment", Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+		BaseSHA: "base-environment", ReservedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.Store.Update("worker_environment_blocked", 1, originalOwner.RunID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "blocked"
+		item.Worktree = loop.Config.RepoPath
+		item.Branch = "codex/issue-1-test"
+		item.Workspace = fixtureWorkspace(loop, item.Worktree, item.Branch)
+		item.ExecutionProfile = "extended"
+		item.SessionID = "session-blocked"
+		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-blocked"}
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: now.Add(time.Minute)}
+		if parkErr := state.ParkIssueLease(item, originalOwner, "park_environment", now.Add(time.Minute)); parkErr != nil {
+			return parkErr
+		}
+		item.ResourcePark.Kind = state.ResourceParkKindEnvironmentBlock
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var resumeOwner state.LeaseOwner
+	if _, err := loop.Store.Update("environment_resume_requested", 1, originalOwner.RunID, nil, func(snapshot *state.Snapshot) error {
+		var resumeErr error
+		resumeOwner, resumeErr = state.ResumeParkedLease(snapshot, 1, "park_environment", 0, now.Add(2*time.Minute))
+		if resumeErr != nil {
+			return resumeErr
+		}
+		item := snapshot.Issues["1"]
+		item.Status = "environment_resume_pending"
+		item.EnvironmentResume = &state.EnvironmentResume{ID: "resume_environment", Status: "github_synced", ConfirmedAt: now.Add(2 * time.Minute)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scripted := &scriptedWorker{results: []worker.Result{retry, retry, completed}}
+	loop.Worker = scripted
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("environment resume worked=%v err=%v", worked, err)
+	}
+	if _, err := loop.Store.Update("fault_retry_due", 1, originalOwner.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].RetryAfter = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("same-session continuation worked=%v err=%v", worked, err)
+	}
+	beforeRestart, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := beforeRestart.Issues["1"]
+	if before.Status != "retry_wait" || before.RunID != originalOwner.RunID || before.SessionID != "session-blocked" ||
+		before.Lease == nil || before.Lease.Owner != resumeOwner || before.Lease.BaseSHA != "base-environment" ||
+		before.ResourcePark == nil || before.ResourcePark.Status != "resumed" || before.ResourcePark.ResumeOwner == nil || *before.ResourcePark.ResumeOwner != resumeOwner {
+		t.Fatalf("resumed continuation provenance before restart=%+v", before)
+	}
+	if len(scripted.states) != 2 || scripted.states[1].Worktree != loop.Config.RepoPath || scripted.states[1].SessionID != "session-blocked" ||
+		scripted.states[1].Lease == nil || scripted.states[1].Lease.Owner != resumeOwner || scripted.states[1].Lease.BaseSHA != "base-environment" {
+		t.Fatalf("same-session retry did not preserve continuation boundary: %+v", scripted.states)
+	}
+	if _, err := loop.Store.Update("fault_retry_due", 1, originalOwner.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].RetryAfter = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	restarted := &Loop{
+		Config: loop.Config, Store: loop.Store, GitHub: loop.GitHub,
+		Worktrees: loop.Worktrees, Worker: scripted,
+	}
+	restartSnapshot, err := restarted.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.reconcileStartup(context.Background(), restartSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := restarted.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("fresh retry after restart worked=%v err=%v", worked, err)
+	}
+
+	finished, err := restarted.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := finished.Issues["1"]
+	if scripted.runs != 1 || scripted.resumes != 2 || item.Status != "completed" || item.Lease != nil ||
+		item.RunID == originalOwner.RunID || item.LeaseGeneration != resumeOwner.Generation+1 || item.Worktree != loop.Config.RepoPath ||
+		item.ResourcePark == nil || item.ResourcePark.Status != "resumed" || item.ResourcePark.OriginalLease.Owner != originalOwner ||
+		item.ResourcePark.ResumeOwner == nil || *item.ResourcePark.ResumeOwner != resumeOwner {
+		t.Fatalf("retry after restart did not converge: runs=%d resumes=%d issue=%+v", scripted.runs, scripted.resumes, item)
+	}
+	if len(scripted.states) != 3 || scripted.states[2].Lease == nil || scripted.states[2].Lease.Owner.RunID != item.RunID ||
+		scripted.states[2].Lease.Owner.Generation != resumeOwner.Generation+1 || scripted.states[2].Lease.BaseSHA != "base-environment" ||
+		scripted.states[2].ResourcePark == nil || scripted.states[2].ResourcePark.ResumeOwner == nil || *scripted.states[2].ResourcePark.ResumeOwner != resumeOwner {
+		t.Fatalf("fresh retry lost active lease or park provenance: %+v", scripted.states)
 	}
 }
 

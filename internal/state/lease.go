@@ -382,7 +382,7 @@ func validateResourceLeases(snapshot Snapshot) error {
 			park := issue.ResourcePark
 			original := &park.OriginalLease
 			if issue.Number < 1 || strconv.Itoa(issue.Number) != key || strings.TrimSpace(park.ID) == "" || park.ID != strings.TrimSpace(park.ID) || park.ParkedAt.IsZero() ||
-				original.Owner.RunID == "" || original.Owner.Generation == 0 || original.Owner.RunID != issue.RunID || original.Owner.Generation > issue.LeaseGeneration ||
+				original.Owner.RunID == "" || original.Owner.Generation == 0 || original.Owner.Generation > issue.LeaseGeneration ||
 				original.Slot < 0 || original.ReservedAt.IsZero() {
 				return fmt.Errorf("Issue #%d has invalid parked resource claim", issue.Number)
 			}
@@ -414,19 +414,29 @@ func validateResourceLeases(snapshot Snapshot) error {
 			} else if park.RequestID != "" {
 				return fmt.Errorf("Issue #%d non-input resource park has a request ID", issue.Number)
 			}
-			if park.Status == "parked" && (issue.LeaseGeneration != original.Owner.Generation || issue.Lease != nil || park.ResumeOwner != nil || !park.ResumedAt.IsZero()) {
+			if park.Status == "parked" && (original.Owner.RunID != issue.RunID || issue.LeaseGeneration != original.Owner.Generation || issue.Lease != nil || park.ResumeOwner != nil || !park.ResumedAt.IsZero()) {
 				return fmt.Errorf("Issue #%d parked resource claim is still active", issue.Number)
 			}
-			if park.ResumeOwner != nil && (park.ResumeOwner.RunID != issue.RunID || park.ResumeOwner.Generation <= original.Owner.Generation || park.ResumeOwner.Generation > issue.LeaseGeneration) {
+			if park.ResumeOwner != nil && (park.ResumeOwner.RunID != original.Owner.RunID || park.ResumeOwner.Generation <= original.Owner.Generation || park.ResumeOwner.Generation > issue.LeaseGeneration) {
 				return fmt.Errorf("Issue #%d resource park resume owner is invalid", issue.Number)
 			}
-			if park.Status == "resuming" && (issue.Lease == nil || park.ResumeOwner == nil || issue.Lease.Owner != *park.ResumeOwner || issue.LeaseGeneration != park.ResumeOwner.Generation || park.ResumedAt.IsZero()) {
+			if park.Status == "resuming" && (original.Owner.RunID != issue.RunID || issue.Lease == nil || park.ResumeOwner == nil || park.ResumeOwner.RunID != issue.RunID || issue.Lease.Owner != *park.ResumeOwner || issue.LeaseGeneration != park.ResumeOwner.Generation || park.ResumedAt.IsZero()) {
 				return fmt.Errorf("Issue #%d resumed resource claim is inconsistent", issue.Number)
 			}
 			if park.Status == "resumed" && (park.ResumeOwner == nil || park.ResumedAt.IsZero()) {
 				return fmt.Errorf("Issue #%d completed resource park lacks resume provenance", issue.Number)
 			}
-			if park.Status == "resumed" && issue.Lease != nil && issue.Lease.Owner != *park.ResumeOwner {
+			if park.Status == "resumed" && issue.LeaseGeneration == park.ResumeOwner.Generation && issue.RunID != park.ResumeOwner.RunID {
+				return fmt.Errorf("Issue #%d completed resource park changed run without a fenced lease transfer", issue.Number)
+			}
+			// A completed park is historical provenance. A fresh retry transfers
+			// the active lease to a new run and advances its fencing generation;
+			// retaining the earlier ResumeOwner must not turn that valid transfer
+			// back into an active parked claim. At the resume generation, however,
+			// the owner still has to match exactly so ambiguous state fails closed.
+			if park.Status == "resumed" && issue.Lease != nil &&
+				(issue.Lease.Owner.Generation < park.ResumeOwner.Generation ||
+					(issue.Lease.Owner.Generation == park.ResumeOwner.Generation && issue.Lease.Owner != *park.ResumeOwner)) {
 				return fmt.Errorf("Issue #%d completed resource park has an unrelated active lease", issue.Number)
 			}
 		}
