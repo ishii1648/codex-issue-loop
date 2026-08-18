@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -408,6 +409,125 @@ printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"standard"
 	}
 }
 
+func TestCodexInitialAndResumePinCanonicalWorkspaceAndPreserveDirtyChanges(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "issue-134")
+	if err := os.MkdirAll(filepath.Join(worktree, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonicalWorktree, err := config.CanonicalRepoPath(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "state")
+	fake := filepath.Join(root, "fake-codex")
+	argsPrefix := filepath.Join(root, "args")
+	cwdPrefix := filepath.Join(root, "cwd")
+	script := fmt.Sprintf(`#!/bin/sh
+mode=initial
+result=''
+for arg in "$@"; do
+  if [ "$arg" = "resume" ]; then mode=resume; fi
+done
+printf '%%s\n' "$@" > %q-"$mode"
+pwd -P > %q-"$mode"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then shift; result="$1"; fi
+  shift
+done
+if [ "$mode" = "initial" ]; then
+  printf 'initial dirty change' > issue-134-change.txt
+  printf '%%s\n' '{"type":"thread.started","thread_id":"session-134"}'
+  printf '%%s\n' '{"version":1,"status":"needs_input","execution_profile":"extended","summary":"answer required","question":{"text":"Continue?","reason":"fixture","recommended_option":"yes","options":[],"allow_free_text":true},"tests":[],"git":null,"retry":null}' > "$result"
+else
+  test "$(cat issue-134-change.txt)" = "initial dirty change" || exit 7
+  printf '\nresume dirty change' >> issue-134-change.txt
+  printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"extended","summary":"resumed","question":null,"tests":[],"git":null,"retry":null}' > "$result"
+fi
+`, argsPrefix, cwdPrefix)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	// Include a reducible path component to verify argv and cwd share the same
+	// canonical worktree rather than merely copying the caller's string.
+	cfg.RepoPath = filepath.Join(worktree, "nested", "..")
+	cfg.Worker.Command = fake
+	cfg.Worker.Model = "test-model"
+	adapter := Codex{StateDir: stateDir}
+	issue := gh.Issue{Number: 134, Title: "resume workspace fixture"}
+	initialState := state.Issue{RunID: "run_134", Attempts: 1, Branch: "codex/issue-134-resume-workspace", Worktree: canonicalWorktree}
+	result, err := adapter.Run(context.Background(), cfg, issue, initialState, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SessionID != "session-134" || result.Status != "needs_input" {
+		t.Fatalf("initial result=%+v", result)
+	}
+
+	resumeState := state.Issue{
+		RunID: initialState.RunID, Attempts: 1, Continuations: 1, SessionID: result.SessionID,
+		Branch: initialState.Branch, Worktree: initialState.Worktree,
+		Answers: []state.AnswerRecord{{RequestID: "request-134", Question: "Continue?", Answer: "yes"}},
+	}
+	resumeStateBefore := resumeState
+	result, err = adapter.Resume(context.Background(), cfg, issue, resumeState, BuildContinuationPrompt(resumeState, "Continue."), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SessionID != "session-134" || result.Status != "completed" {
+		t.Fatalf("resume result=%+v", result)
+	}
+	if !reflect.DeepEqual(resumeState, resumeStateBefore) {
+		t.Fatalf("resume metadata changed: before=%+v after=%+v", resumeStateBefore, resumeState)
+	}
+	if data, err := os.ReadFile(filepath.Join(worktree, "issue-134-change.txt")); err != nil || string(data) != "initial dirty change\nresume dirty change" {
+		t.Fatalf("dirty changes were not preserved and extended: data=%q err=%v", data, err)
+	}
+
+	for _, mode := range []string{"initial", "resume"} {
+		cwd, err := os.ReadFile(cwdPrefix + "-" + mode)
+		if err != nil || strings.TrimSpace(string(cwd)) != canonicalWorktree {
+			t.Fatalf("%s cwd=%q err=%v", mode, cwd, err)
+		}
+		data, err := os.ReadFile(argsPrefix + "-" + mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := strings.Split(strings.TrimSpace(string(data)), "\n")
+		cdIndex, resumeIndex := -1, -1
+		for index, arg := range args {
+			switch arg {
+			case "--cd":
+				if cdIndex != -1 {
+					t.Fatalf("%s argv contains duplicate --cd: %q", mode, args)
+				}
+				cdIndex = index
+			case "resume":
+				resumeIndex = index
+			case "--add-dir":
+				t.Fatalf("%s argv added an extra writable directory: %q", mode, args)
+			}
+		}
+		if cdIndex < 0 || cdIndex+1 >= len(args) || args[cdIndex+1] != canonicalWorktree {
+			t.Fatalf("%s argv did not pin canonical worktree: %q", mode, args)
+		}
+		if mode == "initial" && resumeIndex != -1 {
+			t.Fatalf("initial argv unexpectedly resumed: %q", args)
+		}
+		if mode == "resume" && (resumeIndex < 0 || cdIndex >= resumeIndex) {
+			t.Fatalf("resume argv placed --cd after subcommand: %q", args)
+		}
+		joined := strings.Join(args, " ")
+		for _, expected := range []string{"--sandbox workspace-write", `--config approval_policy="never"`, "--model test-model", "--output-schema", "--output-last-message"} {
+			if !strings.Contains(joined, expected) {
+				t.Fatalf("%s argv missing %q: %q", mode, expected, args)
+			}
+		}
+	}
+}
+
 func TestResumeFallsBackToFreshSessionWhenCapabilityIsUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-codex")
@@ -437,7 +557,11 @@ printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"standard"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(args), " resume ") || !strings.Contains(string(args), "--cd "+dir) {
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(args), " resume ") || !strings.Contains(string(args), "--cd "+canonicalDir) {
 		t.Fatalf("fallback did not start a fresh worker in the existing worktree: %s", args)
 	}
 	prompt, err := os.ReadFile(capturedPrompt)

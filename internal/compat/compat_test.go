@@ -27,7 +27,7 @@ func TestCapabilityProbes(t *testing.T) {
 	writeExecutable(t, codex, `#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.136.0'; exit 0; fi
 if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd'; exit 0; fi
-if [ "$1 $2 $3" = "exec resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
+if [ "$1 $2 $3 $4 $5" = "exec --cd . resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
 exit 2
 `)
 	writeExecutable(t, gh, `#!/bin/sh
@@ -67,12 +67,27 @@ func TestCodexProbeDetectsLocalhostNetworkProxyCapability(t *testing.T) {
 	writeExecutable(t, codex, `#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.147.0'; exit 0; fi
 if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd --ignore-user-config --strict-config --disable'; exit 0; fi
-if [ "$1 $2 $3" = "exec resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
+if [ "$1 $2 $3 $4 $5" = "exec --cd . resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
 if [ "$1 $2" = "features list" ]; then echo 'network_proxy apps browser_use computer_use plugins remote_plugin skill_search tool_suggest'; exit 0; fi
 exit 2
 `)
 	report := ProbeCodex(context.Background(), codex)
 	if !report.OK() || !report.Has("localhost_network_proxy") {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestCodexProbeRejectsResumeThatCannotAcceptPinnedWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	codex := filepath.Join(dir, "codex")
+	writeExecutable(t, codex, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'codex-cli 0.147.0'; exit 0; fi
+if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd'; exit 0; fi
+if [ "$1 $2 $3" = "exec resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
+exit 2
+`)
+	report := ProbeCodex(context.Background(), codex)
+	if !report.VersionOK || !report.Has("exec_structured") || report.Has("session_resume") || len(report.Missing) != 0 {
 		t.Fatalf("report=%+v", report)
 	}
 }

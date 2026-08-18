@@ -1,6 +1,6 @@
 # CLI互換性マトリクス
 
-最終確認日: 2026-08-17
+最終確認日: 2026-08-18
 
 `agent-loop`はversion番号だけでCLIの挙動を推測せず、起動時と`doctor`で実際のhelp出力から必要なcapabilityを検査する。minimum versionは継続的に検証する下限であり、capability検査を省略する条件ではない。
 
@@ -13,7 +13,7 @@
 | OpenCode | 1.1.1 | fake Server API conformance | loopback `serve`、session/message/abort API、JSON Schema output、provider/model、variant、inline permission policy |
 | GitHub CLI | 2.69.0 | 2.69.0 / macOS arm64 | Issue listの`--json`、`--limit`、`--label`、`--assignee`、`--milestone`、label追加・削除、comment追加 |
 
-Codexの`exec resume`と、その`--json`、`--output-schema`、`--output-last-message`は任意capabilityとして扱う。利用できる場合は保存したsession IDを再開し、利用できない場合は同じIssue worktree、run ID、回答履歴をpromptへ再構成して新規sessionを起動する。新規sessionでもsandboxと承認禁止の制約は変えない。
+Codexの`exec resume`と、その`--json`、`--output-schema`、`--output-last-message`は任意capabilityとして扱う。probeはadapterと同じ`codex exec --cd . resume --help`の順序を検証する。利用できる場合は保存したsession IDを再開し、利用できない場合は同じIssue worktree、run ID、回答履歴をpromptへ再構成して新規sessionを起動する。新規sessionでもsandboxと承認禁止の制約は変えない。
 
 Codex App Server Goalも任意capabilityである。`generate-json-schema --experimental`が生成するschemaから`thread/start|resume`、`thread/goal/set|get|clear`、`turn/start|steer`、`item/tool/requestUserInput`、approval request、`thread/tokenUsage/updated`、`turn/completed`をすべて検出した場合だけoptional adapterを選択する。設定が有効でもcapabilityが不足するversionでは起動を拒否せず既存`codex exec` adapterへfallbackする。詳細は[App Server Goal adapter](app-server-goal-adapter.md)を参照する。
 
@@ -25,7 +25,7 @@ Claude Codeは`claude -p`へpromptをstdinで渡し、`--json-schema`の`structu
 
 - session IDはJSONL event内の`thread_id`または`session_id`を受け付ける。
 - event wrapper内に同じfieldが入る形式と、`thread.id`または`session.id`形式も再帰的に受け付ける。
-- working directoryは初回sessionで`codex exec --cd <worktree>`を使う。resume非対応fallbackでも同じIssue worktreeを指定する。
+- Codex processのOS working directoryとCodex workspace rootは、初回session、保存sessionのresume、自動continuation、回答後のresume、`resume-blocked`、resume非対応fallbackのすべてで同じ正規化済みIssue worktreeへ固定する。CLIには`codex exec --cd <worktree> resume ...`のように`--cd`を`resume`より前へ置き、追加のwritable directoryは渡さない。
 - GitHub Issueは`gh issue list --limit 1000`で取得し、Issue番号順に選択する。100件を超えるqueueをfixtureで検証する。1000件を超える単一queueは現在の対応上限である。
 
 ## 確認手順
@@ -35,7 +35,7 @@ Claude Codeは`claude -p`へpromptをstdinで渡し、`--json-schema`の`structu
 ```sh
 codex --version
 codex exec --help
-codex exec resume --help
+codex exec --cd . resume --help
 codex app-server generate-json-schema --help
 claude --version
 claude --help
