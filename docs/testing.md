@@ -78,7 +78,7 @@ make test-race
 
 障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
 
-`internal/state/testdata/zeitreise-442-v0614-full-27-events.jsonl`と`zeitreise-442-v0614-full-27-state.json`は、zeitreise #442の同一runに残ったproduction recordを由来とするrelease-gate fixtureである。path、SHA、ID、PID、時刻、title、retry reason、worker identityの値だけを安全な値へ置換し、27 eventsのtype、order、payload shape、original generation 1→legacy recovery generation 2は保持する。`zeitreise-442-v0614-missing-workspace-resume-*`はPR #153で導入した12-event synthetic short fixtureとして互換性確認にだけ残し、short fixtureの成功だけではrelease gateを満たさない。
+`internal/state/testdata/zeitreise-442-v0614-full-27-events.jsonl`と`zeitreise-442-v0614-full-27-state.json`は、zeitreise #442の同一runに残ったproduction recordを由来とするrelease-gate fixtureである。path、SHA、ID、PID、title、retry reason、worker identityの値だけを安全な値へ置換し、27 eventsのtype、order、payload shape、original generation 1→legacy recovery generation 2を保持する。resumeの`confirmed_at`、recovered leaseの`reserved_at`、request event timestampはproduction値を保持し、request eventが約28ms後になるwriter semanticsを検証する。6回のreconciliationもlocal branchあり、remote branchなし、dirty、同一HEADを保持し、前半4回はremote keysなし、後半2回は`RemoteHead=""`と`RemoteConsistent=false`をexactに検証する。`zeitreise-442-v0614-missing-workspace-resume-*`はPR #153で導入した12-event synthetic short fixtureとして互換性確認にだけ残し、short fixtureの成功だけではrelease gateを満たさない。
 
 Codex Desktopのquestion notification、macOS通知権限、Activityの回答待ち、pinした`codex-issue-loop` / `zeitreise`監視chatの責務分離はrepository内の自動testでは再現しない。[Codex Desktop監視task運用](codex-desktop-monitoring.md)の実機受け入れ手順で検証する。
 

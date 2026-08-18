@@ -1387,18 +1387,21 @@ func TestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree(t *te
 		t.Fatal(err)
 	}
 	runGitApp(t, repo, "worktree", "add", "-b", branch, managedWorktree, baseSHA)
-	if err := os.WriteFile(filepath.Join(managedWorktree, "worker-head.txt"), []byte("published worker head\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(managedWorktree, "worker-head.txt"), []byte("local worker head\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runGitApp(t, managedWorktree, "add", "worker-head.txt")
 	runGitApp(t, managedWorktree, "commit", "-m", "worker head")
-	runGitApp(t, managedWorktree, "push", "-u", "origin", branch)
 	worktreeHead := runGitOutputApp(t, managedWorktree, "rev-parse", "HEAD")
 	if worktreeHead == baseSHA {
 		t.Fatal("fixture worktree HEAD must differ from the original publication base")
 	}
 	if err := os.WriteFile(filepath.Join(managedWorktree, "dirty-v0614.txt"), []byte("preserve interrupted resume\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	inspection, err := (worktree.Manager{GitPath: "/usr/bin/git"}).Inspect(context.Background(), mustConfig(t, repo), managedWorktree, branch)
+	if err != nil || !inspection.Valid || !inspection.LocalBranchExists || inspection.RemoteBranchExists || !inspection.Dirty || inspection.Head != worktreeHead {
+		t.Fatalf("fixture must remain the exact dirty local-only branch: inspection=%+v err=%v", inspection, err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, "main-advanced.txt"), []byte("new main\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1461,7 +1464,6 @@ esac
 	}
 	runGitApp(t, managedWorktree, "add", "later-head.txt")
 	runGitApp(t, managedWorktree, "commit", "-m", "move worker head after reconciliation")
-	runGitApp(t, managedWorktree, "push", "origin", branch)
 	newWorktreeHead := runGitOutputApp(t, managedWorktree, "rev-parse", "HEAD")
 	var headOut, headErr bytes.Buffer
 	if code := (App{Out: &headOut, Err: &headErr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(headErr.String(), "worktree HEAD changed") {

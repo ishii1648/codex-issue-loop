@@ -13,7 +13,7 @@
     "declared_resources": [],
     "resolved_resources": ["repo:*"],
     "base_sha": "1111111111111111111111111111111111111111",
-    "reserved_at": "2026-08-17T12:33:00Z"
+    "reserved_at": "2026-08-18T06:02:12.482456Z"
   },
   "declared_resources": ["repo:*"],
   "branch": "codex/issue-442-sanitized",
@@ -33,7 +33,7 @@
   "environment_resume": {
     "id": "resume_0733cc3d177d05f3",
     "status": "running",
-    "confirmed_at": "2026-08-17T12:33:00Z",
+    "confirmed_at": "2026-08-18T06:02:12.482456Z",
     "previous_reason": "localhost listen denied",
     "base_sha": "1111111111111111111111111111111111111111",
     "current_base_sha": "2222222222222222222222222222222222222222"

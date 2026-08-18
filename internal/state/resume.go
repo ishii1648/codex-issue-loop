@@ -5,11 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
 
 const missingWorkspaceProvenanceReason = "saved workspace provenance is missing"
+
+// The v0.6.14 writer saved ConfirmedAt before Store.Update attached the event
+// envelope timestamp. Production evidence shows a 28ms gap; one second is a
+// deliberately short upper bound for that single write-ahead transaction.
+const maxV0614ResumeRequestEventDelay = time.Second
 
 // InterruptedWorkspaceResumeEvidence is the durable boundary proving that an
 // explicit environment resume reached the worker launch validator and stopped
@@ -125,10 +131,16 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 			legacyRecovered := payload.LegacyRecovered && payload.LegacyWorkerBlock && !payload.InterruptedResume &&
 				parkID == "" && payload.ResourceParkID == "" && !payload.ParkedReacquired
 			if legacyRecovered {
-				fullHistory := exactV0614Zeitreise442History(events, event.Sequence, issue)
+				fullHistoryErr := validateExactV0614Zeitreise442History(events, event.Sequence, issue)
+				fullHistory := fullHistoryErr == nil
 				if resume.Status != "running" || fields["lease_owner"] != nil || fields["lease_slot"] != nil ||
-					issue.Lease.Slot != 0 || len(issue.Lease.ResolvedResources) != 1 || issue.Lease.ResolvedResources[0] != RepositoryResource ||
-					(!fullHistory && !exactV0614RecoveredLeaseChain(events, event.Sequence, issue)) {
+					issue.Lease.Slot != 0 || len(issue.Lease.ResolvedResources) != 1 || issue.Lease.ResolvedResources[0] != RepositoryResource {
+					return nil, fmt.Errorf("Issue #%d v0.6.14 recovered-lease resume does not have exact current lease and legacy event provenance", issue.Number)
+				}
+				if !fullHistory && v0614SameIssueEventCount(events, issue) == 27 {
+					return nil, fmt.Errorf("Issue #%d v0.6.14 full-27 recovery evidence: %w", issue.Number, fullHistoryErr)
+				}
+				if !fullHistory && !exactV0614RecoveredLeaseChain(events, event.Sequence, issue) {
 					return nil, fmt.Errorf("Issue #%d v0.6.14 recovered-lease resume does not have exact current lease and legacy event provenance", issue.Number)
 				}
 				if fullHistory {
@@ -204,7 +216,7 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 // six-event form is retained for snapshots already accepted by v0.6.16, but it
 // must not be used as a shortcut when a longer same-Issue history is present.
 func exactV0614RecoveredLeaseChain(events []Event, requestSequence uint64, issue Issue) bool {
-	if exactV0614Zeitreise442History(events, requestSequence, issue) {
+	if validateExactV0614Zeitreise442History(events, requestSequence, issue) == nil {
 		return true
 	}
 	if issue.SessionID == "" || issue.Session == nil || issue.Session.ID != issue.SessionID {
@@ -282,12 +294,23 @@ func exactV0614RecoveredLeaseChain(events []Event, requestSequence uint64, issue
 		eventPayloadHasReconciliation(prior[5].Payload, legacyNormalizedReason)
 }
 
-// exactV0614Zeitreise442History recognizes the complete 27-event production
+func v0614SameIssueEventCount(events []Event, issue Issue) int {
+	count := 0
+	for _, event := range events {
+		if event.IssueNumber == issue.Number && event.Type != "event_log_checkpoint" {
+			count++
+		}
+	}
+	return count
+}
+
+// validateExactV0614Zeitreise442History recognizes the complete 27-event production
 // history described by the fixture. It deliberately validates the events
 // after the request too: adding, deleting, duplicating, reordering, or moving
 // any authority/retry/reconciliation/resume event to another run must not make
-// the shorter compatibility pattern authoritative.
-func exactV0614Zeitreise442History(events []Event, requestSequence uint64, issue Issue) bool {
+// the shorter compatibility pattern authoritative. Named boundary errors are
+// returned before recovery can mutate durable state.
+func validateExactV0614Zeitreise442History(events []Event, requestSequence uint64, issue Issue) error {
 	history := make([]Event, 0, 27)
 	for _, event := range events {
 		if event.IssueNumber == issue.Number && event.Type != "event_log_checkpoint" {
@@ -295,7 +318,7 @@ func exactV0614Zeitreise442History(events []Event, requestSequence uint64, issue
 		}
 	}
 	if len(history) != 27 {
-		return false
+		return fmt.Errorf("event count boundary: got %d events, want 27", len(history))
 	}
 	wantTypes := []string{
 		"lease_reserved", "issue_claimed", "worker_started", "worker_process_started", "worker_preflight_completed", "retry_scheduled",
@@ -306,38 +329,47 @@ func exactV0614Zeitreise442History(events []Event, requestSequence uint64, issue
 	}
 	for index, event := range history {
 		if event.Type != wantTypes[index] || event.RunID != issue.RunID {
-			return false
+			return fmt.Errorf("event order boundary at index %d: got type=%q run=%q", index, event.Type, event.RunID)
 		}
 	}
 	if history[21].Sequence != requestSequence || issue.SessionID != "" || issue.Session != nil {
-		return false
+		return fmt.Errorf("request marker boundary: sequence or null session provenance differs")
 	}
-	if issue.Lease.ReservedAt.IsZero() || issue.Lease.ReservedAt != issue.EnvironmentResume.ConfirmedAt ||
-		!history[21].Timestamp.Equal(issue.EnvironmentResume.ConfirmedAt) || len(issue.Lease.DeclaredResources) != 0 {
-		return false
+	if issue.EnvironmentResume.ConfirmedAt.IsZero() || issue.Lease.ReservedAt.IsZero() || history[21].Timestamp.IsZero() {
+		return fmt.Errorf("timestamp boundary: confirmed, reservation, and request event timestamps must be non-zero")
+	}
+	if issue.Lease.ReservedAt != issue.EnvironmentResume.ConfirmedAt {
+		return fmt.Errorf("timestamp boundary: recovered lease reservation does not equal confirmed_at")
+	}
+	requestDelay := history[21].Timestamp.Sub(issue.EnvironmentResume.ConfirmedAt)
+	if requestDelay < 0 || requestDelay > maxV0614ResumeRequestEventDelay {
+		return fmt.Errorf("timestamp boundary: request event delay %s is outside [0s,%s]", requestDelay, maxV0614ResumeRequestEventDelay)
+	}
+	if len(issue.Lease.DeclaredResources) != 0 {
+		return fmt.Errorf("current lease boundary: recovered lease has declared resources")
 	}
 	if !exactOriginalLeasePayload(history[0].Payload, issue) ||
 		!exactNonEmptyStringPayload(history[1].Payload, "title") ||
 		!exactInitialWorkerPayload(history[2].Payload, issue) {
-		return false
+		return fmt.Errorf("initial payload boundary: lease, claim, or worker payload differs")
 	}
 	for _, index := range []int{3, 7, 11} {
 		if !exactWorkerProcessPayload(history[index].Payload, issue.Worktree) {
-			return false
+			return fmt.Errorf("worker payload boundary at index %d", index)
 		}
 	}
 	for _, index := range []int{4, 8, 12} {
 		if !exactStringPayload(history[index].Payload, "execution_profile", "extended") {
-			return false
+			return fmt.Errorf("preflight payload boundary at index %d", index)
 		}
 	}
 	for _, index := range []int{5, 9} {
 		if !exactRetryPayload(history[index].Payload) {
-			return false
+			return fmt.Errorf("retry payload boundary at index %d", index)
 		}
 	}
 	if !exactIntegerPayload(history[6].Payload, "continuation", 1) || !exactIntegerPayload(history[10].Payload, "continuation", 2) {
-		return false
+		return fmt.Errorf("continuation payload boundary")
 	}
 	var blocked struct {
 		Error       string `json:"error"`
@@ -346,27 +378,39 @@ func exactV0614Zeitreise442History(events []Event, requestSequence uint64, issue
 	if !payloadHasExactKeys(history[13].Payload, "error", "failure_kind") || json.Unmarshal(history[13].Payload, &blocked) != nil ||
 		blocked.FailureKind != "issue" || blocked.Error != "worker blocked: "+issue.EnvironmentResume.PreviousReason ||
 		!exactStatePayload(history[14].Payload, "blocked", "") {
-		return false
+		return fmt.Errorf("block payload boundary")
 	}
 	worktreeHead := ""
 	for index := 15; index <= 19; index++ {
-		head, ok := exactReconciliationPayload(history[index].Payload, "GitHub exclusion label was applied manually", issue, index >= 19)
-		if !ok || (worktreeHead != "" && head != worktreeHead) {
-			return false
+		head, err := exactReconciliationPayload(history[index].Payload, "GitHub exclusion label was applied manually", issue, index >= 19)
+		if err != nil {
+			return fmt.Errorf("reconciliation remote boundary at index %d: %w", index, err)
+		}
+		if worktreeHead != "" && head != worktreeHead {
+			return fmt.Errorf("reconciliation HEAD boundary at index %d", index)
 		}
 		worktreeHead = head
 	}
-	lastHead, lastReconciliationOK := exactReconciliationPayload(history[20].Payload, legacyNormalizedReason, issue, true)
-	if worktreeHead == "" || worktreeHead == issue.Lease.BaseSHA || !lastReconciliationOK || lastHead != worktreeHead ||
-		!exactLegacyResumeRequestPayload(history[21].Payload, issue) ||
-		!exactStatePayload(history[22].Payload, "environment_resume", "") ||
-		!exactStatePayload(history[23].Payload, "environment_resume", issue.EnvironmentResume.ID) ||
-		!exactStringPayload(history[24].Payload, "mode", "environment_block_resume") ||
-		!exactWorkspaceRejectionPayload(history[25].Payload, issue) ||
-		!exactStatePayload(history[26].Payload, "blocked", "") {
-		return false
+	lastHead, err := exactReconciliationPayload(history[20].Payload, legacyNormalizedReason, issue, true)
+	if err != nil {
+		return fmt.Errorf("reconciliation remote boundary at index 20: %w", err)
 	}
-	return true
+	if worktreeHead == "" || worktreeHead == issue.Lease.BaseSHA || lastHead != worktreeHead {
+		return fmt.Errorf("reconciliation HEAD boundary: dirty HEAD must be stable and differ from original lease base")
+	}
+	if !exactLegacyResumeRequestPayload(history[21].Payload, issue) {
+		return fmt.Errorf("request payload boundary")
+	}
+	if !exactStatePayload(history[22].Payload, "environment_resume", "") ||
+		!exactStatePayload(history[23].Payload, "environment_resume", issue.EnvironmentResume.ID) ||
+		!exactStatePayload(history[26].Payload, "blocked", "") {
+		return fmt.Errorf("marker boundary")
+	}
+	if !exactStringPayload(history[24].Payload, "mode", "environment_block_resume") ||
+		!exactWorkspaceRejectionPayload(history[25].Payload, issue) {
+		return fmt.Errorf("resume payload boundary")
+	}
+	return nil
 }
 
 func exactOriginalLeasePayload(raw json.RawMessage, issue Issue) bool {
@@ -420,7 +464,7 @@ func exactRetryPayload(raw json.RawMessage) bool {
 		payload.FailureKind == "transient" && strings.TrimSpace(payload.Reason) != "" && strings.TrimSpace(payload.RetryAt) != "" && strings.TrimSpace(payload.Delay) != ""
 }
 
-func exactReconciliationPayload(raw json.RawMessage, reason string, issue Issue, remoteFields bool) (string, bool) {
+func exactReconciliationPayload(raw json.RawMessage, reason string, issue Issue, remoteFields bool) (string, error) {
 	var payload struct {
 		PreviousStatus string          `json:"previous_status"`
 		Status         string          `json:"status"`
@@ -435,7 +479,7 @@ func exactReconciliationPayload(raw json.RawMessage, reason string, issue Issue,
 	if !payloadHasExactKeys(raw, "previous_status", "status", "reason", "worktree", "pull_requests") ||
 		json.Unmarshal(raw, &payload) != nil || payload.PreviousStatus != "blocked" || payload.Status != "blocked" || payload.Reason != reason ||
 		!payloadHasExactKeys(payload.Worktree, worktreeKeys...) {
-		return "", false
+		return "", fmt.Errorf("payload shape or remote key placement differs")
 	}
 	var inspection struct {
 		Exists             bool
@@ -450,13 +494,16 @@ func exactReconciliationPayload(raw json.RawMessage, reason string, issue Issue,
 		RemoteConsistent   bool
 	}
 	if json.Unmarshal(payload.Worktree, &inspection) != nil || !inspection.Exists || !inspection.Valid || inspection.Branch != issue.Branch ||
-		strings.TrimSpace(inspection.Head) == "" || !inspection.Dirty || inspection.UnpushedCommits || !inspection.LocalBranchExists || !inspection.RemoteBranchExists {
-		return "", false
+		strings.TrimSpace(inspection.Head) == "" || !inspection.Dirty || inspection.UnpushedCommits || !inspection.LocalBranchExists || inspection.RemoteBranchExists {
+		return "", fmt.Errorf("local-only dirty worktree values differ")
 	}
-	if remoteFields && (inspection.RemoteHead != inspection.Head || !inspection.RemoteConsistent) {
-		return "", false
+	if remoteFields && (inspection.RemoteHead != "" || inspection.RemoteConsistent) {
+		return "", fmt.Errorf("unpublished remote values differ")
 	}
-	return inspection.Head, bytes.Equal(bytes.TrimSpace(payload.PullRequests), []byte("null"))
+	if !bytes.Equal(bytes.TrimSpace(payload.PullRequests), []byte("null")) {
+		return "", fmt.Errorf("pull_requests is not null")
+	}
+	return inspection.Head, nil
 }
 
 func exactV0614ReconciliationHead(events []Event, issue Issue) string {
