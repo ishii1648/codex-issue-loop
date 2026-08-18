@@ -19,6 +19,7 @@ type InterruptedWorkspaceResumeEvidence struct {
 	PreviousReason string
 	BaseSHA        string
 	CurrentBaseSHA string
+	WorktreeHead   string
 	LeaseOwner     LeaseOwner
 	LeaseSlot      int
 	// LegacyLeaseRecovered identifies the exact v0.6.14 path that restored a
@@ -31,8 +32,10 @@ type InterruptedWorkspaceResumeEvidence struct {
 // filter. InterruptedWorkspaceResumeEvidence remains the authority and also
 // verifies the matching event chain.
 func MayHaveInterruptedWorkspaceResumeEvidence(issue *Issue) bool {
+	sessionMissing := issue != nil && issue.SessionID == "" && issue.Session == nil
+	sessionComplete := issue != nil && issue.SessionID != "" && issue.Session != nil && issue.Session.ID == issue.SessionID
 	if issue == nil || issue.Status != "blocked" || issue.GitHubSync != "" || issue.Workspace != nil ||
-		issue.RunID == "" || issue.Worktree == "" || issue.Branch == "" || issue.SessionID == "" || issue.Session == nil || issue.Session.ID != issue.SessionID ||
+		issue.RunID == "" || issue.Worktree == "" || issue.Branch == "" || (!sessionMissing && !sessionComplete) ||
 		issue.ConflictRecovery != nil || issue.PublicationRecovery != nil || issue.PullRequestChecksRecovery != nil || issue.MergedPullRequestAdoption != nil ||
 		issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease == nil || issue.LeaseGeneration == 0 ||
 		issue.Lease.Owner.RunID != issue.RunID || issue.Lease.Owner.Generation != issue.LeaseGeneration ||
@@ -122,10 +125,14 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 			legacyRecovered := payload.LegacyRecovered && payload.LegacyWorkerBlock && !payload.InterruptedResume &&
 				parkID == "" && payload.ResourceParkID == "" && !payload.ParkedReacquired
 			if legacyRecovered {
+				fullHistory := exactV0614Zeitreise442History(events, event.Sequence, issue)
 				if resume.Status != "running" || fields["lease_owner"] != nil || fields["lease_slot"] != nil ||
 					issue.Lease.Slot != 0 || len(issue.Lease.ResolvedResources) != 1 || issue.Lease.ResolvedResources[0] != RepositoryResource ||
-					!exactV0614RecoveredLeaseChain(events, event.Sequence, issue) {
+					(!fullHistory && !exactV0614RecoveredLeaseChain(events, event.Sequence, issue)) {
 					return nil, fmt.Errorf("Issue #%d v0.6.14 recovered-lease resume does not have exact current lease and legacy event provenance", issue.Number)
+				}
+				if fullHistory {
+					evidence.WorktreeHead = exactV0614ReconciliationHead(events, issue)
 				}
 			} else if resume.Status == "running" || payload.LeaseOwner != issue.Lease.Owner || payload.LeaseSlot != issue.Lease.Slot {
 				return nil, fmt.Errorf("Issue #%d interrupted environment resume lease provenance is inconsistent", issue.Number)
@@ -137,7 +144,7 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 			evidence = &InterruptedWorkspaceResumeEvidence{
 				ResumeID: payload.ResumeID, PreviousReason: payload.PreviousReason, BaseSHA: payload.BaseSHA,
 				CurrentBaseSHA: payload.CurrentBaseSHA, LeaseOwner: issue.Lease.Owner, LeaseSlot: issue.Lease.Slot,
-				LegacyLeaseRecovered: legacyRecovered,
+				LegacyLeaseRecovered: legacyRecovered, WorktreeHead: evidence.WorktreeHead,
 			}
 			stage = 1
 			continue
@@ -199,6 +206,9 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 func exactV0614RecoveredLeaseChain(events []Event, requestSequence uint64, issue Issue) bool {
 	if exactV0614Zeitreise442History(events, requestSequence, issue) {
 		return true
+	}
+	if issue.SessionID == "" || issue.Session == nil || issue.Session.ID != issue.SessionID {
+		return false
 	}
 	sameIssueEvents := 0
 	for _, event := range events {
@@ -299,7 +309,7 @@ func exactV0614Zeitreise442History(events []Event, requestSequence uint64, issue
 			return false
 		}
 	}
-	if history[21].Sequence != requestSequence {
+	if history[21].Sequence != requestSequence || issue.SessionID != "" || issue.Session != nil {
 		return false
 	}
 	if issue.Lease.ReservedAt.IsZero() || issue.Lease.ReservedAt != issue.EnvironmentResume.ConfirmedAt ||
@@ -338,12 +348,16 @@ func exactV0614Zeitreise442History(events []Event, requestSequence uint64, issue
 		!exactStatePayload(history[14].Payload, "blocked", "") {
 		return false
 	}
+	worktreeHead := ""
 	for index := 15; index <= 19; index++ {
-		if !exactReconciliationPayload(history[index].Payload, "GitHub exclusion label was applied manually", issue) {
+		head, ok := exactReconciliationPayload(history[index].Payload, "GitHub exclusion label was applied manually", issue, index >= 19)
+		if !ok || (worktreeHead != "" && head != worktreeHead) {
 			return false
 		}
+		worktreeHead = head
 	}
-	if !exactReconciliationPayload(history[20].Payload, legacyNormalizedReason, issue) ||
+	lastHead, lastReconciliationOK := exactReconciliationPayload(history[20].Payload, legacyNormalizedReason, issue, true)
+	if worktreeHead == "" || worktreeHead == issue.Lease.BaseSHA || !lastReconciliationOK || lastHead != worktreeHead ||
 		!exactLegacyResumeRequestPayload(history[21].Payload, issue) ||
 		!exactStatePayload(history[22].Payload, "environment_resume", "") ||
 		!exactStatePayload(history[23].Payload, "environment_resume", issue.EnvironmentResume.ID) ||
@@ -374,33 +388,25 @@ func exactOriginalLeasePayload(raw json.RawMessage, issue Issue) bool {
 
 func exactInitialWorkerPayload(raw json.RawMessage, issue Issue) bool {
 	var payload struct {
-		Worktree            string          `json:"worktree"`
-		Branch              string          `json:"branch"`
-		Identity            json.RawMessage `json:"identity"`
-		ExpectedCWD         string          `json:"expected_cwd"`
-		WorkspaceValidation json.RawMessage `json:"workspace_validation"`
+		Worktree string          `json:"worktree"`
+		Branch   string          `json:"branch"`
+		Identity json.RawMessage `json:"identity"`
 	}
-	if !payloadHasExactKeys(raw, "worktree", "branch", "identity", "expected_cwd", "workspace_validation") || json.Unmarshal(raw, &payload) != nil ||
-		payload.Worktree != issue.Worktree || payload.Branch != issue.Branch || payload.ExpectedCWD != issue.Worktree ||
-		!payloadHasExactKeys(payload.Identity, "backend", "runtime_version", "provider", "requested_model", "resolved_model") {
+	if !payloadHasExactKeys(raw, "worktree", "branch", "identity") || json.Unmarshal(raw, &payload) != nil ||
+		payload.Worktree != issue.Worktree || payload.Branch != issue.Branch ||
+		!payloadHasExactKeys(payload.Identity, "backend", "runtime_version") {
 		return false
 	}
 	var identity WorkerIdentity
-	if json.Unmarshal(payload.Identity, &identity) != nil || identity != issue.WorkerIdentity || identity.Backend == "" {
-		return false
-	}
-	return exactLaunchValidationPayload(payload.WorkspaceValidation, issue.Worktree, issue.Branch, false)
+	return json.Unmarshal(payload.Identity, &identity) == nil && identity == issue.WorkerIdentity && identity.Backend != "" && identity.RuntimeVersion != ""
 }
 
-func exactWorkerProcessPayload(raw json.RawMessage, worktree string) bool {
+func exactWorkerProcessPayload(raw json.RawMessage, _ string) bool {
 	var payload struct {
-		PID         int    `json:"pid"`
-		PGID        int    `json:"pgid"`
-		ExpectedCWD string `json:"expected_cwd"`
-		ActualCWD   string `json:"actual_cwd"`
+		PID  int `json:"pid"`
+		PGID int `json:"pgid"`
 	}
-	return payloadHasExactKeys(raw, "pid", "pgid", "expected_cwd", "actual_cwd") && json.Unmarshal(raw, &payload) == nil &&
-		payload.PID > 1 && payload.PGID == payload.PID && payload.ExpectedCWD == worktree && payload.ActualCWD == worktree
+	return payloadHasExactKeys(raw, "pid", "pgid") && json.Unmarshal(raw, &payload) == nil && payload.PID > 1 && payload.PGID == payload.PID
 }
 
 func exactRetryPayload(raw json.RawMessage) bool {
@@ -414,21 +420,22 @@ func exactRetryPayload(raw json.RawMessage) bool {
 		payload.FailureKind == "transient" && strings.TrimSpace(payload.Reason) != "" && strings.TrimSpace(payload.RetryAt) != "" && strings.TrimSpace(payload.Delay) != ""
 }
 
-func exactReconciliationPayload(raw json.RawMessage, reason string, issue Issue) bool {
+func exactReconciliationPayload(raw json.RawMessage, reason string, issue Issue, remoteFields bool) (string, bool) {
 	var payload struct {
-		PreviousStatus      string          `json:"previous_status"`
-		Status              string          `json:"status"`
-		Reason              string          `json:"reason"`
-		Worktree            json.RawMessage `json:"worktree"`
-		PullRequests        json.RawMessage `json:"pull_requests"`
-		ResourceParkID      string          `json:"resource_park_id"`
-		ResourceParkCreated bool            `json:"resource_park_created"`
+		PreviousStatus string          `json:"previous_status"`
+		Status         string          `json:"status"`
+		Reason         string          `json:"reason"`
+		Worktree       json.RawMessage `json:"worktree"`
+		PullRequests   json.RawMessage `json:"pull_requests"`
 	}
-	if !payloadHasExactKeys(raw, "previous_status", "status", "reason", "worktree", "pull_requests", "resource_park_id", "resource_park_created") ||
+	worktreeKeys := []string{"Exists", "Valid", "Branch", "Head", "Dirty", "UnpushedCommits", "LocalBranchExists", "RemoteBranchExists"}
+	if remoteFields {
+		worktreeKeys = append(worktreeKeys, "RemoteHead", "RemoteConsistent")
+	}
+	if !payloadHasExactKeys(raw, "previous_status", "status", "reason", "worktree", "pull_requests") ||
 		json.Unmarshal(raw, &payload) != nil || payload.PreviousStatus != "blocked" || payload.Status != "blocked" || payload.Reason != reason ||
-		payload.ResourceParkID != "" || payload.ResourceParkCreated ||
-		!payloadHasExactKeys(payload.Worktree, "Exists", "Valid", "Branch", "Head", "RemoteHead", "Dirty", "UnpushedCommits", "LocalBranchExists", "RemoteBranchExists", "RemoteConsistent") {
-		return false
+		!payloadHasExactKeys(payload.Worktree, worktreeKeys...) {
+		return "", false
 	}
 	var inspection struct {
 		Exists             bool
@@ -443,16 +450,27 @@ func exactReconciliationPayload(raw json.RawMessage, reason string, issue Issue)
 		RemoteConsistent   bool
 	}
 	if json.Unmarshal(payload.Worktree, &inspection) != nil || !inspection.Exists || !inspection.Valid || inspection.Branch != issue.Branch ||
-		inspection.Head != issue.Lease.BaseSHA || !inspection.Dirty || inspection.UnpushedCommits || !inspection.LocalBranchExists {
-		return false
+		strings.TrimSpace(inspection.Head) == "" || !inspection.Dirty || inspection.UnpushedCommits || !inspection.LocalBranchExists || !inspection.RemoteBranchExists {
+		return "", false
 	}
-	remoteConsistent := (!inspection.RemoteBranchExists && inspection.RemoteHead == "" && !inspection.RemoteConsistent) ||
-		(inspection.RemoteBranchExists && inspection.RemoteHead == inspection.Head && inspection.RemoteConsistent)
-	if !remoteConsistent {
-		return false
+	if remoteFields && (inspection.RemoteHead != inspection.Head || !inspection.RemoteConsistent) {
+		return "", false
 	}
-	var pullRequests []json.RawMessage
-	return json.Unmarshal(payload.PullRequests, &pullRequests) == nil && len(pullRequests) == 0
+	return inspection.Head, bytes.Equal(bytes.TrimSpace(payload.PullRequests), []byte("null"))
+}
+
+func exactV0614ReconciliationHead(events []Event, issue Issue) string {
+	for _, event := range events {
+		if event.IssueNumber == issue.Number && event.RunID == issue.RunID && event.Type == "startup_reconciled" {
+			var payload struct {
+				Worktree struct{ Head string } `json:"worktree"`
+			}
+			if json.Unmarshal(event.Payload, &payload) == nil {
+				return payload.Worktree.Head
+			}
+		}
+	}
+	return ""
 }
 
 func exactLegacyResumeRequestPayload(raw json.RawMessage, issue Issue) bool {

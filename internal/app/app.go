@@ -1557,6 +1557,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists {
 		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to resume: %+v", inspection)}
 	}
+	if interruptedWorkspaceRecovery && interruptedWorkspaceEvidence.WorktreeHead != "" && inspection.Head != interruptedWorkspaceEvidence.WorktreeHead {
+		return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume worktree HEAD changed; state was not changed", *issueNumber)}
+	}
 	launchValidator := a.validateResumeWorkspace
 	if launchValidator == nil {
 		launchValidator = func(ctx context.Context, manager worktree.Manager, cfg config.Config, path, branch string) (worktree.LaunchValidation, error) {
@@ -1652,13 +1655,30 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		resumeMarker := "<!-- codex-issue-loop:environment-resume:" + current.EnvironmentResume.ID + " -->"
 		failureMarker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", *issueNumber)
 		resumeMarkers, expectedResumeMarkers, failureMarkers, expectedFailureMarkers := 0, 0, 0, 0
+		failureIDMarkers, originalFailureIDMarkers, workspaceFailureIDMarkers := 0, 0, 0
+		originalFailureComments, workspaceFailureComments := 0, 0
+		originalFailureReason := "worker blocked: " + interruptedWorkspaceEvidence.PreviousReason
+		workspaceFailureReason := current.BlockedCause.Reason
+		originalFailureIDMarker := failureIDMarker(originalFailureReason)
+		workspaceFailureIDMarker := failureIDMarker(workspaceFailureReason)
 		for _, comment := range remote.Issue.Comments {
 			resumeMarkers += strings.Count(comment, "<!-- codex-issue-loop:environment-resume:")
 			expectedResumeMarkers += strings.Count(comment, resumeMarker)
 			failureMarkers += strings.Count(comment, "<!-- codex-issue-loop:failed:")
 			expectedFailureMarkers += strings.Count(comment, failureMarker)
+			failureIDMarkers += strings.Count(comment, "<!-- codex-issue-loop:failure:")
+			originalFailureIDMarkers += strings.Count(comment, originalFailureIDMarker)
+			workspaceFailureIDMarkers += strings.Count(comment, workspaceFailureIDMarker)
+			if exactFailureComment(comment, *issueNumber, originalFailureReason) {
+				originalFailureComments++
+			}
+			if exactFailureComment(comment, *issueNumber, workspaceFailureReason) {
+				workspaceFailureComments++
+			}
 		}
-		if !blocked || runningLabel || resumeMarkers != 1 || expectedResumeMarkers != 1 || failureMarkers != 1 || expectedFailureMarkers != 1 {
+		if !blocked || runningLabel || resumeMarkers != 2 || expectedResumeMarkers != 2 || failureMarkers != 2 || expectedFailureMarkers != 2 ||
+			failureIDMarkers != 2 || originalFailureIDMarkers != 1 || workspaceFailureIDMarkers != 1 ||
+			originalFailureComments != 1 || workspaceFailureComments != 1 {
 			return exitError{4, fmt.Errorf("Issue #%d GitHub state does not prove the interrupted missing-workspace resume", *issueNumber)}
 		}
 	} else if resumeIntent {
@@ -1917,6 +1937,19 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		output["resource_park_id"] = parkID
 	}
 	return a.output(*jsonOut, output)
+}
+
+func exactFailureComment(comment string, issueNumber int, reason string) bool {
+	return comment == failureComment(issueNumber, reason)
+}
+
+func failureComment(issueNumber int, reason string) string {
+	return fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->\n%s\nAutomation stopped: %s", issueNumber, failureIDMarker(reason), reason)
+}
+
+func failureIDMarker(reason string) string {
+	digest := sha256.Sum256([]byte(reason))
+	return fmt.Sprintf("<!-- codex-issue-loop:failure:%x -->", digest[:8])
 }
 
 func resourceParkID(issue *state.Issue) string {
