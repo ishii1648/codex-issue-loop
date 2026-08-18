@@ -1,0 +1,36 @@
+{
+  "number": 442,
+  "status": "blocked",
+  "run_id": "run_adaf3142bd207b24",
+  "lease_generation": 8,
+  "lease": {
+    "owner": {"run_id": "run_adaf3142bd207b24", "generation": 8},
+    "slot": 0,
+    "declared_resources": [],
+    "resolved_resources": ["repo:*"],
+    "base_sha": "0123456789012345678901234567890123456789",
+    "reserved_at": "2026-08-17T12:33:00Z"
+  },
+  "branch": "codex/issue-442-pixeloffset",
+  "worktree": "/tmp/zeitreise-442",
+  "session_id": "session_fixture_zeitreise_442",
+  "session": {"backend": "codex", "id": "session_fixture_zeitreise_442"},
+  "failure_kind": "issue",
+  "last_error": "worker workspace validation failed for /tmp/zeitreise-442: saved workspace provenance is missing",
+  "blocked_cause": {
+    "origin": "supervisor",
+    "kind": "worker_workspace",
+    "resumable": false,
+    "reason": "worker workspace validation failed for /tmp/zeitreise-442: saved workspace provenance is missing",
+    "blocked_at": "2026-08-17T12:33:04Z"
+  },
+  "environment_resume": {
+    "id": "resume_0733cc3d177d05f3",
+    "status": "running",
+    "confirmed_at": "2026-08-17T12:33:00Z",
+    "previous_reason": "localhost listen denied",
+    "base_sha": "0123456789012345678901234567890123456789",
+    "current_base_sha": "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+  },
+  "updated_at": "2026-08-17T12:33:04Z"
+}
