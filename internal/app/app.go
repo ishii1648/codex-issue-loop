@@ -61,10 +61,11 @@ type installManifest struct {
 }
 
 type App struct {
-	In                io.Reader
-	Out               io.Writer
-	Err               io.Writer
-	ProcessController supervisor.ProcessGroupController
+	In                      io.Reader
+	Out                     io.Writer
+	Err                     io.Writer
+	ProcessController       supervisor.ProcessGroupController
+	validateResumeWorkspace func(context.Context, worktree.Manager, config.Config, string, string) (worktree.LaunchValidation, error)
 }
 
 type exitError struct {
@@ -1476,6 +1477,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
 	pendingResume := false
+	idempotentResume := false
 	if current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" && current.Status != "blocked" {
 		if current.Status != "environment_resume_pending" {
 			return exitError{4, fmt.Errorf("Issue #%d is not waiting for an environment resume (status=%s)", *issueNumber, current.Status)}
@@ -1491,25 +1493,15 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		} else if current.GitHubSync != "" || current.EnvironmentResume.Status != "github_synced" {
 			return exitError{4, fmt.Errorf("Issue #%d pending environment resume has inconsistent durable synchronization state", *issueNumber)}
 		} else {
-			baseSHA := current.Lease.BaseSHA
-			output := map[string]any{
-				"issue": *issueNumber, "status": current.Status, "resume_id": current.EnvironmentResume.ID,
-				"branch": current.Branch, "worktree": current.Worktree, "base_sha": baseSHA,
-				"current_base_sha": current.EnvironmentResume.CurrentBaseSHA, "idempotent": true,
-			}
-			if current.ResourcePark != nil {
-				output["resource_park_id"] = current.ResourcePark.ID
-				output["lease_owner"] = current.Lease.Owner
-			}
-			return a.output(*jsonOut, output)
+			idempotentResume = true
 		}
 	}
-	if !pendingResume && (current.Status != "blocked" || current.GitHubSync != "") {
+	if !pendingResume && !idempotentResume && (current.Status != "blocked" || current.GitHubSync != "") {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before environment resume (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
 	interruptedResume := current.Status == "blocked" && current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" &&
 		(current.EnvironmentResume.Status == "requested" || current.EnvironmentResume.Status == "github_synced")
-	resumeIntent := interruptedResume || pendingResume
+	resumeIntent := interruptedResume || pendingResume || idempotentResume
 	var legacyCause *state.BlockedCause
 	var legacyRecovery *state.LegacyWorkerBlockRecovery
 	if state.MayHaveLegacyWorkerBlockRecoveryProvenance(current) {
@@ -1552,6 +1544,41 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	}
 	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists {
 		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to resume: %+v", inspection)}
+	}
+	launchValidator := a.validateResumeWorkspace
+	if launchValidator == nil {
+		launchValidator = func(ctx context.Context, manager worktree.Manager, cfg config.Config, path, branch string) (worktree.LaunchValidation, error) {
+			return manager.ValidateLaunch(ctx, cfg, path, branch)
+		}
+	}
+	launch, err := launchValidator(ctx, manager, cfg, current.Worktree, current.Branch)
+	if err != nil || !launch.Valid {
+		if err == nil {
+			err = fmt.Errorf("worktree validator did not establish a valid launch boundary")
+		}
+		return exitError{4, fmt.Errorf("saved workspace provenance recovery validation failed: %w", err)}
+	}
+	workspaceBackfill := current.Workspace == nil
+	if workspaceBackfill && (pendingResume || idempotentResume) {
+		return exitError{4, fmt.Errorf("Issue #%d has an ambiguous in-progress environment resume with missing workspace provenance", *issueNumber)}
+	}
+	if current.Workspace != nil && !current.Workspace.Matches(launch.CanonicalCWD, launch.Branch, entry.RepoID, cfg.GitHub.Repo,
+		cfg.GitHub.RepositoryID, launch.CommonDir, launch.MainCheckout) {
+		return exitError{4, fmt.Errorf("saved workspace provenance does not match the validated launch target")}
+	}
+	if idempotentResume {
+		baseSHA := current.Lease.BaseSHA
+		output := map[string]any{
+			"issue": *issueNumber, "status": current.Status, "resume_id": current.EnvironmentResume.ID,
+			"branch": current.Branch, "worktree": current.Worktree, "base_sha": baseSHA,
+			"current_base_sha": current.EnvironmentResume.CurrentBaseSHA, "idempotent": true,
+			"workspace_provenance": current.Workspace,
+		}
+		if current.ResourcePark != nil {
+			output["resource_park_id"] = current.ResourcePark.ID
+			output["lease_owner"] = current.Lease.Owner
+		}
+		return a.output(*jsonOut, output)
 	}
 	if interruptedResume && current.Lease == nil && current.EnvironmentResume.BaseSHA == "" {
 		baseSHA, recoverErr := store.EnvironmentResumeBaseSHA(*issueNumber, current.RunID, current.EnvironmentResume.ID)
@@ -1645,6 +1672,11 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		resumeID = current.EnvironmentResume.ID
 	}
 	now := time.Now().UTC()
+	validatedWorkspace := state.WorkerWorkspace{
+		Path: launch.CanonicalCWD, Branch: launch.Branch,
+		RepoID: entry.RepoID, Repository: cfg.GitHub.Repo, RepositoryID: cfg.GitHub.RepositoryID,
+		GitCommonDir: launch.CommonDir, MainCheckout: launch.MainCheckout, CapturedAt: now,
+	}
 	previousReason := current.LastError
 	if current.BlockedCause != nil && current.BlockedCause.Reason != "" {
 		previousReason = current.BlockedCause.Reason
@@ -1660,6 +1692,21 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			"resume_id": resumeID, "previous_reason": previousReason, "resource_park_id": resourceParkID(current), "parked_lease_reacquired": parkedClaim,
 			"legacy_worker_block": legacyWorkerBlock, "legacy_lease_recovered": legacyRecovery != nil, "interrupted_resume": interruptedResume,
 			"base_sha": baseSHA, "current_base_sha": currentBaseSHA,
+			"workspace_recovery": map[string]any{
+				"old_provenance_missing": workspaceBackfill,
+				"operator_confirmation":  map[string]any{"confirm_prerequisite_resolved": true},
+				"expected": map[string]any{
+					"path": current.Worktree, "branch": current.Branch, "repo_id": entry.RepoID,
+					"repository": cfg.GitHub.Repo, "repository_id": cfg.GitHub.RepositoryID,
+					"git_common_dir": launch.CommonDir, "main_checkout": launch.MainCheckout,
+				},
+				"actual": map[string]any{
+					"path": launch.CanonicalCWD, "branch": launch.Branch, "repo_id": entry.RepoID,
+					"repository": cfg.GitHub.Repo, "repository_id": cfg.GitHub.RepositoryID,
+					"git_common_dir": launch.CommonDir, "main_checkout": launch.MainCheckout,
+					"validation": launch,
+				},
+			},
 		}
 		_, err = store.Update(eventType, *issueNumber, current.RunID, resumePayload, func(s *state.Snapshot) error {
 			if s.StateRevision != snapshot.StateRevision {
@@ -1670,8 +1717,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				(interruptedResume && (item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != current.EnvironmentResume.Status)) {
 				return fmt.Errorf("Issue #%d changed while environment resume was being prepared", *issueNumber)
 			}
-			if item.Worktree != current.Worktree || item.Branch != current.Branch || item.PullRequestURL != current.PullRequestURL || !reflect.DeepEqual(item.Lease, current.Lease) {
-				return fmt.Errorf("Issue #%d worktree, branch, Pull Request, or resource lease changed while environment resume was being prepared", *issueNumber)
+			if item.Worktree != current.Worktree || item.Branch != current.Branch || item.PullRequestURL != current.PullRequestURL ||
+				!reflect.DeepEqual(item.Lease, current.Lease) || !reflect.DeepEqual(item.Workspace, current.Workspace) {
+				return fmt.Errorf("Issue #%d worktree, branch, Pull Request, resource lease, or workspace provenance changed while environment resume was being prepared", *issueNumber)
 			}
 			transactionPGID := item.WorkerPGID
 			if transactionPGID <= 1 {
@@ -1719,6 +1767,13 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				}
 				resumePayload["lease_owner"] = owner
 				resumePayload["lease_slot"] = item.Lease.Slot
+			}
+			if workspaceBackfill {
+				if item.Workspace != nil {
+					return fmt.Errorf("Issue #%d workspace provenance changed while environment resume was being prepared", *issueNumber)
+				}
+				workspace := validatedWorkspace
+				item.Workspace = &workspace
 			}
 			item.Status = "environment_resume_pending"
 			item.GitHubSync = "environment_resume"
@@ -1784,6 +1839,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		"branch": current.Branch, "worktree": current.Worktree, "session_id": current.SessionID,
 		"base_sha": baseSHA, "current_base_sha": currentBaseSHA,
 		"dirty": inspection.Dirty, "unpushed_commits": inspection.UnpushedCommits,
+		"workspace_provenance_backfilled": workspaceBackfill,
 	}
 	if parkID != "" {
 		output["resource_park_id"] = parkID
