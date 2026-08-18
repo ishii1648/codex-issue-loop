@@ -495,6 +495,61 @@ func TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t
 	}
 }
 
+func TestStartupReconciliationParksExistingTypedEnvironmentBlock(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Processes = fakeProcesses{}
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	loop.Clock = fixedClock{value: now}
+	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Existing typed block", RunID: "run_typed", Slot: 0,
+		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
+		BaseSHA: "base-sha", ReservedAt: now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := "codex/issue-1-typed-block"
+	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = "blocked"
+		item.Branch = branch
+		item.Worktree = loop.Config.RepoPath
+		item.SessionID = "session-typed"
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: now.Add(-time.Minute)}
+		item.LastError = "worker blocked: network unavailable"
+		item.FailureKind = "issue"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}}}
+	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: &worktree.Inspection{
+		Exists: true, Valid: true, Branch: branch, LocalBranchExists: true, RemoteBranchExists: true,
+	}}
+	if err := loop.reconcileStartup(context.Background(), before); err != nil {
+		t.Fatal(err)
+	}
+	after, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := after.Issues["1"]
+	if item.Lease != nil || item.ResourcePark == nil || item.ResourcePark.Status != "parked" || item.ResourcePark.OriginalLease.Owner != owner {
+		t.Fatalf("existing typed block was not parked: %+v", item)
+	}
+	if item.RunID != "run_typed" || item.Worktree != loop.Config.RepoPath || item.Branch != branch || item.SessionID != "session-typed" || item.BlockedCause == nil || item.BlockedCause.Reason != "network unavailable" {
+		t.Fatalf("startup park changed continuation state: %+v", item)
+	}
+	if github.inspectCalls != 1 {
+		t.Fatalf("typed block inspections=%d want=1", github.inspectCalls)
+	}
+}
+
 func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	blockedAt := time.Date(2026, 8, 17, 12, 30, 0, 0, time.UTC)

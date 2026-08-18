@@ -1406,10 +1406,16 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			return exitError{4, fmt.Errorf("Issue #%d pending environment resume has inconsistent durable synchronization state", *issueNumber)}
 		} else {
 			baseSHA := current.Lease.BaseSHA
-			return a.output(*jsonOut, map[string]any{
+			output := map[string]any{
 				"issue": *issueNumber, "status": current.Status, "resume_id": current.EnvironmentResume.ID,
-				"branch": current.Branch, "worktree": current.Worktree, "base_sha": baseSHA, "idempotent": true,
-			})
+				"branch": current.Branch, "worktree": current.Worktree, "base_sha": baseSHA,
+				"current_base_sha": current.EnvironmentResume.CurrentBaseSHA, "idempotent": true,
+			}
+			if current.ResourcePark != nil {
+				output["resource_park_id"] = current.ResourcePark.ID
+				output["lease_owner"] = current.Lease.Owner
+			}
+			return a.output(*jsonOut, output)
 		}
 	}
 	if !pendingResume && (current.Status != "blocked" || current.GitHubSync != "") {
@@ -1433,7 +1439,8 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if current.ConflictRecovery != nil {
 		return exitError{4, fmt.Errorf("Issue #%d is a Pull Request conflict block; use agent-loop retry", *issueNumber)}
 	}
-	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && legacyRecovery == nil && !interruptedResume) {
+	parkedClaim := current.ResourcePark != nil && current.ResourcePark.Status == "parked" && current.ResourcePark.ID != ""
+	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && !parkedClaim && legacyRecovery == nil && !interruptedResume) {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
 	}
 	controller := a.ProcessController
@@ -1468,12 +1475,21 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		current.EnvironmentResume.BaseSHA = baseSHA
 	}
 	publicationState := current
-	if current.Lease == nil && legacyRecovery != nil {
+	if current.Lease == nil && parkedClaim {
+		copy := *current
+		lease := current.ResourcePark.OriginalLease
+		copy.Lease = &lease
+		publicationState = &copy
+	} else if current.Lease == nil && legacyRecovery != nil {
 		copy := *current
 		copy.Lease = &state.ResourceLease{BaseSHA: legacyRecovery.BaseSHA}
 		publicationState = &copy
 	}
 	baseSHA, err := environmentResumeBaseSHA(ctx, entry.Commands["git"], cfg, publicationState, inspection)
+	if err != nil {
+		return exitError{4, err}
+	}
+	currentBaseSHA, err := currentRemoteBaseSHA(ctx, entry.Commands["git"], current.Worktree, cfg.Git.BaseBranch)
 	if err != nil {
 		return exitError{4, err}
 	}
@@ -1554,9 +1570,12 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		if interruptedResume {
 			eventType = "environment_resume_recovered"
 		}
-		_, err = store.Update(eventType, *issueNumber, current.RunID, map[string]any{
-			"resume_id": resumeID, "previous_reason": previousReason, "legacy_worker_block": legacyWorkerBlock, "legacy_lease_recovered": legacyRecovery != nil, "interrupted_resume": interruptedResume, "base_sha": baseSHA,
-		}, func(s *state.Snapshot) error {
+		resumePayload := map[string]any{
+			"resume_id": resumeID, "previous_reason": previousReason, "resource_park_id": resourceParkID(current), "parked_lease_reacquired": parkedClaim,
+			"legacy_worker_block": legacyWorkerBlock, "legacy_lease_recovered": legacyRecovery != nil, "interrupted_resume": interruptedResume,
+			"base_sha": baseSHA, "current_base_sha": currentBaseSHA,
+		}
+		_, err = store.Update(eventType, *issueNumber, current.RunID, resumePayload, func(s *state.Snapshot) error {
 			if s.StateRevision != snapshot.StateRevision {
 				return fmt.Errorf("Issue #%d durable state changed while environment resume was being prepared", *issueNumber)
 			}
@@ -1594,6 +1613,27 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 					}
 				}
 			}
+			if parkedClaim {
+				if item.ResourcePark == nil || current.ResourcePark == nil || !reflect.DeepEqual(item.ResourcePark, current.ResourcePark) {
+					return fmt.Errorf("Issue #%d parked resource claim changed while environment resume was being prepared", *issueNumber)
+				}
+				slot, ok := availableLeaseSlot(s, cfg.Queue.Concurrency, item.ResourcePark.OriginalLease.Slot, item.Number)
+				if !ok {
+					return fmt.Errorf("Issue #%d parked resource claim is waiting for an available worker slot", *issueNumber)
+				}
+				owner, reserveErr := state.ResumeParkedLease(s, item.Number, item.ResourcePark.ID, slot, now)
+				if reserveErr != nil {
+					return fmt.Errorf("Issue #%d cannot reacquire parked resource claim: %w", *issueNumber, reserveErr)
+				}
+				if item.Lease.BaseSHA == "" {
+					item.Lease.BaseSHA = baseSHA
+				}
+				if item.ResourcePark.ResumeOwner == nil || *item.ResourcePark.ResumeOwner != owner {
+					return fmt.Errorf("Issue #%d parked resource owner was not fenced", *issueNumber)
+				}
+				resumePayload["lease_owner"] = owner
+				resumePayload["lease_slot"] = item.Lease.Slot
+			}
 			item.Status = "environment_resume_pending"
 			item.GitHubSync = "environment_resume"
 			if item.BlockedCause == nil && legacyWorkerBlock {
@@ -1613,8 +1653,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			if interruptedResume {
 				item.EnvironmentResume.Status = "requested"
 				item.EnvironmentResume.BaseSHA = baseSHA
+				item.EnvironmentResume.CurrentBaseSHA = currentBaseSHA
 			} else {
-				item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: previousReason, BaseSHA: baseSHA}
+				item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: previousReason, BaseSHA: baseSHA, CurrentBaseSHA: currentBaseSHA}
 			}
 			item.RetryAfter = nil
 			item.UpdatedAt = now
@@ -1640,19 +1681,90 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		return err
 	}
 	status := "environment_resume_pending"
+	var leaseOwner *state.LeaseOwner
+	parkID := resourceParkID(current)
 	if item := updated.Issues[strconv.Itoa(*issueNumber)]; item != nil {
 		status = item.Status
+		if item.Lease != nil {
+			owner := item.Lease.Owner
+			leaseOwner = &owner
+		}
+		if item.ResourcePark != nil {
+			parkID = item.ResourcePark.ID
+		}
 	}
-	return a.output(*jsonOut, map[string]any{
+	output := map[string]any{
 		"issue": *issueNumber, "status": status, "resume_id": resumeID,
 		"branch": current.Branch, "worktree": current.Worktree, "session_id": current.SessionID,
-		"base_sha": baseSHA,
-		"dirty":    inspection.Dirty, "unpushed_commits": inspection.UnpushedCommits,
-	})
+		"base_sha": baseSHA, "current_base_sha": currentBaseSHA,
+		"dirty": inspection.Dirty, "unpushed_commits": inspection.UnpushedCommits,
+	}
+	if parkID != "" {
+		output["resource_park_id"] = parkID
+		output["lease_owner"] = leaseOwner
+	}
+	return a.output(*jsonOut, output)
+}
+
+func resourceParkID(issue *state.Issue) string {
+	if issue == nil || issue.ResourcePark == nil {
+		return ""
+	}
+	return issue.ResourcePark.ID
+}
+
+func availableLeaseSlot(snapshot *state.Snapshot, limit, preferred, issueNumber int) (int, bool) {
+	if limit < 1 {
+		limit = 1
+	}
+	used := map[int]bool{}
+	for _, other := range snapshot.Issues {
+		if other == nil || other.Number == issueNumber || other.Lease == nil || !occupiesWorkerSlot(other.Status) {
+			continue
+		}
+		used[other.Lease.Slot] = true
+	}
+	if preferred >= 0 && preferred < limit && !used[preferred] {
+		return preferred, true
+	}
+	for slot := 0; slot < limit; slot++ {
+		if !used[slot] {
+			return slot, true
+		}
+	}
+	return -1, false
 }
 
 func environmentResumeBaseSHA(ctx context.Context, git string, cfg config.Config, current *state.Issue, inspection worktree.Inspection) (string, error) {
 	return verifiedPublicationBaseSHA(ctx, git, cfg, current, inspection, "environment resume")
+}
+
+func currentRemoteBaseSHA(ctx context.Context, git, worktreePath, baseBranch string) (string, error) {
+	if git == "" {
+		git = "git"
+	}
+	ref := "refs/heads/" + baseBranch
+	out, err := exec.CommandContext(ctx, git, "-C", worktreePath, "ls-remote", "--exit-code", "origin", ref).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("inspect current configured base branch %q for environment resume: %w: %s; state was not changed", baseBranch, err, strings.TrimSpace(string(out)))
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 || fields[1] != ref || !canonicalGitObjectID(fields[0]) {
+		return "", fmt.Errorf("inspect current configured base branch %q for environment resume: git returned an invalid ref; state was not changed", baseBranch)
+	}
+	return fields[0], nil
+}
+
+func canonicalGitObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func verifiedPublicationBaseSHA(ctx context.Context, git string, cfg config.Config, current *state.Issue, inspection worktree.Inspection, operation string) (string, error) {

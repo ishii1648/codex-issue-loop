@@ -246,6 +246,8 @@ lease ownerは`(Issue number, run_id, generation)`で識別する。`generation`
 | `claimed`、`running` | 保持 | worker終了やslot数とは独立して保持する |
 | `retry_wait`、`resume_pending` | 保持 | backoff中、continuation間も次Issueへ譲らない |
 | `needs_input` | 保持 | worker slotは空けても、回答待ちのworktreeとresourceは保護する |
+| typed worker environment `blocked` | park | PID/PGID不在を確認し、active leaseを`resource_park.original_lease`へ移してadmission対象から外す |
+| park済み`resume-blocked` | 新generationで再取得 | 保存claimと全active lease、worker slotを同じstate transactionで再検証する |
 | publish中、draft PR、`awaiting_checks` | 保持 | commit/push/CI待ちをlease内に含める |
 | open PR、`awaiting_merge` | 保持 | 人手merge待ちでも同resourceの次Issueを開始しない |
 | PR merge確認 | 解放準備 | merge結果と`completed`を永続化するtransactionで解放する |
@@ -255,6 +257,12 @@ lease ownerは`(Issue number, run_id, generation)`で識別する。`generation`
 open PRがある限り、Issue labelがdone/failedへ変わったりreadyが外れたりしてもleaseを解放しない。PRがmergeされずcloseされた場合は、worker/publisherが停止し、publication intentがなく、Issueを明示的にabandoned/terminalとして永続化したことをreconcileで確認してから解放する。PR closeをlease解放要求として単独では扱わない。
 
 claim途中のGitHub API失敗ではleaseを保持して同じrun IDでreconcileする。local transaction自体がcommitされていなければleaseは存在せず、workerも起動してはならない。過少claimをpublish前監査で検出した場合は、leaseをその場で追加せず、現在のleaseを保持してattention状態へ遷移する。
+
+workerがtypedなenvironment block（`blocked_cause.origin=worker`、`kind=environment`、`resumable=true`）を返した場合だけ、blockのdurable transactionはactive leaseをparkする。`resource_park`はpark ID、元owner generation、slot、declared/resolved/actual resources、original base SHA、reservation時刻を保持するが、admissionのactive lease集合には含めない。run、worktree、branch、dirty changes、session/Goal、answers、attempt/continuation、blocked causeは変更せず、GitHubは`blocked`のままとする。導入前から同期済みの同じtyped blockは、起動時reconciliationがsupervisor-owned `blocked` label、open PR不在、PID/PGID不在を確認できた場合だけ同じ形式へparkする。
+
+`resume-blocked --confirm-prerequisite-resolved`はpark IDと元claimを指定Issueだけに限定し、同一run/worktree/branch/session、GitHub Issue/PR/label、pending request不在、保存base SHAのHEAD祖先性、dirty/unpushed状態、空worker slot、全active leaseとの非競合を検証する。競合するIssueのleaseは奪わず、stateとGitHubを変更せずIssue番号付きで拒否する。成功時は`lease_generation`を1回だけ増やした新ownerを`resource_park.resume_owner`、resume event、active leaseへ同時保存する。GitHub同期中の`environment_resume_pending`もslot予約済みとして扱い、別claimとの二重slotを拒否する。再実行は同じresume IDとownerへ収束する。
+
+manual/security block、PR conflict、failed、closed Issue、active worker、pending request、未知または改変されたpark provenanceにはpark/resumeを適用しない。parkやresumeの途中停止はstate transactionと冪等GitHub markerから回復し、state fileやsupervisor-owned labelの手編集を復旧手段にしない。後続Issueでbaseが進んでも元base SHAとdirty worktreeを保持し、publish時の通常base/conflict auditへ渡す。
 
 ## 9. 単一hostと複数hostの境界
 

@@ -256,6 +256,175 @@ func TestRetainedLeaseReleasesWorkerSlotButKeepsResourceConflict(t *testing.T) {
 	}
 }
 
+func TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration(t *testing.T) {
+	store := newStore(t)
+	reservedAt := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	parkedAt := reservedAt.Add(time.Minute)
+	_, owner, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 314, RunID: "run_314", Slot: 0,
+		DeclaredResources: []string{RepositoryResource}, ResolvedResources: []string{RepositoryResource},
+		BaseSHA: "base-314", ReservedAt: reservedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("issue_blocked", 314, owner.RunID, nil, func(snapshot *Snapshot) error {
+		issue := snapshot.Issues["314"]
+		issue.Status = "blocked"
+		issue.Branch = "codex/issue-314"
+		issue.Worktree = "/tmp/issue-314"
+		issue.SessionID = "session-314"
+		issue.Answers = []AnswerRecord{{RequestID: "req-314", Answer: "continue"}}
+		issue.BlockedCause = &BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "public network unavailable", BlockedAt: parkedAt}
+		return ParkIssueLease(issue, owner, "park_314", parkedAt)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuation := *parked.Issues["314"]
+	if continuation.Lease != nil || continuation.ResourcePark == nil || continuation.ResourcePark.OriginalLease.Owner != owner {
+		t.Fatalf("parked continuation=%+v", continuation)
+	}
+	_, nextOwner, err := store.ReserveLease(LeaseReservation{
+		IssueNumber: 448, RunID: "run_448", Slot: 0,
+		ResolvedResources: []string{RepositoryResource}, BaseSHA: "base-448", ReservedAt: parkedAt.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("parked resource still blocked the following queue: %v", err)
+	}
+	if _, err := store.Update("environment_resume_requested", 314, owner.RunID, nil, func(snapshot *Snapshot) error {
+		_, resumeErr := ResumeParkedLease(snapshot, 314, "park_314", 1, parkedAt.Add(2*time.Minute))
+		return resumeErr
+	}); err == nil || !strings.Contains(err.Error(), "Issue #448") {
+		t.Fatalf("competing lease was not preserved: %v", err)
+	}
+	if _, err := store.ReleaseLease(448, nextOwner, "test complete"); err != nil {
+		t.Fatal(err)
+	}
+	var resumedOwner LeaseOwner
+	resumed, err := store.Update("environment_resume_requested", 314, owner.RunID, nil, func(snapshot *Snapshot) error {
+		var resumeErr error
+		resumedOwner, resumeErr = ResumeParkedLease(snapshot, 314, "park_314", 0, parkedAt.Add(3*time.Minute))
+		if resumeErr == nil {
+			snapshot.Issues["314"].Status = "environment_resume_pending"
+		}
+		return resumeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := resumed.Issues["314"]
+	if resumedOwner.Generation != owner.Generation+1 || issue.Lease == nil || issue.Lease.Owner != resumedOwner || issue.ResourcePark.Status != "resuming" {
+		t.Fatalf("resumed issue=%+v owner=%+v", issue, resumedOwner)
+	}
+	if issue.RunID != continuation.RunID || issue.Worktree != continuation.Worktree || issue.Branch != continuation.Branch ||
+		issue.SessionID != continuation.SessionID || !reflect.DeepEqual(issue.Answers, continuation.Answers) ||
+		!reflect.DeepEqual(issue.ResourcePark.OriginalLease, continuation.ResourcePark.OriginalLease) {
+		t.Fatalf("park/resume changed continuation boundary: before=%+v after=%+v", continuation, issue)
+	}
+}
+
+func TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner(t *testing.T) {
+	store := newStore(t)
+	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	_, owner, err := store.ReserveLease(LeaseReservation{IssueNumber: 1, RunID: "run_1", Slot: 0, ResolvedResources: []string{"scheduler"}, ReservedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("issue_blocked", 1, owner.RunID, nil, func(snapshot *Snapshot) error {
+		issue := snapshot.Issues["1"]
+		issue.Status = "blocked"
+		return ParkIssueLease(issue, owner, "park_1", now.Add(time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan LeaseOwner, 2)
+	errors := make(chan error, 2)
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			var got LeaseOwner
+			_, updateErr := store.Update("environment_resume_requested", 1, owner.RunID, nil, func(snapshot *Snapshot) error {
+				var resumeErr error
+				got, resumeErr = ResumeParkedLease(snapshot, 1, "park_1", 0, now.Add(2*time.Minute))
+				if resumeErr == nil {
+					snapshot.Issues["1"].Status = "environment_resume_pending"
+				}
+				return resumeErr
+			})
+			results <- got
+			errors <- updateErr
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var fenced LeaseOwner
+	for got := range results {
+		if fenced == (LeaseOwner{}) {
+			fenced = got
+		} else if got != fenced {
+			t.Fatalf("concurrent resume owners differ: first=%+v second=%+v", fenced, got)
+		}
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := loaded.Issues["1"]
+	if fenced.Generation != 2 || issue.LeaseGeneration != 2 || issue.Lease == nil || issue.Lease.Owner != fenced || issue.ResourcePark.ResumeOwner == nil || *issue.ResourcePark.ResumeOwner != fenced {
+		t.Fatalf("double resume was not fenced: owner=%+v issue=%+v", fenced, issue)
+	}
+}
+
+func TestResourceParkValidationFailsClosed(t *testing.T) {
+	now := time.Date(2026, 8, 17, 11, 0, 0, 0, time.UTC)
+	valid := Issue{
+		Number: 1, Status: "blocked", RunID: "run_1", LeaseGeneration: 1,
+		ResourcePark: &ResourceLeasePark{
+			ID: "park_1", Status: "parked", ParkedAt: now,
+			OriginalLease: ResourceLease{Owner: LeaseOwner{RunID: "run_1", Generation: 1}, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{"scheduler"}, ReservedAt: now},
+		},
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*Issue)
+	}{
+		{name: "generation mismatch", mutate: func(issue *Issue) { issue.LeaseGeneration = 2 }},
+		{name: "cross run", mutate: func(issue *Issue) { issue.ResourcePark.OriginalLease.Owner.RunID = "run_other" }},
+		{name: "non canonical resources", mutate: func(issue *Issue) {
+			issue.ResourcePark.OriginalLease.ResolvedResources = []string{"scheduler", "scheduler"}
+		}},
+		{name: "active parked lease", mutate: func(issue *Issue) { lease := issue.ResourcePark.OriginalLease; issue.Lease = &lease }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := valid
+			park := *valid.ResourcePark
+			park.OriginalLease.DeclaredResources = append([]string(nil), valid.ResourcePark.OriginalLease.DeclaredResources...)
+			park.OriginalLease.ResolvedResources = append([]string(nil), valid.ResourcePark.OriginalLease.ResolvedResources...)
+			issue.ResourcePark = &park
+			test.mutate(&issue)
+			if err := validateResourceLeases(Snapshot{Issues: map[string]*Issue{"1": &issue}}); err == nil {
+				t.Fatal("malformed resource park was accepted")
+			}
+		})
+	}
+}
+
 func TestCrashPointsReplayPreparedLeaseTransaction(t *testing.T) {
 	for _, appendEvent := range []bool{false, true} {
 		t.Run(fmt.Sprintf("event_appended_%v", appendEvent), func(t *testing.T) {

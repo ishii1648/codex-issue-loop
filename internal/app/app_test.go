@@ -1138,8 +1138,232 @@ esac
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["10"]
-	if item.Lease.BaseSHA != baseSHA || item.Lease.BaseSHA == newBaseSHA || item.LeaseGeneration != 7 || item.Lease.Owner != originalLease.Owner || item.Lease.Slot != originalLease.Slot || !reflect.DeepEqual(item.Lease.DeclaredResources, originalLease.DeclaredResources) || !reflect.DeepEqual(item.Lease.ResolvedResources, originalLease.ResolvedResources) || !item.Lease.ReservedAt.Equal(reservedAt) {
+	if item.Lease.BaseSHA != baseSHA || item.Lease.BaseSHA == newBaseSHA || item.EnvironmentResume == nil || item.EnvironmentResume.CurrentBaseSHA != newBaseSHA || item.LeaseGeneration != 7 || item.Lease.Owner != originalLease.Owner || item.Lease.Slot != originalLease.Slot || !reflect.DeepEqual(item.Lease.DeclaredResources, originalLease.DeclaredResources) || !reflect.DeepEqual(item.Lease.ResolvedResources, originalLease.ResolvedResources) || !item.Lease.ReservedAt.Equal(reservedAt) {
 		t.Fatalf("existing lease metadata was overwritten: old=%+v new=%+v configured_base=%s", originalLease, item.Lease, newBaseSHA)
+	}
+	if !strings.Contains(out.String(), `"current_base_sha": "`+newBaseSHA+`"`) {
+		t.Fatalf("current base was not exposed in CLI output: %s", out.String())
+	}
+}
+
+func TestFaultResumeBlockedReacquiresParkedLeaseOnceAcrossGitHubSyncFailure(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "config", "user.name", "Test User")
+	runGitApp(t, repo, "config", "user.email", "test@example.com")
+	runGitApp(t, repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitApp(t, repo, "add", "README.md")
+	runGitApp(t, repo, "commit", "-m", "base")
+	runGitApp(t, repo, "branch", "-M", "main")
+	remotePath := filepath.Join(filepath.Dir(repo), "parked-resume-remote.git")
+	runGitApp(t, filepath.Dir(repo), "init", "--bare", remotePath)
+	runGitApp(t, repo, "remote", "add", "origin", remotePath)
+	runGitApp(t, repo, "push", "-u", "origin", "main")
+	baseSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
+	branch := "codex/issue-11-parked"
+	runGitApp(t, repo, "checkout", "-b", branch)
+	runGitApp(t, repo, "push", "-u", "origin", branch)
+	if err := os.WriteFile(filepath.Join(repo, "parked-dirty.txt"), []byte("keep parked work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeGH := filepath.Join(filepath.Dir(repo), "bin", "gh-parked-resume")
+	logPath := filepath.Join(filepath.Dir(repo), "parked-resume-gh.log")
+	failOncePath := filepath.Join(filepath.Dir(repo), "parked-resume-failed-once")
+	closedPath := filepath.Join(filepath.Dir(repo), "parked-resume-closed")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$AGENT_LOOP_TEST_GH_LOG"
+case "$1 $2" in
+  "issue view") issue_state=OPEN; if [ -e "$AGENT_LOOP_TEST_GH_CLOSED" ]; then issue_state=CLOSED; fi; printf '{"number":11,"title":"Parked","body":"","url":"https://example.test/issues/11","state":"%s","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[]}\n' "$issue_state" ;;
+  "pr list") printf '%s\n' '[]' ;;
+  "issue edit") if [ ! -e "$AGENT_LOOP_TEST_GH_FAIL_ONCE" ]; then : > "$AGENT_LOOP_TEST_GH_FAIL_ONCE"; exit 1; fi; exit 0 ;;
+  "issue comment") exit 0 ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_LOOP_TEST_GH_LOG", logPath)
+	t.Setenv("AGENT_LOOP_TEST_GH_FAIL_ONCE", failOncePath)
+	t.Setenv("AGENT_LOOP_TEST_GH_CLOSED", closedPath)
+	configFile, err := os.OpenFile(filepath.Join(repo, config.FileName), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(configFile, "git:\n  worktree_root: %q\n", filepath.Dir(repo)); err != nil {
+		t.Fatal(err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, repo)
+	entry := registry.Entry{
+		RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo,
+		Commands: map[string]string{"git": "/usr/bin/git", "gh": fakeGH},
+	}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: cfg.RepoPath}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	reservedAt := time.Now().UTC().Add(-time.Hour)
+	_, owner, err := store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 11, Title: "Parked", RunID: "run_11", Slot: 0,
+		DeclaredResources: []string{"scheduler"}, ResolvedResources: []string{"scheduler"}, BaseSHA: baseSHA, ReservedAt: reservedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parkedAt := reservedAt.Add(time.Minute)
+	_, err = store.Update("issue_blocked", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["11"]
+		item.Status = "blocked"
+		item.Branch = branch
+		item.Worktree = cfg.RepoPath
+		item.SessionID = "session-11"
+		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-11"}
+		item.Goal = &state.WorkerGoal{ThreadID: "thread-11", Objective: "finish Issue #11", Status: "blocked"}
+		item.Answers = []state.AnswerRecord{{RequestID: "req-11", Answer: "approved", AnsweredAt: parkedAt}}
+		item.Attempts = 2
+		item.Continuations = 1
+		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "public network unavailable", BlockedAt: parkedAt}
+		item.LastError = "worker blocked: public network unavailable"
+		item.FailureKind = "issue"
+		return state.ParkIssueLease(item, owner, "park_11", parkedAt)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, competitor, err := store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 12, Title: "Competing", RunID: "run_12", Slot: 1,
+		ResolvedResources: []string{"scheduler"}, BaseSHA: baseSHA, ReservedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("input_requested", 12, competitor.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["12"].Status = "needs_input"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	beforeConflict, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"resume-blocked", "--repo", cfg.RepoPath, "--issue", "11", "--confirm-prerequisite-resolved", "--json"}
+	controller := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
+	var out, stderr bytes.Buffer
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "Issue #12") {
+		t.Fatalf("competing parked resume was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	afterConflict, err := store.Load()
+	if err != nil || afterConflict.StateRevision != beforeConflict.StateRevision || afterConflict.Issues["11"].Lease != nil || afterConflict.Issues["11"].ResourcePark.Status != "parked" {
+		t.Fatalf("conflict changed parked state: before=%d after=%d issue=%+v err=%v", beforeConflict.StateRevision, afterConflict.StateRevision, afterConflict.Issues["11"], err)
+	}
+	if _, err := store.ReleaseLease(12, competitor, "test competitor finished"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("test_worker_alive", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["11"].WorkerPID = 4311
+		snapshot.Issues["11"].WorkerPGID = 4311
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller.alive[4311] = true
+	out.Reset()
+	stderr.Reset()
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "active worker") {
+		t.Fatalf("active worker was accepted: code=%d stderr=%s", code, stderr.String())
+	}
+	controller.alive[4311] = false
+	if _, err := store.Update("test_pending_request", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["11"].WorkerPID = 0
+		snapshot.Issues["11"].WorkerPGID = 0
+		snapshot.PendingRequests["req-pending-11"] = &state.Request{ID: "req-pending-11", IssueNumber: 11, Status: "pending"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "pending manual answer") {
+		t.Fatalf("pending request was accepted: code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := store.Update("test_request_answered", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.PendingRequests["req-pending-11"].Status = "answered"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(closedPath, []byte("closed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "is not open") {
+		t.Fatalf("closed Issue was accepted: code=%d stderr=%s", code, stderr.String())
+	}
+	if err := os.Remove(closedPath); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	stderr.Reset()
+	if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "durable resume remains pending") {
+		t.Fatalf("GitHub sync fault was not retained: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	pending, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingIssue := pending.Issues["11"]
+	if pendingIssue.Status != "environment_resume_pending" || pendingIssue.GitHubSync != "environment_resume" || pendingIssue.Lease == nil || pendingIssue.Lease.Owner.Generation != owner.Generation+1 || pendingIssue.ResourcePark.Status != "resuming" {
+		t.Fatalf("write-ahead parked resume is inconsistent: %+v", pendingIssue)
+	}
+	resumeOwner := pendingIssue.Lease.Owner
+	resumeID := pendingIssue.EnvironmentResume.ID
+
+	for attempt := 0; attempt < 2; attempt++ {
+		out.Reset()
+		stderr.Reset()
+		if code := (App{Out: &out, Err: &stderr, ProcessController: controller}).Run(context.Background(), args); code != 0 {
+			t.Fatalf("resume retry %d failed: code=%d stdout=%s stderr=%s", attempt, code, out.String(), stderr.String())
+		}
+	}
+	completed, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := completed.Issues["11"]
+	if item.Lease == nil || item.Lease.Owner != resumeOwner || item.LeaseGeneration != resumeOwner.Generation || item.EnvironmentResume.ID != resumeID || item.ResourcePark.ResumeOwner == nil || *item.ResourcePark.ResumeOwner != resumeOwner {
+		t.Fatalf("parked resume was not idempotent: %+v", item)
+	}
+	if item.RunID != "run_11" || item.Branch != branch || item.Worktree != cfg.RepoPath || item.SessionID != "session-11" || item.Session == nil || item.Session.ID != "session-11" || item.Goal == nil || item.Goal.ThreadID != "thread-11" || len(item.Answers) != 1 || item.Attempts != 2 || item.Continuations != 1 {
+		t.Fatalf("continuation metadata changed: %+v", item)
+	}
+	if item.ResourcePark.OriginalLease.Owner != owner || item.ResourcePark.OriginalLease.BaseSHA != baseSHA || !item.ResourcePark.OriginalLease.ReservedAt.Equal(reservedAt) || item.Lease.BaseSHA != baseSHA {
+		t.Fatalf("resource provenance changed: park=%+v lease=%+v", item.ResourcePark, item.Lease)
+	}
+	if data, err := os.ReadFile(filepath.Join(repo, "parked-dirty.txt")); err != nil || string(data) != "keep parked work\n" {
+		t.Fatalf("dirty work was lost: data=%q err=%v", data, err)
+	}
+	if !strings.Contains(out.String(), `"idempotent": true`) || !strings.Contains(out.String(), `"resource_park_id": "park_11"`) {
+		t.Fatalf("idempotent CLI output lacks park audit: %s", out.String())
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "codex-issue-loop:environment-resume:") != 1 {
+		t.Fatalf("environment resume comment was duplicated: %s", calls)
 	}
 }
 
@@ -1178,6 +1402,7 @@ func TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks(t *testing.T) {
 	}{
 		{name: "conflict", issue: state.Issue{Number: 9, Status: "blocked", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}, ConflictRecovery: &state.ConflictRecovery{PullRequestURL: "https://example.test/pr/9"}}},
 		{name: "running", issue: state.Issue{Number: 9, Status: "running", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
+		{name: "failed", issue: state.Issue{Number: 9, Status: "failed", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
 		{name: "completed", issue: state.Issue{Number: 9, Status: "completed", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
 		{name: "security", issue: state.Issue{Number: 9, Status: "blocked", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "supervisor", Kind: "security", Resumable: false}}},
 	} {

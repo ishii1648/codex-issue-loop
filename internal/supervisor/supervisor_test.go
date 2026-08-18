@@ -97,8 +97,10 @@ type fakeGitHub struct {
 	checksRecoveryCalls       int
 	checksRecoveryID          string
 	inspectCalls              int
+	failedCalls               int
 	claimErr                  error
 	doneErr                   error
+	failedErr                 error
 	listErr                   error
 	inspectHook               func()
 }
@@ -143,7 +145,15 @@ func (f *fakeGitHub) MarkDone(context.Context, config.Config, int, string) error
 	f.done = true
 	return nil
 }
-func (f *fakeGitHub) MarkFailed(context.Context, config.Config, int, string, bool) error { return nil }
+func (f *fakeGitHub) MarkFailed(context.Context, config.Config, int, string, bool) error {
+	f.failedCalls++
+	if f.failedErr != nil {
+		err := f.failedErr
+		f.failedErr = nil
+		return err
+	}
+	return nil
+}
 func (f *fakeGitHub) MarkRunning(context.Context, config.Config, int) error {
 	f.markedRunning = true
 	return nil
@@ -331,7 +341,7 @@ func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	}
 }
 
-func TestWorkerEnvironmentBlockPreservesContinuationAndResourceState(t *testing.T) {
+func TestWorkerEnvironmentBlockParksLeaseAndPreservesContinuationState(t *testing.T) {
 	result := worker.Result{
 		Version: 1, Status: "blocked", ExecutionProfile: "extended",
 		Summary: "local HTTP binding is unavailable", SessionID: "session-blocked",
@@ -345,14 +355,86 @@ func TestWorkerEnvironmentBlockPreservesContinuationAndResourceState(t *testing.
 		t.Fatal(err)
 	}
 	issue := snapshot.Issues["1"]
-	if issue.Status != "blocked" || issue.SessionID != "session-blocked" || issue.Session == nil || issue.Lease == nil {
+	if issue.Status != "blocked" || issue.SessionID != "session-blocked" || issue.Session == nil || issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.Status != "parked" {
 		t.Fatalf("continuation state was not preserved: %+v", issue)
 	}
 	if issue.BlockedCause == nil || issue.BlockedCause.Origin != "worker" || issue.BlockedCause.Kind != "environment" || !issue.BlockedCause.Resumable {
 		t.Fatalf("blocked provenance=%+v", issue.BlockedCause)
 	}
-	if len(issue.DeclaredResources) == 0 || len(issue.Lease.ResolvedResources) == 0 {
-		t.Fatalf("resource metadata was not preserved: %+v", issue.Lease)
+	if len(issue.DeclaredResources) == 0 || len(issue.ResourcePark.OriginalLease.ResolvedResources) == 0 || issue.ResourcePark.OriginalLease.Owner.Generation != issue.LeaseGeneration {
+		t.Fatalf("resource metadata was not preserved: %+v", issue.ResourcePark)
+	}
+}
+
+func TestWorkerEnvironmentBlockParkAllowsFollowingRepositoryIssue(t *testing.T) {
+	blocked := worker.Result{
+		Version: 1, Status: "blocked", ExecutionProfile: "extended",
+		Summary: "public network is unavailable", SessionID: "session-314",
+	}
+	loop, github := testLoop(t, blocked)
+	loop.Config.Queue.Concurrency = 1
+	github.issue = gh.Issue{Number: 314, Title: "Public verification", Body: "Verify production", Labels: []string{"codex-loop:ready"}}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("Issue #314 worked=%v err=%v", worked, err)
+	}
+	first, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue := first.Issues["314"]; issue == nil || issue.Status != "blocked" || issue.Lease != nil || issue.ResourcePark == nil || issue.SessionID != "session-314" {
+		t.Fatalf("Issue #314 was not safely parked: %+v", issue)
+	}
+
+	github.issue = gh.Issue{Number: 448, Title: "Local follow-up", Body: "Continue queue", Labels: []string{"codex-loop:ready"}}
+	loop.Worker = fakeWorker{result: worker.Result{
+		Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session-448",
+		Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/448"},
+	}}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("Issue #448 worked=%v err=%v", worked, err)
+	}
+	second, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue := second.Issues["448"]; issue == nil || issue.Status != "awaiting_checks" || issue.Lease == nil || issue.Lease.Owner.RunID == "" {
+		t.Fatalf("following Issue was not admitted: %+v", issue)
+	}
+	if issue := second.Issues["314"]; issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.Status != "parked" || issue.SessionID != "session-314" {
+		t.Fatalf("following Issue changed parked continuation: %+v", issue)
+	}
+}
+
+func TestFaultWorkerEnvironmentParkSurvivesGitHubSyncCrashIdempotently(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{
+		Version: 1, Status: "blocked", ExecutionProfile: "extended",
+		Summary: "network unavailable", SessionID: "session-blocked",
+	})
+	github.failedErr = errors.New("injected blocked label failure")
+	if worked, err := loop.RunOnce(context.Background()); err == nil || !worked {
+		t.Fatalf("initial block worked=%v err=%v", worked, err)
+	}
+	parked, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := parked.Issues["1"]
+	if issue.Status != "blocked" || issue.GitHubSync != "blocked" || issue.Lease != nil || issue.ResourcePark == nil {
+		t.Fatalf("write-ahead park was not retained: %+v", issue)
+	}
+	parkID := issue.ResourcePark.ID
+	parkOwner := issue.ResourcePark.OriginalLease.Owner
+	generation := issue.LeaseGeneration
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("GitHub retry worked=%v err=%v", worked, err)
+	}
+	converged, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue = converged.Issues["1"]
+	if issue.GitHubSync != "" || issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.ID != parkID || issue.ResourcePark.OriginalLease.Owner != parkOwner || issue.LeaseGeneration != generation || github.failedCalls != 2 {
+		t.Fatalf("park retry duplicated or changed state: github=%+v issue=%+v", github, issue)
 	}
 }
 
