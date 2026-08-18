@@ -58,6 +58,16 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 	if !inspection.Exists || !inspection.Valid || !inspection.LocalBranchExists || inspection.RemoteBranchExists || inspection.Branch != result.Branch || inspection.Dirty {
 		t.Fatalf("inspection=%+v", inspection)
 	}
+	launch, err := (Manager{StateRoot: root}).ValidateLaunch(context.Background(), cfg, result.Path, result.Branch)
+	if err != nil || !launch.Valid || launch.CanonicalCWD != result.Path || launch.TopLevel != result.Path || launch.Branch != result.Branch || launch.CommonDir == "" {
+		t.Fatalf("launch validation=%+v err=%v", launch, err)
+	}
+	if _, err := (Manager{StateRoot: root}).ValidateLaunch(context.Background(), cfg, repo, "main"); err == nil {
+		t.Fatal("main checkout was accepted as a worker launch cwd")
+	}
+	if _, err := (Manager{StateRoot: root}).ValidateLaunch(context.Background(), cfg, result.Path, "codex/issue-12-tampered"); err == nil {
+		t.Fatal("tampered saved branch was accepted")
+	}
 	if err := os.WriteFile(filepath.Join(result.Path, "dirty.txt"), []byte("dirty\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

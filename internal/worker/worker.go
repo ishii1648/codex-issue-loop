@@ -109,7 +109,14 @@ type Identity struct {
 	Variant        string `json:"variant,omitempty"`
 }
 
-type Started func(pid int) error
+type ProcessStart struct {
+	PID         int    `json:"pid"`
+	PGID        int    `json:"pgid"`
+	ExpectedCWD string `json:"expected_cwd"`
+	ActualCWD   string `json:"actual_cwd"`
+}
+
+type Started func(ProcessStart) error
 
 type TerminationError struct {
 	Timeout     time.Duration
@@ -222,7 +229,7 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	cmd.Stderr = safeStderr
 	runErr := cmd.Start()
 	if runErr == nil && started != nil {
-		if err := started(cmd.Process.Pid); err != nil {
+		if err := started(processStart(cmd, workspace)); err != nil {
 			_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 			return Result{}, fmt.Errorf("record worker process: %w", err)
@@ -271,6 +278,13 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 		return result, fmt.Errorf("codex worker exited unsuccessfully: %w", runErr)
 	}
 	return result, nil
+}
+
+func processStart(cmd *exec.Cmd, expectedCWD string) ProcessStart {
+	// os.StartProcess performs the child chdir before reporting Start success;
+	// therefore Cmd.Dir is the effective cwd at the spawn boundary. Backends
+	// additionally pass the same canonical path to their workspace APIs.
+	return ProcessStart{PID: cmd.Process.Pid, PGID: cmd.Process.Pid, ExpectedCWD: expectedCWD, ActualCWD: cmd.Dir}
 }
 
 func codexExecBaseArgs(cfg config.Config) []string {

@@ -25,7 +25,8 @@ Claude Codeは`claude -p`へpromptをstdinで渡し、`--json-schema`の`structu
 
 - session IDはJSONL event内の`thread_id`または`session_id`を受け付ける。
 - event wrapper内に同じfieldが入る形式と、`thread.id`または`session.id`形式も再帰的に受け付ける。
-- Codex processのOS working directoryとCodex workspace rootは、初回session、保存sessionのresume、自動continuation、回答後のresume、`resume-blocked`、resume非対応fallbackのすべてで同じ正規化済みIssue worktreeへ固定する。CLIには`codex exec --cd <worktree> resume ...`のように`--cd`を`resume`より前へ置き、追加のwritable directoryは渡さない。
+- 全backendのprocessのOS working directoryとworkspace APIへ渡すdirectoryは、初回session、保存sessionのresume、自動continuation、回答後のresume、`resume-blocked`、resume非対応fallbackのすべてで同じ正規化済みIssue worktreeへ固定する。CLIには`codex exec --cd <worktree> resume ...`のように`--cd`を`resume`より前へ置き、追加のwritable directoryは渡さない。
+- 初回spawn前にworktree path、branch、Git common dir、repository ID、main checkoutとの非同一性をprovenanceとして保存する。以後のspawn直前にrun/session/lease owner generationとともに再検証し、欠損・symlink・別branch/repository・provenance不一致ではbackendを起動せず`blocked`へ収束する。`worker_workspace_validated`、`worker_workspace_rejected`、`worker_process_started` eventでexpected/actual cwdと検証結果を監査できる。
 - GitHub Issueは`gh issue list --limit 1000`で取得し、Issue番号順に選択する。100件を超えるqueueをfixtureで検証する。1000件を超える単一queueは現在の対応上限である。
 
 ## 確認手順

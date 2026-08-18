@@ -373,9 +373,11 @@ func TestFaultStartupReconciliationConvergesOnDirtyPullRequestWithoutDuplicateCo
 	loop.Config.Completion.AutoMerge = true
 	prURL := "https://example.test/pull/1"
 	_, err := loop.Store.Update("awaiting_checks", 1, "run_1", nil, func(s *state.Snapshot) error {
+		branch := "codex/issue-1-test"
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: "awaiting_checks", RunID: "run_1",
-			Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, PullRequestURL: prURL,
+			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			LeaseGeneration: 1, Lease: fixtureLease("run_1"), PullRequestURL: prURL,
 			UpdatedAt: time.Now().UTC(),
 		}
 		return nil

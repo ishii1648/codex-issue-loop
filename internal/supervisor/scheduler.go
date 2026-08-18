@@ -777,12 +777,22 @@ func (s *scheduler) dispatch(ctx context.Context, number int, runID string, slot
 
 func (l *Loop) runWorker(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, prompt string, started worker.Started) (worker.Result, error) {
 	return withWorkerSlot(ctx, func() (worker.Result, error) {
+		validated, err := l.validateWorkerLaunch(ctx, cfg, current)
+		if err != nil {
+			return worker.Result{}, err
+		}
+		cfg.RepoPath = validated.CanonicalCWD
 		return l.Worker.Run(ctx, cfg, issue, current, prompt, started)
 	})
 }
 
 func (l *Loop) resumeWorker(ctx context.Context, cfg config.Config, issue gh.Issue, current state.Issue, prompt string, started worker.Started) (worker.Result, error) {
 	return withWorkerSlot(ctx, func() (worker.Result, error) {
+		validated, err := l.validateWorkerLaunch(ctx, cfg, current)
+		if err != nil {
+			return worker.Result{}, err
+		}
+		cfg.RepoPath = validated.CanonicalCWD
 		return l.Worker.Resume(ctx, cfg, issue, current, prompt, started)
 	})
 }

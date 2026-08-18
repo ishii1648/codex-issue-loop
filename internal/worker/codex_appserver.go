@@ -76,6 +76,11 @@ func (e *appServerError) Unwrap() error { return e.err }
 
 func (c CodexAppServer) execute(parent context.Context, cfg config.Config, issue gh.Issue, current state.Issue, prompt string, freshThread bool, started Started) (Result, error) {
 	identity := Identity{Backend: c.ID(), RuntimeVersion: c.RuntimeVersion, Provider: "app-server-goal", RequestedModel: cfg.Worker.Model, ResolvedModel: cfg.Worker.Model}
+	workspace, err := config.CanonicalRepoPath(cfg.RepoPath)
+	if err != nil {
+		return Result{SessionID: current.SessionID, Identity: identity}, fmt.Errorf("resolve Codex App Server workspace: %w", err)
+	}
+	cfg.RepoPath = workspace
 	runDir := filepath.Join(c.StateDir, "runs", current.RunID)
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return Result{SessionID: current.SessionID, Identity: identity}, err
@@ -104,6 +109,7 @@ func (c CodexAppServer) execute(parent context.Context, cfg config.Config, issue
 
 	command := cfg.Worker.EffectiveCommand()
 	cmd := exec.Command(command, "app-server", "--stdio", "--config", `approval_policy="never"`)
+	cmd.Dir = workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -120,7 +126,7 @@ func (c CodexAppServer) execute(parent context.Context, cfg config.Config, issue
 		return Result{SessionID: current.SessionID, Identity: identity}, &appServerError{err: fmt.Errorf("start codex app-server: %w", err), safeFallback: true}
 	}
 	if started != nil {
-		if err := started(cmd.Process.Pid); err != nil {
+		if err := started(processStart(cmd, workspace)); err != nil {
 			_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 			return Result{SessionID: current.SessionID, Identity: identity}, fmt.Errorf("record app-server process: %w", err)

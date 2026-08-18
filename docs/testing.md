@@ -91,6 +91,7 @@ concurrency 2のfault matrix、self-hosting canary、resource計測、concurrenc
 | state・event・file mode | `TestStateAndEventsNeverPersistSecrets`、`TestWritePlistUsesAbsoluteCommandsAndEscapesPaths` |
 | GitHubコメント・CLI error | `TestGitHubCommentsAndErrorsRedactSecrets` |
 | path traversal・symbolic link | `TestWorktreeRejectsTraversalAndSymbolicLink`、`TestLoadRejectsUnsafePathsRefsAndSecretNames` |
+| continuation worktree provenance・dirty/behind main checkout隔離・spawn cwd監査 | `TestFaultWorktreeCreateReuseAndPartialCreation`、`TestRetryContinuationKeepsDirtyBehindMainCheckoutUntouched`、`TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges`、`TestWorkerProcessCallbackFencesRunAndPersistsProcessGroup` |
 | schema v3の旧配送data除去・active lease/parked continuationのrollback拒否・旧credential保持 | `TestApplyMigratesV3FixturesAndRestoreRecoversOriginalBytes`、`TestV4ActiveLeaseAndParkedContinuationBlockRollback` |
 
 既知の到達可能な依存脆弱性は`make vuln-check`で検査し、Pull Requestと`main`のCIで必須にする。
