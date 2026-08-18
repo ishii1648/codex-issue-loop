@@ -17,9 +17,9 @@ const legacyPublisherRepositoryMismatchPrefix = "pull_request_mismatch: Pull Req
 func (s Store) LegacyPullRequestChecksFailure(issue Issue, repository, baseBranch string) (*PullRequestChecksFailure, error) {
 	if issue.Status != "failed" || issue.GitHubSync != "" || issue.FailureKind != "issue" || issue.PullRequestMerged ||
 		issue.PullRequestChecksFailure != nil || issue.PullRequestChecksRecovery != nil || issue.PublicationFailure != nil ||
-		issue.PublicationRecovery != nil || issue.BlockedCause != nil || issue.RunID == "" || issue.Worktree == "" ||
+		issue.PublicationRecovery != nil || issue.RunID == "" || issue.Worktree == "" ||
 		issue.Branch == "" || issue.PullRequestURL == "" || issue.PullRequestNumber <= 0 || issue.HeadSHA == "" ||
-		issue.Lease == nil || issue.LeaseGeneration == 0 || issue.Lease.Owner.RunID != issue.RunID ||
+		issue.Lease == nil || issue.LeaseGeneration == 0 || issue.Lease.BaseSHA == "" || issue.Lease.Owner.RunID != issue.RunID ||
 		issue.Lease.Owner.Generation != issue.LeaseGeneration ||
 		strings.TrimSpace(repository) == "" || strings.TrimSpace(baseBranch) == "" {
 		return nil, fmt.Errorf("Issue #%d is not a legacy Pull Request checks recovery candidate", issue.Number)
@@ -88,6 +88,12 @@ func validateLegacyChecksChain(history []Event, issue Issue, repository, baseBra
 		if event.Type != "terminal_pull_request_reconciled" {
 			return nil, fmt.Errorf("legacy checks recovery has a non-terminal event after failure at sequence %d", event.Sequence)
 		}
+	}
+	if issue.BlockedCause != nil &&
+		(issue.BlockedCause.Origin != "worker" || issue.BlockedCause.Kind != "environment" || !issue.BlockedCause.Resumable ||
+			strings.TrimSpace(issue.BlockedCause.Reason) == "" || issue.BlockedCause.BlockedAt.IsZero() ||
+			!issue.BlockedCause.BlockedAt.Before(history[0].Timestamp)) {
+		return nil, fmt.Errorf("legacy checks recovery has an incompatible current or non-worker blocked cause")
 	}
 
 	conflictRun := history[0].RunID
@@ -169,7 +175,7 @@ func validateLegacyChecksChain(history []Event, issue Issue, repository, baseBra
 		BaseSHA string `json:"base_sha"`
 		Reason  string `json:"reason"`
 	}
-	if json.Unmarshal(history[7].Payload, &audit) != nil || audit.BaseSHA != published.TargetBaseSHA || audit.Reason != publication.ReasonPullRequestMismatch {
+	if json.Unmarshal(history[7].Payload, &audit) != nil || audit.BaseSHA != issue.Lease.BaseSHA || audit.Reason != publication.ReasonPullRequestMismatch {
 		return nil, fmt.Errorf("legacy publication audit is inconsistent")
 	}
 	expectedReason := legacyPublisherRepositoryMismatchPrefix + issue.Branch + " base=" + baseBranch

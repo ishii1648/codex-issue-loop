@@ -84,10 +84,10 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	}
 	if current.Lease == nil || current.LeaseGeneration == 0 || current.Lease.Owner.RunID != current.RunID ||
 		current.Lease.Owner.Generation != current.LeaseGeneration ||
-		len(current.Lease.DeclaredResources) == 0 || len(current.Lease.ResolvedResources) == 0 {
+		(!legacyCompatibility && len(current.Lease.DeclaredResources) == 0) || len(current.Lease.ResolvedResources) == 0 {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain its fenced resource lease", *issueNumber)}
 	}
-	if (!legacyCompatibility && current.ConflictRecovery != nil) || current.PublicationRecovery != nil || current.PublicationFailure != nil || current.BlockedCause != nil {
+	if (!legacyCompatibility && (current.ConflictRecovery != nil || current.BlockedCause != nil)) || current.PublicationRecovery != nil || current.PublicationFailure != nil {
 		return exitError{4, fmt.Errorf("Issue #%d has an incompatible manual, worker, security, publication, or conflict recovery state", *issueNumber)}
 	}
 	controller := a.ProcessController

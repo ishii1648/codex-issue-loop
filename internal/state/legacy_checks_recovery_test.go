@@ -78,6 +78,8 @@ func TestLegacyPullRequestChecksFailureRejectsBrokenChains(t *testing.T) {
 		}},
 		{name: "identity mismatch", mutate: func(_ []Event, issue *Issue) { issue.PullRequestNumber++ }},
 		{name: "head mismatch", mutate: func(_ []Event, issue *Issue) { issue.HeadSHA = "2222222222222222222222222222222222222222" }},
+		{name: "non-worker blocked cause", mutate: func(_ []Event, issue *Issue) { issue.BlockedCause.Origin = "operator" }},
+		{name: "current blocked cause", mutate: func(events []Event, issue *Issue) { issue.BlockedCause.BlockedAt = events[0].Timestamp }},
 		{name: "fork", mutate: func(events []Event, _ *Issue) {
 			var payload map[string]any
 			_ = json.Unmarshal(events[16].Payload, &payload)
@@ -126,7 +128,8 @@ func legacyChecksIssue() Issue {
 		HeadSHA: "1111111111111111111111111111111111111111", FailureKind: "issue",
 		LastError:       "worker retry limit reached: final verification failed",
 		LeaseGeneration: 3,
-		Lease:           &ResourceLease{Owner: LeaseOwner{RunID: "run_final", Generation: 3}, DeclaredResources: []string{RepositoryResource}, ResolvedResources: []string{RepositoryResource}},
+		Lease:           &ResourceLease{Owner: LeaseOwner{RunID: "run_final", Generation: 3}, ResolvedResources: []string{RepositoryResource}, BaseSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		BlockedCause:    &BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "superseded browser environment block", BlockedAt: finished.Add(-time.Hour)},
 		ConflictRecovery: &ConflictRecovery{
 			PullRequestURL: "https://example.test/pr/91", TargetBaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			LastReason: "published; waiting for CI revalidation",
