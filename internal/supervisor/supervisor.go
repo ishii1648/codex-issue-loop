@@ -100,6 +100,9 @@ func (l *Loop) Run(ctx context.Context) error {
 	if err != nil {
 		return BlockedError{Err: fmt.Errorf("validate durable state: %w", err)}
 	}
+	if err := state.ValidateSemanticContract(snapshot); err != nil {
+		return BlockedError{Err: fmt.Errorf("validate durable state semantic compatibility before startup: %w; run agent-loop migrate --json", err)}
+	}
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
 		return BlockedError{Err: fmt.Errorf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)}
 	}
