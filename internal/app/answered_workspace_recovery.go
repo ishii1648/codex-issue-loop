@@ -37,6 +37,7 @@ type answeredWorkspacePlan struct {
 	ExpectedWorkspace    state.WorkerWorkspace     `json:"expected_workspace"`
 	ActualWorkspace      state.WorkerWorkspace     `json:"actual_workspace"`
 	Validation           worktree.LaunchValidation `json:"validation"`
+	VerifiedProvenance   bool                      `json:"verified_provenance_recovery"`
 }
 
 func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args []string) error {
@@ -134,6 +135,9 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 		launch.MainCheckout != evidence.RejectedLaunch.MainCheckout {
 		return exitError{4, fmt.Errorf("validated workspace identity changed since the missing-Workspace rejection; state was not changed")}
 	}
+	if evidence.VerifiedLaunch != nil && !reflect.DeepEqual(launch, *evidence.VerifiedLaunch) {
+		return exitError{4, fmt.Errorf("validated workspace identity or checks changed since verified provenance recovery; state was not changed")}
+	}
 	inspection, err := manager.Inspect(ctx, cfg, current.Worktree, current.Branch)
 	if err != nil || !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists || inspection.Head == "" {
 		return exitError{4, fmt.Errorf("saved worktree/branch/HEAD is not consistent enough for answered workspace recovery: %+v", inspection)}
@@ -160,10 +164,19 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 		return exitError{4, err}
 	}
 
-	workspace := state.WorkerWorkspace{
+	validatedWorkspace := state.WorkerWorkspace{
 		Path: launch.CanonicalCWD, Branch: launch.Branch, RepoID: entry.RepoID,
 		Repository: cfg.GitHub.Repo, RepositoryID: cfg.GitHub.RepositoryID,
 		GitCommonDir: launch.CommonDir, MainCheckout: launch.MainCheckout,
+	}
+	workspace := validatedWorkspace
+	if current.WorkspaceRecovery != nil {
+		if !validExistingWorkspaceRecovery(current, digest, inspection.Head) || current.Workspace == nil ||
+			!current.Workspace.Matches(validatedWorkspace.Path, validatedWorkspace.Branch, validatedWorkspace.RepoID,
+				validatedWorkspace.Repository, validatedWorkspace.RepositoryID, validatedWorkspace.GitCommonDir, validatedWorkspace.MainCheckout) {
+			return exitError{4, fmt.Errorf("verified workspace provenance no longer matches HEAD, content, repository, or validator evidence; state was not changed")}
+		}
+		workspace = *current.Workspace
 	}
 	plan := answeredWorkspacePlan{
 		Issue: current.Number, Eligible: true, ConfirmationRequired: true, RunID: current.RunID,
@@ -171,6 +184,7 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 		BaseSHA: current.Lease.BaseSHA, HeadSHA: inspection.Head, WorktreeSHA256: digest,
 		OldOwner: current.Lease.Owner, NewOwner: state.LeaseOwner{RunID: current.RunID, Generation: current.LeaseGeneration + 1},
 		ExpectedWorkspace: workspace, ActualWorkspace: workspace, Validation: launch,
+		VerifiedProvenance: current.WorkspaceRecovery != nil,
 	}
 	if *dryRun {
 		return a.output(*jsonOut, plan)
@@ -179,9 +193,11 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 	now := time.Now().UTC()
 	recoveryID := state.NewID("answered_workspace_recovery")
 	answerDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(request.Answer)))
-	workspace.CapturedAt = now
-	plan.ExpectedWorkspace.CapturedAt = now
-	plan.ActualWorkspace.CapturedAt = now
+	if current.WorkspaceRecovery == nil {
+		workspace.CapturedAt = now
+		plan.ExpectedWorkspace.CapturedAt = now
+		plan.ActualWorkspace.CapturedAt = now
+	}
 	payload := map[string]any{
 		"recovery_id": recoveryID, "operator_confirmation": map[string]bool{"confirm_exact_chain": true},
 		"old_provenance_missing": true, "request_id": request.ID, "resource_park_id": current.ResourcePark.ID,

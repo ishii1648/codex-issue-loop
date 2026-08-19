@@ -25,6 +25,7 @@ type AnsweredWorkspaceRecoveryEvidence struct {
 	OriginalOwner   LeaseOwner
 	ResumeOwner     LeaseOwner
 	RejectedLaunch  worktree.LaunchValidation
+	VerifiedLaunch  *worktree.LaunchValidation
 	RejectionReason string
 }
 
@@ -43,7 +44,7 @@ func (s Store) AnsweredWorkspaceRecoveryEvidence(issue Issue, request Request) (
 
 func validateAnsweredWorkspaceRecoveryState(issue Issue, request Request) error {
 	if issue.Status != "blocked" || issue.GitHubSync != "" || issue.FailureKind != "issue" ||
-		issue.Workspace != nil || issue.AnsweredWorkspaceRecovery != nil || issue.EnvironmentResume != nil ||
+		issue.AnsweredWorkspaceRecovery != nil || issue.EnvironmentResume != nil ||
 		issue.PublicationRecovery != nil || issue.PullRequestChecksRecovery != nil || issue.ConflictRecovery != nil ||
 		issue.PullRequestURL != "" || issue.PullRequestNumber != 0 || issue.PullRequestMerged ||
 		issue.RunID == "" || issue.Worktree == "" || issue.Branch == "" || issue.SessionID == "" ||
@@ -51,6 +52,12 @@ func validateAnsweredWorkspaceRecoveryState(issue Issue, request Request) error 
 		issue.BlockedCause == nil || issue.BlockedCause.Origin != "supervisor" || issue.BlockedCause.Kind != "worker_workspace" ||
 		issue.BlockedCause.Resumable || issue.BlockedCause.Reason == "" || issue.BlockedCause.BlockedAt.IsZero() {
 		return fmt.Errorf("Issue #%d is not an exact answered missing-workspace block candidate", issue.Number)
+	}
+	if (issue.Workspace == nil) != (issue.WorkspaceRecovery == nil) {
+		return fmt.Errorf("Issue #%d has incomplete verified workspace provenance recovery", issue.Number)
+	}
+	if issue.WorkspaceRecovery != nil && !validAnsweredWorkspaceProvenanceState(issue) {
+		return fmt.Errorf("Issue #%d verified workspace provenance recovery is inconsistent", issue.Number)
 	}
 	park := issue.ResourcePark
 	if park == nil || park.Kind != ResourceParkKindNeedsInput || park.Status != "resumed" ||
@@ -80,7 +87,7 @@ func sameLeaseIdentity(original, resumed ResourceLease) bool {
 }
 
 func answeredWorkspaceRecoveryFromEvents(events []Event, issue Issue, request Request) (*AnsweredWorkspaceRecoveryEvidence, error) {
-	history := make([]Event, 0, 11)
+	history := make([]Event, 0, 12)
 	for _, event := range events {
 		if event.IssueNumber == issue.Number && event.RunID == issue.RunID && event.Type != "event_log_checkpoint" {
 			history = append(history, event)
@@ -90,6 +97,9 @@ func answeredWorkspaceRecoveryFromEvents(events []Event, issue Issue, request Re
 		"lease_reserved", "issue_claimed", "worker_started", "worker_process_started", "worker_preflight_completed",
 		"input_requested", "github_state_synced", "answer_recorded", "worker_started",
 		"worker_workspace_rejected", "github_state_synced",
+	}
+	if issue.WorkspaceRecovery != nil {
+		want = append(want, "workspace_provenance_recovered")
 	}
 	if len(history) != len(want) {
 		return nil, fmt.Errorf("Issue #%d has %d events in the candidate run, want the exact %d-event chain", issue.Number, len(history), len(want))
@@ -191,11 +201,79 @@ func answeredWorkspaceRecoveryFromEvents(events []Event, issue Issue, request Re
 	if !exactStringPayload(history[10].Payload, "state", "blocked") {
 		return nil, fmt.Errorf("Issue #%d terminal blocked GitHub synchronization is missing", issue.Number)
 	}
-	return &AnsweredWorkspaceRecoveryEvidence{
+	evidence := &AnsweredWorkspaceRecoveryEvidence{
 		RequestID: request.ID, ResourceParkID: issue.ResourcePark.ID,
 		OriginalOwner: issue.ResourcePark.OriginalLease.Owner, ResumeOwner: *issue.ResourcePark.ResumeOwner,
 		RejectedLaunch: rejected.Validation, RejectionReason: rejected.Error,
-	}, nil
+	}
+	if issue.WorkspaceRecovery != nil {
+		if history[11].Sequence != history[10].Sequence+1 {
+			return nil, fmt.Errorf("Issue #%d verified workspace provenance event does not immediately follow the blocked chain", issue.Number)
+		}
+		verified, err := verifiedAnsweredWorkspaceEvent(history[11], issue)
+		if err != nil {
+			return nil, err
+		}
+		evidence.VerifiedLaunch = verified
+	}
+	return evidence, nil
+}
+
+func validAnsweredWorkspaceProvenanceState(issue Issue) bool {
+	recovery, workspace := issue.WorkspaceRecovery, issue.Workspace
+	if recovery == nil || workspace == nil || !ValidID(recovery.ID, "workspace_recovery_") ||
+		recovery.Status != "verified" || !recovery.OperatorConfirmed || !recovery.OldProvenanceMissing ||
+		recovery.PreviousStatus != "blocked" || recovery.RunID != issue.RunID || recovery.ConfirmedAt.IsZero() ||
+		recovery.HeadSHA == "" || recovery.WorktreeSHA256 == "" || workspace.CapturedAt.IsZero() ||
+		*workspace != recovery.ActualWorkspace || recovery.ExpectedWorkspace != recovery.ActualWorkspace ||
+		workspace.Path != issue.Worktree || workspace.Branch != issue.Branch || workspace.RepoID == "" ||
+		workspace.Repository == "" || workspace.GitCommonDir == "" || workspace.MainCheckout == "" ||
+		len(recovery.ValidatorChecks) == 0 {
+		return false
+	}
+	for _, passed := range recovery.ValidatorChecks {
+		if !passed {
+			return false
+		}
+	}
+	return true
+}
+
+func verifiedAnsweredWorkspaceEvent(event Event, issue Issue) (*worktree.LaunchValidation, error) {
+	var payload struct {
+		RecoveryID           string                    `json:"recovery_id"`
+		OperatorConfirmation map[string]bool           `json:"operator_confirmation"`
+		MutationScope        []string                  `json:"mutation_scope"`
+		PreviousStatus       string                    `json:"previous_status"`
+		OldProvenanceMissing bool                      `json:"old_provenance_missing"`
+		HeadSHA              string                    `json:"head_sha"`
+		WorktreeSHA256       string                    `json:"worktree_sha256"`
+		PullRequestURL       string                    `json:"pull_request_url"`
+		ExpectedWorkspace    WorkerWorkspace           `json:"expected_workspace"`
+		ActualWorkspace      WorkerWorkspace           `json:"actual_workspace"`
+		Validator            worktree.LaunchValidation `json:"validator"`
+	}
+	recovery := issue.WorkspaceRecovery
+	if json.Unmarshal(event.Payload, &payload) != nil || recovery == nil || issue.Workspace == nil ||
+		payload.RecoveryID != recovery.ID || !payload.OperatorConfirmation["confirm_verified_workspace"] || len(payload.OperatorConfirmation) != 1 ||
+		!reflect.DeepEqual(payload.MutationScope, []string{"issues[].workspace", "issues[].workspace_provenance_recovery", "events.jsonl"}) ||
+		payload.PreviousStatus != issue.Status || !payload.OldProvenanceMissing || payload.HeadSHA != recovery.HeadSHA ||
+		payload.WorktreeSHA256 != recovery.WorktreeSHA256 || payload.PullRequestURL != issue.PullRequestURL ||
+		payload.ExpectedWorkspace != recovery.ExpectedWorkspace || payload.ActualWorkspace != recovery.ActualWorkspace ||
+		payload.ActualWorkspace != *issue.Workspace || event.RepoID != issue.Workspace.RepoID ||
+		!payload.Validator.Valid || payload.Validator.ExpectedCWD != issue.Worktree ||
+		payload.Validator.CanonicalCWD != issue.Workspace.Path || payload.Validator.TopLevel != issue.Workspace.Path ||
+		payload.Validator.Branch != issue.Workspace.Branch || payload.Validator.CommonDir != issue.Workspace.GitCommonDir ||
+		payload.Validator.MainCheckout != issue.Workspace.MainCheckout ||
+		!reflect.DeepEqual(payload.Validator.Checks, recovery.ValidatorChecks) {
+		return nil, fmt.Errorf("Issue #%d verified workspace provenance event is inconsistent", issue.Number)
+	}
+	for _, passed := range payload.Validator.Checks {
+		if !passed {
+			return nil, fmt.Errorf("Issue #%d verified workspace provenance validator did not pass", issue.Number)
+		}
+	}
+	return &payload.Validator, nil
 }
 
 func legacyAnsweredLaunchMatches(validation worktree.LaunchValidation, issue Issue) bool {

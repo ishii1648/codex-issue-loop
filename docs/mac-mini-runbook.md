@@ -241,7 +241,7 @@ v0.6.14で一度resumeし、spawn前に`saved workspace provenance is missing`�
 
 chainの欠損・重複・順序不正・supersede・cross-run、lease generation/slot、base SHA、resume ID、GitHub marker、worktree/branch/sessionの不一致、workspace mismatch、symlink、branch/repository mismatch、別supervisor error、manual/security/publication blockは対象外である。拒否時はstate、label、worktreeを変更しない。GitHub同期で停止した場合は同じコマンドを再実行し、backfillやgenerationが増えず同じpending resumeへ収束することを確認する。
 
-通常`needs_input`へ回答した後にgeneration 2 leaseを保持したまま、`saved workspace provenance is missing`だけで`supervisor/worker_workspace/non-resumable` blockedになったv0.6.22以前のrecordには`resume-blocked`を使わない。まず次をpreviewし、request/answer/park/run/session/worktree/branch/base、11-event order、validator、HEAD/content fingerprint、GitHub request/failure markerを確認する。
+通常`needs_input`へ回答した後にgeneration 2 leaseを保持したまま、`saved workspace provenance is missing`だけで`supervisor/worker_workspace/non-resumable` blockedになったv0.6.22以前のrecordには`resume-blocked`を使わない。まず次をpreviewし、request/answer/park/run/session/worktree/branch/base、11-event order、validator、HEAD/content fingerprint、GitHub request/failure markerを確認する。先に`recover-workspace --confirm-verified-workspace`を実行済みでもstate/eventを削除せず同じ専用commandを使う。この場合は11 events直後の単一`workspace_provenance_recovered`と、そのrun/status/workspace/repository/HEAD/fingerprint/validatorが現在値まで完全一致する必要がある。
 
 ```sh
 agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 449 --dry-run --json
@@ -255,7 +255,7 @@ agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --d
 agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --confirm-verified-workspace --json
 ```
 
-previewの`mutation_scope`が`workspace`、`workspace_provenance_recovery`、eventだけであること、run/status/branch/worktree/HEAD/content digest/PR identity/validatorが保存対象と一致することを確認する。適用後もstatus、lease/resource park、session、GitHub label、worktree内容が変わらず、`status --json`で非null `workspace`と`workspace_provenance_recovery.status=verified`が得られることを確認する。
+previewの`mutation_scope`が`workspace`、`workspace_provenance_recovery`、eventだけであること、run/status/branch/worktree/HEAD/content digest/PR identity/validatorが保存対象と一致することを確認する。`lifecycle_candidate=answered_missing_workspace`と専用command remediationが出た場合はgeneric confirmを実行せず、先の`recover-answered-workspace`へ戻る。適用後もstatus、lease/resource park、session、GitHub label、worktree内容が変わらず、`status --json`で非null `workspace`と`workspace_provenance_recovery.status=verified`が得られることを確認する。
 
 成功後は`status --json`で`status=resume_pending`、同じsession/worktree/branch、`resource_park.resume_owner.generation=2`、active `lease.owner.generation=3`、`answered_workspace_recovery.status=github_synced`、非null `workspace`を確認する。GitHub同期失敗や並行実行後も同じコマンドを再実行し、generation、recovery ID、markerが増えないことを確認する。state/label編集、rebase/reset、差分移植は行わない。
 
