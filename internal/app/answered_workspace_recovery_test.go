@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
@@ -73,6 +74,113 @@ func TestRecoverAnsweredWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 	idempotent, _ := fixture.store.Load()
 	if idempotent.StateRevision != revision || idempotent.Issues["449"].LeaseGeneration != 3 {
 		t.Fatalf("idempotent invocation duplicated the transaction: revision %d -> %d generation=%d", revision, idempotent.StateRevision, idempotent.Issues["449"].LeaseGeneration)
+	}
+}
+
+func TestRecoverAnsweredWorkspaceAfterVerifiedGenericProvenanceRecovery(t *testing.T) {
+	fixture := newAnsweredWorkspaceAppFixture(t, false)
+	persistVerifiedAnsweredWorkspace(t, fixture)
+	before, _ := fixture.store.Load()
+	originalWorkspace := *before.Issues["449"].Workspace
+	originalRecoveryID := before.Issues["449"].WorkspaceRecovery.ID
+
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	preview := []string{"recover-answered-workspace", "--repo", fixture.repo, "--issue", "449", "--dry-run", "--json"}
+	if code := a.Run(context.Background(), preview); code != 0 || !strings.Contains(out.String(), `"verified_provenance_recovery": true`) {
+		t.Fatalf("verified preview code=%d out=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	out.Reset()
+	stderr.Reset()
+	confirm := []string{"recover-answered-workspace", "--repo", fixture.repo, "--issue", "449", "--confirm-exact-chain", "--json"}
+	if code := a.Run(context.Background(), confirm); code != 0 {
+		t.Fatalf("verified confirm code=%d stderr=%s", code, stderr.String())
+	}
+	after, _ := fixture.store.Load()
+	item := after.Issues["449"]
+	if item.Status != "resume_pending" || item.LeaseGeneration != 3 || item.AnsweredWorkspaceRecovery == nil ||
+		item.AnsweredWorkspaceRecovery.Status != "github_synced" || item.WorkspaceRecovery == nil ||
+		item.WorkspaceRecovery.ID != originalRecoveryID || *item.Workspace != originalWorkspace {
+		t.Fatalf("verified provenance was not retained across lifecycle recovery: %+v", item)
+	}
+	if item.SessionID != before.Issues["449"].SessionID || item.Attempts != before.Issues["449"].Attempts ||
+		item.Continuations != before.Issues["449"].Continuations || !reflectDeepEqualAnswers(item.Answers, before.Issues["449"].Answers) {
+		t.Fatalf("verified continuation metadata changed: before=%+v after=%+v", before.Issues["449"], item)
+	}
+}
+
+func TestRecoverAnsweredWorkspaceRejectsChangedVerifiedContent(t *testing.T) {
+	fixture := newAnsweredWorkspaceAppFixture(t, false)
+	persistVerifiedAnsweredWorkspace(t, fixture)
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "untracked-after-verification.txt"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := fixture.store.Load()
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	if code := a.Run(context.Background(), []string{"recover-answered-workspace", "--repo", fixture.repo, "--issue", "449", "--confirm-exact-chain", "--json"}); code != 4 {
+		t.Fatalf("changed content code=%d stderr=%s", code, stderr.String())
+	}
+	after, _ := fixture.store.Load()
+	if after.StateRevision != before.StateRevision || after.Issues["449"].LeaseGeneration != 2 || after.Issues["449"].AnsweredWorkspaceRecovery != nil {
+		t.Fatal("changed verified content mutated lifecycle state")
+	}
+}
+
+func TestRecoverAnsweredWorkspaceRejectsChangedVerifiedHead(t *testing.T) {
+	fixture := newAnsweredWorkspaceAppFixture(t, false)
+	persistVerifiedAnsweredWorkspace(t, fixture)
+	tree := runGitOutputApp(t, fixture.worktree, "rev-parse", "HEAD^{tree}")
+	newHead := runGitOutputApp(t, fixture.worktree, "commit-tree", tree, "-m", "changed verified head")
+	runGitApp(t, fixture.worktree, "update-ref", "HEAD", newHead)
+	before, _ := fixture.store.Load()
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	if code := a.Run(context.Background(), []string{"recover-answered-workspace", "--repo", fixture.repo, "--issue", "449", "--confirm-exact-chain", "--json"}); code != 4 {
+		t.Fatalf("changed HEAD code=%d stderr=%s", code, stderr.String())
+	}
+	after, _ := fixture.store.Load()
+	if after.StateRevision != before.StateRevision || after.Issues["449"].LeaseGeneration != 2 {
+		t.Fatal("changed verified HEAD mutated lifecycle state")
+	}
+}
+
+func TestValidateAnsweredWorkspaceRemoteRequiresExactMarkers(t *testing.T) {
+	cfg := config.Config{}
+	cfg.GitHub.RunningLabel = "running"
+	cfg.GitHub.NeedsInputLabel = "needs-input"
+	cfg.GitHub.DoneLabel = "done"
+	cfg.GitHub.FailedLabel = "failed"
+	cfg.GitHub.ReadyLabels = []string{"ready"}
+	cfg.GitHub.ExcludeLabels = []string{"blocked", "do-not-automate"}
+	reason := "worker workspace validation failed for /worktree: saved workspace provenance is missing"
+	digest := sha256.Sum256([]byte(reason))
+	issue := &state.Issue{Number: 449, Status: "blocked", LastError: reason}
+	request := &state.Request{ID: "req_exact"}
+	remote := gh.RemoteState{Issue: gh.Issue{
+		Number: 449, State: "OPEN", Labels: []string{"blocked"},
+		Comments: []string{
+			"<!-- codex-issue-loop:request:req_exact -->",
+			fmt.Sprintf("<!-- codex-issue-loop:failed:449 -->\n<!-- codex-issue-loop:failure:%x -->", digest[:8]),
+		},
+	}}
+	if err := validateAnsweredWorkspaceRemote(cfg, issue, request, remote, ""); err != nil {
+		t.Fatalf("exact marker boundary rejected: %v", err)
+	}
+	missing := remote
+	missing.Issue.Comments = append([]string(nil), remote.Issue.Comments[:1]...)
+	if err := validateAnsweredWorkspaceRemote(cfg, issue, request, missing, ""); err == nil {
+		t.Fatal("missing blocked/failure markers accepted")
+	}
+	duplicate := remote
+	duplicate.Issue.Comments = append(append([]string(nil), remote.Issue.Comments...), remote.Issue.Comments[0])
+	if err := validateAnsweredWorkspaceRemote(cfg, issue, request, duplicate, ""); err == nil {
+		t.Fatal("duplicate request marker accepted")
+	}
+	manual := remote
+	manual.Issue.Labels = []string{"blocked", "do-not-automate"}
+	if err := validateAnsweredWorkspaceRemote(cfg, issue, request, manual, ""); err == nil {
+		t.Fatal("manual exclusion marker boundary accepted")
 	}
 }
 
@@ -400,6 +508,56 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 	}
 	if _, err := store.Update("github_state_synced", 449, runID, map[string]string{"state": "blocked"}, func(s *state.Snapshot) error {
 		s.Issues["449"].GitHubSync = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func persistVerifiedAnsweredWorkspace(t *testing.T, fixture answeredWorkspaceAppFixture) {
+	t.Helper()
+	ctx := context.Background()
+	cfg := mustConfig(t, fixture.repo)
+	snapshot, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["449"]
+	validation, err := fixture.manager.ValidateLaunch(ctx, cfg, item.Worktree, item.Branch)
+	if err != nil || !validation.Valid {
+		t.Fatalf("validate fixture workspace: validation=%+v err=%v", validation, err)
+	}
+	inspection, err := fixture.manager.Inspect(ctx, cfg, item.Worktree, item.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fixture.manager.ContentDigest(ctx, item.Worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	workspace := state.WorkerWorkspace{
+		Path: validation.CanonicalCWD, Branch: validation.Branch, RepoID: fixture.store.RepoID,
+		Repository: cfg.GitHub.Repo, RepositoryID: cfg.GitHub.RepositoryID,
+		GitCommonDir: validation.CommonDir, MainCheckout: validation.MainCheckout, CapturedAt: now,
+	}
+	recoveryID := "workspace_recovery_verified449"
+	payload := map[string]any{
+		"recovery_id": recoveryID, "operator_confirmation": map[string]bool{"confirm_verified_workspace": true},
+		"mutation_scope":  []string{"issues[].workspace", "issues[].workspace_provenance_recovery", "events.jsonl"},
+		"previous_status": item.Status, "old_provenance_missing": true, "head_sha": inspection.Head,
+		"worktree_sha256": digest, "pull_request_url": item.PullRequestURL,
+		"expected_workspace": workspace, "actual_workspace": workspace, "validator": validation,
+	}
+	if _, err := fixture.store.Update("workspace_provenance_recovered", item.Number, item.RunID, payload, func(s *state.Snapshot) error {
+		current := s.Issues["449"]
+		current.Workspace = &workspace
+		current.WorkspaceRecovery = &state.WorkspaceProvenanceRecovery{
+			ID: recoveryID, Status: "verified", ConfirmedAt: now, OperatorConfirmed: true, OldProvenanceMissing: true,
+			PreviousStatus: current.Status, RunID: current.RunID, HeadSHA: inspection.Head, WorktreeSHA256: digest,
+			ExpectedWorkspace: workspace, ActualWorkspace: workspace, ValidatorChecks: cloneBoolMap(validation.Checks),
+		}
+		current.UpdatedAt = now
 		return nil
 	}); err != nil {
 		t.Fatal(err)

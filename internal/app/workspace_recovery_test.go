@@ -16,6 +16,7 @@ import (
 
 func TestRecoverWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
+	disqualifyAnsweredLifecycleFixture(t, fixture)
 	before, err := fixture.store.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +82,7 @@ func TestRecoverWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 
 func TestRecoverWorkspaceRejectsMissingConfirmationActiveWorkerAndPendingRequest(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
+	disqualifyAnsweredLifecycleFixture(t, fixture)
 	var out, stderr bytes.Buffer
 	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{44901: true}, signals: map[int][]syscall.Signal{}}}
 	if code := a.Run(context.Background(), []string{"recover-workspace", "--repo", fixture.repo, "--issue", "449", "--json"}); code != 2 {
@@ -123,6 +125,29 @@ func TestRecoverWorkspaceRejectsMissingConfirmationActiveWorkerAndPendingRequest
 	}
 }
 
+func TestRecoverWorkspaceDirectsAnsweredLifecycleCandidateToDedicatedCommand(t *testing.T) {
+	fixture := newAnsweredWorkspaceAppFixture(t, false)
+	before, _ := fixture.store.Load()
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	preview := []string{"recover-workspace", "--repo", fixture.repo, "--issue", "449", "--dry-run", "--json"}
+	if code := a.Run(context.Background(), preview); code != 0 || !strings.Contains(out.String(), `"eligible": false`) ||
+		!strings.Contains(out.String(), `"lifecycle_candidate": "answered_missing_workspace"`) ||
+		!strings.Contains(out.String(), "recover-answered-workspace") {
+		t.Fatalf("dedicated remediation preview code=%d out=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), []string{"recover-workspace", "--repo", fixture.repo, "--issue", "449", "--confirm-verified-workspace", "--json"}); code != 4 ||
+		!strings.Contains(stderr.String(), "recover-answered-workspace") {
+		t.Fatalf("generic confirm was not refused: code=%d stderr=%s", code, stderr.String())
+	}
+	after, _ := fixture.store.Load()
+	if after.StateRevision != before.StateRevision || after.Issues["449"].Workspace != nil {
+		t.Fatal("generic remediation/refusal mutated exact lifecycle candidate")
+	}
+}
+
 func TestValidateWorkspaceRecoveryRemoteRequiresExactLifecycleAndPullRequestIdentity(t *testing.T) {
 	cfg := config.Config{}
 	cfg.GitHub.RunningLabel = "running"
@@ -157,5 +182,12 @@ func TestValidateWorkspaceRecoveryRemoteRequiresExactLifecycleAndPullRequestIden
 	mismatch.PullRequests[0].HeadSHA = "changed"
 	if err := validateWorkspaceRecoveryRemote(cfg, issue, inspection, mismatch); err == nil {
 		t.Fatal("changed Pull Request head accepted")
+	}
+}
+
+func disqualifyAnsweredLifecycleFixture(t *testing.T, fixture answeredWorkspaceAppFixture) {
+	t.Helper()
+	if _, err := fixture.store.Update("fixture_non_answered_terminal", 449, "run_0c0123ac8570c0a8", nil, func(*state.Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
 	}
 }

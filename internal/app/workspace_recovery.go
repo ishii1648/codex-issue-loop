@@ -86,6 +86,19 @@ func (a App) recoverWorkspace(ctx context.Context, l layout.Layout, args []strin
 	if current.GitHubSync != "" || current.RunID == "" || current.Worktree == "" || current.Branch == "" {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain a fully synchronized run, worktree, and branch", *issueNumber)}
 	}
+	if request, requestErr := exactAnsweredRequest(snapshot, current); requestErr == nil {
+		if _, evidenceErr := store.AnsweredWorkspaceRecoveryEvidence(*current, *request); evidenceErr == nil {
+			command := fmt.Sprintf("agent-loop recover-answered-workspace --repo %q --issue %d --dry-run --json", entry.RepoPath, current.Number)
+			if *dryRun {
+				return a.output(*jsonOut, map[string]any{
+					"issue": current.Number, "status": current.Status, "eligible": false,
+					"lifecycle_candidate": "answered_missing_workspace", "recommended_command": command,
+					"remediation": "use recover-answered-workspace before validation-only recover-workspace",
+				})
+			}
+			return exitError{4, fmt.Errorf("Issue #%d is an answered missing-workspace lifecycle candidate; use %s before recover-workspace; state was not changed", current.Number, command)}
+		}
+	}
 	controller := a.ProcessController
 	if controller == nil {
 		controller = supervisor.OSProcessGroupController{}
