@@ -23,6 +23,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	repo := fs.String("repo", "", "repository path")
 	issueNumber := fs.Int("issue", 0, "failed Issue number")
 	confirmed := fs.Bool("confirm-external-fix", false, "confirm the saved Pull Request branch was externally fixed")
+	dryRun := fs.Bool("dry-run", false, "evaluate all safe recovery predicates without mutation")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
@@ -30,8 +31,11 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	if *issueNumber <= 0 {
 		return exitError{2, fmt.Errorf("--issue must be a positive Issue number")}
 	}
-	if !*confirmed {
+	if !*confirmed && !*dryRun {
 		return exitError{2, fmt.Errorf("--confirm-external-fix is required")}
+	}
+	if *dryRun {
+		return a.explainRecoverChecks(ctx, l, *repo, *issueNumber, *jsonOut)
 	}
 	entry, err := a.resolvePath(l, *repo)
 	if err != nil {
@@ -112,13 +116,8 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	if err != nil {
 		return fmt.Errorf("inspect checks recovery worktree: %w", err)
 	}
-	if !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists ||
-		!inspection.RemoteBranchExists || inspection.Head == "" || inspection.RemoteHead == "" ||
-		inspection.Head != inspection.RemoteHead || !inspection.RemoteConsistent {
-		return exitError{4, fmt.Errorf("saved worktree/branch is not aligned with its pushed remote head: %+v", inspection)}
-	}
-	if inspection.Dirty || inspection.UnpushedCommits {
-		return exitError{4, fmt.Errorf("saved worktree must be clean and fully pushed before checks recovery")}
+	if !pullRequestChecksWorktreeMatches(current, inspection) {
+		return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_WORKTREE_REMOTE", Err: fmt.Errorf("saved worktree/branch must be clean and aligned with its pushed remote head")}}
 	}
 
 	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
@@ -212,32 +211,38 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 
 func validatePullRequestChecksRecovery(cfg config.Config, current *state.Issue, remote gh.RemoteState, inspection worktree.Inspection, requireFailedLabel bool) (gh.PullRequest, error) {
 	if !strings.EqualFold(remote.Issue.State, "open") {
-		return gh.PullRequest{}, fmt.Errorf("Issue #%d is closed", current.Number)
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d is closed", current.Number)}
 	}
 	labels := lowerLabelSet(remote.Issue.Labels)
 	failed := labels[strings.ToLower(cfg.GitHub.FailedLabel)]
 	running := labels[strings.ToLower(cfg.GitHub.RunningLabel)]
 	if requireFailedLabel && (!failed || running) {
-		return gh.PullRequest{}, fmt.Errorf("Issue #%d GitHub labels do not represent a synchronized failed state", current.Number)
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d GitHub labels do not represent a synchronized failed state", current.Number)}
 	}
 	if !requireFailedLabel && failed == running {
-		return gh.PullRequest{}, fmt.Errorf("Issue #%d GitHub labels are neither failed nor an idempotent running transition", current.Number)
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d GitHub labels are neither failed nor an idempotent running transition", current.Number)}
 	}
 	for _, label := range append(append([]string{cfg.GitHub.DoneLabel, cfg.GitHub.NeedsInputLabel}, cfg.GitHub.ReadyLabels...), cfg.GitHub.ExcludeLabels...) {
 		if labels[strings.ToLower(label)] {
-			return gh.PullRequest{}, fmt.Errorf("Issue #%d has manual or security exclusion label %q", current.Number, label)
+			return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d has manual or security exclusion label %q", current.Number, label)}
 		}
 	}
 	if len(remote.PullRequests) != 1 {
-		return gh.PullRequest{}, fmt.Errorf("Issue #%d must have exactly one saved Pull Request", current.Number)
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d must have exactly one saved Pull Request", current.Number)}
 	}
 	pr := remote.PullRequests[0]
 	if pr.URL != current.PullRequestURL || pr.Number != current.PullRequestNumber || !strings.EqualFold(pr.State, "open") || pr.MergedAt != nil ||
 		pr.HeadRefName != current.Branch || pr.BaseRefName != cfg.Git.BaseBranch || !strings.EqualFold(pr.HeadRepository, cfg.GitHub.Repo) || pr.HeadSHA == "" ||
 		pr.HeadSHA != inspection.Head || pr.HeadSHA != inspection.RemoteHead {
-		return gh.PullRequest{}, fmt.Errorf("saved Pull Request, branch, worktree, and remote head do not match")
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("saved Pull Request, branch, worktree, and remote head do not match")}
 	}
 	return pr, nil
+}
+
+func pullRequestChecksWorktreeMatches(current *state.Issue, inspection worktree.Inspection) bool {
+	return current != nil && inspection.Exists && inspection.Valid && inspection.Branch == current.Branch && inspection.LocalBranchExists &&
+		inspection.RemoteBranchExists && inspection.Head != "" && inspection.RemoteHead != "" && inspection.Head == inspection.RemoteHead &&
+		inspection.RemoteConsistent && !inspection.Dirty && !inspection.UnpushedCommits
 }
 
 func syncPullRequestChecksRecovery(ctx context.Context, store state.Store, cfg config.Config, ghPath string, current *state.Issue) error {

@@ -113,6 +113,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			if decision.workerPID == 0 {
 				decision.workerPGID = 0
 			}
+			predicateReport := startupReconciliationPredicateReport(number, decision)
 			if decision.markRunning {
 				if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
 					return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
@@ -138,6 +139,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				"reason":                decision.reason,
 				"worktree":              inspection,
 				"pull_requests":         remote.PullRequests,
+				"predicate_report":      predicateReport,
 				"resource_park_id":      parkID,
 				"resource_park_created": parkReconciledLease,
 			}, func(s *state.Snapshot) error {
@@ -204,6 +206,33 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 		}
 	}
 	return nil
+}
+
+func startupReconciliationPredicateReport(issueNumber int, decision reconciliationDecision) state.RecoveryPredicateReport {
+	report := state.RecoveryPredicateReport{
+		SchemaVersion: state.RecoveryPredicateReportSchemaVersion, Operation: "startup-reconciliation",
+		IssueNumber: issueNumber, Eligible: true, Predicates: []state.RecoveryPredicate{},
+	}
+	blocked := strings.HasPrefix(decision.lastError, "startup reconciliation blocked:")
+	code := "RECOVERY_STARTUP_RECONCILIATION"
+	source := "shared startup reconciliation decision"
+	if blocked {
+		reason := strings.ToLower(decision.reason)
+		switch {
+		case strings.Contains(reason, "worktree") || strings.Contains(reason, "branch"):
+			code = "RECOVERY_WORKSPACE"
+		case strings.Contains(reason, "pull request"):
+			code = "RECOVERY_GITHUB_IDENTITY"
+		case strings.Contains(reason, "label") || strings.Contains(reason, "github"):
+			code = "RECOVERY_GITHUB_LABELS"
+		case strings.Contains(reason, "worker pid"):
+			code = "RECOVERY_WORKER_PROCESS"
+		}
+		report.AddPredicate(code, "fail", source, "authoritative state safely converges", "startup reconciliation refused the observed boundary", "operator", "inspect the named durable/GitHub/worktree boundary before retrying")
+		return report
+	}
+	report.AddPredicate(code, "pass", source, "authoritative state safely converges", "startup reconciliation decision is safe", "automatic", "no operator action is required")
+	return report
 }
 
 func resumableWorkerBlock(cause *state.BlockedCause) bool {

@@ -193,6 +193,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.retryConflict(ctx, l, args)
 	case "resume-blocked":
 		return a.resumeBlocked(ctx, l, args)
+	case "explain-recovery":
+		return a.explainRecovery(ctx, l, args)
 	case "recover-publication":
 		return a.recoverPublication(ctx, l, args)
 	case "recover-checks":
@@ -241,6 +243,7 @@ Commands:
   answer        Record an answer for a pending request
   retry         Explicitly resume a blocked Pull Request conflict recovery
   resume-blocked  Explicitly resume a worker environment-blocked Issue
+  explain-recovery  Explain recovery predicates without changing state
   recover-publication  Recover an eligible failed Issue at the publication boundary
   recover-checks  Return an externally repaired Pull Request to its saved lifecycle
   export-recovery-fixture  Export sanitized read-only recovery evidence
@@ -1510,6 +1513,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	repo := fs.String("repo", "", "repository path")
 	issueNumber := fs.Int("issue", 0, "environment-blocked Issue number")
 	confirmed := fs.Bool("confirm-prerequisite-resolved", false, "confirm the external environment prerequisite is resolved")
+	dryRun := fs.Bool("dry-run", false, "evaluate all safe recovery predicates without mutation")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
@@ -1517,8 +1521,11 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if *issueNumber <= 0 {
 		return exitError{2, fmt.Errorf("--issue must be a positive Issue number")}
 	}
-	if !*confirmed {
+	if !*confirmed && !*dryRun {
 		return exitError{2, fmt.Errorf("--confirm-prerequisite-resolved is required")}
+	}
+	if *dryRun {
+		return a.explainResumeBlocked(ctx, l, *repo, *issueNumber, *jsonOut)
 	}
 	entry, err := a.resolvePath(l, *repo)
 	if err != nil {
@@ -1626,11 +1633,11 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to resume: %+v", inspection)}
 	}
 	if interruptedWorkspaceRecovery && interruptedWorkspaceEvidence.WorktreeHead != "" && inspection.Head != interruptedWorkspaceEvidence.WorktreeHead {
-		return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume worktree HEAD changed; state was not changed", *issueNumber)}
+		return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_WORKTREE_HEAD_REMOTE", Err: fmt.Errorf("Issue #%d interrupted environment resume worktree HEAD changed; state was not changed", *issueNumber)}}
 	}
 	if interruptedWorkspaceRecovery && interruptedWorkspaceEvidence.WorktreeHead != "" &&
-		(!inspection.Dirty || inspection.RemoteBranchExists || inspection.RemoteHead != "" || inspection.RemoteConsistent) {
-		return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume worktree is not the exact dirty local-only branch; state was not changed", *issueNumber)}
+		!interruptedWorkspaceInspectionMatches(interruptedWorkspaceEvidence.WorktreeHead, inspection) {
+		return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_WORKTREE_HEAD_REMOTE", Err: fmt.Errorf("Issue #%d interrupted environment resume worktree is not the exact dirty local-only branch; state was not changed", *issueNumber)}}
 	}
 	launchValidator := a.validateResumeWorkspace
 	if launchValidator == nil {
@@ -1694,7 +1701,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		return exitError{4, err}
 	}
 	if interruptedWorkspaceRecovery && (baseSHA != interruptedWorkspaceEvidence.BaseSHA || currentBaseSHA != interruptedWorkspaceEvidence.CurrentBaseSHA) {
-		return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume base SHA provenance changed; state was not changed", *issueNumber)}
+		return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_BASE_SHA_IDENTITY", Err: fmt.Errorf("Issue #%d interrupted environment resume base SHA provenance changed; state was not changed", *issueNumber)}}
 	}
 	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
 	remote, err := client.Inspect(ctx, cfg, *issueNumber, current.Branch)
@@ -1724,34 +1731,8 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	runningLabel := labels[strings.ToLower(cfg.GitHub.RunningLabel)]
 	blocked := labels[blockedLabel]
 	if interruptedWorkspaceRecovery {
-		resumeMarker := "<!-- codex-issue-loop:environment-resume:" + current.EnvironmentResume.ID + " -->"
-		failureMarker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", *issueNumber)
-		resumeMarkers, expectedResumeMarkers, failureMarkers, expectedFailureMarkers := 0, 0, 0, 0
-		failureIDMarkers, originalFailureIDMarkers, workspaceFailureIDMarkers := 0, 0, 0
-		originalFailureComments, workspaceFailureComments := 0, 0
-		originalFailureReason := "worker blocked: " + interruptedWorkspaceEvidence.PreviousReason
-		workspaceFailureReason := current.BlockedCause.Reason
-		originalFailureIDMarker := failureIDMarker(originalFailureReason)
-		workspaceFailureIDMarker := failureIDMarker(workspaceFailureReason)
-		for _, comment := range remote.Issue.Comments {
-			resumeMarkers += strings.Count(comment, "<!-- codex-issue-loop:environment-resume:")
-			expectedResumeMarkers += strings.Count(comment, resumeMarker)
-			failureMarkers += strings.Count(comment, "<!-- codex-issue-loop:failed:")
-			expectedFailureMarkers += strings.Count(comment, failureMarker)
-			failureIDMarkers += strings.Count(comment, "<!-- codex-issue-loop:failure:")
-			originalFailureIDMarkers += strings.Count(comment, originalFailureIDMarker)
-			workspaceFailureIDMarkers += strings.Count(comment, workspaceFailureIDMarker)
-			if exactFailureComment(comment, *issueNumber, originalFailureReason) {
-				originalFailureComments++
-			}
-			if exactFailureComment(comment, *issueNumber, workspaceFailureReason) {
-				workspaceFailureComments++
-			}
-		}
-		if !blocked || runningLabel || resumeMarkers != 2 || expectedResumeMarkers != 2 || failureMarkers != 2 || expectedFailureMarkers != 2 ||
-			failureIDMarkers != 2 || originalFailureIDMarkers != 1 || workspaceFailureIDMarkers != 1 ||
-			originalFailureComments != 1 || workspaceFailureComments != 1 {
-			return exitError{4, fmt.Errorf("Issue #%d GitHub state does not prove the interrupted missing-workspace resume", *issueNumber)}
+		if !interruptedWorkspaceRemoteMarkersMatch(cfg, current, remote) {
+			return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_COMMENT_MARKERS", Err: fmt.Errorf("Issue #%d GitHub state does not prove the interrupted missing-workspace resume", *issueNumber)}}
 		}
 	} else if resumeIntent {
 		switch current.EnvironmentResume.Status {

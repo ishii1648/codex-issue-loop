@@ -3,12 +3,21 @@ package state
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func predicateStatuses(report RecoveryPredicateReport) map[string]string {
+	result := map[string]string{}
+	for _, predicate := range report.Predicates {
+		result[predicate.Code] = predicate.Status
+	}
+	return result
+}
 
 func interruptedWorkspaceResumeFixture(t *testing.T) (Store, Issue, []byte) {
 	t.Helper()
@@ -50,6 +59,111 @@ func TestInterruptedWorkspaceResumeEvidenceFromZeitreise442Full27EventFixture(t 
 	}
 	if delay := request.Timestamp.Sub(issue.EnvironmentResume.ConfirmedAt); delay != 28*time.Millisecond+433*time.Microsecond {
 		t.Fatalf("request timestamp delay=%s", delay)
+	}
+}
+
+func TestInterruptedWorkspaceResumePredicateReportListsIndependentFullHistoryMismatches(t *testing.T) {
+	store, issue, data := interruptedWorkspaceResumeFixture(t)
+	lines := fixtureEventLines(data)
+	// Keep all original positions evaluable while independently breaking event
+	// count, request payload, marker identity, and reconciliation remote state.
+	var extra Event
+	if err := json.Unmarshal(lines[len(lines)-1], &extra); err != nil {
+		t.Fatal(err)
+	}
+	extra.Sequence++
+	extra.EventID = "event_sanitized_extra"
+	extra.Timestamp = extra.Timestamp.Add(time.Second)
+	extraRaw, err := json.Marshal(extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines = append(lines, extraRaw)
+	lines[21] = bytes.Replace(lines[21], []byte(`"current_base_sha":"2222222222222222222222222222222222222222"`), []byte(`"current_base_sha":"ffffffffffffffffffffffffffffffffffffffff"`), 1)
+	lines[23] = bytes.Replace(lines[23], []byte(`"resume_id":"resume_0733cc3d177d05f3",`), nil, 1)
+	lines[19] = bytes.Replace(lines[19], []byte(`"RemoteBranchExists":false`), []byte(`"RemoteBranchExists":true`), 1)
+	if err := os.WriteFile(store.EventsPath(), joinFixtureEventLines(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	issue.SessionID = "session_private"
+	issue.Session = &WorkerSession{Backend: "codex", ID: issue.SessionID}
+	issue.EnvironmentResume.ConfirmedAt = issue.EnvironmentResume.ConfirmedAt.Add(-2 * time.Second)
+
+	report, err := store.InterruptedWorkspaceResumePredicateReport(issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != 1 || report.Operation != "resume-blocked" || report.Eligible {
+		t.Fatalf("report header=%+v", report)
+	}
+	statuses := predicateStatuses(report)
+	for _, code := range []string{
+		"RECOVERY_EVENT_COUNT", "RECOVERY_PAYLOAD_SHAPE", "RECOVERY_SESSION_IDENTITY",
+		"RECOVERY_GITHUB_MARKERS", "RECOVERY_TIMESTAMPS", "RECOVERY_REMOTE_IDENTITY",
+	} {
+		if statuses[code] != "fail" {
+			t.Fatalf("predicate %s=%q report=%+v", code, statuses[code], report)
+		}
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"session_private", issue.Worktree, issue.EnvironmentResume.PreviousReason} {
+		if bytes.Contains(encoded, []byte(secret)) {
+			t.Fatalf("report leaked sensitive evidence %q: %s", secret, encoded)
+		}
+	}
+}
+
+func TestInterruptedWorkspaceResumeMutationAndDiagnosisUseSamePredicateCode(t *testing.T) {
+	store, issue, data := interruptedWorkspaceResumeFixture(t)
+	data = bytes.Replace(data, []byte(`"current_base_sha":"2222222222222222222222222222222222222222"`), []byte(`"current_base_sha":"ffffffffffffffffffffffffffffffffffffffff"`), 1)
+	if err := os.WriteFile(store.EventsPath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := store.InterruptedWorkspaceResumePredicateReport(issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := report.FirstFailure(); got == nil {
+		t.Fatal("diagnosis unexpectedly passed")
+	} else {
+		var predicateErr RecoveryPredicateError
+		if !errors.As(got, &predicateErr) || predicateErr.Code != "RECOVERY_PAYLOAD_SHAPE" {
+			t.Fatalf("diagnostic refusal=%v", got)
+		}
+	}
+	_, mutationErr := store.InterruptedWorkspaceResumeEvidence(issue)
+	var predicateErr RecoveryPredicateError
+	if !errors.As(mutationErr, &predicateErr) || predicateErr.Code != "RECOVERY_PAYLOAD_SHAPE" {
+		t.Fatalf("mutating path refusal=%v", mutationErr)
+	}
+}
+
+func TestReadRecoveryInputsDoesNotCreateLockOrChangeDurableFiles(t *testing.T) {
+	store, issue, eventData := interruptedWorkspaceResumeFixture(t)
+	snapshot := Snapshot{
+		Version: CurrentVersion, RepoID: store.RepoID, RepoPath: "/sanitized/repository", StateRevision: 3791,
+		Issues: map[string]*Issue{"442": &issue}, PendingRequests: map[string]*Request{},
+	}
+	stateData, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.StatePath(), stateData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReadRecoveryInputs(); err != nil {
+		t.Fatal(err)
+	}
+	stateAfter, _ := os.ReadFile(store.StatePath())
+	eventsAfter, _ := os.ReadFile(store.EventsPath())
+	if !bytes.Equal(stateData, stateAfter) || !bytes.Equal(eventData, eventsAfter) {
+		t.Fatal("read-only recovery input changed state or events")
+	}
+	if _, err := os.Stat(store.lockPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only recovery input created a lock file: %v", err)
 	}
 }
 
