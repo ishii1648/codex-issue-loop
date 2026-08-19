@@ -66,6 +66,14 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 
 更新・rollbackを含む詳細は[Release・install・update](docs/release.md)を参照してください。
 
+schema-compatibleなproduction ReleaseをMac側から安全に自動反映する場合は、host単位の設定と専用LaunchAgentをpreviewしてから作成します。設定は各repositoryではなく`$HOME/.agent-loop-delivery.yaml`へ置かれます。
+
+```sh
+"$agent_loop_bin" delivery configure --json
+"$agent_loop_bin" delivery configure --apply --json
+"$agent_loop_bin" delivery status --json
+```
+
 ### 2. 対象リポジトリを準備する
 
 対象リポジトリをMacへcloneし、rootに`.agent-loop.yaml`を置きます。設定にはtokenや秘密値を記載しません。

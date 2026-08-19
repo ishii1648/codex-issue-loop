@@ -67,7 +67,11 @@ type Loop struct {
 	Random          RandomSource
 	Logger          *log.Logger
 	DiskAvailable   func(string) (uint64, error)
-	publicationMu   sync.Mutex
+	// MaintenanceFencePath is a host-level delivery fence. Its presence stops
+	// every kind of new lifecycle dispatch while allowing active workers to
+	// reach their normal durable checkpoint without signals.
+	MaintenanceFencePath string
+	publicationMu        sync.Mutex
 }
 
 type BlockedError struct{ Err error }
@@ -106,8 +110,10 @@ func (l *Loop) Run(ctx context.Context) error {
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
 		return BlockedError{Err: fmt.Errorf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)}
 	}
-	if err := l.reconcileStartupWithRateLimit(ctx, snapshot); err != nil {
-		return err
+	if !l.maintenanceRequested() {
+		if err := l.reconcileStartupWithRateLimit(ctx, snapshot); err != nil {
+			return err
+		}
 	}
 	watcher, watchErr := fsnotify.NewWatcher()
 	if watchErr == nil {
@@ -143,6 +149,14 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 
 	return l.runScheduler(ctx, watcher)
+}
+
+func (l *Loop) maintenanceRequested() bool {
+	if l.MaintenanceFencePath == "" {
+		return false
+	}
+	_, err := os.Lstat(l.MaintenanceFencePath)
+	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
 func (l *Loop) waitForDelay(ctx context.Context, delay time.Duration) {

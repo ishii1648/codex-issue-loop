@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -108,6 +109,70 @@ func (f *appProcessGroups) SignalGroup(pgid int, signal syscall.Signal) error {
 	f.signals[pgid] = append(f.signals[pgid], signal)
 	f.alive[pgid] = false
 	return nil
+}
+
+func TestDeliveryConfigureDefaultsToPreviewWithoutWritingConfigOrPlist(t *testing.T) {
+	root := t.TempDir()
+	managed := filepath.Join(root, "managed")
+	launch := filepath.Join(root, "launch")
+	configPath := filepath.Join(root, "delivery.yaml")
+	t.Setenv("AGENT_LOOP_HOME", managed)
+	t.Setenv("AGENT_LOOP_LAUNCH_AGENTS_DIR", launch)
+	t.Setenv("AGENT_LOOP_SKILLS_DIR", filepath.Join(root, "skills"))
+	var out, stderr bytes.Buffer
+	code := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"delivery", "configure", "--config", configPath, "--json"})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	for _, path := range []string{configPath, filepath.Join(launch, "com.codex-issue-loop.delivery.plist")} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("preview wrote %s: %v", path, err)
+		}
+	}
+	if !strings.Contains(out.String(), `"applied": false`) || !strings.Contains(out.String(), `"runtime_root"`) {
+		t.Fatalf("output=%s", out.String())
+	}
+}
+
+func TestDeliveryConfigureApplyWritesPrivateDefaultConfigAndSingleLaunchAgent(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("DELIVERY_LAUNCHD_STATE", filepath.Join(root, "loaded"))
+	launchctl := filepath.Join(root, "launchctl")
+	script := "#!/bin/sh\ncase \"$1\" in\n print) test -f \"$DELIVERY_LAUNCHD_STATE\" && printf 'state = running\\npid = 123\\n' ;;\n bootstrap) : > \"$DELIVERY_LAUNCHD_STATE\" ;;\n bootout) rm -f \"$DELIVERY_LAUNCHD_STATE\" ;;\n *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+":"+os.Getenv("PATH"))
+	l := layout.Layout{Root: filepath.Join(root, "managed"), RegistryPath: filepath.Join(root, "managed", "registry.json"), ReposRoot: filepath.Join(root, "managed", "repos"), BinDir: filepath.Join(root, "managed", "bin"), SkillsDir: filepath.Join(root, "skills"), LaunchAgents: filepath.Join(root, "launch")}
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.BinDir, "agent-loop"), []byte("managed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := (App{Out: &out, Err: &out}).deliveryConfigure(context.Background(), l, []string{"--apply", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, ".agent-loop-delivery.yaml")
+	for _, path := range []string{configPath, l.DeliveryPlistPath()} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("path=%s info=%v err=%v", path, info, err)
+		}
+	}
+	data, err := os.ReadFile(l.DeliveryPlistPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "com.codex-issue-loop.delivery") != 1 || strings.Contains(string(data), "--config") {
+		t.Fatalf("plist=%s", data)
+	}
 }
 
 // legacyResumeTestApp keeps older resume tests focused on lease/GitHub
@@ -3368,6 +3433,91 @@ func TestUpdateBackupCanRestoreBinarySkillAndManifest(t *testing.T) {
 	}
 	if _, err := validateBackupPath(l, filepath.Dir(l.Root)); err == nil {
 		t.Fatal("outside backup path accepted")
+	}
+}
+
+func TestDeliveryBackupPathIsConfinedToManagedDirectChild(t *testing.T) {
+	_, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(l.Root, "backups", "delivery-generation-v1.0.0")
+	resolved, err := validateDeliveryBackupPath(l, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(resolved) != filepath.Base(want) {
+		t.Fatalf("resolved=%s want=%s", resolved, want)
+	}
+	for _, path := range []string{filepath.Join(l.Root, "backups", "manual"), filepath.Join(l.Root, "backups", "delivery-ok", "nested"), filepath.Join(filepath.Dir(l.Root), "delivery-outside")} {
+		if _, err := validateDeliveryBackupPath(l, path); err == nil {
+			t.Fatalf("unsafe delivery backup accepted: %s", path)
+		}
+	}
+	outside := t.TempDir()
+	link := filepath.Join(l.Root, "backups", "delivery-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateDeliveryBackupPath(l, link); err == nil {
+		t.Fatal("symlink delivery backup accepted")
+	}
+}
+
+func TestDeliveryBackupRetryPreservesCompletePreviousInstallation(t *testing.T) {
+	_, l := testEnvironment(t)
+	oldSource := filepath.Join(t.TempDir(), "old-agent-loop")
+	newSource := filepath.Join(t.TempDir(), "new-agent-loop")
+	if err := os.WriteFile(oldSource, []byte("old-release"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newSource, []byte("new-release"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldManifest, _, err := installArtifacts(l, oldSource, "v1.0.0", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(l.Root, "backups", "delivery-generation-v1.0.0")
+	if _, err := backupInstallationAt(l, backup); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := installArtifacts(l, newSource, "v1.1.0", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backupInstallationAt(l, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreInstallation(l, backup); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := readInstallManifest(filepath.Join(l.Root, "install.json"))
+	if err != nil || restored != oldManifest {
+		t.Fatalf("retry overwrote previous backup: restored=%+v want=%+v err=%v", restored, oldManifest, err)
+	}
+}
+
+func TestDeliveryBackupRetryRebuildsOnlyIncompleteBackupFromConsistentInstall(t *testing.T) {
+	_, l := testEnvironment(t)
+	source := filepath.Join(t.TempDir(), "agent-loop")
+	if err := os.WriteFile(source, []byte("release"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := installArtifacts(l, source, "v1.0.0", "commit"); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(l.Root, "backups", "delivery-generation-v1.0.0")
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "agent-loop"), []byte("partial"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backupInstallationAt(l, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateInstallationBackup(backup); err != nil {
+		t.Fatalf("rebuilt backup is incomplete: %v", err)
 	}
 }
 

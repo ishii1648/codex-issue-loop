@@ -156,6 +156,69 @@ func (m Manager) WriteBrokerPlist(binary, pathEnv string) error {
 	return fsutil.WriteFile(m.Layout.BrokerPlistPath(), []byte(plist), 0o600)
 }
 
+func (m Manager) WriteDeliveryPlist(binary, pathEnv string, interval time.Duration) error {
+	if !filepath.IsAbs(binary) {
+		return fmt.Errorf("delivery binary path must be absolute")
+	}
+	if interval < time.Minute {
+		return fmt.Errorf("delivery interval must be at least one minute")
+	}
+	if pathEnv == "" {
+		pathEnv = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	}
+	if err := os.MkdirAll(m.Layout.LaunchAgents, 0o700); err != nil {
+		return err
+	}
+	if info, statErr := os.Lstat(m.Layout.DeliveryDir()); statErr == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
+		return fmt.Errorf("delivery runtime path is not a regular directory: %s", m.Layout.DeliveryDir())
+	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	if err := os.MkdirAll(m.Layout.DeliveryDir(), 0o700); err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	stdout := filepath.Join(m.Layout.DeliveryDir(), "launchd.stdout.log")
+	stderr := filepath.Join(m.Layout.DeliveryDir(), "launchd.stderr.log")
+	for _, path := range []string{stdout, stderr} {
+		if info, statErr := os.Lstat(path); statErr == nil && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+			return fmt.Errorf("delivery log path is not a regular file: %s", path)
+		} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		file, openErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if openErr != nil {
+			return openErr
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+	values := map[string]string{"label": m.Layout.DeliveryLabel(), "binary": binary, "stdout": stdout, "stderr": stderr, "home": home, "path": pathEnv, "root": m.Layout.Root, "interval": strconv.FormatInt(int64(interval/time.Second), 10)}
+	plist := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{{label}}</string>
+  <key>ProgramArguments</key><array><string>{{binary}}</string><string>delivery</string><string>reconcile</string><string>--json</string></array>
+  <key>RunAtLoad</key><true/><key>StartInterval</key><integer>{{interval}}</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>{{stdout}}</string><key>StandardErrorPath</key><string>{{stderr}}</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>{{home}}</string><key>PATH</key><string>{{path}}</string><key>AGENT_LOOP_HOME</key><string>{{root}}</string></dict>
+</dict></plist>
+`
+	for key, value := range values {
+		plist = strings.ReplaceAll(plist, "{{"+key+"}}", escape(value))
+	}
+	return fsutil.WriteFile(m.Layout.DeliveryPlistPath(), []byte(plist), 0o600)
+}
+
 func escape(value string) string {
 	var b bytes.Buffer
 	_ = xml.EscapeText(&b, []byte(value))
@@ -300,6 +363,46 @@ func (m Manager) RestartBroker(ctx context.Context) error {
 
 func (m Manager) BrokerStatus(ctx context.Context) (Status, error) {
 	return m.serviceStatus(ctx, m.Layout.BrokerLabel())
+}
+
+func (m Manager) DeliveryStatus(ctx context.Context) (Status, error) {
+	return m.serviceStatus(ctx, m.Layout.DeliveryLabel())
+}
+func (m Manager) StartDelivery(ctx context.Context) error {
+	status, err := m.DeliveryStatus(ctx)
+	if err != nil || status.Loaded {
+		return err
+	}
+	if err := m.bootstrap(ctx, m.Layout.DeliveryPlistPath(), m.Layout.DeliveryLabel()); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, _ = m.DeliveryStatus(ctx)
+		if status.Loaded {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("delivery LaunchAgent did not become loaded")
+}
+func (m Manager) StopDelivery(ctx context.Context) error {
+	status, err := m.DeliveryStatus(ctx)
+	if err != nil || !status.Loaded {
+		return err
+	}
+	if err := m.bootout(ctx, m.Layout.DeliveryLabel()); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, _ = m.DeliveryStatus(ctx)
+		if !status.Loaded {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("delivery LaunchAgent did not stop")
 }
 
 func (m Manager) bootstrap(ctx context.Context, plist, label string) error {
