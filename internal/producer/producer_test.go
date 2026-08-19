@@ -51,7 +51,10 @@ func TestValidateProposalFallsBackInsteadOfAssumingParallelSafety(t *testing.T) 
 		{name: "low confidence", mutate: func(p *Proposal) { p.Confidence = "low" }, reason: "confidence_not_high"},
 		{name: "ambiguity", mutate: func(p *Proposal) { p.AmbiguityReasons = []string{"scope is unclear"} }, reason: "issue_ambiguous"},
 		{name: "overlap missing", mutate: func(p *Proposal) { p.Resources = p.Resources[:1] }, reason: "overlapping_resource_missing"},
-		{name: "unknown path", mutate: func(p *Proposal) { p.Resources[0].Paths = []string{"future/file.go"}; p.Resources[1].Paths = []string{"future/file.go"} }, reason: "path_unmapped"},
+		{name: "unknown path", mutate: func(p *Proposal) {
+			p.Resources[0].Paths = []string{"future/file.go"}
+			p.Resources[1].Paths = []string{"future/file.go"}
+		}, reason: "path_unmapped"},
 		{name: "unknown resource", mutate: func(p *Proposal) { p.Resources[0].Name = "future" }, reason: "resource_unknown"},
 	}
 	for _, test := range tests {
