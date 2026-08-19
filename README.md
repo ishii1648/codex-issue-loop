@@ -141,6 +141,8 @@ worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missin
 "$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --confirm-external-fix --json
 ```
 
+Production由来の復旧証跡を手編集せずsanitizationして固定する場合は、[recovery fixture runbook](docs/recovery-fixtures.md)に従い`export-recovery-fixture`と`verify-recovery-fixture`を使用する。
+
 checksがpendingまたはgreenなら`awaiting_checks`から通常のDraft解除・auto mergeへ収束し、failureならterminal `failed`を維持します。manual/security exclusion、active worker、pending request、dirty/unpushed worktree、別branch/PR/head、closed-without-mergeでは拒否します。
 
 terminal `blocked` / `failed`の保存branchからoperatorがPRを作成・merge済みなのに、durable stateへPR URLが保存されずretained leaseがqueueを止めている場合は、限定adoptionを明示実行できます。

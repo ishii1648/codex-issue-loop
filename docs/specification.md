@@ -342,6 +342,8 @@ agent-loop <command> [options]
 | `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
 | `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
 | `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
+| `export-recovery-fixture` | 対象Issueのstate/event/worktree/GitHub recovery evidenceをread-only取得し決定的にsanitizationする |
+| `verify-recovery-fixture` | fixtureのscope、completeness metadata、record shape/value、hashをfail closedで検証する |
 | `adopt-merged-pr` | terminal state後に外部mergeされた保存branchの単一PRを明示確認付きで完了へ採用する |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |

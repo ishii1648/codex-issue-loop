@@ -24,6 +24,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/publish"
+	"github.com/ishii1648/codex-issue-loop/internal/recoveryfixture"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/supervisor"
@@ -251,38 +252,59 @@ func persistInterruptedMissingWorkspaceResume(t *testing.T, store state.Store, n
 
 func persistZeitreise442Full27EventResumeFixture(t *testing.T, store state.Store, number int, runID, worktreePath, branch, baseSHA, worktreeHead, currentBaseSHA, resumeID string) state.LeaseOwner {
 	t.Helper()
-	events, err := os.ReadFile("../state/testdata/zeitreise-442-v0614-full-27-events.jsonl")
+	bundle, err := recoveryfixture.Load("../recoveryfixture/testdata/zeitreise-442-full-history-v1.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueData, err := os.ReadFile("../state/testdata/zeitreise-442-v0614-full-27-state.json")
+	replay, err := bundle.Replay()
 	if err != nil {
 		t.Fatal(err)
+	}
+	original := replay.Snapshot.Issues[strconv.Itoa(bundle.Manifest.IssueNumber)]
+	if original == nil {
+		t.Fatal("unified fixture has no target Issue")
+	}
+	issueData := append([]byte(nil), bundle.Capture.Durable.Issue...)
+	var eventLines [][]byte
+	for _, raw := range bundle.Capture.Events {
+		eventLines = append(eventLines, append([]byte(nil), raw...))
 	}
 	replacements := [][2]string{
-		{"/sanitized/worktrees/zeitreise/issue-442", worktreePath},
-		{"/sanitized/zeitreise/.git", filepath.Join(store.RepoPath, ".git")},
-		{"/sanitized/zeitreise", store.RepoPath},
-		{"codex/issue-442-sanitized", branch},
-		{"1111111111111111111111111111111111111111", baseSHA},
-		{"3333333333333333333333333333333333333333", worktreeHead},
-		{"2222222222222222222222222222222222222222", currentBaseSHA},
-		{"run_adaf3142bd207b24", runID},
-		{"resume_0733cc3d177d05f3", resumeID},
-		{"repo_zeitreise", store.RepoID},
-		{`"issue_number":442`, fmt.Sprintf(`"issue_number":%d`, number)},
-		{`"number": 442`, fmt.Sprintf(`"number": %d`, number)},
+		{original.Worktree, worktreePath},
+		{original.Branch, branch},
+		{original.EnvironmentResume.BaseSHA, baseSHA},
+		{bundle.Capture.Worktree.Head, worktreeHead},
+		{original.EnvironmentResume.CurrentBaseSHA, currentBaseSHA},
+		{original.RunID, runID},
+		{original.EnvironmentResume.ID, resumeID},
+		{bundle.Capture.Durable.RepoID, store.RepoID},
 	}
 	for _, replacement := range replacements {
-		events = bytes.ReplaceAll(events, []byte(replacement[0]), []byte(replacement[1]))
 		issueData = bytes.ReplaceAll(issueData, []byte(replacement[0]), []byte(replacement[1]))
+		for index := range eventLines {
+			eventLines[index] = bytes.ReplaceAll(eventLines[index], []byte(replacement[0]), []byte(replacement[1]))
+		}
 	}
+	for index := range eventLines {
+		var event state.Event
+		if err := json.Unmarshal(eventLines[index], &event); err != nil {
+			t.Fatal(err)
+		}
+		event.IssueNumber = number
+		event.RepoID = store.RepoID
+		eventLines[index], err = json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	events := append(bytes.Join(eventLines, []byte("\n")), '\n')
 	checkpoint := fmt.Sprintf(`{"version":4,"event_id":"event_fixture_checkpoint","sequence":3764,"timestamp":"2026-08-17T12:19:59Z","repo_id":%q,"type":"event_log_checkpoint","payload":{"archived_through":3764}}`+"\n", store.RepoID)
 	events = append([]byte(checkpoint), events...)
 	var issue state.Issue
 	if err := json.Unmarshal(issueData, &issue); err != nil {
 		t.Fatal(err)
 	}
+	issue.Number = number
 	snapshot, err := store.Load()
 	if err != nil {
 		t.Fatal(err)

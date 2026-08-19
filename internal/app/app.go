@@ -117,6 +117,26 @@ func (a App) Run(ctx context.Context, args []string) int {
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
+	// Fixture export must not call Layout.Ensure: chmod or directory creation is
+	// observable mutation outside the requested output file. Verification also
+	// needs no agent-loop home at all.
+	if args[0] == "export-recovery-fixture" || args[0] == "verify-recovery-fixture" {
+		if args[0] == "export-recovery-fixture" {
+			err = a.exportRecoveryFixture(ctx, l, args[1:])
+		} else {
+			err = a.verifyRecoveryFixture(args[1:])
+		}
+		if err == nil {
+			return 0
+		}
+		var ee exitError
+		if errors.As(err, &ee) {
+			fmt.Fprintln(a.Err, ee.Err)
+			return ee.Code
+		}
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	if err := l.Ensure(); err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 1
@@ -212,6 +232,8 @@ Commands:
   resume-blocked  Explicitly resume a worker environment-blocked Issue
   recover-publication  Recover an eligible failed Issue at the publication boundary
   recover-checks  Return an externally repaired Pull Request to its saved lifecycle
+  export-recovery-fixture  Export sanitized read-only recovery evidence
+  verify-recovery-fixture  Fail closed unless a fixture is complete and untampered
   adopt-merged-pr  Adopt one externally merged saved branch into terminal state
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
