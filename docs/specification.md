@@ -876,17 +876,22 @@ transactionなしでsnapshotとevent logが食い違う場合、途中に壊れ�
 
 ### 12.4 永続schema migration
 
-config、registry、state、active event log、prepared transactionの現行schemaはv4とする。v3を検出したbinaryはsupervisor開始、status、通常update後の自動再開を拒否し、`migrate --json`と`doctor`で`SCHEMA_MIGRATION_REQUIRED`を返す。v2以下、v5以上、version欠落は自動変換しない。
+config、registry、state、active event log、prepared transactionの現行storage schemaはv4、state semantic contractはv1とする。release artifactは`state_schema_current=4`、`state_schema_migration_from=3`、`semantic_contract_current=1`、`semantic_contract_minimum=0`を`version --json`とinstall manifestへ埋め込む。v2以下、v5以上、未知semantic versionは自動変換しない。
 
-v3からv4へのforward migrationは次の順序で行う。
+semantic contractはfieldをoptional、observational、execution-required provenanceへ分類するversioned sourceである。同じ宣言からruntime validator、migration preview、CI ruleを導出する。execution-required fieldの追加にdeterministic migrationまたはstable non-migratable codeと運用手順がなければrelease checkを失敗させる。現v1では`issues[].workspace`がworker実行境界後のactive、blocked、needs-input、retry、publication/Pull Request recovery stateに必須である。
+
+`migrate --json`はsupported旧stateへ新validatorをread-onlyで適用し、Issueごとのmigratable/non-migratable、stable code、理由、ruleをJSONで返す。missing Workspaceをsession、worktree、lease、PR metadataから合成しない。#442相当stateはrelease前に`EXECUTION_REQUIRED_WORKSPACE_PROVENANCE_MISSING`となり、v4の承認付き限定`resume-blocked` recoveryがdurable authorityを確立した後だけcompatibleになる。
+
+v3→v4またはv4 semantic v0→v1 migrationは次の順序で行う。
 
 1. 全登録LaunchAgentが停止中であることを確認する
 2. config、registry、state、active event、transactionをchecksum付きmigration backupへcopyする
 3. `migration.json`へ`prepared` journalを原子的に保存する
-4. 各fileを個別に原子的置換する
-5. 全対象がv4へ収束したことを再検査し、journalを`completed`にする
+4. stateとactive eventを決定論的migration IDで原子的置換する
+5. `semantic_migration_applied`へauthority、source、before/after、operator confirmation、provenance非合成を記録する
+6. 全対象へ新validatorを再適用し、journalを`completed`にする
 
-process停止でv3/v4が混在しても、再実行は同じjournalとbackupを使い、v3のfileだけを変換する。外部配送設定とoutboxを削除し、旧配送eventはsequenceを保ったmarkerへ置換してpayloadを破棄する。Issue、pending request、resource lease、worker session、publication stateは保持する。active event logはfile全体を一度に置換し、同一log内のversion混在を許可しない。rotation済みgzip archiveはruntime復旧入力ではないためimmutableな監査履歴として保持する。
+process停止後も再実行は同じjournal、backup、migration/event IDを使い、適用済みartifactを重複更新しない。外部配送設定とoutboxを削除する旧structural migrationでもIssue、request、lease、session、publication stateを保持する。startup時のsilent backfillは禁止し、supervisorはsemantic validator失敗時にworker/GitHub mutationより前でblockedになる。
 
 rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active v4 leaseがある間はrollbackを拒否する。schema v3対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。旧credential fileはmigration対象・backup対象に含めず、rollback互換のため暗黙削除しない。明示的な整理手順は[migration runbook](migration.md)を正本とする。
 

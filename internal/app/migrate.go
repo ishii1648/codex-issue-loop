@@ -56,7 +56,7 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 		return err
 	}
 	if !*apply && !*rollback {
-		return a.output(*jsonOut, map[string]any{"report": report, "loaded_repositories": repoIDs(loaded), "apply_allowed": len(loaded) == 0 && len(report.Unsupported) == 0})
+		return a.output(*jsonOut, map[string]any{"report": report, "loaded_repositories": repoIDs(loaded), "apply_allowed": len(loaded) == 0 && len(report.Unsupported) == 0 && len(report.NonMigratable) == 0})
 	}
 	if len(loaded) > 0 {
 		return fmt.Errorf("schema migration requires every registered LaunchAgent to be stopped; loaded: %v", repoIDs(loaded))

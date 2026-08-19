@@ -34,7 +34,9 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
@@ -48,17 +50,23 @@ var (
 )
 
 type versionInfo struct {
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
+	Version                  string `json:"version"`
+	Commit                   string `json:"commit"`
+	StateSchemaCurrent       int    `json:"state_schema_current"`
+	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
+	SemanticContractCurrent  int    `json:"semantic_contract_current"`
+	SemanticContractMinimum  int    `json:"semantic_contract_minimum"`
 }
 
 type installManifest struct {
-	Version       string    `json:"version"`
-	Commit        string    `json:"commit"`
-	SchemaVersion int       `json:"schema_version"`
-	BinarySHA256  string    `json:"binary_sha256"`
-	SkillSHA256   string    `json:"skill_sha256"`
-	InstalledAt   time.Time `json:"installed_at"`
+	Version                 string    `json:"version"`
+	Commit                  string    `json:"commit"`
+	SchemaVersion           int       `json:"schema_version"`
+	SchemaMigrationFrom     int       `json:"schema_migration_from"`
+	SemanticContractVersion int       `json:"semantic_contract_version"`
+	BinarySHA256            string    `json:"binary_sha256"`
+	SkillSHA256             string    `json:"skill_sha256"`
+	InstalledAt             time.Time `json:"installed_at"`
 }
 
 type App struct {
@@ -92,7 +100,9 @@ func (a App) Run(ctx context.Context, args []string) int {
 	}
 	if args[0] == "--version" || args[0] == "version" {
 		if len(args) > 1 && args[1] == "--json" {
-			_ = json.NewEncoder(a.Out).Encode(versionInfo{Version: Version, Commit: Commit})
+			_ = json.NewEncoder(a.Out).Encode(versionInfo{Version: Version, Commit: Commit,
+				StateSchemaCurrent: schema.CurrentVersion, StateSchemaMigrationFrom: schemaversion.Previous,
+				SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion})
 		} else {
 			fmt.Fprintf(a.Out, "agent-loop %s (%s)\n", Version, Commit)
 		}
@@ -552,7 +562,9 @@ func installArtifacts(l layout.Layout, source, version, commit string) (installM
 	if err := fsutil.WriteFile(filepath.Join(skillDir, "VERSION"), []byte(version+"\n"), 0o600); err != nil {
 		return installManifest{}, false, fmt.Errorf("install Skill version: %w", err)
 	}
-	manifest := installManifest{Version: version, Commit: commit, SchemaVersion: schema.CurrentVersion, BinarySHA256: binaryHash, SkillSHA256: skillHash, InstalledAt: time.Now().UTC()}
+	manifest := installManifest{Version: version, Commit: commit, SchemaVersion: schema.CurrentVersion,
+		SchemaMigrationFrom: schemaversion.Previous, SemanticContractVersion: statecontract.CurrentVersion,
+		BinarySHA256: binaryHash, SkillSHA256: skillHash, InstalledAt: time.Now().UTC()}
 	if err := fsutil.WriteJSON(manifestPath, manifest, 0o600); err != nil {
 		return installManifest{}, false, fmt.Errorf("write install manifest: %w", err)
 	}
@@ -567,7 +579,8 @@ func installationMatches(l layout.Layout, source, version, commit string) (bool,
 	if err != nil {
 		return false, err
 	}
-	if manifest.Version != version || manifest.Commit != commit || manifest.SchemaVersion != schema.CurrentVersion {
+	if manifest.Version != version || manifest.Commit != commit || manifest.SchemaVersion != schema.CurrentVersion ||
+		manifest.SchemaMigrationFrom != schemaversion.Previous || manifest.SemanticContractVersion != statecontract.CurrentVersion {
 		return false, nil
 	}
 	sourceHash, err := fileSHA256(source)
@@ -960,6 +973,15 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 	}
 	lm := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
+	if command == "start" || command == "restart" {
+		snapshot, loadErr := store.Load()
+		if loadErr != nil {
+			return fmt.Errorf("load durable state before %s: %w", command, loadErr)
+		}
+		if semanticErr := state.ValidateSemanticContract(snapshot); semanticErr != nil {
+			return exitError{4, fmt.Errorf("refuse %s before launchd mutation: %w; run agent-loop migrate --json", command, semanticErr)}
+		}
+	}
 	stopReport := supervisor.WorkerStopReport{Workers: []supervisor.WorkerStop{}}
 	switch command {
 	case "start":

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -716,6 +717,43 @@ esac
 	logData, err := os.ReadFile(logPath)
 	if err != nil || string(logData) != "bootstrap broker\n" {
 		t.Fatalf("unexpected shared restart activity: log=%q err=%v", logData, err)
+	}
+}
+
+func TestStartRefusesLegacySemanticStateBeforeLaunchdOrStateMutation(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.Commands["launchctl"] = "/usr/bin/false"
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Update("legacy_retry", 169, "run_169", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["169"] = &state.Issue{Number: 169, Status: "retry_wait", RunID: "run_169", Worktree: "/tmp/legacy", Branch: "codex/issue-169", Attempts: 1}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.SemanticContractVersion = 0
+	writeJSONFixture(t, store.StatePath(), snapshot)
+	stateBefore, _ := os.ReadFile(store.StatePath())
+	eventsBefore, _ := os.ReadFile(store.EventsPath())
+	err = (App{Out: io.Discard, Err: io.Discard}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"})
+	if err == nil || !strings.Contains(err.Error(), state.SemanticCodeContractVersionMismatch) {
+		t.Fatalf("legacy semantic state was not rejected: %v", err)
+	}
+	stateAfter, _ := os.ReadFile(store.StatePath())
+	eventsAfter, _ := os.ReadFile(store.EventsPath())
+	if !bytes.Equal(stateAfter, stateBefore) || !bytes.Equal(eventsAfter, eventsBefore) {
+		t.Fatal("rejected start modified durable state")
 	}
 }
 

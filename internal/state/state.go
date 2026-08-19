@@ -375,14 +375,15 @@ type Recovery struct {
 }
 
 type Snapshot struct {
-	Version         int                 `json:"version"`
-	RepoID          string              `json:"repo_id"`
-	RepoPath        string              `json:"repo_path"`
-	StateRevision   uint64              `json:"state_revision"`
-	Supervisor      Supervisor          `json:"supervisor"`
-	Issues          map[string]*Issue   `json:"issues"`
-	PendingRequests map[string]*Request `json:"pending_requests"`
-	Recovery        *Recovery           `json:"recovery,omitempty"`
+	Version                 int                 `json:"version"`
+	SemanticContractVersion int                 `json:"semantic_contract_version"`
+	RepoID                  string              `json:"repo_id"`
+	RepoPath                string              `json:"repo_path"`
+	StateRevision           uint64              `json:"state_revision"`
+	Supervisor              Supervisor          `json:"supervisor"`
+	Issues                  map[string]*Issue   `json:"issues"`
+	PendingRequests         map[string]*Request `json:"pending_requests"`
+	Recovery                *Recovery           `json:"recovery,omitempty"`
 }
 
 type Event struct {

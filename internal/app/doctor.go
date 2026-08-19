@@ -23,7 +23,9 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 )
@@ -124,8 +126,15 @@ func diagnoseSchemas(l layout.Layout) ([]diagnostic, bool) {
 		}
 		return []diagnostic{failedDiagnostic("SCHEMA_VERSION_UNSUPPORTED", "host", "", "このbinaryで扱えない永続schemaがあります", strings.Join(parts, ", "), instruction("対応binaryへ戻すか、対応するmigration手順を確認してください"))}, false
 	}
+	if len(report.NonMigratable) > 0 {
+		parts := make([]string, 0, len(report.NonMigratable))
+		for _, finding := range report.NonMigratable {
+			parts = append(parts, fmt.Sprintf("%s/Issue#%d=%s", finding.RepoID, finding.IssueNumber, finding.Code))
+		}
+		return []diagnostic{failedDiagnostic("STATE_SEMANTIC_NON_MIGRATABLE", "host", "", "実行必須provenanceを安全にmigrationできないstateがあります", strings.Join(parts, ", "), instruction("agent-loop migrate --jsonのoperator_guideに従い、旧versionの検証済みrecoveryでauthorityを確立してください"))}, false
+	}
 	if report.NeedsMigration {
-		return []diagnostic{failedDiagnostic("SCHEMA_MIGRATION_REQUIRED", "host", "", "永続schemaをv4へmigrationする必要があります", "agent-loop migrate --jsonで対象を確認してください", command("全loop停止後にforward migrationを実行します", "agent-loop migrate --apply --json"))}, false
+		return []diagnostic{failedDiagnostic("SCHEMA_MIGRATION_REQUIRED", "host", "", "永続schemaまたはsemantic contractをmigrationする必要があります", "agent-loop migrate --jsonで対象を確認してください", command("全loop停止後にforward migrationを実行します", "agent-loop migrate --apply --json"))}, false
 	}
 	return []diagnostic{passedDiagnostic("SCHEMA_VERSION_SUPPORTED", "host", "", "永続schemaはこのbinaryと互換です", fmt.Sprintf("version=%d artifacts=%d", report.TargetVersion, len(report.Artifacts)))}, true
 }
@@ -262,6 +271,11 @@ func diagnoseInstallation(l layout.Layout) []diagnostic {
 	}
 	if manifestSchema != schema.CurrentVersion {
 		return []diagnostic{failedDiagnostic("INSTALL_SCHEMA_INCOMPATIBLE", "host", "", "installed binaryと永続schemaの対応versionが一致しません", fmt.Sprintf("install_schema=%d binary_schema=%d", manifestSchema, schema.CurrentVersion), instruction("全loopを停止し、release手順に従ってbinary updateとschema migrationを組で実行してください"))}
+	}
+	if manifest.SchemaMigrationFrom != schemaversion.Previous || manifest.SemanticContractVersion != statecontract.CurrentVersion {
+		return []diagnostic{failedDiagnostic("INSTALL_SEMANTIC_CONTRACT_INCOMPATIBLE", "host", "", "installed artifactのstate互換範囲がcurrent binaryと一致しません",
+			fmt.Sprintf("manifest_migration_from=%d manifest_semantic=%d binary_migration_from=%d binary_semantic=%d", manifest.SchemaMigrationFrom, manifest.SemanticContractVersion, schemaversion.Previous, statecontract.CurrentVersion),
+			instruction("全loopを停止し、検証済みreleaseからupdateしてsemantic migrationをpreviewしてください"))}
 	}
 	binaryHash, binaryErr := fileSHA256(filepath.Join(l.BinDir, "agent-loop"))
 	skillHash, skillErr := fileSHA256(filepath.Join(l.SkillsDir, "agent-loop", "SKILL.md"))
