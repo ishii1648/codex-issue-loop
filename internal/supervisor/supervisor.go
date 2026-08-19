@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/admission"
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
@@ -289,15 +291,15 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
-	statuses := map[string]string{}
-	for number, issue := range snapshot.Issues {
-		statuses[number] = issue.Status
+	selector := &scheduler{loop: l, active: map[int]activeJob{}}
+	selected, evaluation, ok, err := selector.selectReady(ctx, issues, snapshot)
+	if err != nil {
+		return false, failure.Wrap(failure.Supervisor, "select Issue admission", err)
 	}
-	selected, ok := gh.SelectReady(issues, statuses, l.Config.Queue)
 	if !ok {
 		return false, l.markPolling("")
 	}
-	return true, l.startIssue(ctx, selected)
+	return true, l.startIssueAtSlotWithResources(ctx, selected, state.NewID("run"), 0, evaluation.DeclaredResources, evaluation.Resources)
 }
 
 func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
@@ -370,10 +372,24 @@ func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue
 		return nil
 	}
 	issue = latest
+	// Re-evaluate the authoritative body immediately before the first durable
+	// write. A metadata edit between queue collection and dispatch must not
+	// reserve a lease or mutate GitHub under stale capability assumptions.
+	evaluation, err := admission.EvaluateCandidate(l.Config.AdmissionSettings(), admission.Candidate{
+		Number: issue.Number, CreatedAt: issue.CreatedAt, Labels: issue.Labels, Body: issue.Body,
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "evaluate refreshed Issue admission", err)
+	}
+	if !evaluation.Capability.Compatible {
+		return nil
+	}
+	declared, resolved = evaluation.DeclaredResources, evaluation.Resources
 	now := l.now()
 	_, _, err = l.Store.ReserveLease(state.LeaseReservation{
 		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: slot,
 		DeclaredResources: declared, ResolvedResources: resolved, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
+		CapabilityRequirements: evaluation.Capability.Requirements, WorkerCapabilities: evaluation.Capability.Provided,
 	})
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "persist claim start", err)
@@ -484,7 +500,27 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 	return l.handleResult(ctx, issue, current, result, runErr)
 }
 
+func workerCapabilityRecheckStatus(status string) bool {
+	switch status {
+	case "claiming", "answer_claim_waiting", "resume_pending", "environment_resume_pending", "retry_wait":
+		return true
+	default:
+		return false
+	}
+}
+
 func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
+	if current.CapabilityRequirements != nil && workerCapabilityRecheckStatus(current.Status) {
+		capabilityEvaluation := capability.EvaluateRequirement(current.CapabilityRequirements, l.Config.WorkerCapabilityProfiles())
+		if !capabilityEvaluation.Compatible {
+			codes := make([]string, 0, len(capabilityEvaluation.Mismatches))
+			for _, mismatch := range capabilityEvaluation.Mismatches {
+				codes = append(codes, mismatch.Code)
+			}
+			sort.Strings(codes)
+			return failure.Wrap(failure.Issue, "revalidate persisted Issue capability", fmt.Errorf("%s", strings.Join(codes, ",")))
+		}
+	}
 	if current.GitHubSync != "" {
 		return l.syncGitHub(ctx, current)
 	}
@@ -701,6 +737,9 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	}
 	if current.ExecutionProfile == "extended" {
 		profile = "extended"
+	}
+	if current.CapabilityRequirements != nil {
+		profile = current.CapabilityRequirements.Profile
 	}
 	_, err := l.Store.Update("worker_preflight_completed", issue.Number, current.RunID, map[string]string{"execution_profile": profile}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
@@ -919,6 +958,9 @@ var errAnsweredClaimWaiting = errors.New("answered needs-input claim is still wa
 func (l *Loop) reacquireAnsweredClaim(ctx context.Context, remoteIssue gh.Issue, current state.Issue) error {
 	if current.WorkerPID != 0 || current.WorkerPGID != 0 || current.Lease != nil || current.ResourcePark == nil ||
 		current.ResourcePark.Kind != state.ResourceParkKindNeedsInput || current.ResourcePark.Status != "parked" || current.PullRequestURL != "" {
+		return nil
+	}
+	if current.CapabilityRequirements != nil && !capability.EvaluateRequirement(current.CapabilityRequirements, l.Config.WorkerCapabilityProfiles()).Compatible {
 		return nil
 	}
 	labels := labelSet(remoteIssue.Labels)
@@ -1840,6 +1882,9 @@ func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current
 	if profile == "" {
 		profile = "extended"
 	}
+	if current.CapabilityRequirements != nil {
+		profile = current.CapabilityRequirements.Profile
+	}
 	_, err := l.Store.Update("conflict_recovery_worker_completed", current.Number, current.RunID, map[string]any{
 		"status": result.Status, "summary": result.Summary, "execution_profile": profile, "tests": result.Tests,
 	}, func(s *state.Snapshot) error {
@@ -2131,6 +2176,18 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 		return fail(fmt.Errorf("run changed from %q to %q", expected.RunID, fresh.RunID))
 	}
 	validation.Checks["run_id"] = true
+	if fresh.CapabilityRequirements != nil {
+		capabilityEvaluation := capability.EvaluateRequirement(fresh.CapabilityRequirements, l.Config.WorkerCapabilityProfiles())
+		if !capabilityEvaluation.Compatible {
+			codes := make([]string, 0, len(capabilityEvaluation.Mismatches))
+			for _, mismatch := range capabilityEvaluation.Mismatches {
+				codes = append(codes, mismatch.Code)
+			}
+			sort.Strings(codes)
+			return fail(fmt.Errorf("worker capability predicate failed: %s", strings.Join(codes, ",")))
+		}
+		validation.Checks["worker_capabilities"] = true
+	}
 	if fresh.SessionID != expected.SessionID {
 		return fail(fmt.Errorf("session changed before spawn"))
 	}

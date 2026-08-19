@@ -200,8 +200,18 @@ worker:
   profiles:
     standard:
       max_continuations: 0
+      capabilities:
+        network: none
+        browser_cdp: false
+        download: false
+        external_time_gate: false
     extended:
       max_continuations: 3
+      capabilities:
+        network: none
+        browser_cdp: false
+        download: false
+        external_time_gate: false
 
 watch:
   reconcile_interval: 60s

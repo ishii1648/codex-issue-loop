@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
@@ -147,13 +148,30 @@ type fakeGitHub struct {
 	inspectHook               func()
 }
 
+type rawCapabilityGitHub struct{ *fakeGitHub }
+
+func (f rawCapabilityGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) {
+	return f.issue, nil
+}
+
+const supervisorTestCapabilityMetadata = "\n<!-- agent-loop:capabilities\nversion: 1\nprofile: standard\nnetwork: none\nbrowser_cdp: false\ndownload: false\nexternal_time_gate: false\n-->"
+
+func capabilityReadyIssue(issue gh.Issue) gh.Issue {
+	if !strings.Contains(issue.Body, "<!-- agent-loop:capabilities") {
+		issue.Body += supervisorTestCapabilityMetadata
+	}
+	return issue
+}
+
 func (f *fakeGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return []gh.Issue{f.issue}, nil
+	return []gh.Issue{capabilityReadyIssue(f.issue)}, nil
 }
-func (f *fakeGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) { return f.issue, nil }
+func (f *fakeGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) {
+	return capabilityReadyIssue(f.issue), nil
+}
 func (f *fakeGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
 	f.inspectCalls++
 	if f.inspectHook != nil {
@@ -383,8 +401,60 @@ func testLoop(t *testing.T, result worker.Result) (*Loop, *fakeGitHub) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	github := &fakeGitHub{issue: gh.Issue{Number: 1, Title: "Test", Body: "Implement it", Labels: []string{"codex-loop:ready"}}}
+	profile := result.ExecutionProfile
+	if profile == "" {
+		profile = "extended"
+	}
+	body := "Implement it\n" + strings.Replace(supervisorTestCapabilityMetadata, "profile: standard", "profile: "+profile, 1)
+	github := &fakeGitHub{issue: gh.Issue{Number: 1, Title: "Test", Body: body, Labels: []string{"codex-loop:ready"}}}
 	return &Loop{Config: cfg, Store: store, GitHub: github, Worktrees: fakeWorktree{path: repo}, Worker: fakeWorker{result: result}}, github
+}
+
+func TestCapabilityMismatchPrecedesLeaseClaimWorktreeAndGitHubMutation(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	before, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.issue.Body = "<!-- agent-loop:capabilities\nversion: 1\nprofile: standard\nnetwork: public\nbrowser_cdp: false\ndownload: false\nexternal_time_gate: false\n-->"
+	loop.GitHub = rawCapabilityGitHub{fakeGitHub: github}
+	if err := loop.startIssueAtSlotWithResources(context.Background(), github.issue, "run_capability", 0, []string{state.RepositoryResource}, []string{state.RepositoryResource}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.StateRevision != before.StateRevision || after.Issues["1"] != nil || github.claimed {
+		t.Fatalf("capability mismatch caused side effects: before=%d after=%d issue=%+v claimed=%v", before.StateRevision, after.StateRevision, after.Issues["1"], github.claimed)
+	}
+}
+
+func TestStartupClaimRechecksPersistedCapabilityBeforeFurtherSideEffects(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	requirements := &capability.Requirements{
+		Version: 1, Profile: "standard", Network: capability.NetworkPublic,
+	}
+	provided := &capability.Provider{Version: 1, Profile: "standard", Network: capability.NetworkPublic}
+	before, _, err := loop.Store.ReserveLease(state.LeaseReservation{
+		IssueNumber: 1, Title: "Test", RunID: "run_restart", Slot: 0,
+		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: time.Now().UTC(),
+		CapabilityRequirements: requirements, WorkerCapabilities: provided,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := *before.Issues["1"]
+	if err := loop.processExisting(context.Background(), current); err == nil || !strings.Contains(err.Error(), capability.CodeNetworkMismatch) {
+		t.Fatalf("startup mismatch was not rejected: %v", err)
+	}
+	after, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.StateRevision != before.StateRevision || github.claimed {
+		t.Fatalf("startup mismatch caused side effects: before=%d after=%d claimed=%v", before.StateRevision, after.StateRevision, github.claimed)
+	}
 }
 
 func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
@@ -726,7 +796,10 @@ func TestRetryContinuationKeepsDirtyBehindMainCheckoutUntouched(t *testing.T) {
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	github := &fakeGitHub{issue: gh.Issue{Number: 1, Title: "Continue safely", Body: "fixture", Labels: cfg.GitHub.ReadyLabels}}
+	github := &fakeGitHub{issue: gh.Issue{
+		Number: 1, Title: "Continue safely", Body: "fixture\n" + strings.Replace(supervisorTestCapabilityMetadata, "profile: standard", "profile: extended", 1),
+		Labels: cfg.GitHub.ReadyLabels,
+	}}
 	runtime := &workspaceMutationWorker{mainPath: mainCheckout}
 	loop := &Loop{
 		Config: cfg, Store: store, GitHub: github,

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
 )
 
 const RepositoryResource = "repo:*"
@@ -33,14 +35,16 @@ func (e LeaseConflictError) Error() string {
 }
 
 type LeaseReservation struct {
-	IssueNumber       int
-	Title             string
-	RunID             string
-	Slot              int
-	DeclaredResources []string
-	ResolvedResources []string
-	BaseSHA           string
-	ReservedAt        time.Time
+	IssueNumber            int
+	Title                  string
+	RunID                  string
+	Slot                   int
+	DeclaredResources      []string
+	ResolvedResources      []string
+	BaseSHA                string
+	ReservedAt             time.Time
+	CapabilityRequirements *capability.Requirements
+	WorkerCapabilities     *capability.Provider
 }
 
 // ReserveLease atomically persists the claiming Issue and its slot/resource
@@ -69,6 +73,12 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 	payload := map[string]any{
 		"slot": reservation.Slot, "declared_resources": declared, "resolved_resources": resolved,
 		"base_sha": reservation.BaseSHA, "reserved_at": reservation.ReservedAt,
+	}
+	if reservation.CapabilityRequirements != nil {
+		payload["capability_requirements"] = reservation.CapabilityRequirements
+	}
+	if reservation.WorkerCapabilities != nil {
+		payload["worker_capabilities"] = reservation.WorkerCapabilities
 	}
 	snapshot, err := s.Update("lease_reserved", reservation.IssueNumber, reservation.RunID, payload, func(snapshot *Snapshot) error {
 		key := strconv.Itoa(reservation.IssueNumber)
@@ -101,6 +111,11 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 		payload["owner"] = owner
 		issue.Title, issue.Status, issue.RunID = reservation.Title, "claiming", reservation.RunID
 		issue.DeclaredResources = append([]string(nil), declared...)
+		issue.CapabilityRequirements = reservation.CapabilityRequirements
+		issue.WorkerCapabilities = reservation.WorkerCapabilities
+		if reservation.CapabilityRequirements != nil {
+			issue.ExecutionProfile = reservation.CapabilityRequirements.Profile
+		}
 		issue.ActualResources = nil
 		if issue.Attempts == 0 {
 			issue.Attempts = 1

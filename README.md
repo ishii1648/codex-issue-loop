@@ -196,6 +196,8 @@ PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`
 
 同一repository内並列実行で使う`resources.definitions`、`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。publisherは保存済みbase SHAからtracked/untracked変更pathを検査し、actual resourceが宣言claimを超える場合はcommit・pushせず`needs_input`へ移します。`formatters.go.enabled: true`を明示したrepositoryでは、register済み`gofmt`が変更対象Go fileだけをcommit前に整形します。CIは引き続きread-onlyの`make fmt-check`を最終防衛線とします。
 
+Issueが必要とするnetwork、browser/CDP、download、外部時刻前提は[Issue capability admission契約](docs/capability-admission.md)のversioned metadataで宣言します。supervisorはworker profileと実起動経路からeffective capabilityを導出し、claim・lease・worktree・worker spawnより前にfail-closedで照合します。不一致のIssueは副作用なくskipし、compatibleな後続Issueを選択します。
+
 ### 2. 状態を確認・監視する
 
 ```sh
