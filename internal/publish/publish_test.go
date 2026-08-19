@@ -16,6 +16,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/gitops"
 	"github.com/ishii1648/codex-issue-loop/internal/publication"
 )
 
@@ -76,7 +77,7 @@ esac
 	t.Setenv("PUBLISH_TEST_BASE", baseSHA)
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
-	manager := Manager{GitPath: "git", GHPath: fakeGH}
+	manager := Manager{GitPath: "git", GHPath: fakeGH, Gate: gitops.NewGate()}
 	issue := gh.Issue{Number: 1, Title: "Create marker"}
 
 	first, audit, err := manager.Publish(context.Background(), cfg, issue, repo, branch, "", "implemented", baseSHA, []string{admission.RepositoryResource})

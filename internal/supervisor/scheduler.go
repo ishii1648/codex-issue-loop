@@ -377,9 +377,13 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		if ok {
 			slot, slotOK := s.freeSlot()
 			if slotOK {
+				baseSHA, err := s.loop.resolveDispatchBase(ctx)
+				if err != nil {
+					return result, err
+				}
 				runID := state.NewID("run")
 				s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
-					return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
+					return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources, baseSHA)
 				})
 				result.dispatched = true
 			}
@@ -424,9 +428,13 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	if !ok {
 		return result, nil
 	}
+	baseSHA, err := s.loop.resolveDispatchBase(ctx)
+	if err != nil {
+		return result, err
+	}
 	runID := state.NewID("run")
 	s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
-		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
+		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources, baseSHA)
 	})
 	result.dispatched = true
 	return result, nil

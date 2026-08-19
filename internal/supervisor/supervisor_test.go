@@ -253,7 +253,10 @@ type fakeWorktree struct {
 	digest     string
 }
 
-func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error) {
+func (f fakeWorktree) ResolveBase(context.Context, config.Config) (string, error) {
+	return "base-sha", nil
+}
+func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string, string) (worktree.Result, error) {
 	return worktree.Result{Path: f.path, Branch: "codex/issue-1-test"}, nil
 }
 func (f fakeWorktree) Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error) {
@@ -424,7 +427,7 @@ func TestCapabilityMismatchPrecedesLeaseClaimWorktreeAndGitHubMutation(t *testin
 	}
 	github.issue.Body = "<!-- agent-loop:capabilities\nversion: 1\nprofile: standard\nnetwork: public\nbrowser_cdp: false\ndownload: false\nexternal_time_gate: false\n-->"
 	loop.GitHub = rawCapabilityGitHub{fakeGitHub: github}
-	if err := loop.startIssueAtSlotWithResources(context.Background(), github.issue, "run_capability", 0, []string{state.RepositoryResource}, []string{state.RepositoryResource}); err != nil {
+	if err := loop.startIssueAtSlotWithResources(context.Background(), github.issue, "run_capability", 0, []string{state.RepositoryResource}, []string{state.RepositoryResource}, "base-sha"); err != nil {
 		t.Fatal(err)
 	}
 	after, err := loop.Store.Load()

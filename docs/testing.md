@@ -16,6 +16,7 @@ make test-race
 |---|---|
 | fake GitHub adapter + fake Codex process | `TestFaultStandardWorkerCompletesWithoutAdditionalRun`、`TestFaultFakeCodexProcessProducesStructuredResult` |
 | worktree作成、再利用、異常終了 | `TestFaultWorktreeCreateReuseAndPartialCreation` |
+| repository phase gateの失敗・cancel解放、同一base SHAからの複数実worktree、PR作成後retryの冪等性 | `TestGateReleasesAfterFailureAndCancelsWaiter`、`TestMultipleRealWorktreesUseOneImmutableDispatchBase`、`TestPublishRetryReusesPullRequestCreatedBeforeCommandFailure` |
 | supervisor二重起動防止 | `TestFaultSecondSupervisorCannotAcquireLock` |
 | snapshot途中書き込みからの復旧 | `TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint`、`TestFaultPartialEventTailIsTruncatedAndRecorded` |
 | worker kill後のreconciliation | `TestFaultWorkerKillReturnsRecoverableProcessError`、`TestFaultWorkerAndGitHubStateReconciliationDecisions` |

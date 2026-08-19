@@ -7,6 +7,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/gitops"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/lifecycle"
@@ -98,7 +99,7 @@ func worktreeLifecycle(l layout.Layout, entry registry.Entry) (config.Config, st
 		return config.Config{}, state.Store{}, state.Snapshot{}, lifecycle.Manager{}, err
 	}
 	manager := lifecycle.Manager{
-		Worktrees: worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
+		Worktrees: worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"], Gate: gitops.NewGate()},
 		Remote:    gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()},
 	}
 	return cfg, store, snapshot, manager, nil

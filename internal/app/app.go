@@ -26,6 +26,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
+	"github.com/ishii1648/codex-issue-loop/internal/gitops"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	schema "github.com/ishii1648/codex-issue-loop/internal/migration"
@@ -1534,7 +1535,7 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 	if current.Worktree == "" || current.Branch == "" || current.PullRequestURL == "" {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain the worktree, branch, and Pull Request required for retry", *issueNumber)}
 	}
-	manager := worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]}
+	manager := worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"], Gate: gitops.NewGate()}
 	inspection, err := manager.Inspect(ctx, cfg, current.Worktree, current.Branch)
 	if err != nil {
 		return fmt.Errorf("inspect retry worktree: %w", err)
@@ -2309,14 +2310,15 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		RequestedModel: cfg.Worker.Model, ResolvedModel: cfg.Worker.Model, Variant: cfg.Worker.Variant}
 	safeLog := redact.NewLineWriterWithSecrets(supervisorLog, secrets)
 	defer safeLog.Flush()
+	repositoryGate := gitops.NewGate()
 	loop := &supervisor.Loop{
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
 		RateLimits:           ratelimit.Store{Path: l.RateLimitPath()},
-		Worktrees:            worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
+		Worktrees:            worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"], Gate: repositoryGate},
 		Worker:               backend,
 		WorkerIdentity:       identity,
-		Publisher:            publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], GofmtPath: entry.Commands["gofmt"], Secrets: secrets},
-		Conflicts:            conflict.Manager{GitPath: entry.Commands["git"]},
+		Publisher:            publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], GofmtPath: entry.Commands["gofmt"], Secrets: secrets, Gate: repositoryGate},
+		Conflicts:            conflict.Manager{GitPath: entry.Commands["git"], Gate: repositoryGate},
 		Logger:               log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
 		MaintenanceFencePath: filepath.Join(l.DeliveryDir(), "maintenance.json"),
 	}

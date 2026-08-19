@@ -661,7 +661,9 @@ GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リ
 
 - branch: `codex/issue-<number>-<slug>`
 - worktree: `<worktree-root>/<repo-id>/issue-<number>`
-- base branchは処理開始時にfetchした設定値
+- supervisorはdispatch cycleのworker起動前にrepository phase gate内でbase branchを1回fetchし、commit SHAへ解決する
+- 同じdispatch cycleで選択したIssueは同じimmutable base SHAをleaseへwrite-ahead保存し、`git worktree add`はremote追跡refではなく保存済みSHAからbranchを作る
+- fetch、worktree add/reuse/inspect、conflict recovery、publisherのstage/commit/push/PR作成は同じrepository phase gateを通す。待機中のcancellationとphase内の失敗・timeoutはいずれもgateを解放する
 - 既存branchまたはPRがある場合は対応関係を検証して再利用する
 - ユーザーの通常working treeは変更しない
 - 未コミット変更があるworktreeを自動削除しない

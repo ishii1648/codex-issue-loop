@@ -983,6 +983,13 @@ func TestSchedulerContinuesAfterNeedsInputWhenConfigured(t *testing.T) {
 	if number := <-pool.started; number != 2 {
 		t.Fatalf("started Issue=%d, want 2", number)
 	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease := snapshot.Issues["2"].Lease; lease == nil || lease.BaseSHA != "base-sha" {
+		t.Fatalf("dispatch base was not persisted before worker start: %+v", lease)
+	}
 	s.cancelAndDrain()
 }
 

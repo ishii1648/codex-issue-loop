@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -32,7 +31,8 @@ import (
 )
 
 type WorktreeManager interface {
-	Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error)
+	ResolveBase(context.Context, config.Config) (string, error)
+	Ensure(context.Context, config.Config, string, int, string, string) (worktree.Result, error)
 	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
 	ValidateLaunch(context.Context, config.Config, string, string) (worktree.LaunchValidation, error)
 	ContentDigest(context.Context, string) (string, error)
@@ -316,7 +316,11 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	if !ok {
 		return false, l.markPolling("")
 	}
-	return true, l.startIssueAtSlotWithResources(ctx, selected, state.NewID("run"), 0, evaluation.DeclaredResources, evaluation.Resources)
+	baseSHA, err := l.resolveDispatchBase(ctx)
+	if err != nil {
+		return false, err
+	}
+	return true, l.startIssueAtSlotWithResources(ctx, selected, state.NewID("run"), 0, evaluation.DeclaredResources, evaluation.Resources, baseSHA)
 }
 
 func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
@@ -377,10 +381,25 @@ func (l *Loop) startIssueAtSlot(ctx context.Context, issue gh.Issue, runID strin
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "evaluate Issue resource claim", err)
 	}
-	return l.startIssueAtSlotWithResources(ctx, issue, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
+	baseSHA, err := l.resolveDispatchBase(ctx)
+	if err != nil {
+		return err
+	}
+	return l.startIssueAtSlotWithResources(ctx, issue, runID, slot, evaluation.DeclaredResources, evaluation.Resources, baseSHA)
 }
 
-func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue, runID string, slot int, declared, resolved []string) error {
+func (l *Loop) resolveDispatchBase(ctx context.Context) (string, error) {
+	baseSHA, err := l.Worktrees.ResolveBase(ctx, l.Config)
+	if err != nil {
+		return "", failure.Wrap(failure.Transient, "fetch and resolve dispatch base", err)
+	}
+	if strings.TrimSpace(baseSHA) == "" {
+		return "", failure.Wrap(failure.Supervisor, "resolve dispatch base", errors.New("worktree manager returned an empty base SHA"))
+	}
+	return strings.TrimSpace(baseSHA), nil
+}
+
+func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue, runID string, slot int, declared, resolved []string, baseSHA string) error {
 	latest, err := l.getIssue(ctx, issue.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh GitHub Issue before claim", err)
@@ -405,7 +424,7 @@ func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue
 	now := l.now()
 	_, _, err = l.Store.ReserveLease(state.LeaseReservation{
 		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: slot,
-		DeclaredResources: declared, ResolvedResources: resolved, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
+		DeclaredResources: declared, ResolvedResources: resolved, BaseSHA: baseSHA, ReservedAt: now,
 		CapabilityRequirements: evaluation.Capability.Requirements, WorkerCapabilities: evaluation.Capability.Provided,
 	})
 	if err != nil {
@@ -449,16 +468,6 @@ func pullRequestNumber(value string) int {
 	return number
 }
 
-func localBaseSHA(ctx context.Context, cfg config.Config) string {
-	for _, ref := range []string{"refs/remotes/origin/" + cfg.Git.BaseBranch, "HEAD"} {
-		out, err := exec.CommandContext(ctx, "git", "-C", cfg.RepoPath, "rev-parse", "--verify", ref+"^{commit}").Output()
-		if err == nil {
-			return strings.TrimSpace(string(out))
-		}
-	}
-	return ""
-}
-
 func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) error {
 	if err := l.GitHub.Claim(ctx, l.Config, issue, runID); err != nil {
 		return failure.Wrap(failure.Transient, "claim GitHub Issue", err)
@@ -478,7 +487,14 @@ func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) er
 }
 
 func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) error {
-	wt, err := l.Worktrees.Ensure(ctx, l.Config, l.Store.RepoID, issue.Number, issue.Title)
+	current, err := l.issueState(issue.Number)
+	if err != nil {
+		return err
+	}
+	if current.Lease == nil || current.Lease.BaseSHA == "" {
+		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "prepare Issue worktree", errors.New("durable immutable base SHA is missing")), false)
+	}
+	wt, err := l.Worktrees.Ensure(ctx, l.Config, l.Store.RepoID, issue.Number, issue.Title, current.Lease.BaseSHA)
 	if err != nil {
 		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "prepare Issue worktree", err), false)
 	}
@@ -507,7 +523,7 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "persist worker start", err)
 	}
-	current, err := l.issueState(issue.Number)
+	current, err = l.issueState(issue.Number)
 	if err != nil {
 		return err
 	}
