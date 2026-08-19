@@ -13,6 +13,8 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 )
 
+const githubTestCapabilityContract = "<!-- agent-loop:capabilities\nversion: 1\nprofile: standard\nnetwork: none\nbrowser_cdp: false\ndownload: false\nexternal_time_gate: false\n-->"
+
 func TestEligibleRequiresReadyAndRejectsStateLabels(t *testing.T) {
 	cfg := config.Defaults().GitHub
 	if !Eligible([]string{"codex-loop:ready"}, cfg) {
@@ -410,7 +412,7 @@ func TestListReadyPreservesORFilteringForMultipleReadyLabels(t *testing.T) {
 }
 
 func TestSelectReadyIsDeterministic(t *testing.T) {
-	issues := []Issue{{Number: 9}, {Number: 2}, {Number: 5}}
+	issues := []Issue{{Number: 9, Body: githubTestCapabilityContract}, {Number: 2, Body: githubTestCapabilityContract}, {Number: 5, Body: githubTestCapabilityContract}}
 	selected, ok := SelectReady(issues, map[string]string{"2": "completed"}, config.Defaults().Queue)
 	if !ok || selected.Number != 5 {
 		t.Fatalf("selected=%+v ok=%v", selected, ok)
@@ -420,9 +422,9 @@ func TestSelectReadyIsDeterministic(t *testing.T) {
 func TestSelectReadyAppliesChangedOrderOnlyToUnclaimedIssues(t *testing.T) {
 	base := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
 	issues := []Issue{
-		{Number: 3, CreatedAt: base, Labels: []string{"priority:high"}},
-		{Number: 2, CreatedAt: base.Add(time.Hour)},
-		{Number: 1, CreatedAt: base.Add(2 * time.Hour)},
+		{Number: 3, CreatedAt: base, Labels: []string{"priority:high"}, Body: githubTestCapabilityContract},
+		{Number: 2, CreatedAt: base.Add(time.Hour), Body: githubTestCapabilityContract},
+		{Number: 1, CreatedAt: base.Add(2 * time.Hour), Body: githubTestCapabilityContract},
 	}
 	queue := config.Queue{Order: "priority_then_created_at", PriorityLabels: []string{"priority:high"}}
 	selected, ok := SelectReady(issues, map[string]string{"3": "running"}, queue)
@@ -432,7 +434,7 @@ func TestSelectReadyAppliesChangedOrderOnlyToUnclaimedIssues(t *testing.T) {
 }
 
 func TestSelectReadyDoesNotReclaimAnsweredContinuationStates(t *testing.T) {
-	issues := []Issue{{Number: 1}, {Number: 2}, {Number: 3}}
+	issues := []Issue{{Number: 1, Body: githubTestCapabilityContract}, {Number: 2, Body: githubTestCapabilityContract}, {Number: 3, Body: githubTestCapabilityContract}}
 	selected, ok := SelectReady(issues, map[string]string{"1": "answer_claim_waiting", "2": "resume_pending"}, config.Defaults().Queue)
 	if !ok || selected.Number != 3 {
 		t.Fatalf("answered continuation was selected as a new claim: selected=%+v ok=%v", selected, ok)

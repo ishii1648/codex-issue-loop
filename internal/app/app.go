@@ -19,6 +19,7 @@ import (
 	"time"
 
 	assets "github.com/ishii1648/codex-issue-loop"
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/conflict"
@@ -1100,6 +1101,15 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 		return err
 	}
 	result := buildStatus(launchStatus, snapshot, cfg.Queue.Concurrency)
+	result.CapabilityAdmission = &capabilityAdmissionStatus{
+		ContractVersion: capability.ContractVersion, Profiles: cfg.WorkerCapabilityProfiles(),
+		Predicate: "all required capability fields must be satisfied by the selected effective worker profile",
+		MismatchCodes: []string{
+			capability.CodeMetadataMissing, capability.CodeMetadataInvalid, capability.CodeProfileUnknown,
+			capability.CodeNetworkMismatch, capability.CodeBrowserCDPMismatch, capability.CodeDownloadMismatch,
+			capability.CodeExternalTimeMismatch,
+		},
+	}
 	if cfg.Webhook.Enabled() {
 		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
 		brokerLaunchd, statusErr := manager.BrokerStatus(ctx)
@@ -1383,6 +1393,13 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
+	if current.CapabilityRequirements != nil {
+		capabilityEvaluation := capability.EvaluateRequirement(current.CapabilityRequirements, cfg.WorkerCapabilityProfiles())
+		if !capabilityEvaluation.Compatible {
+			data, _ := json.Marshal(capabilityEvaluation.Mismatches)
+			return exitError{4, fmt.Errorf("Issue #%d capability mismatch: %s", *issueNumber, data)}
+		}
+	}
 	if current.Status != "blocked" || current.GitHubSync != "" {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before retry (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
@@ -1497,6 +1514,13 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	current := snapshot.Issues[strconv.Itoa(*issueNumber)]
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
+	}
+	if current.CapabilityRequirements != nil {
+		capabilityEvaluation := capability.EvaluateRequirement(current.CapabilityRequirements, cfg.WorkerCapabilityProfiles())
+		if !capabilityEvaluation.Compatible {
+			data, _ := json.Marshal(capabilityEvaluation.Mismatches)
+			return exitError{4, fmt.Errorf("Issue #%d capability mismatch: %s", *issueNumber, data)}
+		}
 	}
 	pendingResume := false
 	idempotentResume := false

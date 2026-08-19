@@ -4,18 +4,27 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 )
 
 type statusResult struct {
-	Launchd           launchd.Status          `json:"launchd"`
-	WorkerPool        workerPoolStatus        `json:"worker_pool"`
-	ResourceAdmission resourceAdmissionStatus `json:"resource_admission"`
-	PendingRequests   []*state.Request        `json:"pending_requests"`
-	State             state.Snapshot          `json:"state"`
-	Broker            *brokerStatus           `json:"broker,omitempty"`
+	Launchd             launchd.Status             `json:"launchd"`
+	WorkerPool          workerPoolStatus           `json:"worker_pool"`
+	ResourceAdmission   resourceAdmissionStatus    `json:"resource_admission"`
+	PendingRequests     []*state.Request           `json:"pending_requests"`
+	State               state.Snapshot             `json:"state"`
+	Broker              *brokerStatus              `json:"broker,omitempty"`
+	CapabilityAdmission *capabilityAdmissionStatus `json:"capability_admission,omitempty"`
+}
+
+type capabilityAdmissionStatus struct {
+	ContractVersion int                            `json:"contract_version"`
+	Profiles        map[string]capability.Provider `json:"profiles"`
+	Predicate       string                         `json:"predicate"`
+	MismatchCodes   []string                       `json:"mismatch_codes"`
 }
 
 type resourceAdmissionStatus struct {

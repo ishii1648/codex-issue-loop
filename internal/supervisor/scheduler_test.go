@@ -26,7 +26,7 @@ import (
 type numberedFakeGitHub struct{ *fakeGitHub }
 
 func (f numberedFakeGitHub) Get(_ context.Context, cfg config.Config, number int) (gh.Issue, error) {
-	return gh.Issue{Number: number, Title: "Test", State: "OPEN", Labels: append([]string(nil), cfg.GitHub.ReadyLabels...)}, nil
+	return capabilityReadyIssue(gh.Issue{Number: number, Title: "Test", State: "OPEN", Labels: append([]string(nil), cfg.GitHub.ReadyLabels...)}), nil
 }
 
 type countingGitHub struct {
@@ -474,7 +474,7 @@ func (f *webhookFakeGitHub) ListReadyConditional(_ context.Context, _ config.Con
 	f.conditionalCalls++
 	f.conditionalETags = append(f.conditionalETags, etag)
 	if f.conditionalCalls == 1 {
-		return gh.ConditionalQueueResult{Issues: []gh.Issue{f.issue}, StatusCode: 200, ETag: `W/"queue-v1"`, RateRemaining: "4999"}, nil
+		return gh.ConditionalQueueResult{Issues: []gh.Issue{capabilityReadyIssue(f.issue)}, StatusCode: 200, ETag: `W/"queue-v1"`, RateRemaining: "4999"}, nil
 	}
 	return gh.ConditionalQueueResult{StatusCode: 304, ETag: `W/"queue-v1"`, NotModified: true, RateRemaining: "4999"}, nil
 }
@@ -486,7 +486,7 @@ func (f *webhookFakeGitHub) ListReady(ctx context.Context, cfg config.Config) ([
 
 func (f *webhookFakeGitHub) GetREST(context.Context, config.Config, int) (gh.Issue, error) {
 	f.restGets++
-	return f.issue, nil
+	return capabilityReadyIssue(f.issue), nil
 }
 
 func (f *webhookFakeGitHub) InspectPullRequestREST(context.Context, config.Config, int, int, string) (gh.RemoteState, error) {

@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ishii1648/codex-issue-loop/internal/admission"
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 )
@@ -647,7 +648,9 @@ func SelectReady(issues []Issue, snapshotIssues map[string]string, queue config.
 		concurrency = 1
 	}
 	result, err := admission.Select(admission.Input{
-		Settings:   admission.Settings{Concurrency: concurrency, MetadataVersion: 1, Legacy: true},
+		Settings: admission.Settings{Concurrency: concurrency, MetadataVersion: 1, Legacy: true, CapabilityProfiles: map[string]capability.Provider{
+			"standard": {Version: 1, Profile: "standard", Network: capability.NetworkNone},
+		}},
 		Queue:      admission.Queue{Order: queue.Order, PriorityLabels: append([]string(nil), queue.PriorityLabels...)},
 		Candidates: candidates,
 		Ineligible: ineligible,

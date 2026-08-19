@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
@@ -299,6 +300,7 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 			instruction(filepath.Join(entry.RepoPath, config.FileName)+"を修正し、doctorを再実行してください")))
 	}
 	diagnostics = append(diagnostics, passedDiagnostic("CONFIG_VALID", "repository", entry.RepoID, ".agent-loop.yamlを読み込めます", cfg.GitHub.Repo))
+	diagnostics = append(diagnostics, diagnoseWorkerProfileCapabilities(entry, cfg)...)
 	diagnostics = append(diagnostics, diagnoseWorkerBackend(ctx, entry, cfg)...)
 	diagnostics = append(diagnostics, diagnoseFormatters(ctx, entry, cfg)...)
 	diagnostics = append(diagnostics, diagnoseWebhook(ctx, l, entry, cfg)...)
@@ -360,6 +362,27 @@ func diagnoseRepository(ctx context.Context, l layout.Layout, entry registry.Ent
 	}
 
 	diagnostics = append(diagnostics, diagnoseDurableState(l, entry, cfg)...)
+	return diagnostics
+}
+
+func diagnoseWorkerProfileCapabilities(entry registry.Entry, cfg config.Config) []diagnostic {
+	diagnostics := []diagnostic{}
+	for _, profileName := range []string{"standard", "extended"} {
+		profile := cfg.Worker.Profiles[profileName]
+		configured := capability.Provider{
+			Version: capability.ContractVersion, Profile: profileName,
+			Network: profile.Capabilities.Network, BrowserCDP: profile.Capabilities.BrowserCDP,
+			Download: profile.Capabilities.Download, ExternalTimeGate: profile.Capabilities.ExternalTimeGate,
+		}
+		launched := cfg.WorkerLaunchCapabilities(profileName)
+		mismatches := capability.ProfileDrift(configured, launched)
+		if len(mismatches) == 0 {
+			diagnostics = append(diagnostics, passedDiagnostic("WORKER_PROFILE_LAUNCH_MATCH", "repository", entry.RepoID, "worker profileと実起動capabilityが整合しています", "profile="+profileName))
+			continue
+		}
+		detail, _ := json.Marshal(mismatches)
+		diagnostics = append(diagnostics, failedDiagnostic("WORKER_PROFILE_LAUNCH_MISMATCH", "repository", entry.RepoID, "worker profileが実起動経路で提供できないcapabilityを宣言しています", string(detail), instruction("worker.profiles."+profileName+".capabilitiesまたはworker.command_networkを一致させてください")))
+	}
 	return diagnostics
 }
 
