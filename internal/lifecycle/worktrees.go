@@ -217,7 +217,7 @@ func maxAgeForStatus(policy config.Worktrees, status string) (time.Duration, str
 		age = policy.FailedMaxAge.Duration
 	case "blocked":
 		age = policy.BlockedMaxAge.Duration
-	case "needs_input", "resume_pending":
+	case "needs_input", "answer_claim_waiting", "resume_pending":
 		age = policy.NeedsInputMaxAge.Duration
 	default:
 		return 0, "non_terminal_status"

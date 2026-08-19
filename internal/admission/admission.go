@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,6 +22,7 @@ const (
 	ReasonDependencyCycle      = "dependency_cycle"
 	ReasonDependencyIncomplete = "dependency_incomplete"
 	ReasonResourceConflict     = "resource_conflict"
+	ReasonCapabilityMismatch   = "capability_mismatch"
 	ReasonNoCapacity           = "no_capacity"
 )
 
@@ -38,9 +40,10 @@ type ResourceDefinition struct {
 }
 
 type Settings struct {
-	Concurrency     int
-	MetadataVersion int
-	Definitions     []ResourceDefinition
+	Concurrency        int
+	MetadataVersion    int
+	Definitions        []ResourceDefinition
+	CapabilityProfiles map[string]capability.Provider
 
 	// Legacy keeps schema-v2 queues on the same selector without activating
 	// metadata semantics before the schema-v3 migration. Every candidate is an
@@ -96,12 +99,16 @@ type Input struct {
 }
 
 type Evaluation struct {
-	Candidate      Candidate
-	Resources      []string
-	Dependencies   []int
-	FallbackReason string
-	Errors         []string
-	metadataValid  bool
+	Candidate Candidate
+	// DeclaredResources is the normalized area: label set observed at claim
+	// time. Resources is the effective, safety-fallback claim used for leases.
+	DeclaredResources []string
+	Resources         []string
+	Dependencies      []int
+	FallbackReason    string
+	Errors            []string
+	Capability        capability.Evaluation
+	metadataValid     bool
 }
 
 type Skip struct {
@@ -230,6 +237,10 @@ func Select(input Input) (Result, error) {
 			result.Skipped = append(result.Skipped, Skip{Evaluation: evaluation, Reason: ReasonIneligible, Detail: detail})
 			continue
 		}
+		if !evaluation.Capability.Compatible {
+			result.Skipped = append(result.Skipped, Skip{Evaluation: evaluation, Reason: ReasonCapabilityMismatch, Detail: capabilityDetail(evaluation.Capability)})
+			continue
+		}
 		if cycle[number] {
 			result.Skipped = append(result.Skipped, Skip{Evaluation: evaluation, Reason: ReasonDependencyCycle})
 			continue
@@ -254,14 +265,30 @@ func Select(input Input) (Result, error) {
 	return result, nil
 }
 
+// EvaluateCandidate applies the same deterministic normalization used by
+// Select without considering capacity, dependencies, or active leases.
+func EvaluateCandidate(settings Settings, candidate Candidate) (Evaluation, error) {
+	if err := settings.Validate(); err != nil {
+		return Evaluation{}, err
+	}
+	known := make(map[string]bool, len(settings.Definitions))
+	for _, definition := range settings.Definitions {
+		name, _ := normalizeResourceName(strings.Trim(definition.Name, " \t"))
+		known[name] = true
+	}
+	return evaluate(candidate, settings, known), nil
+}
+
 func evaluate(candidate Candidate, settings Settings, known map[string]bool) Evaluation {
 	candidate.Labels = normalizedSet(append([]string(nil), candidate.Labels...))
-	result := Evaluation{Candidate: candidate, Resources: []string{RepositoryResource}, Dependencies: []int{}}
+	result := Evaluation{Candidate: candidate, DeclaredResources: []string{}, Resources: []string{RepositoryResource}, Dependencies: []int{}, Capability: capability.Evaluate(candidate.Body, settings.CapabilityProfiles)}
 	if settings.Legacy {
+		result.DeclaredResources = []string{RepositoryResource}
 		return result
 	}
 	metadata, metadataReason, metadataErrors := parseMetadata(candidate.Number, candidate.Body, settings.MetadataVersion)
 	claims, claimReason, claimErrors := parseClaims(candidate.Labels, known)
+	result.DeclaredResources = append([]string(nil), claims...)
 	result.Errors = append(result.Errors, metadataErrors...)
 	result.Errors = append(result.Errors, claimErrors...)
 	sort.Strings(result.Errors)
@@ -277,6 +304,15 @@ func evaluate(candidate Candidate, settings Settings, known map[string]bool) Eva
 	}
 	result.Resources = claims
 	return result
+}
+
+func capabilityDetail(evaluation capability.Evaluation) string {
+	codes := make([]string, 0, len(evaluation.Mismatches))
+	for _, mismatch := range evaluation.Mismatches {
+		codes = append(codes, mismatch.Code)
+	}
+	sort.Strings(codes)
+	return strings.Join(codes, ",")
 }
 
 func normalizeLeases(leases []Lease) ([]Lease, map[int]bool, error) {
@@ -578,12 +614,135 @@ func parseClaims(labels []string, known map[string]bool) ([]string, string, []st
 		return nil, FallbackResourceMissing, []string{"resource claim is missing"}
 	}
 	if len(invalid) > 0 {
-		return nil, FallbackResourceInvalid, prefixed("invalid resource label ", invalid)
+		return claims, FallbackResourceInvalid, prefixed("invalid resource label ", invalid)
 	}
 	if len(unknown) > 0 {
-		return nil, FallbackResourceUnknown, prefixed("unknown resource ", unknown)
+		return claims, FallbackResourceUnknown, prefixed("unknown resource ", unknown)
 	}
 	return claims, "", nil
+}
+
+// ResourcesForPaths maps changed repository-relative paths to every matching
+// resource. One path may intentionally require multiple resources. Any path
+// that cannot be represented safely or matches no definition falls back to
+// repo:*, which conflicts with every claim.
+func ResourcesForPaths(settings Settings, paths []string) ([]string, error) {
+	if err := settings.Validate(); err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return []string{}, nil
+	}
+	if settings.Legacy {
+		return []string{RepositoryResource}, nil
+	}
+	resources := map[string]bool{}
+	for _, path := range paths {
+		if validateChangedPath(path) != nil {
+			return []string{RepositoryResource}, nil
+		}
+		matched := false
+		for _, definition := range settings.Definitions {
+			for _, pattern := range definition.Paths {
+				if matchPathPattern(pattern, path) {
+					name, _ := normalizeResourceName(strings.Trim(definition.Name, " \t"))
+					resources[name] = true
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return []string{RepositoryResource}, nil
+		}
+	}
+	result := make([]string, 0, len(resources))
+	for resource := range resources {
+		result = append(result, resource)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+// Covers reports whether every actual resource was present in the effective
+// declaration. repo:* is only covered by an explicit repository-wide claim.
+func Covers(declared, actual []string) bool {
+	set := map[string]bool{}
+	for _, resource := range declared {
+		set[resource] = true
+	}
+	for _, resource := range actual {
+		if !set[resource] {
+			return false
+		}
+	}
+	return true
+}
+
+func validateChangedPath(path string) error {
+	if err := validateResourcePath(path); err != nil {
+		return err
+	}
+	if strings.ContainsAny(path, "*?") {
+		return fmt.Errorf("changed path contains glob tokens")
+	}
+	return nil
+}
+
+func matchPathPattern(pattern, path string) bool {
+	patterns := strings.Split(pattern, "/")
+	segments := strings.Split(path, "/")
+	type position struct{ pattern, path int }
+	memo := map[position]bool{}
+	seen := map[position]bool{}
+	var match func(int, int) bool
+	match = func(patternIndex, pathIndex int) bool {
+		key := position{patternIndex, pathIndex}
+		if seen[key] {
+			return memo[key]
+		}
+		seen[key] = true
+		if patternIndex == len(patterns) {
+			memo[key] = pathIndex == len(segments)
+			return memo[key]
+		}
+		if patterns[patternIndex] == "**" {
+			memo[key] = match(patternIndex+1, pathIndex) || pathIndex < len(segments) && match(patternIndex, pathIndex+1)
+			return memo[key]
+		}
+		memo[key] = pathIndex < len(segments) && matchSegment(patterns[patternIndex], segments[pathIndex]) && match(patternIndex+1, pathIndex+1)
+		return memo[key]
+	}
+	return match(0, 0)
+}
+
+func matchSegment(pattern, value string) bool {
+	patterns, values := []rune(pattern), []rune(value)
+	type position struct{ pattern, value int }
+	memo := map[position]bool{}
+	seen := map[position]bool{}
+	var match func(int, int) bool
+	match = func(patternIndex, valueIndex int) bool {
+		key := position{patternIndex, valueIndex}
+		if seen[key] {
+			return memo[key]
+		}
+		seen[key] = true
+		if patternIndex == len(patterns) {
+			memo[key] = valueIndex == len(values)
+			return memo[key]
+		}
+		switch patterns[patternIndex] {
+		case '*':
+			memo[key] = match(patternIndex+1, valueIndex) || valueIndex < len(values) && match(patternIndex, valueIndex+1)
+		case '?':
+			memo[key] = valueIndex < len(values) && match(patternIndex+1, valueIndex+1)
+		default:
+			memo[key] = valueIndex < len(values) && patterns[patternIndex] == values[valueIndex] && match(patternIndex+1, valueIndex+1)
+		}
+		return memo[key]
+	}
+	return match(0, 0)
 }
 
 func prefixed(prefix string, values []string) []string {

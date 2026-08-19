@@ -55,10 +55,11 @@ jobs:
           scripts/build-release.sh "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${source_epoch}" dist/second
           cmp dist/first/agent-loop_Darwin_arm64 dist/second/agent-loop_Darwin_arm64
           cmp dist/first/agent-loop_Darwin_arm64.spdx.json dist/second/agent-loop_Darwin_arm64.spdx.json
+          cmp dist/first/release-manifest.json dist/second/release-manifest.json
           cmp dist/first/checksums.txt dist/second/checksums.txt
           dist/first/agent-loop_Darwin_arm64 version --json | jq -e \
             --arg version "${GITHUB_REF_NAME}" --arg commit "${GITHUB_SHA}" \
-            '.version == $version and .commit == $commit'
+            '.version == $version and .commit == $commit and .target == "darwin/arm64" and .delivery_protocol == 1'
 
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@v3
@@ -66,6 +67,7 @@ jobs:
           subject-path: |
             dist/first/agent-loop_Darwin_arm64
             dist/first/agent-loop_Darwin_arm64.spdx.json
+            dist/first/release-manifest.json
             dist/first/checksums.txt
 
       - name: Create GitHub Release
@@ -75,6 +77,7 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             dist/first/agent-loop_Darwin_arm64 \
             dist/first/agent-loop_Darwin_arm64.spdx.json \
+            dist/first/release-manifest.json \
             dist/first/checksums.txt \
             --verify-tag \
             --generate-notes \

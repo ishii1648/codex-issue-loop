@@ -11,11 +11,120 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/capability"
+	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/userrules"
+	"github.com/ishii1648/codex-issue-loop/internal/webhook"
 )
+
+func TestDoctorDetectsWorkerProfileLaunchMismatch(t *testing.T) {
+	cfg := config.Defaults()
+	profile := cfg.Worker.Profiles["extended"]
+	profile.Capabilities.Network = "public"
+	profile.Capabilities.BrowserCDP = true
+	cfg.Worker.Profiles["extended"] = profile
+	diagnostics := diagnoseWorkerProfileCapabilities(registry.Entry{RepoID: "repo-test"}, cfg)
+	found := false
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == "WORKER_PROFILE_LAUNCH_MISMATCH" && !diagnostic.OK && strings.Contains(diagnostic.Detail, capability.CodeWorkerProfileDrift) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("profile/launch mismatch was not diagnosed: %+v", diagnostics)
+	}
+}
+
+func TestDoctorDiagnosesGoFormatterCapability(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Formatters.Go.Enabled = true
+	entry := registry.Entry{RepoID: "repo", RepoPath: "/repo", Commands: map[string]string{}}
+	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_NOT_REGISTERED"); item.OK {
+		t.Fatalf("missing gofmt passed: %+v", item)
+	}
+	formatter := filepath.Join(t.TempDir(), "gofmt")
+	if err := os.WriteFile(formatter, []byte("#!/bin/sh\nprintf 'wrong\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry.Commands["gofmt"] = formatter
+	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_CAPABILITY_MISSING"); item.OK {
+		t.Fatalf("invalid gofmt capability passed: %+v", item)
+	}
+	if err := os.WriteFile(formatter, []byte("#!/bin/sh\nprintf 'package probe\\n\\nfunc f() {}\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_AVAILABLE"); !item.OK {
+		t.Fatalf("available gofmt failed: %+v", item)
+	}
+	cfg.Formatters.Go.Enabled = false
+	if item := diagnosticByCode(t, diagnoseFormatters(context.Background(), entry, cfg), "FORMATTER_GO_DISABLED"); !item.OK {
+		t.Fatalf("disabled gofmt failed: %+v", item)
+	}
+}
+
+func TestDoctorDistinguishesBrokerRegistrationRuntimeAndFreshness(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{
+		Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"),
+		LaunchAgents: filepath.Join(root, "launchagents"),
+	}
+	if err := os.MkdirAll(l.LaunchAgents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launchctl := filepath.Join(root, "launchctl")
+	script := `#!/bin/sh
+case "$DOCTOR_BROKER_MODE" in
+  unloaded) exit 1 ;;
+  crash) printf 'state = waiting\nlast exit code = 78\n' ;;
+  running) printf 'state = running\npid = 4321\n' ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	cfg.GitHub.RepositoryID = 1234
+	cfg.Webhook.Mode = "webhook"
+	cfg.Webhook.ListenerAddress = "127.0.0.1:8787"
+	cfg.Webhook.PublicURLIdentifier = "fixture.example/webhook"
+	cfg.Webhook.SecretSource.Env = "DOCTOR_WEBHOOK_SECRET"
+	cfg.Webhook.InstallationIDs = []int64{99}
+	t.Setenv("DOCTOR_WEBHOOK_SECRET", "fixture-secret")
+	entry := registry.Entry{RepoID: "repo", RepoPath: root, Commands: map[string]string{"launchctl": launchctl}}
+	if item := diagnosticByCode(t, diagnoseWebhook(context.Background(), l, entry, cfg), "WEBHOOK_BROKER_NOT_REGISTERED"); item.OK {
+		t.Fatalf("missing plist passed: %+v", item)
+	}
+	if err := os.WriteFile(l.BrokerPlistPath(), []byte("plist"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCTOR_BROKER_MODE", "unloaded")
+	if item := diagnosticByCode(t, diagnoseWebhook(context.Background(), l, entry, cfg), "WEBHOOK_BROKER_UNLOADED"); item.OK {
+		t.Fatalf("unloaded broker passed: %+v", item)
+	}
+	if err := os.MkdirAll(l.BrokerDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFixture(t, filepath.Join(l.BrokerDir(), "status.json"), webhook.Status{
+		Version: 1, Mode: "webhook", ListenerAddress: cfg.Webhook.ListenerAddress, UpdatedAt: time.Now().Add(-10 * time.Minute),
+	})
+	t.Setenv("DOCTOR_BROKER_MODE", "crash")
+	diagnostics := diagnoseWebhook(context.Background(), l, entry, cfg)
+	if diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_CRASH_LOOP").OK || diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_STATUS_STALE").OK {
+		t.Fatalf("crash/stale broker passed: %+v", diagnostics)
+	}
+	writeJSONFixture(t, filepath.Join(l.BrokerDir(), "status.json"), webhook.Status{
+		Version: 1, Mode: "webhook", ListenerAddress: cfg.Webhook.ListenerAddress, UpdatedAt: time.Now().UTC(),
+	})
+	t.Setenv("DOCTOR_BROKER_MODE", "running")
+	diagnostics = diagnoseWebhook(context.Background(), l, entry, cfg)
+	if !diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_RUNNING").OK || !diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_STATUS_FRESH").OK {
+		t.Fatalf("healthy broker failed: %+v", diagnostics)
+	}
+}
 
 func diagnosticByCode(t *testing.T, diagnostics []diagnostic, code string) diagnostic {
 	t.Helper()
@@ -103,9 +212,9 @@ func TestDiagnoseSchemasDistinguishesSupportedRequiredAndUnsupported(t *testing.
 		code    string
 		ready   bool
 	}{
-		{name: "supported", version: 3, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
-		{name: "migration-required", version: 2, code: "SCHEMA_MIGRATION_REQUIRED"},
-		{name: "unsupported", version: 4, code: "SCHEMA_VERSION_UNSUPPORTED"},
+		{name: "supported", version: 4, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
+		{name: "migration-required", version: 3, code: "SCHEMA_MIGRATION_REQUIRED"},
+		{name: "unsupported", version: 5, code: "SCHEMA_VERSION_UNSUPPORTED"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := os.WriteFile(l.RegistryPath, []byte(fmt.Sprintf("{\"version\":%d,\"repos\":{}}\n", test.version)), 0o600); err != nil {
@@ -210,35 +319,6 @@ esac
 		if item := diagnosticByCode(t, diagnostics, code); item.OK || len(item.Remediations) == 0 {
 			t.Fatalf("diagnostic=%+v", item)
 		}
-	}
-}
-
-func TestDoctorDiagnosesNotificationCredentialLifecycle(t *testing.T) {
-	repo, l := testEnvironment(t)
-	if err := l.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	cfg := mustConfig(t, repo)
-	cfg.Notifications.Enabled = true
-	entry := registry.Entry{RepoID: registry.RepoID(cfg.GitHub.Repo, repo), RepoPath: repo}
-	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_MISSING"); item.OK || len(item.Remediations) != 1 {
-		t.Fatalf("diagnostic=%+v", item)
-	}
-	path := l.NotificationTokenPath(entry.RepoID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("token-value\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_VALID"); !item.OK {
-		t.Fatalf("diagnostic=%+v", item)
-	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if item := diagnosticByCode(t, diagnoseNotificationCredential(l, entry, cfg), "NOTIFICATION_CREDENTIAL_UNSAFE"); item.OK {
-		t.Fatalf("diagnostic=%+v", item)
 	}
 }
 

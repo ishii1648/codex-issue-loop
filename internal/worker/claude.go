@@ -50,6 +50,10 @@ func (c ClaudeCode) Resume(ctx context.Context, cfg config.Config, issue gh.Issu
 }
 
 func (c ClaudeCode) execute(parent context.Context, cfg config.Config, runID, sessionID, prompt string, started Started) (Result, error) {
+	workspace, err := config.CanonicalRepoPath(cfg.RepoPath)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve Claude Code workspace: %w", err)
+	}
 	runDir := filepath.Join(c.StateDir, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return Result{}, err
@@ -88,7 +92,7 @@ func (c ClaudeCode) execute(parent context.Context, cfg config.Config, runID, se
 	ctx, cancel := context.WithTimeout(parent, cfg.Worker.Timeout.Duration)
 	defer cancel()
 	cmd := exec.Command(cfg.Worker.EffectiveCommand(), args...)
-	cmd.Dir = cfg.RepoPath
+	cmd.Dir = workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(prompt)
 	safeOut := redact.NewLineWriterWithSecrets(stdout, c.Secrets)
@@ -96,7 +100,7 @@ func (c ClaudeCode) execute(parent context.Context, cfg config.Config, runID, se
 	cmd.Stdout, cmd.Stderr = safeOut, safeErr
 	runErr := cmd.Start()
 	if runErr == nil && started != nil {
-		if err := started(cmd.Process.Pid); err != nil {
+		if err := started(processStart(cmd, workspace)); err != nil {
 			_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 			return Result{}, fmt.Errorf("record worker process: %w", err)

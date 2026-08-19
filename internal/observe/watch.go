@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -12,8 +13,9 @@ import (
 )
 
 type Result struct {
-	Reason   string         `json:"reason"`
-	Snapshot state.Snapshot `json:"snapshot"`
+	Reason          string           `json:"reason"`
+	PendingRequests []*state.Request `json:"pending_requests"`
+	Snapshot        state.Snapshot   `json:"snapshot"`
 }
 
 type eventSubscription struct {
@@ -37,7 +39,7 @@ func waitWithSubscription(ctx context.Context, store state.Store, interval time.
 		return Result{}, fmt.Errorf("reconcile interval must be positive")
 	}
 	if snapshot, result, err := check(store, untilIdle); err != nil || result != "" {
-		return Result{Reason: result, Snapshot: snapshot}, err
+		return newResult(result, snapshot), err
 	}
 
 	subscription, err := subscribe(ctx, filepath.Clean(store.Dir))
@@ -57,7 +59,7 @@ func waitWithSubscription(ctx context.Context, store state.Store, interval time.
 	// Read again after subscribing so a transition between the first read and
 	// event registration cannot be lost.
 	if snapshot, result, err := check(store, untilIdle); err != nil || result != "" {
-		return Result{Reason: result, Snapshot: snapshot}, err
+		return newResult(result, snapshot), err
 	}
 
 	return wait(ctx, store, interval, jitter, untilIdle, subscription.wake, subscription.errors)
@@ -111,7 +113,7 @@ func wait(ctx context.Context, store state.Store, interval time.Duration, jitter
 		return Result{}, fmt.Errorf("reconcile interval must be positive")
 	}
 	if snapshot, result, err := check(store, untilIdle); err != nil || result != "" {
-		return Result{Reason: result, Snapshot: snapshot}, err
+		return newResult(result, snapshot), err
 	}
 	timer := time.NewTimer(jittered(interval, jitter))
 	defer timer.Stop()
@@ -138,7 +140,7 @@ func wait(ctx context.Context, store state.Store, interval time.Duration, jitter
 			return Result{}, err
 		}
 		if result != "" {
-			return Result{Reason: result, Snapshot: snapshot}, nil
+			return newResult(result, snapshot), nil
 		}
 		timer.Reset(jittered(interval, jitter))
 	}
@@ -154,6 +156,23 @@ func check(store state.Store, untilIdle bool) (state.Snapshot, string, error) {
 		return snapshot, "", nil
 	}
 	return snapshot, reason, nil
+}
+
+func pendingRequests(snapshot state.Snapshot) []*state.Request {
+	requests := make([]*state.Request, 0)
+	for _, request := range snapshot.PendingRequests {
+		if request != nil && request.Status == "pending" {
+			copy := *request
+			copy.Options = append([]state.Option(nil), request.Options...)
+			requests = append(requests, &copy)
+		}
+	}
+	sort.Slice(requests, func(i, j int) bool { return requests[i].ID < requests[j].ID })
+	return requests
+}
+
+func newResult(reason string, snapshot state.Snapshot) Result {
+	return Result{Reason: reason, PendingRequests: pendingRequests(snapshot), Snapshot: snapshot}
 }
 
 func jittered(base time.Duration, ratio float64) time.Duration {

@@ -66,6 +66,14 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 
 更新・rollbackを含む詳細は[Release・install・update](docs/release.md)を参照してください。
 
+schema-compatibleなproduction ReleaseをMac側から安全に自動反映する場合は、host単位の設定と専用LaunchAgentをpreviewしてから作成します。設定は各repositoryではなく`$HOME/.agent-loop-delivery.yaml`へ置かれます。
+
+```sh
+"$agent_loop_bin" delivery configure --json
+"$agent_loop_bin" delivery configure --apply --json
+"$agent_loop_bin" delivery status --json
+```
+
 ### 2. 対象リポジトリを準備する
 
 対象リポジトリをMacへcloneし、rootに`.agent-loop.yaml`を置きます。設定にはtokenや秘密値を記載しません。
@@ -107,11 +115,73 @@ sleep 3
 
 `doctor`が`ok: true`を返し、LaunchAgentとsupervisorが稼働していることを確認します。LaunchAgentのPATH、aqua利用時の登録、初回セットアップの詳細は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
 
+多数のrepositoryを常駐させる場合は、明示的な`webhook.mode: webhook`で共有localhost brokerを利用できます。公開HTTPS endpointはagent-loopが用意せず、既存のreverse proxyから`127.0.0.1`または`::1`へ配送します。署名検証、secret管理、GitHub event、rotation、15分の条件付きREST safety sweep、pollingへのrollbackは[Mac mini常駐運用runbook](docs/mac-mini-runbook.md#12-webhook-brokerとreverse-proxy)を参照してください。
+
 `completion.auto_merge: true`でPR conflictが発生した場合は、同じworktree・branch・PRを使う`resolving_conflict`へ自動遷移します。規定回数後に最終`blocked`となったconflictだけ、原因を修復したうえで次の明示操作から再開します。
 
 ```sh
 "$agent_loop_bin" retry --repo "$PWD" --issue 123 --json
 ```
+
+workerが外部環境前提を理由にtyped `blocked`を返すと、supervisorはPID/PGID不在を確認し、run・worktree・branch・dirty changes・session/Goal・answers・resource/base provenanceを`resource_park`へ保持したままactive leaseだけを自動parkします。GitHubは`blocked`のままですが、後続queueは同じresourceを予約できます。`status --json`の`resource_admission.resource_parks`で保存claimとpark状態、`claim_waiting_candidates`でresumeを妨げるIssue/resource/slotを確認できます。
+
+通常workerが`needs_input`を返した場合も、pending requestとrequest IDをrun・元lease ownerへ結び付け、PID/PGID消失後に同じtransactionでleaseをparkします。GitHubの`codex-loop:needs-input`は回答まで維持されるため、質問、worktree、dirty changes、branch、session/Goal、base SHAを残したまま無関係なready queueを継続できます。`answer`は保存provenanceを検証し、競合がなければ新generationを1回だけ取得します。競合中は回答を`answer_claim_waiting`として保存し、相手lease解放後に自動再取得します。
+
+前提をoperatorが解消し、active processがないことを確認した後だけ、次の明示操作で同じworktree・branch・sessionから再開します。park済みclaimは他Issueのactive leaseとworker slotを同じtransactionで再検証し、新しいowner generationを1回だけ取得します。競合中は他Issueのleaseを奪わず拒否します。PR conflict、手動exclusion、security block、failed、completed/closed Issueには適用されません。
+
+```sh
+"$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
+"$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --dry-run --json
+```
+
+park済みstateでは元のresource集合、base SHA、reservation provenanceを使い、legacy stateでleaseが欠けている場合だけ、既存の厳密なdurable history検証後に保守的な`repo:*` leaseを補います。base SHAを検証できない場合はstateとGitHub labelを変更せず拒否するため、state fileを編集せずremote-tracking branchを復旧して再実行します。
+
+v0.6.22以前の通常`needs_input` workerが回答後にleaseをgeneration 2で再取得したものの、導入前の`Workspace`欠損だけでspawn直前にblockedへ収束したexact chainには、通常のenvironment recoveryと分離した専用操作を使います。必ずpreview後に明示確認し、state・label・worktreeを手編集しません。
+
+```sh
+"$agent_loop_bin" recover-answered-workspace --repo "$PWD" --issue 123 --dry-run --json
+"$agent_loop_bin" recover-answered-workspace --repo "$PWD" --issue 123 --confirm-exact-chain --json
+```
+
+CLIは同じrequest/answer/park/run/session/worktree/branch/base、generation 1→2、全check成功の`worker_workspace_rejected`、blocked GitHub markerまでの完全な11-event chainを照合します。その直後に同じrun/status/worktree/branch/repository/HEAD/content fingerprint/validatorを証明する`workspace_provenance_recovered`がexactly 1件ある場合も、保存済みverified provenanceを再利用して限定的に受け付けます。成功時だけgeneration 3 fenceと`resume_pending`を単一transactionへ保存し、同じsession/worktreeからcontinuationを再開します。
+
+実行再開を伴う限定recoveryに一致しないlegacy `blocked` / `failed` recordは、lifecycleを一切変更しない`recover-workspace`でWorkspace provenanceだけを復旧できます。必ずpreviewし、run/worktree/branch、HEAD/content digest、LaunchValidation、GitHub Issue/label、保存PR identityを確認してから適用します。
+
+```sh
+"$agent_loop_bin" recover-workspace --repo "$PWD" --issue 123 --dry-run --json
+"$agent_loop_bin" recover-workspace --repo "$PWD" --issue 123 --confirm-verified-workspace --json
+```
+
+成功時に変わるのは`workspace`、`workspace_provenance_recovery`監査record、対応eventだけです。status、lease/resource park、session、attempt/continuation、GitHub label/comment、worktree内容は変更しません。active process、pending request、別exclusion、closed Issue、保存PR/branch/HEAD不一致ではfail closedとなります。11-event answered missing-workspace lifecycle candidateではpreviewが`eligible=false`と専用`recover-answered-workspace` remediationを返し、generic confirmはstateを変更せず拒否します。
+
+worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missing`として最終`failed`になったIssueは、保存済みcompleted resultとdirty worktreeが一致する場合だけpublication-only recoveryを明示要求できます。workerは再実行せず、元のattempt budget、run、worktree、branch、回答、session、resource metadataを保持します。
+
+```sh
+"$agent_loop_bin" recover-publication --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
+```
+
+このコマンドは汎用failed retryではありません。manual exclusion、worker failure、security block、PR conflict、closed Issue、unknown failure provenance、missing/changed resultやworktreeをfail closedで拒否します。
+
+保存済みPRのrequired checks失敗でretry budgetを使い切ったIssueは、同じbranchへ外部修正をpushした後だけ、明示操作で既存PR lifecycleへ戻せます。旧headと異なるclean・fully pushedなhead、same-repositoryのopen Issue/PR、typed failure provenance、retained leaseを検証し、worker retry budgetはresetしません。v0.6.20のpublisher decode bug後にfinal retryでprovenanceが失われたrecordだけは、欠落・重複・順序・run/generation・PR identityをdurable eventsから完全に再構成できる場合に限り同じ経路へ復帰できます。
+
+```sh
+"$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --confirm-external-fix --json
+"$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --dry-run --json
+```
+
+Production由来の復旧証跡を手編集せずsanitizationして固定する場合は、[recovery fixture runbook](docs/recovery-fixtures.md)に従い`export-recovery-fixture`と`verify-recovery-fixture`を使用する。
+
+checksがpendingまたはgreenなら`awaiting_checks`から通常のDraft解除・auto mergeへ収束し、failureならterminal `failed`を維持します。manual/security exclusion、active worker、pending request、dirty/unpushed worktree、別branch/PR/head、closed-without-mergeでは拒否します。
+
+terminal `blocked` / `failed`の保存branchからoperatorがPRを作成・merge済みなのに、durable stateへPR URLが保存されずretained leaseがqueueを止めている場合は、限定adoptionを明示実行できます。
+
+```sh
+"$agent_loop_bin" adopt-merged-pr --repo "$PWD" --issue 123 --confirm-merged-pr-adoption --json
+```
+
+同一repo・保存branchのmerged PRがちょうど1件で、cleanかつfully pushedなworktree/head、lease owner/generation/base SHA、supervisor-owned terminal provenance、process/request不在がすべて一致する場合だけterminal stateへ採用します。新しいcommit、push、branch、PR、mergeは作成せず、attempt、continuation、session、回答を保持したままPR情報と監査metadataを保存し、leaseを1回だけ解放します。
+
+local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_network` localhost-only policyへopt-inできます。既定はnetwork無効です。設定と残余リスクは[localhost-only command network](docs/localhost-network.md)を参照してください。
 
 ### 4. 複数リポジトリを並列実行する
 
@@ -130,7 +200,7 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 "$agent_loop_bin" doctor --repo /absolute/path/to/repo-b --json
 ```
 
-リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。現在、同一リポジトリ内のIssueは`queue.concurrency: 1`で直列に処理します。
+リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。同一リポジトリでは`resources.definitions`とIssueの`area:` claimを設定した場合に`queue.concurrency`まで並列実行できます。resource設定がない既存configは`queue.concurrency: 1`と`repo:*`で安全に直列実行されます。
 
 - 同じGitHubリポジトリを複数のcloneやhostから同時に動かさないでください。
 - `status`、`watch`、`stop`などでは常に`--repo`で対象を明示してください。
@@ -152,7 +222,9 @@ gh issue edit 123 --add-label codex-loop:ready
 
 PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
 
-同一repository内並列実行で使う`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。現行schema v3はdurable resource leaseを導入済みですが、queueは引き続き`concurrency: 1`だけを受理します。
+同一repository内並列実行で使う`resources.definitions`、`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。publisherは保存済みbase SHAからtracked/untracked変更pathを検査し、actual resourceが宣言claimを超える場合はcommit・pushせず`needs_input`へ移します。`formatters.go.enabled: true`を明示したrepositoryでは、register済み`gofmt`が変更対象Go fileだけをcommit前に整形します。CIは引き続きread-onlyの`make fmt-check`を最終防衛線とします。
+
+Issueが必要とするnetwork、browser/CDP、download、外部時刻前提は[Issue capability admission契約](docs/capability-admission.md)のversioned metadataで宣言します。supervisorはworker profileと実起動経路からeffective capabilityを導出し、claim・lease・worktree・worker spawnより前にfail-closedで照合します。不一致のIssueは副作用なくskipし、compatibleな後続Issueを選択します。
 
 ### 2. 状態を確認・監視する
 
@@ -165,7 +237,7 @@ PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`
   --json
 ```
 
-短い間隔で`status`を繰り返さず、入力や復旧操作が必要になるまで1回のblocking `watch`で待機します。Codex Remoteからの監視方法は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
+短い間隔で`status`を繰り返さず、入力や復旧操作が必要になるまで1回のblocking `watch`で待機します。Codex Desktopではrepositoryごとに専用chatをpinし、質問通知とActivityの回答待ちを通常の発見経路にします。セットアップ、回答、切断・再起動後の再接続、複数repositoryの分離は[Codex Desktop監視task運用](docs/codex-desktop-monitoring.md)を参照してください。Codex Remoteからの監視方法は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
 
 ### 3. 質問へ回答する
 
@@ -178,6 +250,8 @@ printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
   --message-file - \
   --json
 ```
+
+出力が`claim_waiting: true`なら回答は保存済みです。`status --json`の`resource_admission.claim_waiting_candidates[].blocked_by`を確認し、相手Issueの通常処理を待ちます。`ready`/`running` labelやstate fileを手動編集せず、同じ回答を別requestへ再送しないでください。
 
 ### 4. 停止・再開する
 
@@ -204,7 +278,7 @@ schema migrationが必要な場合はloopを開始せず、[migration runbook](d
 
 ## 詳細ドキュメント
 
-- 運用: [Mac mini常駐運用](docs/mac-mini-runbook.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[通知](docs/notifications.md)、[worktree](docs/worktree-lifecycle.md)
-- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
+- 運用: [Codex Desktop監視task](docs/codex-desktop-monitoring.md)、[Mac mini常駐運用](docs/mac-mini-runbook.md)、[concurrency 2 rollout・rollback](docs/concurrency-rollout.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[worktree](docs/worktree-lifecycle.md)
+- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[App Server Goal adapter](docs/app-server-goal-adapter.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
 - 実測: [Mac mini実機E2E](docs/e2e/2026-08-15-mac-mini.md)、[LLM内ループとのtoken消費比較](docs/e2e/2026-08-16-llm-loop-token-comparison.md)
 - 開発: [Build・test](Makefile)、[実装状況](docs/implementation.md)、[脅威モデル](docs/threat-model.md)、[セキュリティ運用](docs/security-runbook.md)、[CLI互換性](docs/compatibility.md)

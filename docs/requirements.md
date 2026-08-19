@@ -111,8 +111,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 1. ワーカーが自律的に決められない事項を検出する
 2. ワーカーが構造化された `needs_input` 結果を返す
 3. ループが質問、選択肢、作業状態を永続化する
-4. 監視コマンドが終了し、監視用 Codex task がユーザーへ質問する
-5. Codex の通知と task 状態により、ユーザーがスマートフォンで検知する
+4. 監視コマンドが終了し、監視用 Codex task がrequest ID、推奨案、選択肢を保持してユーザーへ質問する
+5. Codex Desktopの質問通知とActivityの回答待ちにより、ユーザーが検知する
 6. ユーザー回答を `agent-loop answer` で保存する
 7. 新しい Codex ワーカーが、既存 worktree と回答を引き継いで処理を再開する
 
@@ -169,6 +169,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-038**: preflightは初回worker内の論理フェーズとして実行し、そのまま実装へ進めること。profile判定だけを目的とする別workerを必須にしないこと。
 - **FR-039**: profile判定が曖昧な場合は、ユーザーへ質問せず `extended` を選択すること。`extended` は必要に応じてsupervisor管理のcontinuationを許可すること。
 - **FR-039-A**: worker timeout時はprocess groupへ穏当な終了要求を送り、設定可能なgrace periodを超えた場合だけ強制終了すること。子processを残さず、既存worktreeと有効な作業を保持すること。
+- **FR-039-B**: command networkは既定無効とし、Codex localhost-only opt-inではcommand/child processのnetworkを必須proxy経由のexact `localhost` / `127.0.0.1`へ限定し、capability・設定・proxy初期化失敗時はworker開始前にfail closedすること。
+- **FR-039-C**: command proxyが保護しないWeb Search、Browser/Computer Use、MCP、apps/plugins等をlocalhost-only workerで無効化し、proxyの保証範囲を越えて保護済みと扱わないこと。
 
 ### 6.5 GitHubへの反映
 
@@ -180,6 +182,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-045**: 対象リポジトリのmanifestでauto mergeを選択でき、既定は無効とすること。有効時はbase branchへの追随とCI再確認を行い、conflict時は既存worktree・branch・Pull Requestを維持した永続的な自動復旧を開始すること。
 - **FR-045-A**: conflict recoveryはimmutableなbase SHA、競合file、試行履歴を永続化し、workerへIssue・元PR差分・base追加commit・競合内容・検証要件を渡すこと。workerはGit公開操作を行わず、supervisorが未解消entry、marker、base SHA、path scope、検証結果を確認して通常pushすること。
 - **FR-045-B**: `blocked`はbase単位の復旧budget超過または非回復障害の最終escalationに限定し、明示的な`agent-loop retry --repo <path> --issue <number>`でdurable stateとGitHubを監査付きで再同期できること。
+- **FR-045-C**: worker起因の環境`blocked`だけを、operatorの前提解消確認とactive process不在、run/worktree/branch/resource/PR整合性検査後に、明示的なIssue番号を持つ別CLI操作で同一成果物から再開できること。conflict、手動/security block、running/completed/closed-without-mergeは拒否すること。
 - **FR-046**: Issueを完了扱いにし、設定に応じてcloseするのは対応Pull Requestのmergeを確認した後とすること。
 
 ### 6.6 監視と質問
@@ -194,10 +197,9 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-057**: 未回答質問は監視 task が切断しても失われないこと。
 - **FR-058**: `watch` は永続snapshotを正本とし、event通知を状態変化のヒントとして扱うこと。event payloadだけでattention状態を確定しないこと。
 - **FR-059**: `watch` はeventを取りこぼしても検出できるよう、既定60秒間隔の内部reconciliationを行うこと。reconciliation中はCodexへheartbeatや途中結果を返さないこと。
-- **FR-059-A**: opt-inの外部push adapterは、監視taskが0件でも`needs_input`とsupervisor blockedを永続outboxからスマートフォンへ通知できること。
-- **FR-059-B**: 外部pushはrequest/event単位で重複を抑止し、上限付きbackoffとrate limitを持ち、adapter障害でsupervisor本体を停止しないこと。
-- **FR-059-C**: 通知credentialは設定file・plist・repository・logへ保存せず、repository別のprivate管理fileから読み込むこと。通知本文の詳細は明示opt-inとすること。
 - **FR-059-D**: macOSのevent wakeはfsnotify/kqueueでstate directoryを監視し、watcher作成・登録失敗またはchannel終了時はpolling-onlyへ降格すること。
+- **FR-059-E**: 接続中のCodex Desktop監視taskは`needs_input`をユーザー回答待ちの質問として表示し、OSの質問通知を閉じてもActivityから再発見できること。
+- **FR-059-F**: Codex Desktop監視taskが切断中の新規Activity投入は保証せず、再接続時に永続snapshotの未回答requestを即時再表示すること。
 
 ### 6.7 Codex Skill
 
@@ -206,6 +208,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-062**: Skill は開始後に監視へ接続し、入力待ちになったらユーザーへ質問し、回答後に監視へ戻ること。
 - **FR-063**: stop、reset、claim解除など影響の大きい操作では、対象と影響を明示すること。
 - **FR-064**: 既存の未回答質問がある場合は、新規 watch より先にその質問を表示すること。
+- **FR-065**: Desktopではrepositoryごとに専用監視taskを命名・pinし、対象path、request ID、回答先をrepository間で混在させないこと。
+- **FR-066**: 質問表示はrequest ID、Issue番号、質問、理由、推奨案、全選択肢、自由記述可否を欠落させないこと。
 
 ### 6.8 Worktreeライフサイクル
 
@@ -222,7 +226,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-083**: 複数hostのworkerはGitHubへ直接公開せず、durable publication intentを介してfenced publication gatewayだけがbranch、comment、Pull Requestを更新すること。
 - **FR-084**: status/watchは複数hostのownership、Issue状態、attentionをcoordinatorから集約し、event取りこぼしをreconciliationで修復すること。
 - **FR-085**: distributed modeの有効化前にbackend conformance、credential、backup、partition、publication takeoverをdoctorまたは運用検証で確認すること。
-- **FR-086**: 単一hostのresource leaseは`claiming`からPR merge確認まで永続化し、retry、`needs_input`、CI待ち、open PRの間も保持すること。
+- **FR-086**: 単一hostのresource claimは`claiming`からPR merge確認まで永続化すること。retry、CI待ち、open PRとpublication/PR conflictの`needs_input`はactive leaseを保持し、通常workerの`needs_input`はcontinuation provenanceを保ったparkとしてadmissionから外すこと。
 - **FR-087**: admissionは固定snapshot、正規化済み集合、queueの全順序、Issue番号tie-breakから決定し、同じsnapshotとscheduler versionに対して同じ選択結果と待機理由を返すこと。
 - **FR-088**: resource/依存metadataの導入はconfig/state schema v3への停止・backup・preview・明示applyを伴うmigrationとし、v2 Issueを自動書換えまたは暗黙に並列化しないこと。
 
@@ -246,7 +250,6 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **NFR-012**: `--dangerously-bypass-approvals-and-sandbox` 相当を既定で使用しないこと。
 - **NFR-013**: ログ出力時に既知のcredential形式と設定されたsecretをマスクすること。
 - **NFR-014**: force push、履歴破壊、Issue削除、リポジトリ削除を通常フローに含めないこと。
-- **NFR-015**: 外部push providerへ送る既定本文をrepository名、Issue番号、request ID、状態の最小情報に限定すること。
 
 ### 7.3 可観測性
 
@@ -319,9 +322,9 @@ Mac mini に物理アクセスせず、Codex Remote から起動、状態確認�
 
 GitHub UI、CLI/API、automation、または別ホストのCodexから作成したIssueでも、同じ着手可能条件を満たせばMac mini上のsupervisorが取得して処理を開始する。
 
-### AC-10: 監視task未接続時の直接push
+### AC-10: 監視task未接続時の永続化
 
-監視taskを閉じた状態で`needs_input`へ遷移すると、正常なprovider/network環境では90秒以内を目標にスマートフォンへ通知される。同じrequestの再読込やsupervisor再起動では送信を重複せず、provider障害中もIssue loopは継続する。
+監視taskを閉じた状態で`needs_input`へ遷移しても、pending requestは永続snapshotに残る。再接続した監視taskはstatus-first手順で同じrequestを即時再表示し、supervisor再起動でも失われない。
 
 ## 10. 実装フェーズ
 
@@ -364,11 +367,11 @@ GitHub UI、CLI/API、automation、または別ホストのCodexから作成し�
 
 ## 11. OpenAI公式仕様への依存
 
-本要件は、2026-08-16時点の以下の公式OpenAIドキュメントを前提とする。利用可否の詳細とlocal schema確認は[Codex公式仕様確認](codex-capability-review.md)を正本とする。
+本要件は、2026-08-17時点の以下の公式OpenAIドキュメントを前提とする。利用可否の詳細とlocal schema確認は[Codex公式仕様確認](codex-capability-review.md)を正本とする。
 
 - [Remote connections](https://learn.chatgpt.com/docs/remote-connections): 接続済みコンピューター上のchatをスマートフォンから開始・監視・指示・承認できる
 - [Projects and chats](https://learn.chatgpt.com/docs/projects): 同一ローカルプロジェクトで複数taskを整理し、頻繁に使うtaskをピン留めできる
-- [Notifications](https://learn.chatgpt.com/docs/notifications): task の `Running`、`Needs input`、`Ready`、`Blocked` 状態を確認できる
+- [Notifications](https://learn.chatgpt.com/docs/notifications): Desktopでpermission/question notificationsを設定でき、Activityからunread、running、回答待ちのchatを確認できる
 - [Long-running work](https://learn.chatgpt.com/docs/long-running-work): Goalは明確な成果、制約、完了条件を持つ長時間作業に使う
 - [Codex App Server](https://learn.chatgpt.com/docs/app-server): thread Goal、resume、turn start、token usageのprogrammatic interface
 - [Integrated terminal](https://learn.chatgpt.com/docs/integrated-terminal): Codex taskから実行中のterminal出力を確認できる
@@ -376,4 +379,4 @@ GitHub UI、CLI/API、automation、または別ホストのCodexから作成し�
 
 外部製品の未公開APIや、外部プロセスからCodex taskの表示状態を直接変更する機能には依存しない。Codex taskが `watch` を実行し、そのコマンドが入力待ちイベントを返すことで、Codexがユーザーへ質問する。
 
-Goalは外側のIssueキューsupervisorの代替には使わない。App Serverのheadless Goal interfaceは利用可能になったため、Issue #53で`extended` profileのoptional adapterを検証する。導入までは非対話workerの長時間継続をsupervisor管理のexecution profileと`codex exec resume`で実現する。待機中のtool callに対する製品全体の厳密なゼロトークン保証は公式文書にないため要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。
+Goalは外側のIssueキューsupervisorの代替には使わない。App Serverのheadless Goal interfaceは、`extended` continuation限定のoptional adapterとして検証実装する。既定およびcapability非対応時は、supervisor管理のexecution profileと`codex exec resume`を維持する。待機中のtool callに対する製品全体の厳密なゼロトークン保証は公式文書にないため要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。

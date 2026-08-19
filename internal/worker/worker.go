@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -59,6 +60,21 @@ type Result struct {
 	Retry            *Retry     `json:"retry"`
 	SessionID        string     `json:"-"`
 	Identity         Identity   `json:"-"`
+	Goal             *Goal      `json:"-"`
+}
+
+type Goal struct {
+	ThreadID          string `json:"thread_id"`
+	Objective         string `json:"objective"`
+	Status            string `json:"status"`
+	TokenBudget       *int64 `json:"token_budget,omitempty"`
+	TimeBudgetSeconds int64  `json:"time_budget_seconds,omitempty"`
+	TokensUsed        int64  `json:"tokens_used"`
+	TimeUsedSeconds   int64  `json:"time_used_seconds"`
+	InputTokens       int64  `json:"input_tokens,omitempty"`
+	CachedInputTokens int64  `json:"cached_input_tokens,omitempty"`
+	OutputTokens      int64  `json:"output_tokens,omitempty"`
+	UpdatedAt         int64  `json:"updated_at,omitempty"`
 }
 
 type Runner interface {
@@ -81,6 +97,7 @@ type Capabilities struct {
 	VariantSelection     bool `json:"variant_selection"`
 	NonInteractivePolicy bool `json:"non_interactive_permission_policy"`
 	WorkspaceIsolation   bool `json:"workspace_isolation"`
+	ThreadGoal           bool `json:"thread_goal"`
 }
 
 type Identity struct {
@@ -92,7 +109,14 @@ type Identity struct {
 	Variant        string `json:"variant,omitempty"`
 }
 
-type Started func(pid int) error
+type ProcessStart struct {
+	PID         int    `json:"pid"`
+	PGID        int    `json:"pgid"`
+	ExpectedCWD string `json:"expected_cwd"`
+	ActualCWD   string `json:"actual_cwd"`
+}
+
+type Started func(ProcessStart) error
 
 type TerminationError struct {
 	Timeout     time.Duration
@@ -145,6 +169,10 @@ func (c Codex) Resume(ctx context.Context, cfg config.Config, issue gh.Issue, cu
 
 func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber int, runID, sessionID, prompt string, started Started) (Result, error) {
 	identity := Identity{Backend: c.ID(), RuntimeVersion: c.RuntimeVersion, RequestedModel: cfg.Worker.Model, ResolvedModel: cfg.Worker.Model, Variant: cfg.Worker.Variant}
+	workspace, err := config.CanonicalRepoPath(cfg.RepoPath)
+	if err != nil {
+		return Result{Identity: identity}, fmt.Errorf("resolve Codex workspace: %w", err)
+	}
 	runDir := filepath.Join(c.StateDir, "runs", runID)
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return Result{}, err
@@ -173,7 +201,10 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 
 	ctx, cancel := context.WithTimeout(parent, cfg.Worker.Timeout.Duration)
 	defer cancel()
-	args := []string{"exec", "--sandbox", cfg.Worker.Sandbox, "--config", `approval_policy="never"`}
+	// --cd is an exec option, so it must precede the resume subcommand. Keep the
+	// process cwd aligned with it below: cwd selects files for the CLI process,
+	// while --cd selects Codex's workspace and writable project root.
+	args := append(codexExecBaseArgs(cfg), "--cd", workspace)
 	if sessionID != "" {
 		args = append(args, "resume", "--json", "--output-schema", schemaPath, "--output-last-message", resultPath)
 		if cfg.Worker.Model != "" {
@@ -181,8 +212,6 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 		}
 		args = append(args, sessionID, "-")
 	} else {
-		args = append(args, "--cd", cfg.RepoPath)
-		// The caller passes the worktree in cfg.RepoPath for worker execution.
 		args = append(args, "--json", "--output-schema", schemaPath, "--output-last-message", resultPath)
 		if cfg.Worker.Model != "" {
 			args = append(args, "--model", cfg.Worker.Model)
@@ -191,6 +220,7 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	}
 	command := cfg.Worker.EffectiveCommand()
 	cmd := exec.Command(command, args...)
+	cmd.Dir = workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(prompt)
 	safeStdout := redact.NewLineWriterWithSecrets(stdout, c.Secrets)
@@ -199,7 +229,7 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	cmd.Stderr = safeStderr
 	runErr := cmd.Start()
 	if runErr == nil && started != nil {
-		if err := started(cmd.Process.Pid); err != nil {
+		if err := started(processStart(cmd, workspace)); err != nil {
 			_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 			return Result{}, fmt.Errorf("record worker process: %w", err)
@@ -248,6 +278,46 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 		return result, fmt.Errorf("codex worker exited unsuccessfully: %w", runErr)
 	}
 	return result, nil
+}
+
+func processStart(cmd *exec.Cmd, expectedCWD string) ProcessStart {
+	// os.StartProcess performs the child chdir before reporting Start success;
+	// therefore Cmd.Dir is the effective cwd at the spawn boundary. Backends
+	// additionally pass the same canonical path to their workspace APIs.
+	return ProcessStart{PID: cmd.Process.Pid, PGID: cmd.Process.Pid, ExpectedCWD: expectedCWD, ActualCWD: cmd.Dir}
+}
+
+func codexExecBaseArgs(cfg config.Config) []string {
+	args := []string{"exec", "--sandbox", cfg.Worker.Sandbox, "--config", `approval_policy="never"`}
+	if !cfg.Worker.CommandNetwork.LocalhostOnly() {
+		return args
+	}
+	// This is a closed policy assembled by the adapter, not arbitrary config
+	// passthrough. --ignore-user-config removes user MCP/plugin expansion while
+	// auth remains available, and --strict-config makes an older Codex fail
+	// before a model turn or command can start.
+	args = append(args,
+		"--ignore-user-config", "--strict-config",
+		"--config", `sandbox_workspace_write.network_access=true`,
+		"--config", `features.network_proxy.enabled=true`,
+		"--config", `features.network_proxy.domains={localhost="allow","127.0.0.1"="allow"}`,
+		"--config", `features.network_proxy.allow_local_binding=false`,
+		"--config", `features.network_proxy.allow_upstream_proxy=false`,
+		"--config", `features.network_proxy.dangerously_allow_all_unix_sockets=false`,
+		"--config", `features.network_proxy.dangerously_allow_non_loopback_proxy=false`,
+		"--config", `features.network_proxy.enable_socks5_udp=false`,
+		"--config", `features.network_proxy.unix_sockets={}`,
+		"--config", `tools.web_search=false`,
+		"--config", `mcp_servers={}`,
+	)
+	for _, feature := range []string{
+		"apps", "browser_use", "browser_use_external", "computer_use",
+		"in_app_browser", "image_generation", "multi_agent", "plugins",
+		"remote_plugin", "skill_mcp_dependency_install", "skill_search", "tool_suggest",
+	} {
+		args = append(args, "--disable", feature)
+	}
+	return args
 }
 
 func waitForProcess(ctx context.Context, cmd *exec.Cmd, timeout, grace time.Duration) error {
@@ -398,6 +468,44 @@ func (r Result) Validate() error {
 		return fmt.Errorf("invalid worker status %q", r.Status)
 	}
 	return nil
+}
+
+// LoadLatestCompletedResult returns the newest sanitized, schema-conforming
+// completed result for a durable run together with the bytes used for digest
+// verification. Invalid or non-completed later files are skipped so adapter
+// retries within one run remain recoverable.
+func LoadLatestCompletedResult(runDir string) (Result, []byte, error) {
+	info, err := os.Lstat(runDir)
+	if err != nil {
+		return Result{}, nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return Result{}, nil, fmt.Errorf("worker run path is not a real directory")
+	}
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return Result{}, nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		entryInfo, infoErr := entry.Info()
+		if infoErr == nil && entry.Type()&os.ModeSymlink == 0 && entryInfo.Mode().IsRegular() && entryInfo.Size() <= 1<<20 && strings.HasPrefix(entry.Name(), "result-") && strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	for _, name := range names {
+		data, readErr := os.ReadFile(filepath.Join(runDir, name))
+		if readErr != nil {
+			continue
+		}
+		result, decodeErr := decodeResult(data)
+		if decodeErr != nil || result.Validate() != nil || result.Status != "completed" || result.Git != nil {
+			continue
+		}
+		return result, data, nil
+	}
+	return Result{}, nil, fmt.Errorf("run has no schema-conforming unpublished completed result")
 }
 
 func decodeResult(data []byte) (Result, error) {

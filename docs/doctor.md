@@ -30,7 +30,7 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | `USER_RULE_CODEX_OUTDATED` / `USER_RULE_CLAUDE_OUTDATED` | agent-loop管理ruleが旧version | 対象agentの`init --json`を確認後、明示的に`--apply` |
 | `USER_RULE_CODEX_CONFLICT` / `USER_RULE_CLAUDE_CONFLICT` | marker不整合または所有できないfile | `agent-loop init --json`のpathとdetailを確認し、手動で競合を解消 |
 | `SCHEMA_MIGRATION_REQUIRED` | v1のconfig・registry・state・event等が残る | 全loop停止後にpreviewを確認して`migrate --apply` |
-| `SCHEMA_VERSION_UNSUPPORTED` | v3以上など対応外schema | fileを変更せず対応binary・migration手順を確認 |
+| `SCHEMA_VERSION_UNSUPPORTED` | v2以下、v5以上など対応外schema | fileを変更せず対応binary・migration手順を確認 |
 | `SCHEMA_INSPECTION_FAILED` | schema version自体を安全に読み取れない | fileを削除せずbackupして調査 |
 | `SCHEMA_VERSION_SUPPORTED` | 全永続schemaがv2 | 対応不要 |
 | `GITHUB_AUTH_INVALID` | `gh auth status`が失敗 | `gh auth login`後に対象repository権限を確認 |
@@ -39,11 +39,12 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | `MACOS_SLEEP_ENABLED` / `MACOS_SLEEP_STATUS_UNKNOWN` | AC電源時のsleepが有効または判定不能 | System Settings > Energyで「Prevent automatic sleeping when the display is off」を有効化 |
 | `REGISTRY_CORRUPT` | registryを解釈不能 | 元fileを削除せず退避・確認し、repositoryを再登録 |
 | `CONFIG_INVALID` | `.agent-loop.yaml`が無効 | 表示されたpathとvalidation errorを修正 |
-| `NOTIFICATION_CREDENTIAL_MISSING` | 外部pushが有効だが管理tokenがない | `notification-token --token-file -`で標準入力から保存 |
-| `NOTIFICATION_CREDENTIAL_UNSAFE` | token fileがregular fileでない、0600でない、または内容が無効 | symlinkやpermissionを確認し専用commandで保存し直す |
-| `NOTIFICATION_CREDENTIAL_VALID` / `NOTIFICATIONS_DISABLED` | tokenを安全に読める、または外部pushが無効 | 対応不要 |
 | `REGISTRATION_MISSING` | repositoryが未登録 | `agent-loop register --repo PATH` |
 | `REGISTERED_BINARY_MISSING` | 登録時の絶対command pathが移動 | install/update後に同じrepositoryを再register |
+| `FORMATTER_GO_NOT_REGISTERED` / `FORMATTER_GO_UNAVAILABLE` / `FORMATTER_GO_CAPABILITY_MISSING` | 有効なbuilt-in Go formatterの固定pathが未登録、実行不能、またはstdin整形capability不一致 | loop停止中にGo toolchainとPATHを確認し、同じrepositoryを再registerしてdoctorを再実行 |
+| `CODEX_LOCALHOST_NETWORK_PROXY_READY` | opt-in localhost-only workerに必要なstrict config、user config isolation、network proxy、hosted tool disable capabilityを確認済み | なし。実機E2Eは別途実行する |
+| `CODEX_LOCALHOST_NETWORK_PROXY_UNAVAILABLE` | 設定はlocalhost-onlyだがCodex runtimeに必須capabilityがない | loopを開始せずCodex CLIを更新し、再register後にdoctorを再実行 |
+| `FORMATTER_GO_AVAILABLE` / `FORMATTER_GO_DISABLED` | Go formatter capabilityが利用可能、または明示的に無効 | 対応不要 |
 | `LAUNCH_AGENT_MISSING` / `LAUNCH_AGENT_UNREADABLE` | plistがない、または読めない | 再register、所有者・permission確認 |
 | `GITHUB_REPOSITORY_INACCESSIBLE` | repository参照権限または認証不足 | `gh auth status`とtoken/GitHub App権限を確認 |
 | `GITHUB_LABELS_MISSING` | 必須label不足 | `bootstrap-labels`をpreviewし、確認後に`--apply` |

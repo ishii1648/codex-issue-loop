@@ -12,11 +12,14 @@ GitHub Releaseには次を公開する。
 - `agent-loop_Darwin_arm64`
 - `agent-loop_Darwin_arm64.spdx.json`（SPDX 2.3）
 - `checksums.txt`（SHA-256）
+- `release-manifest.json`（delivery protocol、tag/commit、target、artifact digest、schema互換範囲）
 - GitHub Actions artifact provenance attestation
 
 release jobは同じtag、commit、`SOURCE_DATE_EPOCH`から2回buildし、binary、SBOM、checksumのbyte一致を確認してから公開する。repository固有の長期secretは使わず、GitHub Actionsの短命OIDC tokenと`GITHUB_TOKEN`だけを使う。
 
 Pull Requestとmainの通常CIでも`scripts/check-release.sh`を実行し、固定test versionから2回作成したartifactのbyte一致と埋め込みversion/commitを確認する。
+
+release artifactの`version --json`とinstall manifestはstorage schemaのcurrent/migration-from、およびsemantic contractのcurrent/minimumを明示する。release checkはこの範囲とversioned state contractを検査し、execution-required provenance追加にmigration/compatibility ruleがないbuildを拒否する。release前にはsupported旧versionのactive、blocked、needs-input、retry、publication recovery fixtureへcurrent validatorを適用する。
 
 ## Release作成
 
@@ -44,6 +47,31 @@ chmod 0755 agent-loop_Darwin_arm64
 ```
 
 checksum、attestation、version/commitのいずれかが一致しなければ実行・installしない。
+
+## Mac側pull型delivery
+
+初回installとdoctor完了後、Macごとに1つのcontrollerをpreviewしてから有効化する。
+
+```sh
+agent-loop delivery configure --json
+agent-loop delivery configure --apply --json
+agent-loop delivery check --json
+agent-loop delivery status --json
+```
+
+設定は`$HOME/.agent-loop-delivery.yaml`だけに置き、regular file、現在userのowner、mode `0600`を必須とする。`--config`はtestまたは明示運用用のabsolute pathだけを受理する。credentialは保存せず既存の`gh`認証を使う。transaction、download cache、log、maintenance fenceは`$HOME/Library/Application Support/codex-issue-loop/delivery/`配下であり、設定fileや各repositoryへ展開しない。
+
+`check`/`reconcile`はdraft/prereleaseを除く最新production Releaseのannotated SemVer tagをcommitへpeelし、`release-manifest.json`、`checksums.txt`、binaryとmanifest双方のGitHub attestation、`darwin/arm64` target、binary埋め込みmetadataを照合する。checksumとtrusted release workflow attestationの完了前にcandidate binaryを実行しない。download中にRelease/tagが変化した場合はfresh candidateでやり直す。major、schema migration、downgrade、同一version異commit、未知manifest/protocolは自動適用しない。
+
+`com.codex-issue-loop.delivery`は`RunAtLoad`と`StartInterval`で短命な`delivery reconcile`を実行する。host lockで手動`apply`との多重実行を拒否し、永続phaseと固定backup pathから再開する。drain timeoutではworkerをkillせずfenceを解除してdeferする。apply後はfenceを維持したまま全repositoryを含む`doctor --json`を二度実行してsoakし、失敗時は通常Issue処理の再開前にrollbackする。rollbackも失敗した場合はfenceとbackupを保持してfail closedする。
+
+```sh
+agent-loop delivery pause --json
+agent-loop delivery resume --json
+agent-loop delivery apply --version v1.2.3 --json
+```
+
+pause/resumeはactive maintenance transaction中には変更できない。schema migrationとmajor updateは従来どおり全loop停止、migration preview、paired rollbackを明示承認する手動runbookへ移す。
 
 ## 新規install
 
@@ -73,6 +101,8 @@ agent-loop doctor --json
 6. 途中で失敗した場合は旧install一式を自動復元し、元のLaunchAgentを再開する。
 
 state、event、worker log、worktree、registryは通常updateの対象ではなく保持される。schema migrationを伴うversionでは全loopを先に停止する。新artifactの`update`はbinary/Skillだけを配置して自動再開せず、`schema_migration_required: true`を返す。その後、installed binaryで`migrate --apply`を実行してからdoctorとstartへ進む。詳細は[永続schema migration runbook](migration.md)を正本とする。
+
+storage versionが同じでもsemantic contract migrationが必要なら自動再開しない。`migrate --json`の`non_migratable`が空であることを確認し、apply、doctor、repositoryごとのstartの順を守る。rollback時はmigration backupを先にrestoreし、安全な旧artifactへ戻す。
 
 ## rollback
 

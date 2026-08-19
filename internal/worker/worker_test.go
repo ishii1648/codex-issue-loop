@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -28,6 +29,34 @@ func TestResultValidation(t *testing.T) {
 	invalid := Result{Version: 1, Status: "needs_input", ExecutionProfile: "extended"}
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("expected missing question error")
+	}
+}
+
+func TestCodexLocalhostNetworkArgumentsAreFailClosed(t *testing.T) {
+	cfg := config.Defaults()
+	disabled := strings.Join(codexExecBaseArgs(cfg), " ")
+	if strings.Contains(disabled, "network_access=true") || strings.Contains(disabled, "network_proxy") {
+		t.Fatalf("disabled policy enabled network: %s", disabled)
+	}
+	cfg.Worker.CommandNetwork = config.CommandNetwork{
+		Policy: "localhost-only", Proxy: true, AllowedHosts: []string{"localhost", "127.0.0.1"},
+	}
+	args := strings.Join(codexExecBaseArgs(cfg), " ")
+	for _, required := range []string{
+		"--ignore-user-config", "--strict-config", "sandbox_workspace_write.network_access=true",
+		`features.network_proxy.enabled=true`, `domains={localhost="allow","127.0.0.1"="allow"}`,
+		"allow_upstream_proxy=false", "dangerously_allow_all_unix_sockets=false",
+		"dangerously_allow_non_loopback_proxy=false", "enable_socks5_udp=false",
+		"tools.web_search=false", "mcp_servers={}", "--disable browser_use", "--disable plugins",
+	} {
+		if !strings.Contains(args, required) {
+			t.Fatalf("localhost policy missing %q: %s", required, args)
+		}
+	}
+	for _, forbidden := range []string{`example.com="allow"`, `*="allow"`, "dangerously_allow_all_unix_sockets=true", "allow_upstream_proxy=true"} {
+		if strings.Contains(args, forbidden) {
+			t.Fatalf("localhost policy contains forbidden %q: %s", forbidden, args)
+		}
 	}
 }
 
@@ -71,15 +100,24 @@ printf '%s\n' '{"version":1,"status":"completed","execution_profile":"standard",
 	cfg.Worker.Command = fake
 	current := state.Issue{RunID: "run_1", Attempts: 1}
 	startedPID := 0
-	result, err := (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1, Title: "Test"}, current, "", func(pid int) error {
-		startedPID = pid
+	spawnCWD := ""
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1, Title: "Test"}, current, "", func(start ProcessStart) error {
+		startedPID = start.PID
+		if start.ExpectedCWD != start.ActualCWD {
+			return fmt.Errorf("spawn cwd mismatch: %+v", start)
+		}
+		spawnCWD = start.ActualCWD
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SessionID != "session-123" || result.Status != "completed" || startedPID <= 0 {
-		t.Fatalf("result=%+v startedPID=%d", result, startedPID)
+	if result.SessionID != "session-123" || result.Status != "completed" || startedPID <= 0 || spawnCWD != canonicalDir {
+		t.Fatalf("result=%+v startedPID=%d spawnCWD=%q", result, startedPID, spawnCWD)
 	}
 }
 
@@ -95,8 +133,8 @@ func TestFaultWorkerKillReturnsRecoverableProcessError(t *testing.T) {
 	cfg.Worker.Command = fake
 	ctx, cancel := context.WithCancel(context.Background())
 	pid := 0
-	_, err := (Codex{StateDir: dir}).Run(ctx, cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_kill", Attempts: 1}, "", func(startedPID int) error {
-		pid = startedPID
+	_, err := (Codex{StateDir: dir}).Run(ctx, cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_kill", Attempts: 1}, "", func(start ProcessStart) error {
+		pid = start.PID
 		cancel()
 		return nil
 	})
@@ -129,9 +167,9 @@ while :; do :; done
 	cfg.Worker.Timeout.Duration = 100 * time.Millisecond
 	cfg.Worker.TimeoutGrace.Duration = time.Second
 	workerPID, workerPGID := 0, 0
-	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_grace", Attempts: 1}, "", func(pid int) error {
-		workerPID = pid
-		workerPGID, _ = syscall.Getpgid(pid)
+	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_grace", Attempts: 1}, "", func(start ProcessStart) error {
+		workerPID = start.PID
+		workerPGID, _ = syscall.Getpgid(start.PID)
 		return waitForTestFile(ready, testProcessReadyTimeout)
 	})
 	if workerPGID != workerPID {
@@ -171,7 +209,7 @@ func TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace(t *testing.T) 
 	cfg.GitHub.Repo, cfg.RepoPath, cfg.Worker.Command = "owner/repo", dir, fake
 	cfg.Worker.Timeout.Duration = 100 * time.Millisecond
 	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
-	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_force", Attempts: 1}, "", func(int) error {
+	_, err = (Codex{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_force", Attempts: 1}, "", func(ProcessStart) error {
 		return waitForTestFile(childPath, testProcessReadyTimeout)
 	})
 	var termination *TerminationError
@@ -380,6 +418,125 @@ printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"standard"
 	}
 }
 
+func TestCodexInitialAndResumePinCanonicalWorkspaceAndPreserveDirtyChanges(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "issue-134")
+	if err := os.MkdirAll(filepath.Join(worktree, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonicalWorktree, err := config.CanonicalRepoPath(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "state")
+	fake := filepath.Join(root, "fake-codex")
+	argsPrefix := filepath.Join(root, "args")
+	cwdPrefix := filepath.Join(root, "cwd")
+	script := fmt.Sprintf(`#!/bin/sh
+mode=initial
+result=''
+for arg in "$@"; do
+  if [ "$arg" = "resume" ]; then mode=resume; fi
+done
+printf '%%s\n' "$@" > %q-"$mode"
+pwd -P > %q-"$mode"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then shift; result="$1"; fi
+  shift
+done
+if [ "$mode" = "initial" ]; then
+  printf 'initial dirty change' > issue-134-change.txt
+  printf '%%s\n' '{"type":"thread.started","thread_id":"session-134"}'
+  printf '%%s\n' '{"version":1,"status":"needs_input","execution_profile":"extended","summary":"answer required","question":{"text":"Continue?","reason":"fixture","recommended_option":"yes","options":[],"allow_free_text":true},"tests":[],"git":null,"retry":null}' > "$result"
+else
+  test "$(cat issue-134-change.txt)" = "initial dirty change" || exit 7
+  printf '\nresume dirty change' >> issue-134-change.txt
+  printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"extended","summary":"resumed","question":null,"tests":[],"git":null,"retry":null}' > "$result"
+fi
+`, argsPrefix, cwdPrefix)
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	// Include a reducible path component to verify argv and cwd share the same
+	// canonical worktree rather than merely copying the caller's string.
+	cfg.RepoPath = filepath.Join(worktree, "nested", "..")
+	cfg.Worker.Command = fake
+	cfg.Worker.Model = "test-model"
+	adapter := Codex{StateDir: stateDir}
+	issue := gh.Issue{Number: 134, Title: "resume workspace fixture"}
+	initialState := state.Issue{RunID: "run_134", Attempts: 1, Branch: "codex/issue-134-resume-workspace", Worktree: canonicalWorktree}
+	result, err := adapter.Run(context.Background(), cfg, issue, initialState, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SessionID != "session-134" || result.Status != "needs_input" {
+		t.Fatalf("initial result=%+v", result)
+	}
+
+	resumeState := state.Issue{
+		RunID: initialState.RunID, Attempts: 1, Continuations: 1, SessionID: result.SessionID,
+		Branch: initialState.Branch, Worktree: initialState.Worktree,
+		Answers: []state.AnswerRecord{{RequestID: "request-134", Question: "Continue?", Answer: "yes"}},
+	}
+	resumeStateBefore := resumeState
+	result, err = adapter.Resume(context.Background(), cfg, issue, resumeState, BuildContinuationPrompt(resumeState, "Continue."), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SessionID != "session-134" || result.Status != "completed" {
+		t.Fatalf("resume result=%+v", result)
+	}
+	if !reflect.DeepEqual(resumeState, resumeStateBefore) {
+		t.Fatalf("resume metadata changed: before=%+v after=%+v", resumeStateBefore, resumeState)
+	}
+	if data, err := os.ReadFile(filepath.Join(worktree, "issue-134-change.txt")); err != nil || string(data) != "initial dirty change\nresume dirty change" {
+		t.Fatalf("dirty changes were not preserved and extended: data=%q err=%v", data, err)
+	}
+
+	for _, mode := range []string{"initial", "resume"} {
+		cwd, err := os.ReadFile(cwdPrefix + "-" + mode)
+		if err != nil || strings.TrimSpace(string(cwd)) != canonicalWorktree {
+			t.Fatalf("%s cwd=%q err=%v", mode, cwd, err)
+		}
+		data, err := os.ReadFile(argsPrefix + "-" + mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := strings.Split(strings.TrimSpace(string(data)), "\n")
+		cdIndex, resumeIndex := -1, -1
+		for index, arg := range args {
+			switch arg {
+			case "--cd":
+				if cdIndex != -1 {
+					t.Fatalf("%s argv contains duplicate --cd: %q", mode, args)
+				}
+				cdIndex = index
+			case "resume":
+				resumeIndex = index
+			case "--add-dir":
+				t.Fatalf("%s argv added an extra writable directory: %q", mode, args)
+			}
+		}
+		if cdIndex < 0 || cdIndex+1 >= len(args) || args[cdIndex+1] != canonicalWorktree {
+			t.Fatalf("%s argv did not pin canonical worktree: %q", mode, args)
+		}
+		if mode == "initial" && resumeIndex != -1 {
+			t.Fatalf("initial argv unexpectedly resumed: %q", args)
+		}
+		if mode == "resume" && (resumeIndex < 0 || cdIndex >= resumeIndex) {
+			t.Fatalf("resume argv placed --cd after subcommand: %q", args)
+		}
+		joined := strings.Join(args, " ")
+		for _, expected := range []string{"--sandbox workspace-write", `--config approval_policy="never"`, "--model test-model", "--output-schema", "--output-last-message"} {
+			if !strings.Contains(joined, expected) {
+				t.Fatalf("%s argv missing %q: %q", mode, expected, args)
+			}
+		}
+	}
+}
+
 func TestResumeFallsBackToFreshSessionWhenCapabilityIsUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-codex")
@@ -409,7 +566,11 @@ printf '%%s\n' '{"version":1,"status":"completed","execution_profile":"standard"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(args), " resume ") || !strings.Contains(string(args), "--cd "+dir) {
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(args), " resume ") || !strings.Contains(string(args), "--cd "+canonicalDir) {
 		t.Fatalf("fallback did not start a fresh worker in the existing worktree: %s", args)
 	}
 	prompt, err := os.ReadFile(capturedPrompt)
@@ -435,5 +596,30 @@ func TestFindSessionIDAcceptsKnownEventShapes(t *testing.T) {
 	}
 	if got := findSessionID(path); got != "thread-container" {
 		t.Fatalf("findSessionID()=%q", got)
+	}
+}
+
+func TestLoadLatestCompletedResultRequiresUnpublishedSchemaConformingResult(t *testing.T) {
+	dir := t.TempDir()
+	completed := `{"version":1,"status":"completed","execution_profile":"extended","summary":"verified","question":null,"tests":[],"git":null,"retry":null}`
+	if err := os.WriteFile(filepath.Join(dir, "result-1.json"), []byte(completed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "result-2.json"), []byte(`{"status":"completed"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, data, err := LoadLatestCompletedResult(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "completed" || result.Summary != "verified" || string(data) != completed {
+		t.Fatalf("result=%+v data=%s", result, data)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "result-3.json"), []byte(`{"version":1,"status":"completed","execution_profile":"extended","summary":"published","question":null,"tests":[],"git":{"branch":"b","commit":"c","pull_request_url":"p"},"retry":null}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, _, err = LoadLatestCompletedResult(dir)
+	if err != nil || result.Summary != "verified" {
+		t.Fatalf("published result must be skipped: result=%+v err=%v", result, err)
 	}
 }

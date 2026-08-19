@@ -1,7 +1,9 @@
-version: 3
+version: 4
 
 github:
   repo: owner/repository
+  # Required only when webhook.mode is webhook.
+  # repository_id: 123456789
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
   running_label: codex-loop:running
@@ -11,16 +13,36 @@ github:
 
 queue:
   poll_interval: 60s
-  concurrency: 1
+  concurrency: 2
   order: issue_number_asc
   # Used from highest to lowest when order is priority_then_created_at.
   priority_labels: []
   max_attempts: 3
   continue_after_needs_input: true
 
+resources:
+  metadata_version: 1
+  definitions:
+    - name: application
+      paths: [src/**]
+    - name: docs
+      paths: [README.md, docs/**]
+
 worker:
   command: codex
   model: null
+  # Experimental opt-in for extended continuations. Initial and standard runs
+  # continue to use `codex exec` even when enabled.
+  app_server:
+    enabled: false
+    goal_token_budget: 200000
+    goal_time_budget: 2h
+  # Default is disabled. For local HTTP/CDP verification, set all three values
+  # exactly as shown; arbitrary hosts and proxy bypass are rejected.
+  command_network:
+    policy: disabled
+    proxy: false
+    allowed_hosts: []
   sandbox: workspace-write
   session_mode: resumable
   timeout: 2h
@@ -29,8 +51,18 @@ worker:
   profiles:
     standard:
       max_continuations: 0
+      capabilities:
+        network: none
+        browser_cdp: false
+        download: false
+        external_time_gate: false
     extended:
       max_continuations: 3
+      capabilities:
+        network: none
+        browser_cdp: false
+        download: false
+        external_time_gate: false
 
 watch:
   reconcile_interval: 60s
@@ -40,6 +72,12 @@ git:
   branch_prefix: codex/issue-
   worktree_root: null
   base_branch: main
+
+# Fixed built-in adapter; no shell command or extra arguments are accepted.
+formatters:
+  go:
+    enabled: false
+    timeout: 30s
 
 completion:
   create_draft_pr: true
@@ -60,20 +98,6 @@ worktrees:
   blocked_max_age: 0s
   needs_input_max_age: 0s
 
-# Direct smartphone push is opt-in. Store the token with the
-# `agent-loop notification-token` command, never in this file.
-notifications:
-  enabled: false
-  provider: ntfy
-  endpoint: https://ntfy.sh
-  topic: replace-with-opaque-topic
-  include_details: false
-  timeout: 10s
-  min_interval: 5s
-  retry_initial: 10s
-  retry_max: 10m
-  max_attempts: 8
-
 logs:
   rotate_bytes: 16777216
   rotate_interval: 24h
@@ -85,3 +109,35 @@ logs:
 # secret values themselves in this file.
 security:
   redact_env: []
+
+# Explicit fallback is polling. See docs/mac-mini-runbook.md before opting in.
+# Switch to webhook only after the reverse proxy and the GitHub webhook are both
+# ready. While deliveries cannot reach the broker, the only remaining detection
+# path is the 15 minute safety sweep, which is slower than 60 second polling.
+webhook:
+  mode: polling
+  # The values below are the defaults and are validated only when mode is
+  # webhook. listener_address must be a literal loopback address; the reverse
+  # proxy terminates TLS in front of it.
+  # mode: webhook
+  # listener_address: 127.0.0.1:8787
+  # Non-secret audit identifier for the public endpoint. Never write a URL that
+  # carries a query token.
+  # public_url_identifier: hooks.example.invalid/github/webhook
+  # Owner-only (0600) file outside the repository. Prefer a file source over env
+  # because LaunchAgent environments are hard to provision safely.
+  # secret_source:
+  #   file: /Users/example/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook
+  # Keep an installation allowlist for GitHub Apps. A classic repository webhook
+  # has no installation, so it requires an empty list plus the explicit opt-in.
+  # installation_ids: [987654]
+  # allow_repository_webhook: false
+  # safety_sweep_interval: 15m
+  # Unlike watch.reconcile_jitter, this field has no percent-aware unmarshaler.
+  # Write it as a decimal fraction.
+  # safety_sweep_jitter: 0.1
+  # max_body_bytes: 2097152
+  # read_timeout: 10s
+  # read_header_timeout: 5s
+  # idle_timeout: 30s
+  # max_concurrent: 16

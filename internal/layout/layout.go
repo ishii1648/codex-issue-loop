@@ -58,8 +58,8 @@ func (l Layout) RepoDir(repoID string) string {
 	return filepath.Join(l.ReposRoot, repoID)
 }
 
-func (l Layout) NotificationTokenPath(repoID string) string {
-	return filepath.Join(l.RepoDir(repoID), "notification-token")
+func (l Layout) RateLimitPath() string {
+	return filepath.Join(l.Root, "github-rate-limit.json")
 }
 
 func (l Layout) PlistPath(repoID string) string {
@@ -69,3 +69,22 @@ func (l Layout) PlistPath(repoID string) string {
 func (l Layout) Label(repoID string) string {
 	return "com.codex-issue-loop." + repoID
 }
+
+func (l Layout) BrokerDir() string { return filepath.Join(l.Root, "broker") }
+
+func (l Layout) BrokerPlistPath() string {
+	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop.broker.plist")
+}
+
+func (l Layout) BrokerLabel() string { return "com.codex-issue-loop.broker" }
+
+// DeliveryDir contains host-level delivery runtime data.  The operator-owned
+// configuration deliberately lives outside this managed root at
+// $HOME/.agent-loop-delivery.yaml.
+func (l Layout) DeliveryDir() string { return filepath.Join(l.Root, "delivery") }
+
+func (l Layout) DeliveryPlistPath() string {
+	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop.delivery.plist")
+}
+
+func (l Layout) DeliveryLabel() string { return "com.codex-issue-loop.delivery" }

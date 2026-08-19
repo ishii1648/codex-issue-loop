@@ -105,6 +105,7 @@ func TestBootstrapLabelsIsIdempotentWhenEveryLabelExists(t *testing.T) {
 func TestRequiredLabelSpecsIncludesPriorityLabelsWithoutCaseDuplicate(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Queue.PriorityLabels = []string{"priority:high", "PRIORITY:LOW", strings.ToUpper(cfg.GitHub.ReadyLabels[0])}
+	cfg.Resources.Definitions = []config.ResourceDefinition{{Name: "Git", Paths: []string{"internal/git/**"}}}
 	specs := RequiredLabelSpecs(cfg)
 	counts := map[string]int{}
 	for _, spec := range specs {
@@ -112,6 +113,9 @@ func TestRequiredLabelSpecsIncludesPriorityLabelsWithoutCaseDuplicate(t *testing
 	}
 	if counts["priority:high"] != 1 || counts["priority:low"] != 1 || counts[strings.ToLower(cfg.GitHub.ReadyLabels[0])] != 1 {
 		t.Fatalf("priority label specs are missing or duplicated: %+v", specs)
+	}
+	if counts["area:git"] != 1 {
+		t.Fatalf("resource label spec is missing: %+v", specs)
 	}
 }
 

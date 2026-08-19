@@ -31,6 +31,26 @@ func TestBackendFactoryAndCapabilities(t *testing.T) {
 	}
 }
 
+func TestBackendFactoryEnablesGoalOnlyWhenConfiguredAndSupported(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Worker.AppServer.Enabled = true
+	supported, unsupported := true, false
+	backend, err := NewBackend(cfg, FactoryOptions{AppServerGoalSupported: &unsupported})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(Codex); !ok || backend.Capabilities().ThreadGoal {
+		t.Fatalf("unsupported capability did not fall back to codex exec: %T %+v", backend, backend.Capabilities())
+	}
+	backend, err = NewBackend(cfg, FactoryOptions{AppServerGoalSupported: &supported})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(CodexAppServer); !ok || !backend.Capabilities().ThreadGoal {
+		t.Fatalf("supported capability did not select App Server: %T %+v", backend, backend.Capabilities())
+	}
+}
+
 func TestClaudeCodeInitialAndResumePassModelAndEffortWithoutPromptArgv(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "claude")
@@ -47,9 +67,18 @@ printf '%%s\n' '{"type":"result","session_id":"claude-session","structured_outpu
 	cfg := backendTestConfig(dir, "claude-code", fake, "claude-sonnet-test", "high")
 	adapter := ClaudeCode{StateDir: dir, RuntimeVersion: "2.1.119"}
 	current := state.Issue{RunID: "run_claude", Attempts: 1}
-	result, err := adapter.Run(context.Background(), cfg, gh.Issue{Number: 1, Title: "secret prompt marker"}, current, "", nil)
+	var spawn ProcessStart
+	recordSpawn := func(start ProcessStart) error { spawn = start; return nil }
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := adapter.Run(context.Background(), cfg, gh.Issue{Number: 1, Title: "secret prompt marker"}, current, "", recordSpawn)
 	if err != nil || result.SessionID != "claude-session" || result.Identity.Backend != "claude-code" {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if spawn.ExpectedCWD != canonicalDir || spawn.ActualCWD != canonicalDir {
+		t.Fatalf("Claude Code spawn=%+v", spawn)
 	}
 	args, _ := os.ReadFile(argsPath)
 	if strings.Contains(string(args), "secret prompt marker") || !strings.Contains(string(args), "--model claude-sonnet-test") || !strings.Contains(string(args), "--effort high") || !strings.Contains(string(args), "--permission-mode dontAsk") {
@@ -60,7 +89,7 @@ printf '%%s\n' '{"type":"result","session_id":"claude-session","structured_outpu
 		t.Fatalf("prompt not sent on stdin: %s", prompt)
 	}
 	current.SessionID = result.SessionID
-	if _, err := adapter.Resume(context.Background(), cfg, gh.Issue{Number: 1}, current, "continue marker", nil); err != nil {
+	if _, err := adapter.Resume(context.Background(), cfg, gh.Issue{Number: 1}, current, "continue marker", recordSpawn); err != nil {
 		t.Fatal(err)
 	}
 	args, _ = os.ReadFile(argsPath)
@@ -90,13 +119,22 @@ func TestOpenCodeServerAdapterInitialResumeAndOpenCodeGoModel(t *testing.T) {
 	t.Setenv("AGENT_LOOP_OPENCODE_CAPTURE", captured)
 	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/kimi-k2.7-code", "high")
 	adapter := OpenCode{StateDir: dir, RuntimeVersion: "1.14.0"}
-	result, err := adapter.Run(context.Background(), cfg, gh.Issue{Number: 73, Title: "adapter"}, state.Issue{RunID: "run_open", Attempts: 1}, "", nil)
+	var spawn ProcessStart
+	recordSpawn := func(start ProcessStart) error { spawn = start; return nil }
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := adapter.Run(context.Background(), cfg, gh.Issue{Number: 73, Title: "adapter"}, state.Issue{RunID: "run_open", Attempts: 1}, "", recordSpawn)
 	if err != nil || result.SessionID != "ses_fake" || result.Identity.Provider != "opencode-go" || result.Identity.ResolvedModel != "opencode-go/kimi-k2.7-code" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+	if spawn.ExpectedCWD != canonicalDir || spawn.ActualCWD != canonicalDir {
+		t.Fatalf("OpenCode spawn=%+v", spawn)
+	}
 	assertOpenCodeRequest(t, captured, "opencode-go", "kimi-k2.7-code", "high")
 	current := state.Issue{RunID: "run_resume", Attempts: 1, SessionID: "ses_saved"}
-	if _, err := adapter.Resume(context.Background(), cfg, gh.Issue{Number: 73}, current, "resume", nil); err != nil {
+	if _, err := adapter.Resume(context.Background(), cfg, gh.Issue{Number: 73}, current, "resume", recordSpawn); err != nil {
 		t.Fatal(err)
 	}
 	assertOpenCodeRequest(t, captured, "opencode-go", "kimi-k2.7-code", "high")
@@ -110,10 +148,10 @@ func TestOpenCodeTimeoutAbortsSessionAndStopsServerGroup(t *testing.T) {
 	t.Setenv("AGENT_LOOP_OPENCODE_MODE", "timeout")
 	t.Setenv("AGENT_LOOP_OPENCODE_ABORTED", aborted)
 	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/test", "")
-	cfg.Worker.Timeout.Duration = 150 * time.Millisecond
+	cfg.Worker.Timeout.Duration = time.Second
 	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
 	pid := 0
-	_, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_timeout", Attempts: 1}, "", func(value int) error { pid = value; return nil })
+	_, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_timeout", Attempts: 1}, "", func(start ProcessStart) error { pid = start.PID; return nil })
 	var termination *TerminationError
 	if !errors.As(err, &termination) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("pid=%d err=%v", pid, err)
