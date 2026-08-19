@@ -25,7 +25,7 @@ agent-loop migrate --json
 
 unknown storage/contract version、decode error、non-migratable findingがある場合はapplyしない。versionやWorkspaceを手編集しない。
 
-## #442相当のnon-migratable recovery
+## non-migratable Workspace recovery
 
 missing Workspace provenanceをsession、worktree path、lease、PR identityから推測して埋めない。v4の対応artifactと既存の限定recoveryを使い、全loop停止中に次の順で処理する。
 
@@ -35,7 +35,16 @@ missing Workspace provenanceをsession、worktree path、lease、PR identityか�
 4. workerを再開する前に停止し、新artifactの`migrate --json`を再実行する。
 5. findingが`SEMANTIC_COMPATIBLE`になった後だけcontract migrationをapplyする。
 
-このrecoveryが拒否されたstateはnon-migratableのまま保全し、session/workspace/lease/PR identityを新規生成しない。
+専用lifecycle recoveryに一致しないlegacy terminal recordは、全loop停止中に次のvalidation-only recoveryを使う。
+
+```sh
+agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --dry-run --json
+agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --confirm-verified-workspace --json
+```
+
+これは保存worktreeからWorkspace identityを検証し、監査record/eventとともにbackfillするだけである。status、lease、resource park、session、GitHub、worktreeは変更しない。適用後に各Issueの`workspace_provenance_recovery.status=verified`と不変のlifecycle metadataを確認し、`migrate --json`の`report.non_migratable`が空になってからapplyする。
+
+いずれのrecoveryも拒否されたstateはnon-migratableのまま保全し、state/labelを手編集しない。
 
 ## Apply、restart、idempotency
 

@@ -29,6 +29,7 @@ Claude Codeは`claude -p`へpromptをstdinで渡し、`--json-schema`の`structu
 - 初回spawn前にworktree path、branch、Git common dir、repository ID、main checkoutとの非同一性をprovenanceとして保存する。以後のspawn直前にrun/session/lease owner generationとともに再検証し、欠損・symlink・別branch/repository・provenance不一致ではbackendを起動せず`blocked`へ収束する。`worker_workspace_validated`、`worker_workspace_rejected`、`worker_process_started` eventでexpected/actual cwdと検証結果を監査できる。
 - zeitreise #442のfull 27-event legacy recoveryだけはdurable session provenanceが元から存在しないため、`session_id/session`の両方がnullであることをexact chainの一部として要求し、旧sessionを推測しない。同じdirty worktree/branchで新規sessionを開始して新しいprovenanceだけを保存する。片方だけのsession、short/typed/通常recoveryのsession欠損は引き続き拒否する。
 - v0.6.22以前に初回workerが`Workspace`なしで通常`needs_input`へ進み、同一requestへの1回の回答で同じrun/slot/resources/baseをgeneration 2として再取得した後、`ValidateLaunch`のfilesystem/repository checkは全成功したがmissing provenanceだけで`supervisor/worker_workspace/non-resumable` blockedへ同期した11-event chainは、`recover-answered-workspace`だけが扱う。通常`resume-blocked`へ混在させず、保存sessionを必須とし、検証済みWorkspace backfillとgeneration 3 fenceを同一transactionへ保存する。
+- v0.7.1以前の実行済み`blocked` / `failed` recordで専用lifecycle recoveryに一致しないmissing `Workspace`は、v0.7.2以降の`recover-workspace`でprovenanceだけを検証・保存できる。この操作はstatus、lease、session、GitHubを変えず、実行再開authorityを合成しない。
 - GitHub Issueは`gh issue list --limit 1000`で取得し、Issue番号順に選択する。100件を超えるqueueをfixtureで検証する。1000件を超える単一queueは現在の対応上限である。
 
 ## 確認手順
