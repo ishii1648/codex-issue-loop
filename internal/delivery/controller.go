@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,24 +43,33 @@ type updateResult struct {
 }
 
 type Report struct {
-	Version            int                `json:"version"`
-	Enabled            bool               `json:"enabled"`
-	Current            VersionRef         `json:"current"`
-	Desired            VersionRef         `json:"desired"`
-	Previous           VersionRef         `json:"previous"`
-	Phase              Phase              `json:"phase"`
-	Result             string             `json:"result,omitempty"`
-	Reason             string             `json:"reason,omitempty"`
-	Plan               *CompatibilityPlan `json:"plan,omitempty"`
-	LastCheckAt        time.Time          `json:"last_check_at,omitempty"`
-	NextCheckAt        time.Time          `json:"next_check_at,omitempty"`
-	Drain              DrainProgress      `json:"drain"`
-	DrainStartedAt     time.Time          `json:"drain_started_at,omitempty"`
-	DrainDeadline      time.Time          `json:"drain_deadline,omitempty"`
-	LoadedRepositories []string           `json:"loaded_repositories,omitempty"`
-	Backup             string             `json:"backup,omitempty"`
-	Transaction        string             `json:"transaction"`
-	Maintenance        string             `json:"maintenance_fence"`
+	Version               int                `json:"version"`
+	Enabled               bool               `json:"enabled"`
+	Current               VersionRef         `json:"current"`
+	Desired               VersionRef         `json:"desired"`
+	Previous              VersionRef         `json:"previous"`
+	Phase                 Phase              `json:"phase"`
+	Result                string             `json:"result,omitempty"`
+	Reason                string             `json:"reason,omitempty"`
+	Plan                  *CompatibilityPlan `json:"plan,omitempty"`
+	LastCheckAt           time.Time          `json:"last_check_at,omitempty"`
+	NextCheckAt           time.Time          `json:"next_check_at,omitempty"`
+	Drain                 DrainProgress      `json:"drain"`
+	DrainStartedAt        time.Time          `json:"drain_started_at,omitempty"`
+	DrainDeadline         time.Time          `json:"drain_deadline,omitempty"`
+	LoadedRepositories    []string           `json:"loaded_repositories,omitempty"`
+	Backup                string             `json:"backup,omitempty"`
+	Transaction           string             `json:"transaction"`
+	Evidence              string             `json:"evidence"`
+	EvidenceError         string             `json:"evidence_error,omitempty"`
+	Maintenance           string             `json:"maintenance_fence"`
+	MaintenanceGeneration string             `json:"maintenance_generation,omitempty"`
+	PreflightDoctor       *DoctorSnapshot    `json:"preflight_doctor,omitempty"`
+	PostUpdateDoctor      *DoctorSnapshot    `json:"post_update_doctor,omitempty"`
+	RollbackDoctor        *DoctorSnapshot    `json:"rollback_doctor,omitempty"`
+	RollbackRestored      bool               `json:"rollback_installation_restored,omitempty"`
+	RollbackRecovery      *RollbackRecovery  `json:"rollback_recovery,omitempty"`
+	RecoveryPlan          *RollbackRecovery  `json:"recovery_plan,omitempty"`
 }
 
 type DrainProgress struct {
@@ -128,12 +138,18 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 		_ = SaveTransaction(paths.Transaction, tx)
 		return c.reportFrom(paths, cfg, tx, DrainProgress{}), nil
 	}
-	if transactionActive(tx) && tx.LastResult == "rollback_failed" {
+	if transactionActive(tx) && (tx.LastResult == "rollback_failed" || tx.LastResult == "rollback_health_failed") {
 		return c.reportFrom(paths, cfg, tx, DrainProgress{}), errors.New(tx.Reason)
 	}
 	if transactionActive(tx) && tx.LastResult == "rolling_back" {
 		if current.ref() == tx.Previous {
-			if healthErr := c.health(ctx, tx.LoadedRepositories); healthErr == nil {
+			if doctor, healthErr := c.health(ctx, tx.LoadedRepositories); healthErr == nil {
+				if err := c.updateEvidence(paths, tx, func(evidence *Evidence) {
+					evidence.RollbackDoctor = &doctor
+					evidence.RollbackRestored = true
+				}); err != nil {
+					return Report{}, err
+				}
 				tx.LastResult = "rolled_back"
 				tx.Current = tx.Previous
 				tx.Phase = PhaseVerified
@@ -246,15 +262,23 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 		if err := SaveTransaction(paths.Transaction, tx); err != nil {
 			return Report{}, err
 		}
-		if err := c.health(ctx, tx.LoadedRepositories); err != nil {
-			return c.rollback(ctx, paths, cfg, &tx, DrainProgress{}, err)
+		doctor, healthErr := c.health(ctx, tx.LoadedRepositories)
+		if err := c.updateEvidence(paths, tx, func(evidence *Evidence) { evidence.PostUpdateDoctor = &doctor }); err != nil {
+			return Report{}, err
+		}
+		if healthErr != nil {
+			return c.rollback(ctx, paths, cfg, &tx, DrainProgress{}, healthErr)
 		}
 		if c.soak() > 0 {
 			if err := c.sleep(ctx, c.soak()); err != nil {
 				return c.rollback(ctx, paths, cfg, &tx, DrainProgress{}, err)
 			}
-			if err := c.health(ctx, tx.LoadedRepositories); err != nil {
-				return c.rollback(ctx, paths, cfg, &tx, DrainProgress{}, err)
+			doctor, healthErr := c.health(ctx, tx.LoadedRepositories)
+			if err := c.updateEvidence(paths, tx, func(evidence *Evidence) { evidence.PostUpdateDoctor = &doctor }); err != nil {
+				return Report{}, err
+			}
+			if healthErr != nil {
+				return c.rollback(ctx, paths, cfg, &tx, DrainProgress{}, healthErr)
 			}
 		}
 		tx.Phase = PhaseSucceeded
@@ -326,6 +350,19 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 		report.Plan = &plan
 		return report, nil
 	}
+	preflight, preflightErr := c.doctor(ctx)
+	if err := c.updateEvidence(paths, tx, func(evidence *Evidence) { evidence.PreflightDoctor = &preflight }); err != nil {
+		return Report{}, err
+	}
+	if preflightErr != nil {
+		tx.LastResult = "preflight_failed"
+		tx.Reason = fmt.Sprintf("pre-update doctor failed; installed version was not modified: %v", preflightErr)
+		tx.Phase = PhaseVerified
+		if err := SaveTransaction(paths.Transaction, tx); err != nil {
+			return Report{}, err
+		}
+		return c.reportFrom(paths, cfg, tx, DrainProgress{}), errors.New(tx.Reason)
+	}
 
 	entries, loaded, err := c.loadedEntries(ctx)
 	if err != nil {
@@ -338,6 +375,9 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 	}
 	if tx.Previous.Version == "" {
 		tx.Previous = tx.Current
+	}
+	if err := c.updateEvidence(paths, tx, nil); err != nil {
+		return Report{}, err
 	}
 	if tx.BackupPath == "" {
 		backupRoot := filepath.Join(c.Layout.Root, "backups")
@@ -429,15 +469,23 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 	if err := SaveTransaction(paths.Transaction, tx); err != nil {
 		return Report{}, err
 	}
-	if err := c.health(ctx, tx.LoadedRepositories); err != nil {
-		return c.rollback(ctx, paths, cfg, &tx, drain, err)
+	doctor, healthErr := c.health(ctx, tx.LoadedRepositories)
+	if err := c.updateEvidence(paths, tx, func(evidence *Evidence) { evidence.PostUpdateDoctor = &doctor }); err != nil {
+		return Report{}, err
+	}
+	if healthErr != nil {
+		return c.rollback(ctx, paths, cfg, &tx, drain, healthErr)
 	}
 	if c.soak() > 0 {
 		if err := c.sleep(ctx, c.soak()); err != nil {
 			return c.rollback(ctx, paths, cfg, &tx, drain, fmt.Errorf("health soak interrupted: %w", err))
 		}
-		if err := c.health(ctx, tx.LoadedRepositories); err != nil {
-			return c.rollback(ctx, paths, cfg, &tx, drain, err)
+		doctor, healthErr := c.health(ctx, tx.LoadedRepositories)
+		if err := c.updateEvidence(paths, tx, func(evidence *Evidence) { evidence.PostUpdateDoctor = &doctor }); err != nil {
+			return Report{}, err
+		}
+		if healthErr != nil {
+			return c.rollback(ctx, paths, cfg, &tx, drain, healthErr)
 		}
 	}
 	tx.Phase = PhaseSucceeded
@@ -478,52 +526,200 @@ func (c Controller) Status() (Report, error) {
 	return c.reportFrom(paths, cfg, tx, DrainProgress{}), nil
 }
 
+func (c Controller) RecoverRollback(ctx context.Context, confirm bool) (Report, error) {
+	paths, cfg, current, err := c.prepare()
+	if err != nil {
+		return Report{}, err
+	}
+	lock, err := AcquireLock(paths.Lock)
+	if err != nil {
+		return Report{}, err
+	}
+	defer lock.Close()
+	tx, err := LoadTransaction(paths.Transaction)
+	if err != nil {
+		return Report{}, err
+	}
+	report := c.reportFrom(paths, cfg, tx, DrainProgress{})
+	refuse := func(reason string) (Report, error) {
+		report.Result = "blocked"
+		report.Reason = reason
+		return report, errors.New(reason)
+	}
+	if !transactionActive(tx) || (tx.LastResult != "rollback_health_failed" && tx.LastResult != "rollback_failed") {
+		return refuse("rollback recovery requires an active rollback_failed or rollback_health_failed transaction")
+	}
+	if tx.LastResult == "rollback_failed" && !strings.Contains(tx.Reason, "rollback failed: post-update doctor failed") {
+		return refuse("legacy rollback_failed transaction does not prove that installation restore succeeded before the health failure")
+	}
+	if current.ref() != tx.Previous {
+		return refuse(fmt.Sprintf("installed version %s@%s does not match saved previous version %s@%s", current.Version, current.Commit, tx.Previous.Version, tx.Previous.Commit))
+	}
+	maintenance, err := LoadMaintenance(paths.Maintenance)
+	if err != nil {
+		return refuse(fmt.Sprintf("load maintenance fence: %v", err))
+	}
+	if maintenance.Generation != tx.MaintenanceGeneration || maintenance.Desired != tx.Desired {
+		return refuse("maintenance fence does not match the saved delivery transaction")
+	}
+	backupRoot := filepath.Join(c.Layout.Root, "backups")
+	backupRelative, err := filepath.Rel(backupRoot, filepath.Clean(tx.BackupPath))
+	if err != nil || backupRelative == "." || strings.Contains(backupRelative, string(os.PathSeparator)) || strings.HasPrefix(backupRelative, "..") || !strings.HasPrefix(backupRelative, "delivery-") {
+		return refuse("saved backup is not a direct managed delivery-* backup")
+	}
+	backupInfo, err := os.Lstat(tx.BackupPath)
+	if err != nil || !backupInfo.IsDir() || backupInfo.Mode()&os.ModeSymlink != 0 {
+		return refuse(fmt.Sprintf("saved delivery backup is unavailable or unsafe: %v", err))
+	}
+	backupManifest, err := readInstalled(filepath.Join(tx.BackupPath, "install.json"))
+	if err != nil || backupManifest.ref() != tx.Previous {
+		return refuse("saved delivery backup manifest does not match the previous installation")
+	}
+	doctor, healthErr := c.doctor(ctx)
+	if healthErr == nil && len(tx.LoadedRepositories) > 0 {
+		healthErr = c.repositoriesHealthy(ctx, tx.LoadedRepositories)
+	}
+	plan := &RollbackRecovery{Status: "recoverable", Installed: current.ref(), Previous: tx.Previous, MaintenanceGeneration: tx.MaintenanceGeneration, LoadedRepositories: append([]string(nil), tx.LoadedRepositories...), BackupPath: tx.BackupPath, Doctor: doctor, PreviousReason: tx.Reason}
+	report.RecoveryPlan = plan
+	if healthErr != nil {
+		return refuse(fmt.Sprintf("restored previous installation is not healthy: %v", healthErr))
+	}
+	if !confirm {
+		report.Result = "recoverable"
+		report.Reason = "restored previous installation and maintenance state are verified; explicit confirmation is required"
+		return report, nil
+	}
+	plan.Status = "succeeded"
+	confirmedAt := c.now()
+	plan.ConfirmedAt = &confirmedAt
+	if err := c.updateEvidence(paths, tx, func(evidence *Evidence) {
+		evidence.RollbackRestored = true
+		evidence.RollbackDoctor = &doctor
+		evidence.RollbackRecovery = plan
+	}); err != nil {
+		return Report{}, err
+	}
+	tx.Current = tx.Previous
+	tx.Phase = PhaseVerified
+	tx.LastResult = "rolled_back"
+	tx.Reason = "rollback recovery verified the restored previous installation"
+	if err := SaveTransaction(paths.Transaction, tx); err != nil {
+		return Report{}, err
+	}
+	if err := c.clearFence(paths); err != nil {
+		return Report{}, err
+	}
+	report = c.reportFrom(paths, cfg, tx, DrainProgress{})
+	report.RecoveryPlan = plan
+	return report, nil
+}
+
 func (c Controller) rollback(ctx context.Context, paths Paths, cfg Config, tx *Transaction, drain DrainProgress, cause error) (Report, error) {
 	tx.LastResult = "rolling_back"
 	tx.Reason = cause.Error()
 	_ = SaveTransaction(paths.Transaction, *tx)
 	binary := filepath.Join(c.Layout.BinDir, "agent-loop")
 	_, rollbackErr := c.runner().Run(ctx, binary, "rollback", "--backup", tx.BackupPath, "--json")
-	if rollbackErr == nil {
-		rollbackErr = c.health(ctx, tx.LoadedRepositories)
-	}
 	if rollbackErr != nil {
 		tx.LastResult = "rollback_failed"
 		tx.Reason = fmt.Sprintf("%v; rollback failed: %v; keep maintenance fence and inspect backup %s", cause, rollbackErr, tx.BackupPath)
 		_ = SaveTransaction(paths.Transaction, *tx)
 		return c.reportFrom(paths, cfg, *tx, drain), errors.New(tx.Reason)
 	}
+	tx.Current = tx.Previous
+	_ = SaveTransaction(paths.Transaction, *tx)
+	doctor, healthErr := c.health(ctx, tx.LoadedRepositories)
+	if err := c.updateEvidence(paths, *tx, func(evidence *Evidence) {
+		evidence.RollbackRestored = true
+		evidence.RollbackDoctor = &doctor
+	}); err != nil {
+		return Report{}, err
+	}
+	if healthErr != nil {
+		tx.LastResult = "rollback_health_failed"
+		tx.Reason = fmt.Sprintf("%v; previous installation was restored but its health check failed: %v; keep maintenance fence and inspect backup %s", cause, healthErr, tx.BackupPath)
+		_ = SaveTransaction(paths.Transaction, *tx)
+		return c.reportFrom(paths, cfg, *tx, drain), errors.New(tx.Reason)
+	}
 	tx.LastResult = "rolled_back"
 	tx.Reason = cause.Error()
-	tx.Current = tx.Previous
 	tx.Phase = PhaseVerified
 	_ = SaveTransaction(paths.Transaction, *tx)
 	_ = c.clearFence(paths)
 	return c.reportFrom(paths, cfg, *tx, drain), cause
 }
 
-func (c Controller) health(ctx context.Context, expectedLoaded []string) error {
+func (c Controller) health(ctx context.Context, expectedLoaded []string) (DoctorSnapshot, error) {
 	if err := c.ensureExpectedStarted(ctx, expectedLoaded); err != nil {
-		return err
+		return DoctorSnapshot{}, err
 	}
-	_, err := c.runner().Run(ctx, filepath.Join(c.Layout.BinDir, "agent-loop"), "doctor", "--json")
+	doctor, err := c.doctor(ctx)
 	if err != nil {
-		return fmt.Errorf("post-update doctor failed: %w", err)
+		return doctor, fmt.Errorf("post-update doctor failed: %w", err)
 	}
 	if len(expectedLoaded) == 0 {
-		return nil
+		return doctor, nil
 	}
 	var lastErr error
 	for attempt := 0; attempt < 20; attempt++ {
 		lastErr = c.repositoriesHealthy(ctx, expectedLoaded)
 		if lastErr == nil {
-			return nil
+			return doctor, nil
 		}
 		if err := c.sleep(ctx, 250*time.Millisecond); err != nil {
-			return err
+			return doctor, err
 		}
 	}
-	return lastErr
+	return doctor, lastErr
+}
+
+type doctorJSON struct {
+	SchemaVersion int  `json:"schema_version"`
+	OK            bool `json:"ok"`
+	Diagnostics   []struct {
+		Code    string `json:"code"`
+		OK      bool   `json:"ok"`
+		Scope   string `json:"scope"`
+		RepoID  string `json:"repo_id"`
+		Summary string `json:"summary"`
+		Detail  string `json:"detail"`
+	} `json:"diagnostics"`
+}
+
+func (c Controller) doctor(ctx context.Context) (DoctorSnapshot, error) {
+	out, runErr := c.runner().Run(ctx, filepath.Join(c.Layout.BinDir, "agent-loop"), "doctor", "--json")
+	start := bytes.IndexByte(out, '{')
+	if start < 0 {
+		if runErr != nil {
+			return DoctorSnapshot{}, runErr
+		}
+		return DoctorSnapshot{}, errors.New("doctor returned no JSON object")
+	}
+	var raw doctorJSON
+	if err := json.NewDecoder(bytes.NewReader(out[start:])).Decode(&raw); err != nil {
+		return DoctorSnapshot{}, fmt.Errorf("decode doctor JSON: %w", err)
+	}
+	snapshot := DoctorSnapshot{SchemaVersion: raw.SchemaVersion, OK: raw.OK, CheckedAt: c.now()}
+	for _, diagnostic := range raw.Diagnostics {
+		if diagnostic.OK {
+			continue
+		}
+		snapshot.Failures = append(snapshot.Failures, DoctorDiagnostic{Code: diagnostic.Code, Scope: diagnostic.Scope, RepoID: diagnostic.RepoID, Summary: diagnostic.Summary, Detail: diagnostic.Detail})
+	}
+	if raw.SchemaVersion != 1 {
+		return snapshot, fmt.Errorf("unsupported doctor schema version %d", raw.SchemaVersion)
+	}
+	if runErr != nil || !raw.OK {
+		codes := make([]string, 0, len(snapshot.Failures))
+		for _, diagnostic := range snapshot.Failures {
+			codes = append(codes, diagnostic.Code)
+		}
+		if len(codes) == 0 {
+			return snapshot, fmt.Errorf("doctor failed without structured diagnostics: %v", runErr)
+		}
+		return snapshot, fmt.Errorf("doctor diagnostics failed: %s", strings.Join(codes, ", "))
+	}
+	return snapshot, nil
 }
 
 func (c Controller) ensureExpectedStarted(ctx context.Context, expectedLoaded []string) error {
@@ -696,13 +892,43 @@ func readInstalled(path string) (installedManifest, error) {
 }
 func (i installedManifest) ref() VersionRef { return VersionRef{Version: i.Version, Commit: i.Commit} }
 func (c Controller) baseReport(paths Paths, cfg Config, current installedManifest) Report {
-	return Report{Version: 1, Enabled: cfg.Enabled, Current: current.ref(), Phase: PhaseIdle, Transaction: paths.Transaction, Maintenance: paths.Maintenance}
+	return Report{Version: 1, Enabled: cfg.Enabled, Current: current.ref(), Phase: PhaseIdle, Transaction: paths.Transaction, Evidence: paths.Evidence, Maintenance: paths.Maintenance}
 }
 func (c Controller) reportFrom(paths Paths, cfg Config, tx Transaction, drain DrainProgress) Report {
 	if drain.Total == 0 && len(drain.Waiting) == 0 {
 		drain = tx.Drain
 	}
-	return Report{Version: 1, Enabled: cfg.Enabled, Current: tx.Current, Desired: tx.Desired, Previous: tx.Previous, Phase: tx.Phase, Result: tx.LastResult, Reason: tx.Reason, LastCheckAt: tx.LastCheckAt, NextCheckAt: tx.NextCheckAt, Drain: drain, DrainStartedAt: tx.DrainStartedAt, DrainDeadline: tx.DrainDeadline, LoadedRepositories: append([]string(nil), tx.LoadedRepositories...), Backup: tx.BackupPath, Transaction: paths.Transaction, Maintenance: paths.Maintenance}
+	report := Report{Version: 1, Enabled: cfg.Enabled, Current: tx.Current, Desired: tx.Desired, Previous: tx.Previous, Phase: tx.Phase, Result: tx.LastResult, Reason: tx.Reason, LastCheckAt: tx.LastCheckAt, NextCheckAt: tx.NextCheckAt, Drain: drain, DrainStartedAt: tx.DrainStartedAt, DrainDeadline: tx.DrainDeadline, LoadedRepositories: append([]string(nil), tx.LoadedRepositories...), Backup: tx.BackupPath, Transaction: paths.Transaction, Evidence: paths.Evidence, Maintenance: paths.Maintenance, MaintenanceGeneration: tx.MaintenanceGeneration}
+	evidence, err := LoadEvidence(paths.Evidence)
+	if err != nil {
+		report.EvidenceError = err.Error()
+		return report
+	}
+	if evidence.Desired != tx.Desired || evidence.MaintenanceGeneration != "" && evidence.MaintenanceGeneration != tx.MaintenanceGeneration {
+		return report
+	}
+	report.PreflightDoctor = evidence.PreflightDoctor
+	report.PostUpdateDoctor = evidence.PostUpdateDoctor
+	report.RollbackDoctor = evidence.RollbackDoctor
+	report.RollbackRestored = evidence.RollbackRestored
+	report.RollbackRecovery = evidence.RollbackRecovery
+	return report
+}
+
+func (c Controller) updateEvidence(paths Paths, tx Transaction, update func(*Evidence)) error {
+	evidence, err := LoadEvidence(paths.Evidence)
+	if err != nil {
+		return err
+	}
+	if evidence.Desired != tx.Desired || tx.MaintenanceGeneration == "" && evidence.MaintenanceGeneration != "" || tx.MaintenanceGeneration != "" && evidence.MaintenanceGeneration != "" && evidence.MaintenanceGeneration != tx.MaintenanceGeneration {
+		evidence = Evidence{Version: 1, Desired: tx.Desired}
+	}
+	evidence.Desired = tx.Desired
+	evidence.MaintenanceGeneration = tx.MaintenanceGeneration
+	if update != nil {
+		update(&evidence)
+	}
+	return SaveEvidence(paths.Evidence, evidence)
 }
 func (c Controller) runner() Runner {
 	if c.Runner != nil {

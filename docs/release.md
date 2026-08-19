@@ -63,12 +63,19 @@ agent-loop delivery status --json
 
 `check`/`reconcile`はdraft/prereleaseを除く最新production Releaseのannotated SemVer tagをcommitへpeelし、`release-manifest.json`、`checksums.txt`、binaryとmanifest双方のGitHub attestation、`darwin/arm64` target、binary埋め込みmetadataを照合する。checksumとtrusted release workflow attestationの完了前にcandidate binaryを実行しない。download中にRelease/tagが変化した場合はfresh candidateでやり直す。major、schema migration、downgrade、同一version異commit、未知manifest/protocolは自動適用しない。
 
-`com.codex-issue-loop.delivery`は`RunAtLoad`と`StartInterval`で短命な`delivery reconcile`を実行する。host lockで手動`apply`との多重実行を拒否し、永続phaseと固定backup pathから再開する。drain timeoutではworkerをkillせずfenceを解除してdeferする。apply後はfenceを維持したまま全repositoryを含む`doctor --json`を二度実行してsoakし、失敗時は通常Issue処理の再開前にrollbackする。rollbackも失敗した場合はfenceとbackupを保持してfail closedする。
+`com.codex-issue-loop.delivery`は`RunAtLoad`と`StartInterval`で短命な`delivery reconcile`を実行する。host lockで手動`apply`との多重実行を拒否し、永続phaseと固定backup pathから再開する。candidateを適用する前に全repositoryを含むbaseline `doctor --json`を実行し、失敗時はfenceを作らず`preflight_failed`としてdeferする。drain timeoutではworkerをkillせずfenceを解除してdeferする。apply後はfenceを維持したまま同じdoctorを二度実行してsoakし、失敗時は通常Issue処理の再開前にrollbackする。installation restoreの失敗は`rollback_failed`、restore成功後のhealth失敗は`rollback_health_failed`として分離し、structured doctor診断とbackupを保持する。
 
 ```sh
 agent-loop delivery pause --json
 agent-loop delivery resume --json
 agent-loop delivery apply --version v1.2.3 --json
+```
+
+`rollback_failed`または`rollback_health_failed`でprevious install自体が復元済みの場合は、maintenance fenceを手動削除しない。外部prerequisiteを修正後、修正版の検証済みRelease artifactから次を実行する。previewはsaved previous/current、maintenance generation、backup manifest、全repositoryのmaintenance状態、structured doctorを再検証するだけでstateを変更しない。完全一致したpreviewをoperatorが確認した場合だけconfirmを実行し、transactionを`rolled_back`へ収束してfenceを解除する。
+
+```sh
+./agent-loop_Darwin_arm64 delivery recover-rollback --json
+./agent-loop_Darwin_arm64 delivery recover-rollback --confirm-restored-baseline --json
 ```
 
 pause/resumeはactive maintenance transaction中には変更できない。schema migrationとmajor updateは従来どおり全loop停止、migration preview、paired rollbackを明示承認する手動runbookへ移す。

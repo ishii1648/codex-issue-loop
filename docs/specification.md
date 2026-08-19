@@ -361,6 +361,8 @@ agent-loop <command> [options]
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
 | `doctor` | 依存関係、認証、設定、電源条件、状態整合性を検査する |
+| `delivery configure/check/status/reconcile/apply` | host単位の検証済みRelease deliveryを設定・観測・実行する |
+| `delivery recover-rollback [--confirm-restored-baseline]` | rollback済みinstallationとfence/backup/doctorをpreviewし、明示確認時だけ`rolled_back`へ収束する |
 | `bootstrap-labels --repo PATH [--apply]` | 必須GitHubラベルの変更計画を表示し、明示時だけ不足分を作成する |
 | `run` | launchd専用の内部supervisorエントリーポイント |
 

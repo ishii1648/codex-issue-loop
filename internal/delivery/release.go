@@ -31,7 +31,7 @@ type ExecRunner struct{}
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("%s failed: %w", filepath.Base(name), err)
+		return out, fmt.Errorf("%s failed: %w", filepath.Base(name), err)
 	}
 	return out, nil
 }

@@ -47,7 +47,7 @@ GitHub         = producerとループが共有する仕事のキュー
 
 Release deliveryではGitHub Actionsの責務をbuild、test、SBOM/checksum、provenance attestation、Release公開までに限定する。production Macへ接続するworkflow、inbound listener、self-hosted runnerは置かない。同じログインユーザーの`com.codex-issue-loop.delivery`が既存の`gh`認証を使ってproduction Releaseをpullする。設定の正本はMac単位の`$HOME/.agent-loop-delivery.yaml`、transaction/cache/logは`$HOME/Library/Application Support/codex-issue-loop/delivery/`であり、repositoryの`.agent-loop.yaml`とは別のtrust boundaryである。
 
-delivery controllerがmaintenance fenceを作ると、全repository schedulerは新規claim、retry/resume、conflict worker、PR maintenanceをdispatchしない。実行中workerへsignalを送らず、PID/PGIDが消えてsnapshotがflushされ、supervisorが`maintenance`へ到達するまで待つ。適用後のdoctorとbounded soakが完了するまでfenceを解除せず、失敗時はprevious installへrollbackする。LLM、Issue worker、GitHub Actionsはいずれもこのtransactionを所有しない。
+delivery controllerはcandidate適用前にbaseline doctorを記録し、不合格ならmaintenance fenceを作らずdeferする。fence作成後は全repository schedulerが新規claim、retry/resume、conflict worker、PR maintenanceをdispatchしない。実行中workerへsignalを送らず、PID/PGIDが消えてsnapshotがflushされ、supervisorが`maintenance`へ到達するまで待つ。適用後のdoctorとbounded soakが完了するまでfenceを解除せず、失敗時はprevious installへrollbackする。installation restoreとrollback後healthを別結果として永続化し、外部prerequisite解消後のfence解除は保存transaction・backup・maintenance generation・doctorを再検証する明示的なrecoveryだけが行う。LLM、Issue worker、GitHub Actionsはいずれもtransactionを所有しない。
 
 現行のownership境界は1 host・1 supervisor・1 workerである。将来の単一host並列化は同じsupervisor内のworker slotとして実装し、複数host冗長化は外部の線形化可能なcoordinatorとfenced publication gatewayを必須とする。GitHub labelを分散lockとして使わない。詳細は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
 

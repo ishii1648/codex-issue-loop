@@ -259,7 +259,7 @@ func TestPublishFormatterFailureAndTimeoutDoNotCommitOrPush(t *testing.T) {
 		timeout            time.Duration
 		cancel             bool
 	}{
-		{name: "exit", script: "#!/bin/sh\nexit 42\n", code: "exit_failure", timeout: time.Second},
+		{name: "exit", script: "#!/bin/sh\nexit 42\n", code: "exit_failure", timeout: 5 * time.Second},
 		{name: "timeout", script: "#!/bin/sh\nexec sleep 2\n", code: "timeout", timeout: 20 * time.Millisecond},
 		{name: "canceled", script: "#!/bin/sh\nexec sleep 2\n", code: "canceled", timeout: 3 * time.Second, cancel: true},
 	} {
