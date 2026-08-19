@@ -304,22 +304,56 @@ func v0614SameIssueEventCount(events []Event, issue Issue) int {
 	return count
 }
 
-// validateExactV0614Zeitreise442History recognizes the complete 27-event production
-// history described by the fixture. It deliberately validates the events
-// after the request too: adding, deleting, duplicating, reordering, or moving
-// any authority/retry/reconciliation/resume event to another run must not make
-// the shorter compatibility pattern authoritative. Named boundary errors are
-// returned before recovery can mutate durable state.
-func validateExactV0614Zeitreise442History(events []Event, requestSequence uint64, issue Issue) error {
+// InterruptedWorkspaceResumePredicateReport evaluates the exact legacy
+// full-history predicates without changing state or events. It deliberately
+// returns a report even when several predicates fail so an operator can repair
+// evidence once instead of discovering one boundary per release.
+func (s Store) InterruptedWorkspaceResumePredicateReport(issue Issue) (RecoveryPredicateReport, error) {
+	events, err := s.legacyWorkerBlockEvents()
+	if err != nil {
+		return RecoveryPredicateReport{}, err
+	}
+	return InterruptedWorkspaceResumePredicateReportFromEvents(issue, events), nil
+}
+
+// InterruptedWorkspaceResumePredicateReportFromEvents evaluates detached
+// read-only evidence, including sanitized fixture replays.
+func InterruptedWorkspaceResumePredicateReportFromEvents(issue Issue, events []Event) RecoveryPredicateReport {
+	requestSequence := uint64(0)
+	if issue.EnvironmentResume != nil {
+		for _, event := range events {
+			if event.IssueNumber != issue.Number || event.RunID != issue.RunID || event.Type != "environment_resume_requested" {
+				continue
+			}
+			var payload struct {
+				ResumeID string `json:"resume_id"`
+			}
+			if json.Unmarshal(event.Payload, &payload) == nil && payload.ResumeID == issue.EnvironmentResume.ID {
+				requestSequence = event.Sequence
+			}
+		}
+	}
+	return evaluateExactV0614Zeitreise442History(events, requestSequence, issue)
+}
+
+func recoveryStatus(ok bool) string {
+	if ok {
+		return "pass"
+	}
+	return "fail"
+}
+
+func evaluateExactV0614Zeitreise442History(events []Event, requestSequence uint64, issue Issue) RecoveryPredicateReport {
+	report := newRecoveryPredicateReport("resume-blocked", issue.Number)
 	history := make([]Event, 0, 27)
 	for _, event := range events {
 		if event.IssueNumber == issue.Number && event.Type != "event_log_checkpoint" {
 			history = append(history, event)
 		}
 	}
-	if len(history) != 27 {
-		return fmt.Errorf("event count boundary: got %d events, want 27", len(history))
-	}
+	countOK := len(history) == 27
+	report.add("RECOVERY_EVENT_COUNT", recoveryStatus(countOK), "durable.events", "exactly 27 same-Issue events", fmt.Sprintf("%d same-Issue events", len(history)), "operator", "restore the complete ordered event history from a reviewed backup", fmt.Sprintf("event count boundary: got %d events, want 27", len(history)))
+
 	wantTypes := []string{
 		"lease_reserved", "issue_claimed", "worker_started", "worker_process_started", "worker_preflight_completed", "retry_scheduled",
 		"worker_continuation_started", "worker_process_started", "worker_preflight_completed", "retry_scheduled",
@@ -327,88 +361,110 @@ func validateExactV0614Zeitreise442History(events []Event, requestSequence uint6
 		"startup_reconciled", "startup_reconciled", "startup_reconciled", "startup_reconciled", "startup_reconciled", "startup_reconciled",
 		"environment_resume_requested", "github_state_synced", "github_state_synced", "worker_started", "worker_workspace_rejected", "github_state_synced",
 	}
-	for index, event := range history {
-		if event.Type != wantTypes[index] || event.RunID != issue.RunID {
-			return fmt.Errorf("event order boundary at index %d: got type=%q run=%q", index, event.Type, event.RunID)
+	orderOK := len(history) >= len(wantTypes)
+	orderDetail := "event order boundary: history is incomplete"
+	for index := 0; index < len(history) && index < len(wantTypes); index++ {
+		if history[index].Type != wantTypes[index] || history[index].RunID != issue.RunID {
+			orderOK = false
+			orderDetail = fmt.Sprintf("event order boundary at index %d: got type=%q", index, history[index].Type)
+			break
 		}
 	}
-	if history[21].Sequence != requestSequence || issue.SessionID != "" || issue.Session != nil {
-		return fmt.Errorf("request marker boundary: sequence or null session provenance differs")
+	if orderOK {
+		orderDetail = ""
 	}
-	if issue.EnvironmentResume.ConfirmedAt.IsZero() || issue.Lease.ReservedAt.IsZero() || history[21].Timestamp.IsZero() {
-		return fmt.Errorf("timestamp boundary: confirmed, reservation, and request event timestamps must be non-zero")
-	}
-	if issue.Lease.ReservedAt != issue.EnvironmentResume.ConfirmedAt {
-		return fmt.Errorf("timestamp boundary: recovered lease reservation does not equal confirmed_at")
-	}
-	requestDelay := history[21].Timestamp.Sub(issue.EnvironmentResume.ConfirmedAt)
-	if requestDelay < 0 || requestDelay > maxV0614ResumeRequestEventDelay {
-		return fmt.Errorf("timestamp boundary: request event delay %s is outside [0s,%s]", requestDelay, maxV0614ResumeRequestEventDelay)
-	}
-	if len(issue.Lease.DeclaredResources) != 0 {
-		return fmt.Errorf("current lease boundary: recovered lease has declared resources")
-	}
-	if !exactOriginalLeasePayload(history[0].Payload, issue) ||
-		!exactNonEmptyStringPayload(history[1].Payload, "title") ||
-		!exactInitialWorkerPayload(history[2].Payload, issue) {
-		return fmt.Errorf("initial payload boundary: lease, claim, or worker payload differs")
-	}
-	for _, index := range []int{3, 7, 11} {
-		if !exactWorkerProcessPayload(history[index].Payload, issue.Worktree) {
-			return fmt.Errorf("worker payload boundary at index %d", index)
+	report.add("RECOVERY_EVENT_ORDER", recoveryStatus(orderOK), "durable.events", "exact production event type/order and one run identity", map[bool]string{true: "order matches", false: "order or run identity differs"}[orderOK], "none", "do not reorder or synthesize durable events; restore reviewed evidence", orderDetail)
+
+	sessionOK := issue.EnvironmentResume != nil && issue.Lease != nil && len(history) > 21 && history[21].Sequence == requestSequence && issue.SessionID == "" && issue.Session == nil
+	report.add("RECOVERY_SESSION_IDENTITY", recoveryStatus(sessionOK), "durable.state+events", "request sequence matches and legacy session fields are null", map[bool]string{true: "legacy null session provenance matches", false: "request sequence or session provenance differs"}[sessionOK], "none", "use only the original legacy snapshot and matching request event", "request marker boundary: sequence or null session provenance differs")
+
+	timestampOK := issue.EnvironmentResume != nil && issue.Lease != nil && len(history) > 21 &&
+		!issue.EnvironmentResume.ConfirmedAt.IsZero() && !issue.Lease.ReservedAt.IsZero() && !history[21].Timestamp.IsZero() &&
+		issue.Lease.ReservedAt == issue.EnvironmentResume.ConfirmedAt
+	timestampDetail := "timestamp boundary: confirmed, reservation, and request event timestamps differ"
+	if timestampOK {
+		delay := history[21].Timestamp.Sub(issue.EnvironmentResume.ConfirmedAt)
+		timestampOK = delay >= 0 && delay <= maxV0614ResumeRequestEventDelay
+		if !timestampOK {
+			timestampDetail = fmt.Sprintf("timestamp boundary: request event delay %s is outside [0s,%s]", delay, maxV0614ResumeRequestEventDelay)
 		}
 	}
-	for _, index := range []int{4, 8, 12} {
-		if !exactStringPayload(history[index].Payload, "execution_profile", "extended") {
-			return fmt.Errorf("preflight payload boundary at index %d", index)
+	report.add("RECOVERY_TIMESTAMPS", recoveryStatus(timestampOK), "durable.state+events", "non-zero reservation/confirmation and request delay within one second", map[bool]string{true: "timestamp relation matches", false: "timestamp relation differs"}[timestampOK], "none", "restore the original timestamp-bearing records; do not rewrite timestamps", timestampDetail)
+
+	leaseOK := issue.Lease != nil && len(issue.Lease.DeclaredResources) == 0
+	if len(history) > 0 {
+		leaseOK = leaseOK && exactOriginalLeasePayload(history[0].Payload, issue)
+	} else {
+		leaseOK = false
+	}
+	report.add("RECOVERY_LEASE_IDENTITY", recoveryStatus(leaseOK), "durable.state+events", "legacy generation transition and exact repository lease", map[bool]string{true: "lease identity matches", false: "lease generation, resources, or base identity differs"}[leaseOK], "none", "restore the matching state and lease reservation event", "current lease boundary: recovered lease identity differs")
+
+	payloadOK := len(history) >= 27 && issue.EnvironmentResume != nil && issue.Lease != nil && issue.BlockedCause != nil
+	requestPayloadOK := false
+	if payloadOK {
+		payloadOK = exactNonEmptyStringPayload(history[1].Payload, "title") && exactInitialWorkerPayload(history[2].Payload, issue)
+		for _, index := range []int{3, 7, 11} {
+			payloadOK = payloadOK && exactWorkerProcessPayload(history[index].Payload, issue.Worktree)
 		}
-	}
-	for _, index := range []int{5, 9} {
-		if !exactRetryPayload(history[index].Payload) {
-			return fmt.Errorf("retry payload boundary at index %d", index)
+		for _, index := range []int{4, 8, 12} {
+			payloadOK = payloadOK && exactStringPayload(history[index].Payload, "execution_profile", "extended")
 		}
+		for _, index := range []int{5, 9} {
+			payloadOK = payloadOK && exactRetryPayload(history[index].Payload)
+		}
+		payloadOK = payloadOK && exactIntegerPayload(history[6].Payload, "continuation", 1) && exactIntegerPayload(history[10].Payload, "continuation", 2)
+		var blocked struct {
+			Error       string `json:"error"`
+			FailureKind string `json:"failure_kind"`
+		}
+		payloadOK = payloadOK && payloadHasExactKeys(history[13].Payload, "error", "failure_kind") && json.Unmarshal(history[13].Payload, &blocked) == nil &&
+			blocked.FailureKind == "issue" && blocked.Error == "worker blocked: "+issue.EnvironmentResume.PreviousReason && exactStatePayload(history[14].Payload, "blocked", "") &&
+			exactStringPayload(history[24].Payload, "mode", "environment_block_resume") &&
+			exactWorkspaceRejectionPayload(history[25].Payload, issue)
+		requestPayloadOK = exactLegacyResumeRequestPayload(history[21].Payload, issue)
 	}
-	if !exactIntegerPayload(history[6].Payload, "continuation", 1) || !exactIntegerPayload(history[10].Payload, "continuation", 2) {
-		return fmt.Errorf("continuation payload boundary")
+	payloadOK = payloadOK && requestPayloadOK
+	payloadDetail := "payload shape boundary: one or more exact payload predicates differ"
+	if !requestPayloadOK && len(history) >= 27 && issue.EnvironmentResume != nil {
+		payloadDetail = "request payload boundary"
 	}
-	var blocked struct {
-		Error       string `json:"error"`
-		FailureKind string `json:"failure_kind"`
-	}
-	if !payloadHasExactKeys(history[13].Payload, "error", "failure_kind") || json.Unmarshal(history[13].Payload, &blocked) != nil ||
-		blocked.FailureKind != "issue" || blocked.Error != "worker blocked: "+issue.EnvironmentResume.PreviousReason ||
-		!exactStatePayload(history[14].Payload, "blocked", "") {
-		return fmt.Errorf("block payload boundary")
-	}
+	report.add("RECOVERY_PAYLOAD_SHAPE", recoveryStatus(payloadOK), "durable.events", "exact payload keys, types, and bound values", map[bool]string{true: "payload shapes match", false: "one or more payload shapes or values differ"}[payloadOK], "none", "restore unmodified event payloads from the reviewed recovery evidence", payloadDetail)
+
+	remoteOK := len(history) >= 27
 	worktreeHead := ""
-	for index := 15; index <= 19; index++ {
-		head, err := exactReconciliationPayload(history[index].Payload, "GitHub exclusion label was applied manually", issue, index >= 19)
-		if err != nil {
-			return fmt.Errorf("reconciliation remote boundary at index %d: %w", index, err)
+	if remoteOK {
+		for index := 15; index <= 19; index++ {
+			head, err := exactReconciliationPayload(history[index].Payload, "GitHub exclusion label was applied manually", issue, index >= 19)
+			if err != nil || (worktreeHead != "" && head != worktreeHead) {
+				remoteOK = false
+			}
+			if head != "" {
+				worktreeHead = head
+			}
 		}
-		if worktreeHead != "" && head != worktreeHead {
-			return fmt.Errorf("reconciliation HEAD boundary at index %d", index)
-		}
-		worktreeHead = head
+		lastHead, err := exactReconciliationPayload(history[20].Payload, legacyNormalizedReason, issue, true)
+		remoteOK = remoteOK && err == nil && worktreeHead != "" && issue.Lease != nil && worktreeHead != issue.Lease.BaseSHA && lastHead == worktreeHead
 	}
-	lastHead, err := exactReconciliationPayload(history[20].Payload, legacyNormalizedReason, issue, true)
-	if err != nil {
-		return fmt.Errorf("reconciliation remote boundary at index 20: %w", err)
-	}
-	if worktreeHead == "" || worktreeHead == issue.Lease.BaseSHA || lastHead != worktreeHead {
-		return fmt.Errorf("reconciliation HEAD boundary: dirty HEAD must be stable and differ from original lease base")
-	}
-	if !exactLegacyResumeRequestPayload(history[21].Payload, issue) {
-		return fmt.Errorf("request payload boundary")
-	}
-	if !exactStatePayload(history[22].Payload, "environment_resume", "") ||
-		!exactStatePayload(history[23].Payload, "environment_resume", issue.EnvironmentResume.ID) ||
-		!exactStatePayload(history[26].Payload, "blocked", "") {
-		return fmt.Errorf("marker boundary")
-	}
-	if !exactStringPayload(history[24].Payload, "mode", "environment_block_resume") ||
-		!exactWorkspaceRejectionPayload(history[25].Payload, issue) {
-		return fmt.Errorf("resume payload boundary")
+	report.add("RECOVERY_REMOTE_IDENTITY", recoveryStatus(remoteOK), "durable.events.reconciliation", "stable dirty local-only HEAD and exact remote field evolution", map[bool]string{true: "branch/remote identity matches", false: "branch, HEAD, PR, or remote identity differs"}[remoteOK], "operator", "restore the original local-only branch boundary or abandon this recovery", "reconciliation remote boundary: branch, HEAD, PR, or remote evidence differs")
+
+	markerOK := len(history) >= 27 && issue.EnvironmentResume != nil &&
+		exactStatePayload(history[22].Payload, "environment_resume", "") &&
+		exactStatePayload(history[23].Payload, "environment_resume", issue.EnvironmentResume.ID) &&
+		exactStatePayload(history[26].Payload, "blocked", "")
+	report.add("RECOVERY_GITHUB_MARKERS", recoveryStatus(markerOK), "durable.events.github_state_synced", "exact resume-ID-less, resume-ID-bearing, and blocked markers", map[bool]string{true: "marker provenance matches", false: "marker sequence or identity differs"}[markerOK], "none", "do not recreate comments manually; restore matching automation evidence", "marker boundary: exact synchronization markers differ")
+	return report
+}
+
+// validateExactV0614Zeitreise442History recognizes the complete 27-event production
+// history described by the fixture. It deliberately validates the events
+// after the request too: adding, deleting, duplicating, reordering, or moving
+// any authority/retry/reconciliation/resume event to another run must not make
+// the shorter compatibility pattern authoritative. Named boundary errors are
+// returned before recovery can mutate durable state.
+func validateExactV0614Zeitreise442History(events []Event, requestSequence uint64, issue Issue) error {
+	report := evaluateExactV0614Zeitreise442History(events, requestSequence, issue)
+	if err := report.FirstFailure(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -518,6 +574,13 @@ func exactV0614ReconciliationHead(events []Event, issue Issue) string {
 		}
 	}
 	return ""
+}
+
+// InterruptedWorkspaceResumeReconciliationHead returns only the saved commit
+// identity needed by a detached read-only worktree comparison. Callers must
+// not print the returned value in diagnostics.
+func InterruptedWorkspaceResumeReconciliationHead(events []Event, issue Issue) string {
+	return exactV0614ReconciliationHead(events, issue)
 }
 
 func exactLegacyResumeRequestPayload(raw json.RawMessage, issue Issue) bool {

@@ -363,7 +363,10 @@ func TestFaultStartupReconciliationPersistsDiscoveredPullRequest(t *testing.T) {
 		t.Fatalf("item=%+v", item)
 	}
 	events, err := os.ReadFile(loop.Store.EventsPath())
-	if err != nil || !strings.Contains(string(events), "startup_reconciled") {
+	if err != nil || !strings.Contains(string(events), "startup_reconciled") ||
+		!strings.Contains(string(events), `"predicate_report":{`) ||
+		!strings.Contains(string(events), `"operation":"startup-reconciliation"`) ||
+		!strings.Contains(string(events), `"schema_version":1`) {
 		t.Fatalf("events=%s err=%v", events, err)
 	}
 }

@@ -350,6 +350,7 @@ agent-loop <command> [options]
 | `answer` | 未回答requestへ回答を登録する |
 | `retry` | PR conflictで最終blockedになったIssueを監査付きで`resolving_conflict`へ戻す |
 | `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
+| `explain-recovery` | recovery predicateをversioned JSONでread-only診断する |
 | `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
 | `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
 | `export-recovery-fixture` | 対象Issueのstate/event/worktree/GitHub recovery evidenceをread-only取得し決定的にsanitizationする |
@@ -453,6 +454,7 @@ agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
 
 ```sh
 agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
+agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --dry-run --json
 ```
 
 `blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは、`failure_kind=issue`とsupervisor生成の厳密な`worker blocked: ...` errorに加え、durable history上で同一Issue・同一runの`issue_blocked`の直後のsequenceに`github_state_synced(state=blocked)`がある場合だけlegacy worker blockとして扱う。v0.6.9でfixture化された`issue: worker blocked: ...`も後方互換表現として明示的に許可するが、その他の部分一致は認めない。`issue_blocked` eventのtimestampとerror内の元reasonをtyped `blocked_cause`へ正規化する。旧startup reconciliationが直後に残した、同じrunかつ`previous_status=blocked`、`status=blocked`、reasonがmanual blocked label誤分類と完全一致する`startup_reconciled`と、そのchainをtyped化した既知の`startup_reconciled`だけは許容する。startupが既にtyped化したstateは、保存済み`blocked_cause`のorigin/kind/resumable/reason/blocked_atが復元値と完全一致する場合だけ同じlegacy recovery candidateとして扱う。event chainの欠損、複数候補、別run、sequence gap・順序不正、payload不一致、typed cause不一致、空時刻、security/manual provenance、その他の後続Issue eventはfail closedとする。
@@ -475,10 +477,13 @@ startup/periodic reconciliationはinspectionに使ったIssue snapshotと更新t
 
 PR conflict、手動exclusion、security block、failed、上記markerのないlegacy block、running/completed、closed Issue、active worker、pending request、missing/inconsistent worktree・branch・PR、改変または未知のpark provenanceを拒否する。`retry`と`resume-blocked`は交換可能ではなく、state fileやsupervisor-owned labelの手編集を復旧手順にしない。後続Issueでbaseが進んでもoriginal base SHAとdirty worktreeは保持し、publication auditと通常のPR conflict recoveryへ接続する。
 
+`--dry-run --json`（または`explain-recovery --operation resume-blocked`）はschema version、stable predicate code、`pass`/`fail`/`unknown`、redactedなexpected/actual evidence summary、evidence source、fixability、remediationを返す。event count、payload shape、session、marker、timestamp、lease、worktree、branch/remote、GitHub Issue/PR/comment markerを安全に全件評価し、最初の不一致では停止しない。mutating pathは同じpredicate evaluatorとrefusal codeを使う。診断中はstate/eventをrepairせず、GitHubはread endpointだけを使用する。
+
 ### 6.8 recover-checks
 
 ```sh
 agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
+agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --dry-run --json
 ```
 
 保存済みPRのrequired checksがfailureとなりworker retry budgetを使い切ったterminal `failed`だけを対象にする。失敗時のPR URL・number・branch・head SHAとretry exhaustionをimmutableなtyped provenanceへ保存し、`status --json`と`watch`はretained leaseでqueueを塞いでいる復旧可能状態を`recoverable_checks_failure`として通知する。

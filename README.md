@@ -123,6 +123,7 @@ workerが外部環境前提を理由にtyped `blocked`を返すと、supervisor�
 
 ```sh
 "$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
+"$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --dry-run --json
 ```
 
 park済みstateでは元のresource集合、base SHA、reservation provenanceを使い、legacy stateでleaseが欠けている場合だけ、既存の厳密なdurable history検証後に保守的な`repo:*` leaseを補います。base SHAを検証できない場合はstateとGitHub labelを変更せず拒否するため、state fileを編集せずremote-tracking branchを復旧して再実行します。
@@ -139,6 +140,7 @@ worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missin
 
 ```sh
 "$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --confirm-external-fix --json
+"$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --dry-run --json
 ```
 
 Production由来の復旧証跡を手編集せずsanitizationして固定する場合は、[recovery fixture runbook](docs/recovery-fixtures.md)に従い`export-recovery-fixture`と`verify-recovery-fixture`を使用する。

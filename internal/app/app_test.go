@@ -1516,6 +1516,24 @@ esac
 	if err != nil || seeded.Issues["150"] == nil {
 		t.Fatalf("full 27-event fixture was not installed: issue=%+v err=%v", seeded.Issues["150"], err)
 	}
+	stateBeforeDryRun, _ := os.ReadFile(store.StatePath())
+	eventsBeforeDryRun, _ := os.ReadFile(store.EventsPath())
+	worktreeBeforeDryRun := runGitOutputApp(t, managedWorktree, "status", "--porcelain=v1")
+	var dryOut, dryErr bytes.Buffer
+	dryApp := App{Out: &dryOut, Err: &dryErr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	if code := dryApp.Run(context.Background(), []string{"resume-blocked", "--repo", repo, "--issue", "150", "--dry-run", "--json"}); code != 0 {
+		t.Fatalf("read-only predicate diagnosis failed: code=%d stdout=%s stderr=%s", code, dryOut.String(), dryErr.String())
+	}
+	var dryReport state.RecoveryPredicateReport
+	if err := json.Unmarshal(dryOut.Bytes(), &dryReport); err != nil || dryReport.SchemaVersion != 1 || !dryReport.Eligible {
+		t.Fatalf("read-only predicate report=%+v err=%v stderr=%s", dryReport, err, dryErr.String())
+	}
+	stateAfterDryRun, _ := os.ReadFile(store.StatePath())
+	eventsAfterDryRun, _ := os.ReadFile(store.EventsPath())
+	worktreeAfterDryRun := runGitOutputApp(t, managedWorktree, "status", "--porcelain=v1")
+	if !bytes.Equal(stateBeforeDryRun, stateAfterDryRun) || !bytes.Equal(eventsBeforeDryRun, eventsAfterDryRun) || worktreeBeforeDryRun != worktreeAfterDryRun {
+		t.Fatal("read-only predicate diagnosis changed state, events, or worktree")
+	}
 
 	args := []string{"resume-blocked", "--repo", repo, "--issue", "150", "--confirm-prerequisite-resolved", "--json"}
 	controller := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
@@ -2767,6 +2785,26 @@ esac
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	checksStateBefore, _ := os.ReadFile(store.StatePath())
+	checksEventsBefore, _ := os.ReadFile(store.EventsPath())
+	checksCallsBefore, _ := os.ReadFile(ghLog)
+	var checksDryOut, checksDryErr bytes.Buffer
+	checksDryApp := App{Out: &checksDryOut, Err: &checksDryErr, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}
+	if code := checksDryApp.Run(context.Background(), append(baseArgs, "--dry-run")); code != 0 {
+		t.Fatalf("recover-checks dry-run code=%d stdout=%s stderr=%s", code, checksDryOut.String(), checksDryErr.String())
+	}
+	var checksReport state.RecoveryPredicateReport
+	if err := json.Unmarshal(checksDryOut.Bytes(), &checksReport); err != nil || checksReport.SchemaVersion != 1 || !checksReport.Eligible {
+		t.Fatalf("recover-checks report=%+v err=%v", checksReport, err)
+	}
+	checksStateAfter, _ := os.ReadFile(store.StatePath())
+	checksEventsAfter, _ := os.ReadFile(store.EventsPath())
+	checksCallsAfter, _ := os.ReadFile(ghLog)
+	newChecksCalls := checksCallsAfter[len(checksCallsBefore):]
+	if !bytes.Equal(checksStateBefore, checksStateAfter) || !bytes.Equal(checksEventsBefore, checksEventsAfter) ||
+		bytes.Contains(newChecksCalls, []byte("issue edit")) || bytes.Contains(newChecksCalls, []byte("issue comment")) {
+		t.Fatalf("recover-checks diagnosis mutated state or GitHub: %s", newChecksCalls)
 	}
 	if err := os.WriteFile(fixture, []byte("const value = \"dirty\";\n"), 0o600); err != nil {
 		t.Fatal(err)
