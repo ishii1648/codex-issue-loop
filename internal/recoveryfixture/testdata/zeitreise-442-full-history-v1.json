@@ -1,0 +1,703 @@
+{
+  "format_version": 1,
+  "manifest": {
+    "source_schema_version": 4,
+    "source_version": "v0.6.22",
+    "sanitizer_version": 1,
+    "captured_at": "2026-08-18T06:03:00Z",
+    "repository": "ishii1648/zeitreise",
+    "issue_number": 442,
+    "acquisition": {
+      "durable_state": "target Issue plus its pending-request records from state.json",
+      "events": "all events.jsonl records whose issue_number equals the target",
+      "worktree": "one read-only git inspection of the saved worktree and branch",
+      "remote": "one read-only GitHub Issue/labels/comments/PR identity inspection"
+    },
+    "intentional_omissions": [
+      {
+        "path": "durable.issues[issue_number!=target]",
+        "reason": "unrelated Issue state is outside the acquisition scope"
+      },
+      {
+        "path": "durable.pending_requests[issue_number!=target]",
+        "reason": "unrelated manual requests are outside the acquisition scope"
+      },
+      {
+        "path": "events[issue_number!=target]",
+        "reason": "unrelated repository events are outside the acquisition scope"
+      },
+      {
+        "path": "remote.issue.body",
+        "reason": "Issue body is not a recovery predicate and may contain sensitive production text"
+      },
+      {
+        "path": "remote.issue.comments[].non_marker_text",
+        "reason": "only exact automation marker lines and required failure reasons are retained"
+      },
+      {
+        "path": "worktree.contents",
+        "reason": "worktree content is not exported; only read-only inspection results are captured"
+      },
+      {
+        "path": "worker_run_artifacts",
+        "reason": "worker prompts, logs, and results are not required by the selected recovery predicates"
+      }
+    ],
+    "content_sha256": "bb569140fa94275303c84da61d89794d2fc8059daae40477f11639ca67a117ac"
+  },
+  "capture": {
+    "durable": {
+      "repo_id": "repo_zeitreise",
+      "repo_path": "/sanitized/f556a41bd4589ee2",
+      "state_revision": 3791,
+      "issue": {
+        "attempts": 1,
+        "blocked_cause": {
+          "blocked_at": "2026-08-17T12:33:04Z",
+          "kind": "worker_workspace",
+          "origin": "supervisor",
+          "reason": "worker workspace validation failed for /sanitized/d835bcb48ea6bdfc: saved workspace provenance is missing",
+          "resumable": false
+        },
+        "branch": "codex/issue-442-sanitized",
+        "continuations": 2,
+        "declared_resources": [
+          "repo:*"
+        ],
+        "environment_resume": {
+          "base_sha": "f1b2b9ec25764a742c8ff2a6adde71cf75c40730",
+          "confirmed_at": "2026-08-18T06:02:12.482456Z",
+          "current_base_sha": "8323523fd7f984abc6ed8d1d6a995904975e40b9",
+          "id": "resume_343605e97b2e3155",
+          "previous_reason": "localhost listen denied",
+          "status": "running"
+        },
+        "execution_profile": "extended",
+        "failure_kind": "issue",
+        "last_error": "worker workspace validation failed for /sanitized/d835bcb48ea6bdfc: saved workspace provenance is missing",
+        "lease": {
+          "base_sha": "f1b2b9ec25764a742c8ff2a6adde71cf75c40730",
+          "declared_resources": [],
+          "owner": {
+            "generation": 2,
+            "run_id": "run_7d573f21a4a8b699"
+          },
+          "reserved_at": "2026-08-18T06:02:12.482456Z",
+          "resolved_resources": [
+            "repo:*"
+          ],
+          "slot": 0
+        },
+        "lease_generation": 2,
+        "number": 442,
+        "run_id": "run_7d573f21a4a8b699",
+        "session": null,
+        "session_id": null,
+        "status": "blocked",
+        "title": "sanitized-title-22d1b97d97515706",
+        "updated_at": "2026-08-17T12:33:04Z",
+        "worker_identity": {
+          "backend": "codex",
+          "runtime_version": "sanitized-version"
+        },
+        "worktree": "/sanitized/d835bcb48ea6bdfc"
+      },
+      "pending_requests": []
+    },
+    "events": [
+      {
+        "event_id": "event_8800dc6fe24b9163",
+        "issue_number": 442,
+        "payload": {
+          "base_sha": "f1b2b9ec25764a742c8ff2a6adde71cf75c40730",
+          "declared_resources": [
+            "repo:*"
+          ],
+          "owner": {
+            "generation": 1,
+            "run_id": "run_7d573f21a4a8b699"
+          },
+          "reserved_at": "2026-08-17T12:20:00Z",
+          "resolved_resources": [
+            "repo:*"
+          ],
+          "slot": 0
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3765,
+        "timestamp": "2026-08-17T12:20:00Z",
+        "type": "lease_reserved",
+        "version": 4
+      },
+      {
+        "event_id": "event_b07aeb43d9a49927",
+        "issue_number": 442,
+        "payload": {
+          "title": "sanitized-title-22d1b97d97515706"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3766,
+        "timestamp": "2026-08-17T12:20:01Z",
+        "type": "issue_claimed",
+        "version": 4
+      },
+      {
+        "event_id": "event_518924d9f0000ef2",
+        "issue_number": 442,
+        "payload": {
+          "branch": "codex/issue-442-sanitized",
+          "identity": {
+            "backend": "codex",
+            "runtime_version": "sanitized-version"
+          },
+          "worktree": "/sanitized/d835bcb48ea6bdfc"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3767,
+        "timestamp": "2026-08-17T12:20:02Z",
+        "type": "worker_started",
+        "version": 4
+      },
+      {
+        "event_id": "event_80c082c2a2b92c8f",
+        "issue_number": 442,
+        "payload": {
+          "pgid": 41001,
+          "pid": 41001
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3768,
+        "timestamp": "2026-08-17T12:20:03Z",
+        "type": "worker_process_started",
+        "version": 4
+      },
+      {
+        "event_id": "event_769dde9a5cb9419b",
+        "issue_number": 442,
+        "payload": {
+          "execution_profile": "extended"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3769,
+        "timestamp": "2026-08-17T12:21:00Z",
+        "type": "worker_preflight_completed",
+        "version": 4
+      },
+      {
+        "event_id": "event_7a6a1a3d093f7141",
+        "issue_number": 442,
+        "payload": {
+          "delay": "1m0s",
+          "failure_kind": "transient",
+          "reason": "sanitized transient retry 1",
+          "retry_at": "2026-08-17T12:22:01Z"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3770,
+        "timestamp": "2026-08-17T12:21:01Z",
+        "type": "retry_scheduled",
+        "version": 4
+      },
+      {
+        "event_id": "event_016caf6b8b4ac891",
+        "issue_number": 442,
+        "payload": {
+          "continuation": 1
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3771,
+        "timestamp": "2026-08-17T12:22:01Z",
+        "type": "worker_continuation_started",
+        "version": 4
+      },
+      {
+        "event_id": "event_41d26d57efe39bbf",
+        "issue_number": 442,
+        "payload": {
+          "pgid": 41002,
+          "pid": 41002
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3772,
+        "timestamp": "2026-08-17T12:22:02Z",
+        "type": "worker_process_started",
+        "version": 4
+      },
+      {
+        "event_id": "event_31b71ebff75623d8",
+        "issue_number": 442,
+        "payload": {
+          "execution_profile": "extended"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3773,
+        "timestamp": "2026-08-17T12:23:00Z",
+        "type": "worker_preflight_completed",
+        "version": 4
+      },
+      {
+        "event_id": "event_3c17dd1d2d706a2e",
+        "issue_number": 442,
+        "payload": {
+          "delay": "2m0s",
+          "failure_kind": "transient",
+          "reason": "sanitized transient retry 2",
+          "retry_at": "2026-08-17T12:25:01Z"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3774,
+        "timestamp": "2026-08-17T12:23:01Z",
+        "type": "retry_scheduled",
+        "version": 4
+      },
+      {
+        "event_id": "event_7ad56a659afd4f66",
+        "issue_number": 442,
+        "payload": {
+          "continuation": 2
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3775,
+        "timestamp": "2026-08-17T12:25:01Z",
+        "type": "worker_continuation_started",
+        "version": 4
+      },
+      {
+        "event_id": "event_aaa27d7b45039ef9",
+        "issue_number": 442,
+        "payload": {
+          "pgid": 41003,
+          "pid": 41003
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3776,
+        "timestamp": "2026-08-17T12:25:02Z",
+        "type": "worker_process_started",
+        "version": 4
+      },
+      {
+        "event_id": "event_237f0f76931e8f6d",
+        "issue_number": 442,
+        "payload": {
+          "execution_profile": "extended"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3777,
+        "timestamp": "2026-08-17T12:26:00Z",
+        "type": "worker_preflight_completed",
+        "version": 4
+      },
+      {
+        "event_id": "event_90998175efa5b0e8",
+        "issue_number": 442,
+        "payload": {
+          "error": "worker blocked: localhost listen denied",
+          "failure_kind": "issue"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3778,
+        "timestamp": "2026-08-17T12:26:01Z",
+        "type": "issue_blocked",
+        "version": 4
+      },
+      {
+        "event_id": "event_a5d5b3094d3b1535",
+        "issue_number": 442,
+        "payload": {
+          "state": "blocked"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3779,
+        "timestamp": "2026-08-17T12:26:02Z",
+        "type": "github_state_synced",
+        "version": 4
+      },
+      {
+        "event_id": "event_09e46de297d15338",
+        "issue_number": 442,
+        "payload": {
+          "previous_status": "blocked",
+          "pull_requests": null,
+          "reason": "GitHub exclusion label was applied manually",
+          "status": "blocked",
+          "worktree": {
+            "Branch": "codex/issue-442-sanitized",
+            "Dirty": true,
+            "Exists": true,
+            "Head": "40fd7f23f5f32d5d90e7478ca4ba7b0d18cd383b",
+            "LocalBranchExists": true,
+            "RemoteBranchExists": false,
+            "UnpushedCommits": false,
+            "Valid": true
+          }
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3780,
+        "timestamp": "2026-08-17T12:27:00Z",
+        "type": "startup_reconciled",
+        "version": 4
+      },
+      {
+        "event_id": "event_dcf0407c3ef36ef1",
+        "issue_number": 442,
+        "payload": {
+          "previous_status": "blocked",
+          "pull_requests": null,
+          "reason": "GitHub exclusion label was applied manually",
+          "status": "blocked",
+          "worktree": {
+            "Branch": "codex/issue-442-sanitized",
+            "Dirty": true,
+            "Exists": true,
+            "Head": "40fd7f23f5f32d5d90e7478ca4ba7b0d18cd383b",
+            "LocalBranchExists": true,
+            "RemoteBranchExists": false,
+            "UnpushedCommits": false,
+            "Valid": true
+          }
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3781,
+        "timestamp": "2026-08-17T12:28:00Z",
+        "type": "startup_reconciled",
+        "version": 4
+      },
+      {
+        "event_id": "event_f7b7985493886081",
+        "issue_number": 442,
+        "payload": {
+          "previous_status": "blocked",
+          "pull_requests": null,
+          "reason": "GitHub exclusion label was applied manually",
+          "status": "blocked",
+          "worktree": {
+            "Branch": "codex/issue-442-sanitized",
+            "Dirty": true,
+            "Exists": true,
+            "Head": "40fd7f23f5f32d5d90e7478ca4ba7b0d18cd383b",
+            "LocalBranchExists": true,
+            "RemoteBranchExists": false,
+            "UnpushedCommits": false,
+            "Valid": true
+          }
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3782,
+        "timestamp": "2026-08-17T12:29:00Z",
+        "type": "startup_reconciled",
+        "version": 4
+      },
+      {
+        "event_id": "event_ef471747449771cf",
+        "issue_number": 442,
+        "payload": {
+          "previous_status": "blocked",
+          "pull_requests": null,
+          "reason": "GitHub exclusion label was applied manually",
+          "status": "blocked",
+          "worktree": {
+            "Branch": "codex/issue-442-sanitized",
+            "Dirty": true,
+            "Exists": true,
+            "Head": "40fd7f23f5f32d5d90e7478ca4ba7b0d18cd383b",
+            "LocalBranchExists": true,
+            "RemoteBranchExists": false,
+            "UnpushedCommits": false,
+            "Valid": true
+          }
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3783,
+        "timestamp": "2026-08-17T12:30:00Z",
+        "type": "startup_reconciled",
+        "version": 4
+      },
+      {
+        "event_id": "event_62562e1c55cf4788",
+        "issue_number": 442,
+        "payload": {
+          "previous_status": "blocked",
+          "pull_requests": null,
+          "reason": "GitHub exclusion label was applied manually",
+          "status": "blocked",
+          "worktree": {
+            "Branch": "codex/issue-442-sanitized",
+            "Dirty": true,
+            "Exists": true,
+            "Head": "40fd7f23f5f32d5d90e7478ca4ba7b0d18cd383b",
+            "LocalBranchExists": true,
+            "RemoteBranchExists": false,
+            "RemoteConsistent": false,
+            "RemoteHead": "",
+            "UnpushedCommits": false,
+            "Valid": true
+          }
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3784,
+        "timestamp": "2026-08-17T12:31:00Z",
+        "type": "startup_reconciled",
+        "version": 4
+      },
+      {
+        "event_id": "event_649164e7a8910b5d",
+        "issue_number": 442,
+        "payload": {
+          "previous_status": "blocked",
+          "pull_requests": null,
+          "reason": "supervisor-owned worker environment block provenance preserved",
+          "status": "blocked",
+          "worktree": {
+            "Branch": "codex/issue-442-sanitized",
+            "Dirty": true,
+            "Exists": true,
+            "Head": "40fd7f23f5f32d5d90e7478ca4ba7b0d18cd383b",
+            "LocalBranchExists": true,
+            "RemoteBranchExists": false,
+            "RemoteConsistent": false,
+            "RemoteHead": "",
+            "UnpushedCommits": false,
+            "Valid": true
+          }
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3785,
+        "timestamp": "2026-08-17T12:32:00Z",
+        "type": "startup_reconciled",
+        "version": 4
+      },
+      {
+        "event_id": "event_c2db718ae4873f72",
+        "issue_number": 442,
+        "payload": {
+          "base_sha": "f1b2b9ec25764a742c8ff2a6adde71cf75c40730",
+          "current_base_sha": "8323523fd7f984abc6ed8d1d6a995904975e40b9",
+          "interrupted_resume": false,
+          "legacy_lease_recovered": true,
+          "legacy_worker_block": true,
+          "parked_lease_reacquired": false,
+          "previous_reason": "localhost listen denied",
+          "resource_park_id": "",
+          "resume_id": "resume_343605e97b2e3155"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3786,
+        "timestamp": "2026-08-18T06:02:12.510889Z",
+        "type": "environment_resume_requested",
+        "version": 4
+      },
+      {
+        "event_id": "event_d893963c11ad75f9",
+        "issue_number": 442,
+        "payload": {
+          "state": "environment_resume"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3787,
+        "timestamp": "2026-08-17T12:33:01Z",
+        "type": "github_state_synced",
+        "version": 4
+      },
+      {
+        "event_id": "event_2efe6818a8c92a95",
+        "issue_number": 442,
+        "payload": {
+          "resume_id": "resume_343605e97b2e3155",
+          "state": "environment_resume"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3788,
+        "timestamp": "2026-08-17T12:33:02Z",
+        "type": "github_state_synced",
+        "version": 4
+      },
+      {
+        "event_id": "event_31c71865cec7d36f",
+        "issue_number": 442,
+        "payload": {
+          "mode": "environment_block_resume"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3789,
+        "timestamp": "2026-08-17T12:33:03Z",
+        "type": "worker_started",
+        "version": 4
+      },
+      {
+        "event_id": "event_08ef6284551ec52c",
+        "issue_number": 442,
+        "payload": {
+          "error": "worker workspace validation failed for /sanitized/d835bcb48ea6bdfc: saved workspace provenance is missing",
+          "expected_cwd": "/sanitized/d835bcb48ea6bdfc",
+          "run_id": "run_7d573f21a4a8b699",
+          "validation": {
+            "branch": "codex/issue-442-sanitized",
+            "canonical_cwd": "/sanitized/d835bcb48ea6bdfc",
+            "checks": {
+              "canonical_path": true,
+              "git_top_level": true,
+              "lease_owner_generation": true,
+              "managed_root": true,
+              "no_symlink_components": true,
+              "not_main_checkout": true,
+              "repository_identity": true,
+              "run_id": true,
+              "saved_branch": true,
+              "saved_branch_state": true,
+              "saved_path": true,
+              "session_id": true
+            },
+            "expected_cwd": "/sanitized/d835bcb48ea6bdfc",
+            "git_common_dir": "/sanitized/80fed5823addf40f",
+            "main_checkout": "/sanitized/f556a41bd4589ee2",
+            "top_level": "/sanitized/d835bcb48ea6bdfc",
+            "valid": true
+          }
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3790,
+        "timestamp": "2026-08-17T12:33:04Z",
+        "type": "worker_workspace_rejected",
+        "version": 4
+      },
+      {
+        "event_id": "event_73527d9c4190d0f7",
+        "issue_number": 442,
+        "payload": {
+          "state": "blocked"
+        },
+        "repo_id": "repo_zeitreise",
+        "run_id": "run_7d573f21a4a8b699",
+        "sequence": 3791,
+        "timestamp": "2026-08-17T12:33:05Z",
+        "type": "github_state_synced",
+        "version": 4
+      }
+    ],
+    "worktree": {
+      "Exists": true,
+      "Valid": true,
+      "Branch": "codex/issue-442-sanitized",
+      "Head": "40fd7f23f5f32d5d90e7478ca4ba7b0d18cd383b",
+      "RemoteHead": "",
+      "Dirty": true,
+      "UnpushedCommits": false,
+      "LocalBranchExists": true,
+      "RemoteBranchExists": false,
+      "RemoteConsistent": false
+    },
+    "remote": {
+      "Issue": {
+        "Number": 442,
+        "Title": "sanitized-title-22d1b97d97515706",
+        "Body": "sanitized-body-3ac90f7e06195d33",
+        "URL": "",
+        "CreatedAt": "0001-01-01T00:00:00Z",
+        "Labels": [
+          "blocked"
+        ],
+        "Assignees": null,
+        "Milestone": "",
+        "Comments": [
+          "\u003c!-- codex-issue-loop:environment-resume:resume_343605e97b2e3155 --\u003e",
+          "\u003c!-- codex-issue-loop:environment-resume:resume_343605e97b2e3155 --\u003e",
+          "\u003c!-- codex-issue-loop:failed:442 --\u003e\n\u003c!-- codex-issue-loop:failure:36fc69471daf6028 --\u003e\nAutomation stopped: worker blocked: localhost listen denied",
+          "\u003c!-- codex-issue-loop:failed:442 --\u003e\n\u003c!-- codex-issue-loop:failure:8161f175d6d97233 --\u003e\nAutomation stopped: worker workspace validation failed for /sanitized/d835bcb48ea6bdfc: saved workspace provenance is missing"
+        ],
+        "State": "OPEN"
+      },
+      "PullRequests": null
+    }
+  },
+  "completeness": {
+    "event_count": 27,
+    "event_sequences": [
+      3765,
+      3766,
+      3767,
+      3768,
+      3769,
+      3770,
+      3771,
+      3772,
+      3773,
+      3774,
+      3775,
+      3776,
+      3777,
+      3778,
+      3779,
+      3780,
+      3781,
+      3782,
+      3783,
+      3784,
+      3785,
+      3786,
+      3787,
+      3788,
+      3789,
+      3790,
+      3791
+    ],
+    "event_types": [
+      "lease_reserved",
+      "issue_claimed",
+      "worker_started",
+      "worker_process_started",
+      "worker_preflight_completed",
+      "retry_scheduled",
+      "worker_continuation_started",
+      "worker_process_started",
+      "worker_preflight_completed",
+      "retry_scheduled",
+      "worker_continuation_started",
+      "worker_process_started",
+      "worker_preflight_completed",
+      "issue_blocked",
+      "github_state_synced",
+      "startup_reconciled",
+      "startup_reconciled",
+      "startup_reconciled",
+      "startup_reconciled",
+      "startup_reconciled",
+      "startup_reconciled",
+      "environment_resume_requested",
+      "github_state_synced",
+      "github_state_synced",
+      "worker_started",
+      "worker_workspace_rejected",
+      "github_state_synced"
+    ],
+    "event_shape_sha256": "69008a731c6293453c43361866b66c333dc2b2f6e3f1fb83f28df71cd84de03c",
+    "value_sha256": "b5e801bb3124a6a893dbb89ea55539ac576d133056d75f4860dab9ac7c4a998b",
+    "timestamp_sha256": "f2eda5a04951526ea2fe040c001f15ad5333219a8ccbf01063bbab963ade5957",
+    "reference_sha256": "537f35607960ce3ff309e68dc9c420dd514d4c5dac00a7b2f556f67bb1190585"
+  }
+}

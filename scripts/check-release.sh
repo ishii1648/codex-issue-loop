@@ -18,3 +18,14 @@ done
 version_json=$($temporary_root/first/agent-loop_Darwin_arm64 version --json)
 printf '%s\n' "$version_json" | grep -Fq '"version":"v0.0.0-test"'
 printf '%s\n' "$version_json" | grep -Fq "\"commit\":\"$commit\""
+
+# Recovery fixtures are production-derived release evidence. Refuse a release
+# if a reviewed byte changes, or if its internal completeness/hash manifest no
+# longer verifies. Updating both files requires an explicit fixture review.
+while read -r expected fixture; do
+  [ -n "$expected" ] || continue
+  fixture_path="internal/recoveryfixture/testdata/$fixture"
+  actual=$(shasum -a 256 "$fixture_path" | awk '{print $1}')
+  [ "$actual" = "$expected" ]
+  "$temporary_root/first/agent-loop_Darwin_arm64" verify-recovery-fixture --fixture "$fixture_path" --json >/dev/null
+done < internal/recoveryfixture/testdata/blessed-fixtures.sha256
