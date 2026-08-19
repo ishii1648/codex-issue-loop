@@ -129,23 +129,24 @@ func TestRestartCompletesRequestedMergedPullRequestAdoption(t *testing.T) {
 }
 
 type fakeGitHub struct {
-	issue                     gh.Issue
-	remote                    *gh.RemoteState
-	claimed, done, needsInput bool
-	doneCalls                 int
-	markedRunning             bool
-	readyPullRequest          bool
-	updatedPullRequest        bool
-	mergedPullRequest         bool
-	checksRecoveryCalls       int
-	checksRecoveryID          string
-	inspectCalls              int
-	failedCalls               int
-	claimErr                  error
-	doneErr                   error
-	failedErr                 error
-	listErr                   error
-	inspectHook               func()
+	issue                       gh.Issue
+	remote                      *gh.RemoteState
+	claimed, done, needsInput   bool
+	doneCalls                   int
+	markedRunning               bool
+	readyPullRequest            bool
+	updatedPullRequest          bool
+	mergedPullRequest           bool
+	checksRecoveryCalls         int
+	checksRecoveryID            string
+	answeredWorkspaceRecoveries int
+	inspectCalls                int
+	failedCalls                 int
+	claimErr                    error
+	doneErr                     error
+	failedErr                   error
+	listErr                     error
+	inspectHook                 func()
 }
 
 type rawCapabilityGitHub struct{ *fakeGitHub }
@@ -226,6 +227,11 @@ func (f *fakeGitHub) MarkPullRequestChecksRecovery(_ context.Context, _ config.C
 	f.markedRunning = true
 	f.checksRecoveryCalls++
 	f.checksRecoveryID = recoveryID
+	return nil
+}
+func (f *fakeGitHub) MarkAnsweredWorkspaceRecovery(context.Context, config.Config, int, string) error {
+	f.markedRunning = true
+	f.answeredWorkspaceRecoveries++
 	return nil
 }
 func (f *fakeGitHub) ReadyPullRequest(context.Context, config.Config, string) error {
@@ -1766,6 +1772,82 @@ func TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce(t *testing.T) {
 	rejected, _ := loop.Store.Load()
 	if item := rejected.Issues["1"]; item.Status != "blocked" || item.Lease != nil || item.ResourcePark.Status != "resumed" || item.BlockedCause == nil || item.BlockedCause.Kind != "answer_resume" {
 		t.Fatalf("closed answered continuation was not rejected: %+v", item)
+	}
+}
+
+func TestAnsweredWorkspaceRecoverySyncThenResumesSameSessionAndWorktree(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	recorder := &recordingWorker{result: worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "continue",
+		Retry: &worker.Retry{Reason: "continue"},
+	}}
+	loop.Worker = recorder
+	runID := "run_answered_workspace"
+	branch := "codex/issue-1-test"
+	now := time.Now().UTC()
+	originalOwner := state.LeaseOwner{RunID: runID, Generation: 1}
+	resumeOwner := state.LeaseOwner{RunID: runID, Generation: 2}
+	activeOwner := state.LeaseOwner{RunID: runID, Generation: 3}
+	reason := fmt.Sprintf("worker workspace validation failed for %s: saved workspace provenance is missing", loop.Config.RepoPath)
+	recoveryID := "answered_workspace_recovery_1"
+	failureDigest := sha256.Sum256([]byte(reason))
+	github.issue = gh.Issue{
+		Number: 1, Title: "Test", State: "OPEN", Labels: []string{"blocked"},
+		Comments: []string{
+			"<!-- codex-issue-loop:request:req_1 -->",
+			fmt.Sprintf("<!-- codex-issue-loop:failed:1 -->\n<!-- codex-issue-loop:failure:%x -->", failureDigest[:8]),
+		},
+	}
+	_, err := loop.Store.Update("fixture", 1, runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: "resume_pending", RunID: runID, LeaseGeneration: 3,
+			Lease: &state.ResourceLease{Owner: activeOwner, Slot: 0, DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base", ReservedAt: now},
+			ResourcePark: &state.ResourceLeasePark{
+				ID: "park_1", Kind: state.ResourceParkKindNeedsInput, RequestID: "req_1", Status: "resumed",
+				OriginalLease: state.ResourceLease{Owner: originalOwner, Slot: 0, DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base", ReservedAt: now.Add(-time.Hour)},
+				ParkedAt:      now.Add(-30 * time.Minute), ResumedAt: now.Add(-20 * time.Minute), ResumeOwner: &resumeOwner,
+			},
+			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			SessionID: "session-answer", Session: &state.WorkerSession{Backend: "codex", ID: "session-answer"},
+			ExecutionProfile: "extended", Attempts: 1, Continuations: 0, FailureKind: "issue", LastError: reason,
+			GitHubSync:   "answered_workspace_recovery",
+			Answers:      []state.AnswerRecord{{RequestID: "req_1", Question: "Continue?", Answer: "yes", AnsweredAt: now.Add(-20 * time.Minute)}},
+			BlockedCause: &state.BlockedCause{Origin: "supervisor", Kind: "worker_workspace", Resumable: false, Reason: reason, BlockedAt: now.Add(-time.Minute)},
+			AnsweredWorkspaceRecovery: &state.AnsweredWorkspaceRecovery{
+				ID: recoveryID, Status: "requested", ConfirmedAt: now, OperatorConfirmed: true, OldProvenanceMissing: true,
+				RequestID: "req_1", ResourceParkID: "park_1", OldOwner: resumeOwner, NewOwner: activeOwner,
+			},
+		}
+		snapshot.PendingRequests["req_1"] = &state.Request{
+			ID: "req_1", IssueNumber: 1, Question: "Continue?", RunID: runID, ResourceParkID: "park_1",
+			ReleasedOwner: &originalOwner, Status: "answered", Answer: "yes", CreatedAt: now.Add(-30 * time.Minute), AnsweredAt: deadlinePointer(now.Add(-20 * time.Minute)),
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ := loop.issueState(1)
+	if err := loop.processExisting(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	synced, _ := loop.issueState(1)
+	if synced.GitHubSync != "" || synced.AnsweredWorkspaceRecovery.Status != "github_synced" || github.answeredWorkspaceRecoveries != 1 {
+		t.Fatalf("sync did not converge: issue=%+v github=%+v", synced, github)
+	}
+	revision := func() uint64 { snapshot, _ := loop.Store.Load(); return snapshot.StateRevision }()
+	if err := loop.syncGitHub(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if after := func() uint64 { snapshot, _ := loop.Store.Load(); return snapshot.StateRevision }(); after != revision {
+		t.Fatalf("stale synchronization duplicated its durable event: before=%d after=%d", revision, after)
+	}
+	github.issue.Labels = []string{loop.Config.GitHub.RunningLabel}
+	if err := loop.processExisting(context.Background(), synced); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.resumePrompts) != 1 || recorder.resumeConfigPaths[0] != loop.Config.RepoPath {
+		t.Fatalf("same-workspace continuation was not resumed: recorder=%+v", recorder)
 	}
 }
 

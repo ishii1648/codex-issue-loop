@@ -353,6 +353,7 @@ agent-loop <command> [options]
 | `explain-recovery` | recovery predicateをversioned JSONでread-only診断する |
 | `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
 | `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
+| `recover-answered-workspace` | 回答後にmissing `Workspace`だけでblockedになったexact legacy chainを同じcontinuationへ戻す |
 | `export-recovery-fixture` | 対象Issueのstate/event/worktree/GitHub recovery evidenceをread-only取得し決定的にsanitizationする |
 | `verify-recovery-fixture` | fixtureのscope、completeness metadata、record shape/value、hashをfail closedで検証する |
 | `adopt-merged-pr` | terminal state後に外部mergeされた保存branchの単一PRを明示確認付きで完了へ採用する |
@@ -479,7 +480,22 @@ PR conflict、手動exclusion、security block、failed、上記markerのないl
 
 `--dry-run --json`（または`explain-recovery --operation resume-blocked`）はschema version、stable predicate code、`pass`/`fail`/`unknown`、redactedなexpected/actual evidence summary、evidence source、fixability、remediationを返す。event count、payload shape、session、marker、timestamp、lease、worktree、branch/remote、GitHub Issue/PR/comment markerを安全に全件評価し、最初の不一致では停止しない。mutating pathは同じpredicate evaluatorとrefusal codeを使う。診断中はstate/eventをrepairせず、GitHubはread endpointだけを使用する。
 
-### 6.8 recover-checks
+### 6.8 recover-answered-workspace
+
+```sh
+agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 123 --dry-run --json
+agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 123 --confirm-exact-chain --json
+```
+
+対象は、provenance導入前の同一runに `lease_reserved(generation 1)`、`issue_claimed`、保存worktree/branchの初回`worker_started`、有効なPID/PGID、preflight、通常`input_requested`とneeds-input GitHub同期、同一requestの単一`answer_recorded`による同一slot/resources/baseのgeneration 2再取得、`worker_started(mode=user_answer_resume)`、全local boundary check成功かつ`saved workspace provenance is missing`だけの`worker_workspace_rejected`、blocked GitHub同期がexact orderで各1件存在する11-event chainに限定する。current stateは同じrun/session/request/answer/park、`Workspace=null`、active generation 2 lease、`resource_park.status=resumed`、PID/PGID不在、pending request不在、`blocked_cause=supervisor/worker_workspace/non-resumable`でなければならない。
+
+previewとconfirmはいずれもworker spawnと同じ`ValidateLaunch`でcanonical path、managed root、symlink component不在、Git top-level、保存branch、Git common dir、configured repository identity、registered main checkoutとの非同一性を再検証する。さらに保存baseが同repositoryのcommitであること、HEADとtracked/staged/untracked fingerprint、open/no-PR GitHub Issue、supervisor-owned blocked label、request marker、blocked reason由来failure markerのcardinalityを検査する。
+
+confirmはoperator confirmation、old provenance missing、expected/actual workspace identity、validator checks、answer digest、HEAD/content digest、old/new ownerを`answered_workspace_recovery_requested`へ保存する。同じdurable transactionで検証から生成した`Workspace`をbackfillし、leaseを同じrunのgeneration 2から3へfenceし、`resume_pending`と専用GitHub同期intentへ遷移する。answer/request/park/session、attempt/continuation、run/worktree/branch/base、dirty/staged/untracked内容、HEADは変更しない。専用GitHub marker同期後は通常の回答continuationが同じsession/worktreeで起動する。
+
+missing/duplicate/reordered/superseded/cross-run event、別request/park/session/branch/repository/base/lease、generation/slot/resource mismatch、既存Workspace、別validator error、active worker、pending request、manual/security label、closed Issue、PR、marker mismatchは副作用なく拒否する。startupでsilent backfillせず、通常のenvironment recoveryやerror文字列だけでは許可しない。transaction、GitHub同期、並行CLI、supervisor restartの再実行は保存recovery IDとgeneration 3へ収束し、fence、spawn、commentを二重化しない。
+
+### 6.9 recover-checks
 
 ```sh
 agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
@@ -494,7 +510,7 @@ operatorが同じPR branchへ外部commitをpushした後、run、managed worktr
 
 同期後は同じbranch/PRの`awaiting_checks`へ戻し、通常のDraft解除、auto merge、done/close、merge確認後のlease releaseを再利用する。worker attempts、continuations、run historyをresetせず、新branch、PR、push、worker実行を作らない。GitHub同期途中の停止・再起動は保存intentをauthoritative Issue/PR/head/checksと再照合してから同じmarkerへ収束する。closed-without-merge、head/branch/PR不一致、dirty/unpushed worktree、active worker、pending request、manual/security exclusionはstateとlabelを変更せずfail closedとする。
 
-### 6.9 adopt-merged-pr
+### 6.10 adopt-merged-pr
 
 ```sh
 agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
@@ -506,7 +522,7 @@ agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --con
 
 open/closed-unmerged PR、別repo/branch/base/head、dirty/unpushed worktree、active worker、pending request、running/completed state、missing/inconsistent lease、manual/security exclusion、supervisor markerのないterminal stateは変更せずfail closedとする。コマンドはbranch、commit、push、PR、mergeを新規作成せず、state fileやlabelの手編集を代替手順にしない。
 
-### 6.10 終了コード
+### 6.11 終了コード
 
 | code | 意味 |
 | --- | --- |
@@ -851,6 +867,7 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `publication_retry_scheduled`
 - `environment_resume_requested`
 - `environment_resume_recovered`
+- `answered_workspace_recovery_requested`
 - `publication_failed`
 - `publication_recovery_requested`
 - `publication_recovery_attempt_started`

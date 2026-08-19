@@ -199,6 +199,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.recoverPublication(ctx, l, args)
 	case "recover-checks":
 		return a.recoverPullRequestChecks(ctx, l, args)
+	case "recover-answered-workspace":
+		return a.recoverAnsweredWorkspace(ctx, l, args)
 	case "adopt-merged-pr":
 		return a.adoptMergedPullRequest(ctx, l, args)
 	case "logs":
@@ -246,6 +248,7 @@ Commands:
   explain-recovery  Explain recovery predicates without changing state
   recover-publication  Recover an eligible failed Issue at the publication boundary
   recover-checks  Return an externally repaired Pull Request to its saved lifecycle
+  recover-answered-workspace  Recover the exact answered legacy missing-Workspace chain
   export-recovery-fixture  Export sanitized read-only recovery evidence
   verify-recovery-fixture  Fail closed unless a fixture is complete and untampered
   adopt-merged-pr  Adopt one externally merged saved branch into terminal state

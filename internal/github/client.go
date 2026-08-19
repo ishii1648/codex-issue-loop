@@ -447,6 +447,24 @@ func (c CLI) MarkEnvironmentResume(ctx context.Context, cfg config.Config, numbe
 	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
 }
 
+// MarkAnsweredWorkspaceRecovery resumes only the operator-confirmed legacy
+// needs-input/missing-Workspace chain. Its dedicated marker keeps this path
+// distinguishable from environment and ordinary answer continuation recovery.
+func (c CLI) MarkAnsweredWorkspaceRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
+	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			remove = append(remove, label)
+		}
+	}
+	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
+		return err
+	}
+	marker := fmt.Sprintf("<!-- codex-issue-loop:answered-workspace-recovery:%s -->", recoveryID)
+	body := marker + "\nThe exact answered needs-input continuation was explicitly recovered after validating its retained workspace and lease chain."
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
+}
+
 // MarkPublicationRecovery removes only non-exclusion supervisor state labels.
 // In particular, a concurrently added blocked/do-not-automate label is never
 // removed. The operation is idempotent through labels and the durable marker.
