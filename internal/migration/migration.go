@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +18,8 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/schema"
+	"github.com/ishii1648/codex-issue-loop/internal/state"
+	"github.com/ishii1648/codex-issue-loop/internal/statecontract"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,25 +29,40 @@ const (
 )
 
 type Artifact struct {
-	Kind    string `json:"kind"`
-	Path    string `json:"path"`
-	Version int    `json:"version"`
+	Kind              string `json:"kind"`
+	Path              string `json:"path"`
+	Version           int    `json:"version"`
+	SemanticMigration bool   `json:"semantic_migration,omitempty"`
+}
+
+type SemanticFinding struct {
+	RepoID        string `json:"repo_id"`
+	IssueNumber   int    `json:"issue_number"`
+	Status        string `json:"status"`
+	Field         string `json:"field"`
+	Code          string `json:"code"`
+	Migratable    bool   `json:"migratable"`
+	Reason        string `json:"reason"`
+	MigrationRule string `json:"migration_rule"`
+	OperatorGuide string `json:"operator_guide,omitempty"`
+}
+
+type ReleaseCompatibility struct {
+	StateSchemaCurrent       int `json:"state_schema_current"`
+	StateSchemaMigrationFrom int `json:"state_schema_migration_from"`
+	SemanticContractCurrent  int `json:"semantic_contract_current"`
+	SemanticContractMinimum  int `json:"semantic_contract_minimum"`
 }
 
 type Report struct {
-	TargetVersion  int              `json:"target_version"`
-	NeedsMigration bool             `json:"needs_migration"`
-	Artifacts      []Artifact       `json:"artifacts"`
-	Unsupported    []Artifact       `json:"unsupported,omitempty"`
-	FallbackLeases []FallbackLease  `json:"fallback_leases,omitempty"`
-	Repositories   []registry.Entry `json:"-"`
-}
-
-type FallbackLease struct {
-	Path        string `json:"path"`
-	IssueNumber int    `json:"issue_number"`
-	RunID       string `json:"run_id"`
-	Resource    string `json:"resource"`
+	TargetVersion    int                  `json:"target_version"`
+	NeedsMigration   bool                 `json:"needs_migration"`
+	Artifacts        []Artifact           `json:"artifacts"`
+	Unsupported      []Artifact           `json:"unsupported,omitempty"`
+	SemanticFindings []SemanticFinding    `json:"semantic_findings"`
+	NonMigratable    []SemanticFinding    `json:"non_migratable,omitempty"`
+	Compatibility    ReleaseCompatibility `json:"release_compatibility"`
+	Repositories     []registry.Entry     `json:"-"`
 }
 
 type Result struct {
@@ -67,6 +83,7 @@ type Migrator struct {
 
 type journal struct {
 	Version     int        `json:"version"`
+	MigrationID string     `json:"migration_id"`
 	Status      string     `json:"status"`
 	From        int        `json:"from_version"`
 	To          int        `json:"to_version"`
@@ -85,10 +102,11 @@ type backupManifest struct {
 }
 
 type backupEntry struct {
-	Source string      `json:"source"`
-	Backup string      `json:"backup"`
-	Mode   os.FileMode `json:"mode"`
-	SHA256 string      `json:"sha256"`
+	Source  string      `json:"source"`
+	Backup  string      `json:"backup"`
+	Mode    os.FileMode `json:"mode"`
+	SHA256  string      `json:"sha256"`
+	Existed bool        `json:"existed"`
 }
 
 func RegisteredRepositories(l layout.Layout) ([]registry.Entry, error) {
@@ -97,7 +115,10 @@ func RegisteredRepositories(l layout.Layout) ([]registry.Entry, error) {
 }
 
 func Inspect(l layout.Layout) (Report, error) {
-	report := Report{TargetVersion: CurrentVersion}
+	report := Report{TargetVersion: CurrentVersion, SemanticFindings: []SemanticFinding{}, Compatibility: ReleaseCompatibility{
+		StateSchemaCurrent: CurrentVersion, StateSchemaMigrationFrom: schemaversion.Previous,
+		SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,
+	}}
 	repositories, registryArtifact, err := inspectRegistry(l.RegistryPath)
 	if err != nil {
 		return Report{}, err
@@ -132,6 +153,32 @@ func Inspect(l layout.Layout) (Report, error) {
 			continue
 		}
 		dir := filepath.Join(l.ReposRoot, entry.Name())
+		statePath := filepath.Join(dir, "state.json")
+		stateVersion, stateExists, stateErr := jsonVersion(statePath)
+		if stateErr != nil {
+			return Report{}, fmt.Errorf("inspect state %s: %w", statePath, stateErr)
+		}
+		semanticMigration := false
+		if stateExists && (stateVersion == schemaversion.Previous || stateVersion == CurrentVersion) {
+			marker, markerErr := semanticVersion(statePath)
+			if markerErr != nil {
+				return Report{}, fmt.Errorf("inspect semantic contract marker %s: %w", statePath, markerErr)
+			}
+			semanticMigration = marker != statecontract.CurrentVersion
+			if semanticMigration {
+				report.NeedsMigration = true
+			}
+			findings, findingErr := inspectSemanticState(statePath)
+			if findingErr != nil {
+				return Report{}, fmt.Errorf("inspect semantic state %s: %w", statePath, findingErr)
+			}
+			report.SemanticFindings = append(report.SemanticFindings, findings...)
+			for _, finding := range findings {
+				if !finding.Migratable {
+					report.NonMigratable = append(report.NonMigratable, finding)
+				}
+			}
+		}
 		for _, item := range []struct {
 			kind string
 			name string
@@ -153,25 +200,32 @@ func Inspect(l layout.Layout) (Report, error) {
 				return Report{}, fmt.Errorf("inspect %s %s: %w", item.kind, path, inspectErr)
 			}
 			if exists {
-				report.Artifacts = append(report.Artifacts, Artifact{Kind: item.kind, Path: path, Version: version})
-				if version == schemaversion.Previous && (item.kind == "state" || item.kind == "transaction") {
-					fallbacks, fallbackErr := inspectFallbackLeases(path, item.kind)
-					if fallbackErr != nil {
-						return Report{}, fmt.Errorf("inspect fallback leases %s: %w", path, fallbackErr)
-					}
-					report.FallbackLeases = append(report.FallbackLeases, fallbacks...)
+				artifactVersion := version
+				if item.kind == "events" && artifactVersion == 0 && semanticMigration {
+					artifactVersion = stateVersion
 				}
+				report.Artifacts = append(report.Artifacts, Artifact{Kind: item.kind, Path: path, Version: artifactVersion,
+					SemanticMigration: semanticMigration && (item.kind == "state" || item.kind == "events")})
+			}
+			if item.kind == "transaction" && exists && semanticMigration {
+				finding := SemanticFinding{RepoID: entry.Name(), Field: "state.txn.json", Code: state.SemanticCodePreparedTransactionPresent,
+					Migratable: false, Reason: fmt.Sprintf("prepared transaction must be completed by the v%d runtime before semantic migration", stateVersion),
+					MigrationRule: "RECOVER_PREPARED_TRANSACTION_WITH_PRIOR_RUNTIME", OperatorGuide: fmt.Sprintf("run a read-only status with the supported v%d binary, stop the loop, then preview again", stateVersion)}
+				report.SemanticFindings = append(report.SemanticFindings, finding)
+				report.NonMigratable = append(report.NonMigratable, finding)
+			}
+		}
+		if stateExists && semanticMigration {
+			eventsPath := filepath.Join(dir, "events.jsonl")
+			if _, err := os.Stat(eventsPath); errors.Is(err, os.ErrNotExist) {
+				report.Artifacts = append(report.Artifacts, Artifact{Kind: "events", Path: eventsPath, Version: stateVersion, SemanticMigration: true})
+			} else if err != nil {
+				return Report{}, fmt.Errorf("inspect events %s: %w", eventsPath, err)
 			}
 		}
 	}
 
 	sort.Slice(report.Artifacts, func(i, j int) bool { return report.Artifacts[i].Path < report.Artifacts[j].Path })
-	sort.Slice(report.FallbackLeases, func(i, j int) bool {
-		if report.FallbackLeases[i].Path != report.FallbackLeases[j].Path {
-			return report.FallbackLeases[i].Path < report.FallbackLeases[j].Path
-		}
-		return report.FallbackLeases[i].IssueNumber < report.FallbackLeases[j].IssueNumber
-	})
 	for _, artifact := range report.Artifacts {
 		switch artifact.Version {
 		case 0: // Empty event logs do not yet contain a versioned record.
@@ -183,6 +237,68 @@ func Inspect(l layout.Layout) (Report, error) {
 		}
 	}
 	return report, nil
+}
+
+func inspectSemanticState(path string) ([]SemanticFinding, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var snapshot state.Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return nil, err
+	}
+	// Legacy v4 has no explicit contract marker. Preview applies the current validator in
+	// memory and never writes the source file.
+	if snapshot.SemanticContractVersion == statecontract.MinimumVersion {
+		snapshot.SemanticContractVersion = statecontract.CurrentVersion
+	}
+	violations := state.SemanticViolations(snapshot)
+	byIssue := map[int]state.SemanticViolation{}
+	findings := make([]SemanticFinding, 0, len(snapshot.Issues)+1)
+	for _, violation := range violations {
+		if violation.IssueNumber == 0 {
+			findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, Field: violation.Field, Code: violation.Code,
+				Migratable: false, Reason: violation.Reason, MigrationRule: violation.MigrationRule, OperatorGuide: violation.OperatorGuide})
+			continue
+		}
+		byIssue[violation.IssueNumber] = violation
+	}
+	keys := make([]string, 0, len(snapshot.Issues))
+	for key := range snapshot.Issues {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		issue := snapshot.Issues[key]
+		if issue == nil {
+			continue
+		}
+		if violation, found := byIssue[issue.Number]; found {
+			findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: issue.Number, Status: issue.Status,
+				Field: violation.Field, Code: violation.Code, Migratable: false, Reason: violation.Reason,
+				MigrationRule: violation.MigrationRule, OperatorGuide: violation.OperatorGuide})
+			continue
+		}
+		findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: issue.Number, Status: issue.Status,
+			Field: "issues[].workspace", Code: state.SemanticCodeCompatible, Migratable: true,
+			Reason: "current execution invariants are satisfied or the worker execution boundary has not been crossed", MigrationRule: "PRESERVE_VERIFIED_PROVENANCE"})
+	}
+	return findings, nil
+}
+
+func semanticVersion(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	var envelope struct {
+		SemanticContractVersion int `json:"semantic_contract_version"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return 0, err
+	}
+	return envelope.SemanticContractVersion, nil
 }
 
 func (m Migrator) Apply() (Result, error) {
@@ -199,6 +315,9 @@ func (m Migrator) Apply() (Result, error) {
 	if len(report.Unsupported) > 0 {
 		return Result{}, unsupportedError(report.Unsupported)
 	}
+	if len(report.NonMigratable) > 0 {
+		return Result{}, nonMigratableError(report.NonMigratable)
+	}
 
 	j, journalExists, err := m.loadJournal()
 	if err != nil {
@@ -208,6 +327,12 @@ func (m Migrator) Apply() (Result, error) {
 		return Result{}, fmt.Errorf("unfinished migration targets schema version %d; use its matching binary", j.To)
 	}
 	if journalExists && j.Status == "prepared" {
+		if j.MigrationID == "" {
+			j.MigrationID = migrationID(j.Backup)
+			if err := fsutil.WriteJSON(m.journalPath(), j, 0o600); err != nil {
+				return Result{}, err
+			}
+		}
 		if _, _, err := m.verifyBackup(j.Backup); err != nil {
 			return Result{}, fmt.Errorf("verify prepared migration backup: %w", err)
 		}
@@ -225,11 +350,13 @@ func (m Migrator) Apply() (Result, error) {
 	}
 
 	if !journalExists || j.Status != "prepared" {
-		backup, err := m.createBackup(report)
+		from := migrationFrom(report)
+		backup, err := m.createBackup(report, from)
 		if err != nil {
 			return Result{}, err
 		}
-		j = journal{Version: journalVersion, Status: "prepared", From: schemaversion.Previous, To: CurrentVersion, Backup: backup, StartedAt: m.now()}
+		startedAt := m.now()
+		j = journal{Version: journalVersion, MigrationID: migrationID(backup), Status: "prepared", From: from, To: CurrentVersion, Backup: backup, StartedAt: startedAt}
 		if err := fsutil.WriteJSON(m.journalPath(), j, 0o600); err != nil {
 			return Result{}, err
 		}
@@ -237,10 +364,10 @@ func (m Migrator) Apply() (Result, error) {
 
 	changed := 0
 	for _, artifact := range report.Artifacts {
-		if artifact.Version != schemaversion.Previous {
+		if artifact.Version != schemaversion.Previous && !artifact.SemanticMigration {
 			continue
 		}
-		if err := migrateArtifact(artifact, m.now()); err != nil {
+		if err := migrateArtifact(artifact, j); err != nil {
 			return Result{}, err
 		}
 		changed++
@@ -280,6 +407,12 @@ func (m Migrator) Restore(backup string) (Result, error) {
 		return Result{}, err
 	}
 	for _, entry := range manifest.Entries {
+		if !backupEntryExisted(entry) {
+			if err := os.Remove(entry.Source); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return Result{}, fmt.Errorf("remove migration-created %s: %w", entry.Source, err)
+			}
+			continue
+		}
 		backupPath, err := backupEntryPath(resolved, entry.Backup)
 		if err != nil {
 			return Result{}, err
@@ -313,6 +446,9 @@ func (m Migrator) verifyBackup(backup string) (string, backupManifest, error) {
 		if err := validateRestoreTarget(m.Layout, manifest.RepositoryPaths, entry.Source); err != nil {
 			return "", backupManifest{}, err
 		}
+		if !backupEntryExisted(entry) {
+			continue
+		}
 		backupPath, err := backupEntryPath(resolved, entry.Backup)
 		if err != nil {
 			return "", backupManifest{}, err
@@ -328,6 +464,13 @@ func (m Migrator) verifyBackup(backup string) (string, backupManifest, error) {
 	return resolved, manifest, nil
 }
 
+// Version 1 manifests created before semantic migration did not emit
+// "existed". A non-empty backup path is the unambiguous legacy representation
+// of an existing source; only new synthetic event entries have neither.
+func backupEntryExisted(entry backupEntry) bool {
+	return entry.Existed || entry.Backup != ""
+}
+
 func backupEntryPath(root, name string) (string, error) {
 	if name == "" || filepath.IsAbs(name) {
 		return "", fmt.Errorf("invalid migration backup entry path %q", name)
@@ -339,12 +482,16 @@ func backupEntryPath(root, name string) (string, error) {
 	return filepath.Join(root, clean), nil
 }
 
-func (m Migrator) createBackup(report Report) (string, error) {
+func (m Migrator) createBackup(report Report, from int) (string, error) {
 	root := filepath.Join(m.Layout.Root, "migrations")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
 	}
-	backup := filepath.Join(root, m.now().UTC().Format("20060102T150405.000000000Z")+fmt.Sprintf("-v%d-to-v%d", schemaversion.Previous, CurrentVersion))
+	suffix := fmt.Sprintf("-v%d-to-v%d", from, CurrentVersion)
+	if from == CurrentVersion {
+		suffix = fmt.Sprintf("-v%d-semantic-v%d", CurrentVersion, statecontract.CurrentVersion)
+	}
+	backup := filepath.Join(root, m.now().UTC().Format("20060102T150405.000000000Z")+suffix)
 	if err := os.Mkdir(backup, 0o700); err != nil {
 		return "", err
 	}
@@ -352,13 +499,17 @@ func (m Migrator) createBackup(report Report) (string, error) {
 	if err := os.Mkdir(filesDir, 0o700); err != nil {
 		return "", err
 	}
-	manifest := backupManifest{Version: 1, From: schemaversion.Previous, To: CurrentVersion, CreatedAt: m.now()}
+	manifest := backupManifest{Version: 1, From: from, To: CurrentVersion, CreatedAt: m.now()}
 	for _, repository := range report.Repositories {
 		manifest.RepositoryPaths = append(manifest.RepositoryPaths, repository.RepoPath)
 	}
 	sort.Strings(manifest.RepositoryPaths)
 	for index, artifact := range report.Artifacts {
 		data, err := os.ReadFile(artifact.Path)
+		if errors.Is(err, os.ErrNotExist) && artifact.Kind == "events" {
+			manifest.Entries = append(manifest.Entries, backupEntry{Source: artifact.Path, Existed: false})
+			continue
+		}
 		if err != nil {
 			return "", err
 		}
@@ -370,7 +521,7 @@ func (m Migrator) createBackup(report Report) (string, error) {
 		if err := fsutil.WriteFile(filepath.Join(backup, name), data, 0o600); err != nil {
 			return "", err
 		}
-		manifest.Entries = append(manifest.Entries, backupEntry{Source: artifact.Path, Backup: name, Mode: info.Mode().Perm(), SHA256: hashBytes(data)})
+		manifest.Entries = append(manifest.Entries, backupEntry{Source: artifact.Path, Backup: name, Mode: info.Mode().Perm(), SHA256: hashBytes(data), Existed: true})
 	}
 	if err := fsutil.WriteJSON(filepath.Join(backup, "manifest.json"), manifest, 0o600); err != nil {
 		return "", err
@@ -471,16 +622,16 @@ func eventVersion(path string) (int, bool, error) {
 	return version, true, nil
 }
 
-func migrateArtifact(artifact Artifact, now time.Time) error {
+func migrateArtifact(artifact Artifact, migration journal) error {
 	switch artifact.Kind {
 	case "config":
 		return migrateYAML(artifact.Path)
 	case "events":
-		return migrateEvents(artifact.Path)
+		return migrateEvents(artifact.Path, migration, artifact.Version)
 	case "transaction":
-		return migrateTransaction(artifact.Path, now)
+		return migrateTransaction(artifact.Path)
 	case "state":
-		return migrateState(artifact.Path, now)
+		return migrateState(artifact.Path, migration)
 	case "registry":
 		return migrateJSONObject(artifact.Path)
 	default:
@@ -502,12 +653,16 @@ func migrateYAML(path string) error {
 	}
 	mapping := node.Content[0]
 	found := false
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
+	for index := 0; index+1 < len(mapping.Content); {
+		if mapping.Content[index].Value == "notifications" {
+			mapping.Content = append(mapping.Content[:index], mapping.Content[index+2:]...)
+			continue
+		}
 		if mapping.Content[index].Value == "version" {
 			mapping.Content[index+1].Value = fmt.Sprint(CurrentVersion)
 			found = true
-			break
 		}
+		index += 2
 	}
 	if !found {
 		return fmt.Errorf("config version is missing")
@@ -528,7 +683,7 @@ func migrateJSONObject(path string) error {
 	return writeRawObject(path, object)
 }
 
-func migrateTransaction(path string, now time.Time) error {
+func migrateTransaction(path string) error {
 	object, err := readRawObject(path)
 	if err != nil {
 		return err
@@ -541,9 +696,9 @@ func migrateTransaction(path string, now time.Time) error {
 		}
 		nested["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
 		if key == "snapshot" {
-			if err := addFallbackLeases(nested, now); err != nil {
-				return err
-			}
+			delete(nested, "notifications")
+		} else {
+			removeLegacyDeliveryEvent(nested)
 		}
 		encoded, err := json.Marshal(nested)
 		if err != nil {
@@ -554,110 +709,32 @@ func migrateTransaction(path string, now time.Time) error {
 	return writeRawObject(path, object)
 }
 
-func migrateState(path string, now time.Time) error {
+func migrateState(path string, migration journal) error {
 	object, err := readRawObject(path)
 	if err != nil {
 		return err
 	}
 	object["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
-	if err := addFallbackLeases(object, now); err != nil {
+	object["semantic_contract_version"] = json.RawMessage(fmt.Sprint(statecontract.CurrentVersion))
+	var revision uint64
+	if err := json.Unmarshal(object["state_revision"], &revision); err != nil {
+		return fmt.Errorf("decode state revision: %w", err)
+	}
+	revision++
+	object["state_revision"] = json.RawMessage(fmt.Sprint(revision))
+	var supervisor map[string]json.RawMessage
+	if err := json.Unmarshal(object["supervisor"], &supervisor); err != nil {
+		return fmt.Errorf("decode state supervisor: %w", err)
+	}
+	updatedAt, _ := json.Marshal(migration.StartedAt)
+	supervisor["updated_at"] = updatedAt
+	encodedSupervisor, err := json.Marshal(supervisor)
+	if err != nil {
 		return err
 	}
+	object["supervisor"] = encodedSupervisor
+	delete(object, "notifications")
 	return writeRawObject(path, object)
-}
-
-var leaseHoldingStatuses = map[string]bool{
-	"claiming": true, "claimed": true, "running": true, "retry_wait": true,
-	"resume_pending": true, "needs_input": true, "awaiting_checks": true,
-	"awaiting_merge": true, "resolving_conflict": true,
-}
-
-func addFallbackLeases(snapshot map[string]json.RawMessage, now time.Time) error {
-	var issues map[string]map[string]json.RawMessage
-	if len(snapshot["issues"]) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(snapshot["issues"], &issues); err != nil {
-		return fmt.Errorf("decode snapshot issues: %w", err)
-	}
-	active := 0
-	for key, issue := range issues {
-		var status, runID string
-		_ = json.Unmarshal(issue["status"], &status)
-		if !leaseHoldingStatuses[status] {
-			continue
-		}
-		active++
-		if active > 1 {
-			return fmt.Errorf("v2 concurrency-1 state contains more than one active Issue")
-		}
-		var number int
-		_ = json.Unmarshal(issue["number"], &number)
-		if number < 1 {
-			number, _ = strconv.Atoi(key)
-		}
-		_ = json.Unmarshal(issue["run_id"], &runID)
-		if runID == "" {
-			runID = fmt.Sprintf("migration_v2_issue_%d", number)
-			encoded, _ := json.Marshal(runID)
-			issue["run_id"] = encoded
-		}
-		reservedAt := now.UTC()
-		if value := issue["updated_at"]; len(value) > 0 {
-			var updated time.Time
-			if json.Unmarshal(value, &updated) == nil && !updated.IsZero() {
-				reservedAt = updated.UTC()
-			}
-		}
-		issue["lease_generation"] = json.RawMessage("1")
-		lease, err := json.Marshal(map[string]any{
-			"owner": map[string]any{"run_id": runID, "generation": 1},
-			"slot":  0, "declared_resources": []string{}, "resolved_resources": []string{"repo:*"},
-			"reserved_at": reservedAt,
-		})
-		if err != nil {
-			return err
-		}
-		issue["lease"] = lease
-	}
-	encoded, err := json.Marshal(issues)
-	if err != nil {
-		return err
-	}
-	snapshot["issues"] = encoded
-	return nil
-}
-
-func inspectFallbackLeases(path, kind string) ([]FallbackLease, error) {
-	object, err := readRawObject(path)
-	if err != nil {
-		return nil, err
-	}
-	if kind == "transaction" {
-		if err := json.Unmarshal(object["snapshot"], &object); err != nil {
-			return nil, err
-		}
-	}
-	var issues map[string]struct {
-		Number int    `json:"number"`
-		Status string `json:"status"`
-		RunID  string `json:"run_id"`
-	}
-	if err := json.Unmarshal(object["issues"], &issues); err != nil {
-		return nil, err
-	}
-	result := []FallbackLease{}
-	for _, issue := range issues {
-		if leaseHoldingStatuses[issue.Status] {
-			runID := issue.RunID
-			if runID == "" {
-				runID = fmt.Sprintf("migration_v2_issue_%d", issue.Number)
-			}
-			result = append(result, FallbackLease{Path: path, IssueNumber: issue.Number, RunID: runID, Resource: "repo:*"})
-		}
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].IssueNumber < result[j].IssueNumber })
-	return result, nil
 }
 
 func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
@@ -678,7 +755,10 @@ func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
 			}
 		}
 		var issues map[string]struct {
-			Lease json.RawMessage `json:"lease"`
+			Lease        json.RawMessage `json:"lease"`
+			ResourcePark *struct {
+				Status string `json:"status"`
+			} `json:"resource_park"`
 		}
 		if err := json.Unmarshal(object["issues"], &issues); err != nil {
 			return err
@@ -687,18 +767,28 @@ func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
 			if len(issue.Lease) > 0 && string(issue.Lease) != "null" {
 				return fmt.Errorf("rollback blocked: active resource lease for Issue #%s in %s", number, entry.Source)
 			}
+			if issue.ResourcePark != nil && (issue.ResourcePark.Status == "parked" || issue.ResourcePark.Status == "resuming") {
+				return fmt.Errorf("rollback blocked: parked resource continuation for Issue #%s in %s", number, entry.Source)
+			}
 		}
 	}
 	return nil
 }
 
-func migrateEvents(path string) error {
+func migrateEvents(path string, migration journal, fromSchema int) error {
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		data = nil
+		err = nil
+	}
 	if err != nil {
 		return err
 	}
 	lines := strings.Split(string(data), "\n")
 	output := make([]byte, 0, len(data))
+	var lastSequence uint64
+	repoID := ""
+	hasAudit := false
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -708,6 +798,27 @@ func migrateEvents(path string) error {
 			return err
 		}
 		object["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
+		var sequence uint64
+		if err := json.Unmarshal(object["sequence"], &sequence); err != nil {
+			return fmt.Errorf("decode event sequence: %w", err)
+		}
+		if sequence > lastSequence {
+			lastSequence = sequence
+		}
+		if repoID == "" {
+			_ = json.Unmarshal(object["repo_id"], &repoID)
+		}
+		var eventType string
+		_ = json.Unmarshal(object["type"], &eventType)
+		if eventType == "semantic_migration_applied" {
+			var payload struct {
+				MigrationID string `json:"migration_id"`
+			}
+			if json.Unmarshal(object["payload"], &payload) == nil && payload.MigrationID == migration.MigrationID {
+				hasAudit = true
+			}
+		}
+		removeLegacyDeliveryEvent(object)
 		encoded, err := json.Marshal(object)
 		if err != nil {
 			return err
@@ -715,7 +826,68 @@ func migrateEvents(path string) error {
 		output = append(output, encoded...)
 		output = append(output, '\n')
 	}
+	if repoID == "" {
+		stateData, readErr := os.ReadFile(filepath.Join(filepath.Dir(path), "state.json"))
+		if readErr != nil {
+			return fmt.Errorf("resolve repository for migration audit: %w", readErr)
+		}
+		var envelope struct {
+			RepoID        string `json:"repo_id"`
+			StateRevision uint64 `json:"state_revision"`
+		}
+		if err := json.Unmarshal(stateData, &envelope); err != nil {
+			return err
+		}
+		repoID, lastSequence = envelope.RepoID, envelope.StateRevision
+	}
+	if hasAudit {
+		return fsutil.WriteFile(path, output, 0o600)
+	}
+	payload := map[string]any{
+		"migration_id":           migration.MigrationID,
+		"authority":              "operator",
+		"source":                 "agent-loop migrate --apply",
+		"before":                 map[string]int{"state_schema_version": fromSchema, "semantic_contract_version": statecontract.MinimumVersion},
+		"after":                  map[string]int{"state_schema_version": CurrentVersion, "semantic_contract_version": statecontract.CurrentVersion},
+		"operator_confirmation":  map[string]bool{"apply": true},
+		"provenance_synthesized": false,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	eventID := migrationAuditEventID(migration.MigrationID, repoID)
+	audit := map[string]any{
+		"version": CurrentVersion, "event_id": eventID, "sequence": lastSequence + 1,
+		"timestamp": migration.StartedAt, "repo_id": repoID, "type": "semantic_migration_applied", "payload": json.RawMessage(payloadJSON),
+	}
+	auditJSON, err := json.Marshal(audit)
+	if err != nil {
+		return err
+	}
+	output = append(output, auditJSON...)
+	output = append(output, '\n')
 	return fsutil.WriteFile(path, output, 0o600)
+}
+
+func migrationID(backup string) string {
+	digest := sha256.Sum256([]byte(backup))
+	return fmt.Sprintf("migration_%x", digest[:12])
+}
+
+func migrationAuditEventID(id, repoID string) string {
+	digest := sha256.Sum256([]byte(id + "\x00" + repoID))
+	return fmt.Sprintf("evt_migration_%x", digest[:12])
+}
+
+func removeLegacyDeliveryEvent(object map[string]json.RawMessage) {
+	var eventType string
+	_ = json.Unmarshal(object["type"], &eventType)
+	if !strings.HasPrefix(eventType, "notification_") {
+		return
+	}
+	object["type"] = json.RawMessage(`"legacy_external_delivery_removed"`)
+	delete(object, "payload")
 }
 
 func readRawObject(path string) (map[string]json.RawMessage, error) {
@@ -821,10 +993,19 @@ func readManifest(path string) (backupManifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return backupManifest{}, err
 	}
-	if manifest.Version != 1 || manifest.From != schemaversion.Previous || manifest.To != CurrentVersion {
+	if manifest.Version != 1 || (manifest.From != schemaversion.Previous && manifest.From != CurrentVersion) || manifest.To != CurrentVersion {
 		return backupManifest{}, fmt.Errorf("unsupported migration backup manifest")
 	}
 	return manifest, nil
+}
+
+func migrationFrom(report Report) int {
+	for _, artifact := range report.Artifacts {
+		if artifact.Version == schemaversion.Previous {
+			return schemaversion.Previous
+		}
+	}
+	return CurrentVersion
 }
 
 func unsupportedError(artifacts []Artifact) error {
@@ -833,6 +1014,19 @@ func unsupportedError(artifacts []Artifact) error {
 		parts = append(parts, fmt.Sprintf("%s=%d", artifact.Path, artifact.Version))
 	}
 	return fmt.Errorf("unsupported schema version; supported migration is v%d to v%d: %s", schemaversion.Previous, CurrentVersion, strings.Join(parts, ", "))
+}
+
+func nonMigratableError(findings []SemanticFinding) error {
+	parts := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		target := finding.RepoID
+		if finding.IssueNumber > 0 {
+			target = fmt.Sprintf("%s/Issue#%d", finding.RepoID, finding.IssueNumber)
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", target, finding.Code))
+	}
+	sort.Strings(parts)
+	return fmt.Errorf("semantic migration refused; non-migratable recovery state requires the reported operator procedure: %s", strings.Join(parts, ", "))
 }
 
 func hashBytes(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }

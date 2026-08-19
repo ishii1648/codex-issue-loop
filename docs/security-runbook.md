@@ -6,10 +6,24 @@
 2. `gh auth status`で利用中のアカウントとhostを確認する。token値は表示・記録しない。対象リポジトリに限定できるfine-grained tokenまたはGitHub Appを優先し、Metadata read、Contents read/write、Issues read/write、Pull requests read/writeだけを付与する。Administration、Actions、Packages、組織管理権限は通常不要である。
 3. `codex login status`で認証済みであることだけを確認する。CodexのtokenやAPI keyを`.agent-loop.yaml`、plist、Issue、回答、shell履歴へ書かない。
    Claude Codeでは`claude auth status`、OpenCodeでは`opencode models`を使う。いずれもcredential値を出力・転記せず、runtimeの既存ユーザー認証領域を使う。
-4. `.agent-loop.yaml`の`worker.sandbox`を`workspace-write`（調査専用なら`read-only`）にする。`danger-full-access`は設定検証で拒否される。workerは承認を要求できないため、worktree外への追加書き込みやnetwork権限が必要なIssueは自動キューへ入れない。
+4. `.agent-loop.yaml`の`worker.sandbox`を`workspace-write`（調査専用なら`read-only`）にする。`danger-full-access`は設定検証で拒否される。workerは承認を要求できないため、worktree外への追加書き込みが必要なIssueは自動キューへ入れない。command networkは既定無効とし、local HTTP/CDPが必要なrepositoryだけ[localhost-only command network](localhost-network.md)の固定policyと実機負テストを適用する。`sandbox_workspace_write.network_access=true`だけを設定してはならない。
    Claude Code adapterはnative OS sandboxを有効化し、利用不能時をhard failureにし、unsandboxed escapeを拒否する。OpenCode adapterは`OPENCODE_CONFIG_CONTENT`で`external_directory`、質問待ち、`git commit`、`git push`、PR publishをdenyする。ただしOpenCodeの境界はapplication-levelでOS sandboxと同等ではないため、専用標準ユーザー、最小権限credential、branch protectionを併用する。
 5. branch protectionでmainへの直接pushを禁止し、CIとレビューを必須にする。worker用資格情報にbranch protection bypass権限を与えない。
-6. 外部pushを有効にする場合はprivate topicとpublish専用tokenを用意し、`agent-loop notification-token --repo <path> --token-file -`で保存する。tokenを`.agent-loop.yaml`、plist、shell history、Issue、Codex taskへ貼らない。通知本文の詳細は既定の無効を維持する。
+
+## Built-in formatterの境界
+
+Go repositoryでpublisher整形を使う場合は、trustedなdefault branchの設定へ次だけを追加し、loop停止中に`register`と`doctor`を再実行する。
+
+```yaml
+formatters:
+  go:
+    enabled: true
+    timeout: 30s
+```
+
+これは任意hookではない。supervisorは登録時に固定した`gofmt`だけを使い、Issue本文、worker出力、repository fileからcommandや引数を組み立てない。GitがNUL区切りで返した変更対象`.go` fileをcanonicalなIssue worktree内のregular fileとして検証し、symlink、hard link、directory traversal、worktree外参照を拒否してからshellなしで実行する。formatterはcredential、network、GitHub APIを必要とせず、CIの`contents: read`と`make fmt-check`を最終検査境界として維持する。
+
+`publication_audited` eventと`status --json`のIssue `publication_audit`にはadapter名、対象数、変更有無、結果とfailure codeだけを保存し、source内容や任意command outputは保存しない。`formatter_failed`ではcommit・push前にretryへ移るため、worktreeを削除せず、`doctor`のformatter codeとeventを確認する。
 
 ## 追加の秘密をマスクする
 
@@ -41,14 +55,14 @@ find "$HOME/Library/Application Support/codex-issue-loop/repos" -type d \
 stat -f '%Sp %N' "$HOME/Library/LaunchAgents"/com.codex-issue-loop.*.plist
 ```
 
-期待値は、管理対象ディレクトリ0700、registry/state/event/log/plist/notification-token 0600である。`~/Library/LaunchAgents`ディレクトリ自体のmodeはmacOS標準に従い、plistだけを0600にする。
+期待値は、管理対象ディレクトリ0700、registry/state/event/log/plist 0600である。`~/Library/LaunchAgents`ディレクトリ自体のmodeはmacOS標準に従い、plistだけを0600にする。schema v3から移行した旧credential fileはrollback互換のため自動削除されない。[migration runbook](migration.md)に従って別途確認する。
 
 ## backupとインシデント対応
 
 - stateとログはTime Machine等のユーザーbackup対象になり得る。backupの暗号化とアクセス制御を確認する。サポートbundleやIssueへraw log/stateを添付しない。
 - M2導入前の既存state、event、recovery backup、ログは自動で遡及マスクされない。漏えいが疑われる場合はループを停止し、該当credentialを先に失効・再発行してから、保持要件に従って旧ファイルを隔離または削除する。
 - tokenらしい文字列を検出したら、`agent-loop stop`、token失効、GitHub audit log/PR/Issueの確認、Codexセッションの無効化、原因修正、再登録の順で復旧する。
-- backend、command path、runtime version、modelを変更した場合はloopを停止して`register`と`doctor`を再実行する。異なるbackendの保存sessionは再利用されずfresh sessionになることを`status --json`の`session.backend`と`worker_identity`で確認する。
+- backend、command path、runtime version、model、built-in formatter設定を変更した場合はloopを停止して`register`と`doctor`を再実行する。異なるbackendの保存sessionは再利用されずfresh sessionになることを`status --json`の`session.backend`と`worker_identity`で確認する。
 - `govulncheck`の検出は到達可能性と影響を確認し、修正版へ更新する。例外を恒久的に黙殺せず、期限付きIssueとして記録する。
 
 ## リポジトリ外で管理する棚卸し
@@ -59,7 +73,6 @@ stat -f '%Sp %N' "$HOME/Library/LaunchAgents"/com.codex-issue-loop.*.plist
 - GitHub認証方式、token所有者、対象リポジトリ、付与permission、有効期限、最終rotation日
 - Codex認証方式、利用組織、最終login確認日
 - `security.redact_env`の変数名、注入元、rotation責任者（値は台帳にも平文記載しない）
-- 外部push provider、account所有者、private topic、token権限、有効期限、rotation責任者、mobile appの購読端末（token値は記載しない）
 - branch protection、required check、bypass可能なactor
 
 本番導入前と認証・sandbox・外部連携を変更したときは、別担当者によるセキュリティレビューを実施する。

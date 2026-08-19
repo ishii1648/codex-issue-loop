@@ -54,6 +54,11 @@ func (o OpenCode) Resume(ctx context.Context, cfg config.Config, issue gh.Issue,
 }
 
 func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sessionID, prompt string, started Started) (Result, error) {
+	workspace, err := config.CanonicalRepoPath(cfg.RepoPath)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve OpenCode workspace: %w", err)
+	}
+	cfg.RepoPath = workspace
 	provider, model, ok := strings.Cut(cfg.Worker.Model, "/")
 	if !ok || provider == "" || model == "" {
 		return Result{}, fmt.Errorf("opencode worker requires worker.model in provider/model format")
@@ -93,7 +98,7 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 	}
 	policyJSON, _ := json.Marshal(inlineConfig)
 	cmd := exec.Command(cfg.Worker.EffectiveCommand(), "--pure", "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port))
-	cmd.Dir = cfg.RepoPath
+	cmd.Dir = workspace
 	cmd.Env = replaceEnvironment(os.Environ(), "OPENCODE_CONFIG_CONTENT", string(policyJSON))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout, cmd.Stderr = safeOut, safeErr
@@ -101,7 +106,7 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 		return Result{Identity: identity}, err
 	}
 	if started != nil {
-		if err := started(cmd.Process.Pid); err != nil {
+		if err := started(processStart(cmd, workspace)); err != nil {
 			_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 			return Result{Identity: identity}, fmt.Errorf("record worker process: %w", err)
@@ -126,8 +131,13 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 		stopErr := stop()
 		_ = safeOut.Flush()
 		_ = safeErr.Flush()
-		if stopErr != nil && ctx.Err() != nil {
-			return Result{SessionID: sessionID, Identity: identity}, stopErr
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			termination := &TerminationError{Timeout: cfg.Worker.Timeout.Duration, GracePeriod: cfg.Worker.TimeoutGrace.Duration, Cause: ctxErr}
+			var stopped *TerminationError
+			if errors.As(stopErr, &stopped) {
+				termination.Forced = stopped.Forced
+			}
+			return Result{SessionID: sessionID, Identity: identity}, termination
 		}
 		return Result{SessionID: sessionID, Identity: identity}, fmt.Errorf("start opencode server: %w", err)
 	}

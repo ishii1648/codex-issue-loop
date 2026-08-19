@@ -12,7 +12,7 @@ worktrees:
   needs_input_max_age: 0s
 ```
 
-`0s`は無期限保持を表す。`resume_pending`は`needs_input`と同じポリシーを使い、running、claimed、retry中などの非terminal状態は期間にかかわらず保持する。期間の起点は永続stateのIssue `updated_at`である。
+`0s`は無期限保持を表す。`answer_claim_waiting`と`resume_pending`は`needs_input`と同じポリシーを使い、running、claimed、retry中などの非terminal状態は期間にかかわらず保持する。期間の起点は永続stateのIssue `updated_at`である。
 
 ## Cleanup
 

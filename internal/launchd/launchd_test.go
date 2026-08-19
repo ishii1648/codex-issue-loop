@@ -6,10 +6,35 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/registry"
 )
+
+func TestWriteDeliveryPlistUsesHostLevelIntervalAndDefaultConfig(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root, LaunchAgents: filepath.Join(root, "launch")}
+	if err := (Manager{Layout: l}).WriteDeliveryPlist("/absolute/agent-loop", "/usr/bin:/bin", 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(l.DeliveryPlistPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"com.codex-issue-loop.delivery", "<string>delivery</string>", "<string>reconcile</string>", "<key>RunAtLoad</key>", "<key>StartInterval</key><integer>900</integer>"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("plist missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "--config") {
+		t.Fatal("LaunchAgent must use the default host-level config path")
+	}
+	if info, err := os.Stat(l.DeliveryPlistPath()); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("plist mode=%v err=%v", info, err)
+	}
+}
 
 func TestWritePlistUsesAbsoluteCommandsAndEscapesPaths(t *testing.T) {
 	root := t.TempDir()

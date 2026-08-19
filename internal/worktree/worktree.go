@@ -2,12 +2,14 @@ package worktree
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
@@ -28,10 +30,192 @@ type Inspection struct {
 	Valid              bool
 	Branch             string
 	Head               string
+	RemoteHead         string
 	Dirty              bool
 	UnpushedCommits    bool
 	LocalBranchExists  bool
 	RemoteBranchExists bool
+	RemoteConsistent   bool
+}
+
+// LaunchValidation is the local, non-network identity of a linked worktree at
+// a worker process boundary. CommonDir ties the checkout to the configured
+// repository while TopLevel and Branch fence it to the saved Issue worktree.
+type LaunchValidation struct {
+	Valid        bool            `json:"valid"`
+	ExpectedCWD  string          `json:"expected_cwd"`
+	CanonicalCWD string          `json:"canonical_cwd,omitempty"`
+	TopLevel     string          `json:"top_level,omitempty"`
+	Branch       string          `json:"branch,omitempty"`
+	CommonDir    string          `json:"git_common_dir,omitempty"`
+	MainCheckout string          `json:"main_checkout,omitempty"`
+	Checks       map[string]bool `json:"checks"`
+}
+
+// ValidateLaunch performs only local checks so it can be repeated immediately
+// before every process spawn without depending on origin availability.
+func (m Manager) ValidateLaunch(ctx context.Context, cfg config.Config, path, branch string) (LaunchValidation, error) {
+	validation := LaunchValidation{ExpectedCWD: path, Checks: map[string]bool{}}
+	root := cfg.Git.WorktreeRoot
+	if root == "" {
+		root = filepath.Join(m.StateRoot, "worktrees")
+	}
+	secureRoot, err := canonicalExistingRoot(root)
+	if err != nil {
+		return validation, err
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil || !within(secureRoot, absPath) {
+		return validation, fmt.Errorf("worker worktree path is outside configured root: %s", path)
+	}
+	validation.Checks["managed_root"] = true
+	if err := rejectSymlinkComponents(secureRoot, absPath); err != nil {
+		return validation, err
+	}
+	validation.Checks["no_symlink_components"] = true
+	canonicalPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return validation, fmt.Errorf("resolve worker worktree path: %w", err)
+	}
+	validation.CanonicalCWD = canonicalPath
+	if canonicalPath != absPath {
+		return validation, fmt.Errorf("worker worktree path is not canonical: %s", path)
+	}
+	validation.Checks["canonical_path"] = true
+
+	mainCheckout, err := config.CanonicalRepoPath(cfg.RepoPath)
+	if err != nil {
+		return validation, fmt.Errorf("resolve configured main checkout: %w", err)
+	}
+	validation.MainCheckout = mainCheckout
+	if canonicalPath == mainCheckout {
+		return validation, fmt.Errorf("refuse to launch worker in the main checkout: %s", canonicalPath)
+	}
+	validation.Checks["not_main_checkout"] = true
+
+	git := m.GitPath
+	if git == "" {
+		git = "git"
+	}
+	readGitPath := func(repo string, args ...string) (string, error) {
+		out, commandErr := exec.CommandContext(ctx, git, append([]string{"-C", repo}, args...)...).CombinedOutput()
+		if commandErr != nil {
+			return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), commandErr, strings.TrimSpace(string(out)))
+		}
+		value := strings.TrimSpace(string(out))
+		if value == "" {
+			return "", fmt.Errorf("git %s returned an empty path", strings.Join(args, " "))
+		}
+		if !filepath.IsAbs(value) {
+			value = filepath.Join(repo, value)
+		}
+		return filepath.EvalSymlinks(filepath.Clean(value))
+	}
+	topLevel, err := readGitPath(canonicalPath, "rev-parse", "--path-format=absolute", "--show-toplevel")
+	if err != nil {
+		return validation, fmt.Errorf("inspect worker worktree top-level: %w", err)
+	}
+	validation.TopLevel = topLevel
+	if topLevel != canonicalPath {
+		return validation, fmt.Errorf("worker cwd %s is not the Git worktree top-level %s", canonicalPath, topLevel)
+	}
+	validation.Checks["git_top_level"] = true
+	commonDir, err := readGitPath(canonicalPath, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return validation, fmt.Errorf("inspect worker repository identity: %w", err)
+	}
+	mainCommonDir, err := readGitPath(mainCheckout, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return validation, fmt.Errorf("inspect configured repository identity: %w", err)
+	}
+	validation.CommonDir = commonDir
+	if commonDir != mainCommonDir {
+		return validation, fmt.Errorf("worker worktree belongs to a different repository")
+	}
+	validation.Checks["repository_identity"] = true
+	branchOut, err := exec.CommandContext(ctx, git, "-C", canonicalPath, "symbolic-ref", "--quiet", "--short", "HEAD").CombinedOutput()
+	if err != nil {
+		return validation, fmt.Errorf("inspect worker worktree branch: %w: %s", err, strings.TrimSpace(string(branchOut)))
+	}
+	validation.Branch = strings.TrimSpace(string(branchOut))
+	if branch == "" || validation.Branch != branch {
+		return validation, fmt.Errorf("worker worktree branch is %q, expected %q", validation.Branch, branch)
+	}
+	validation.Checks["saved_branch"] = true
+	validation.Valid = true
+	return validation, nil
+}
+
+func rejectSymlinkComponents(root, path string) error {
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || relative == ".." {
+		return fmt.Errorf("worker worktree path is outside configured root: %s", path)
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			return fmt.Errorf("inspect worker worktree path component: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("worker worktree path must not contain a symbolic link: %s", current)
+		}
+	}
+	return nil
+}
+
+// ContentDigest fingerprints tracked, staged, and untracked worktree content
+// without mutating the index. It is used to fence operator validation from the
+// later publication-only supervisor attempt.
+func ContentDigest(ctx context.Context, git, path string) (string, error) {
+	if git == "" {
+		git = "git"
+	}
+	hash := sha256.New()
+	run := func(args ...string) ([]byte, error) {
+		out, err := exec.CommandContext(ctx, git, append([]string{"-C", path}, args...)...).Output()
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	for _, args := range [][]string{
+		{"status", "--porcelain=v1", "-z", "--untracked-files=all", "--"},
+		{"diff", "--binary", "HEAD", "--"},
+		{"diff", "--cached", "--binary", "HEAD", "--"},
+	} {
+		out, err := run(args...)
+		if err != nil {
+			return "", fmt.Errorf("fingerprint worktree with git %s: %w", strings.Join(args, " "), err)
+		}
+		hash.Write(out)
+		hash.Write([]byte{0})
+	}
+	untracked, err := run("ls-files", "--others", "--exclude-standard", "-z", "--")
+	if err != nil {
+		return "", fmt.Errorf("list untracked files for worktree fingerprint: %w", err)
+	}
+	paths := strings.Split(string(untracked), "\x00")
+	sort.Strings(paths)
+	for _, relative := range paths {
+		if relative == "" {
+			continue
+		}
+		blob, hashErr := run("hash-object", "--no-filters", "--", relative)
+		if hashErr != nil {
+			return "", fmt.Errorf("hash untracked worktree path %q: %w", relative, hashErr)
+		}
+		hash.Write([]byte(relative))
+		hash.Write([]byte{0})
+		hash.Write(blob)
+		hash.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func (m Manager) ContentDigest(ctx context.Context, path string) (string, error) {
+	return ContentDigest(ctx, m.GitPath, path)
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -186,6 +370,10 @@ func (m Manager) Inspect(ctx context.Context, cfg config.Config, path, branch st
 		inspection.RemoteBranchExists = remoteLine != ""
 		if inspection.RemoteBranchExists {
 			remoteFields := strings.Fields(remoteLine)
+			if len(remoteFields) > 0 {
+				inspection.RemoteHead = remoteFields[0]
+				inspection.RemoteConsistent = exec.CommandContext(ctx, git, "-C", path, "merge-base", "--is-ancestor", inspection.RemoteHead, inspection.Head).Run() == nil
+			}
 			inspection.UnpushedCommits = len(remoteFields) == 0 || remoteFields[0] != inspection.Head
 		} else {
 			base := "origin/" + cfg.Git.BaseBranch
@@ -255,6 +443,25 @@ func canonicalPrivateRoot(root string) (string, error) {
 	}
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return "", fmt.Errorf("create worktree root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree root symlinks: %w", err)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func canonicalExistingRoot(root string) (string, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree root: %w", err)
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return "", fmt.Errorf("inspect worktree root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("worktree root must be a real directory: %s", abs)
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {

@@ -39,7 +39,7 @@ GitHub Actionsの`Quality gates`は通常suite、`TestFault` suite、`go test -r
 
 ## 2. canary前preflight
 
-依存変更が導入済みで、config/stateがv3であることを確認する。migrationが必要なら先に[migration runbook](migration.md)を完了し、migrationとconcurrency変更を同時に実施しない。
+依存変更が導入済みで、config/stateがv4であることを確認する。migrationが必要なら先に[migration runbook](migration.md)を完了し、migrationとconcurrency変更を同時に実施しない。
 
 ```sh
 agent-loop status --repo /absolute/path/to/codex-issue-loop --json
@@ -120,16 +120,16 @@ rollbackはschemaを戻さず、resource definitionsも削除しない。worker�
 1. 新規ready投入を止める。
 2. `status`を保存し、loopを`stop`する。
 3. `.agent-loop.yaml`の`queue.concurrency`だけを`1`へ変更する。
-4. `doctor`を実行し、同じv3 stateと全leaseが読めることを確認する。
+4. `doctor`を実行し、同じv4 stateと全leaseが読めることを確認する。
 5. loopを開始し、同時worker数が1以下で、既存Issueが重複worker/PRなしに収束することを確認する。
 
-active leaseをv2へrollbackする必要はない。binary/schema rollbackも必要な場合は、すべてのactive leaseが通常のterminal遷移で解放された後に[migration runbook](migration.md)のpaired rollbackを別作業として行う。
+active leaseを古いschemaへrollbackする必要はない。binary/schema rollbackも必要な場合は、すべてのactive leaseが通常のterminal遷移で解放された後に[migration runbook](migration.md)のpaired rollbackを別作業として行う。
 
 ## 7. 既知制約
 
 - resource leaseは単一host内だけで有効であり、複数hostから同じrepositoryを処理してはならない。
 - `repo:*`へ縮退したunknown/exclusive Issueは単独実行され、concurrency 2でも並列化されない。
-- `needs_input`、retry、checks、open PRはworker slotを解放してもresource leaseを保持する。
+- 通常workerの`needs_input`はworker slotとactive resource leaseを解放してclaimをparkする。publication/PR conflictの`needs_input`、retry、checks、open PRはresource leaseを保持する。
 - GitHub publicationはrepository単位で直列化されるため、workerが2件完了してもcommit/push/PR操作は同時実行しない。
 - throughputより安全性を優先し、resource claim不足はpublish前監査で`needs_input`へ遷移する。
 - 実際のCPU、memory、disk、Codex利用枠はIssue内容とhost状態に依存し、自動testだけでは上限を決められない。

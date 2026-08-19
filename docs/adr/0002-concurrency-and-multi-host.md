@@ -30,7 +30,7 @@ v2の既定動作を`coordination.mode: local`相当として維持する。repo
 - 選択とclaimは決定論的な順番で直列化する。workerの完了順は保証しない。
 - publisherによるcommit、push、Pull Request、label、comment操作はrepository単位で直列化する。
 - GitHub API rate limitとbackoffはsupervisorがglobalに調停する。
-- 同じIssueへ複数slotを割り当てない。`needs_input`のIssueはslotを占有し続けず、worktreeだけを保持する。
+- 同じIssueへ複数slotを割り当てない。通常workerの`needs_input`はslotを占有し続けず、worktreeとpark済みresource claimを保持する。
 
 これはlocal state schemaをIssue map中心へ変更する将来機能であり、multi-host coordinatorを必要としない。
 

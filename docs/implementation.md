@@ -24,6 +24,7 @@
 - dirty PRのimmutable base merge準備、workerによる意味的競合解消、scope検証付き通常push、再起動時の冪等再開
 - draft PRのCI監視、成功後のReady化、manifestで選べるbase branch追随・squash merge、merge後のIssue完了
 - schema付き`codex exec`、session ID保存、`codex exec resume`
+- `extended` continuation限定のoptional App Server Goal adapter、token/time usage永続化、safe fallback
 - `standard` / `extended` preflight policy
 - typed failure分類、±20% jitter付き上限5分のretry/polling backoff、extended continuation
 - 完了、入力待ち、失敗のGitHub反映と未反映状態の再試行
@@ -39,9 +40,8 @@
 - tag由来version、再現build、SPDX SBOM、checksum、artifact attestationを含むGitHub Release workflow
 - binary/Skill manifest、稼働LaunchAgentを保ったupdate、自動rollback、明示backup rollback
 - config・registry・state・active event・transactionのv1→v2 migration、checksum backup、journal再開、paired rollback
+- config・registry・state・active event・transactionのv3→v4 migration、旧外部配送data除去、旧credential非破壊保持、paired rollback
 - status別保持期間、dirty・未push・open PR・未回答request検査、dry-run cleanup、確認token付きpurge、削除監査event
-- provider-neutral interface、永続outbox、重複抑止、上限付き再送を備えたopt-inのntfyスマートフォン直接push
-- mode `0600`のrepository別通知credential管理とdoctor診断
 
 ## 運用前に必要なもの
 
@@ -62,13 +62,13 @@
 - 対象はmacOSのユーザーLaunchAgentのみである。
 - LaunchDaemonと自動ログインは採用せず、logout・再起動は運用時確認とする。[ADR-0001](adr/0001-macos-execution-model.md)を参照する。
 - 1 repositoryにつき`queue.concurrency`までworkerを並列実行する。resource definitionがない既存設定は`repo:*` leaseにより安全に直列化される。
-- schema v3のresource leaseはIssueごとにslot、resource、run ownerを保持し、scheduler再起動時は全active/open-PR Issueを照合して排他を復元する。`area:` resource claimとIssue本文の`depends_on` metadataは[Resource admission契約](resource-admission.md)に従う。
+- schema v3のresource leaseはIssueごとにslot、resource、run ownerを保持し、scheduler再起動時は全active/open-PR Issueを照合して排他を復元する。typed worker environment blockはcontinuationと元lease provenanceを`resource_park`へ保持したままactive admissionから外し、限定resume時だけ新generationで再取得する。`area:` resource claimとIssue本文の`depends_on` metadataは[Resource admission契約](resource-admission.md)に従う。
 - 同じrepositoryを複数hostから処理しない。
 - local `flock`はhostをまたぐ排他ではない。複数hostを登録するだけでは安全にならず、[ADR-0002](adr/0002-concurrency-and-multi-host.md)のcoordinatorとpublication gatewayが実装されるまで禁止する。
 - GitHub labelは自動作成しない。
 - 起動時reconciliationは全active/open-PR Issue、write-ahead claim、残存worker process group、未反映GitHub状態、未記録のpush/PR、merge/close済みPRをIssue単位で復旧する。所有確認済みのorphan groupは全group共通grace periodで終了し、PID再利用、branch・worktree・labelの人手変更は推測で上書きせずblockedへ移す。
+- 通常schedulerは保存済み未merge PRを持つterminal Issueを低頻度で1件ずつ再照合する。保存URL・head branch・単一PRが一致し、自動blocked markerを持つIssueのmergeだけをauthoritativeとしてcompletedへ収束させ、他workerを停止せずlease解放とdone同期を行う。手動exclusion、未merge、mergeなしclose、複数PR、不一致はstickyのまま保持する。
 - PR conflictの検出自体はblocked理由にしない。`resolving_conflict`にbase SHA・競合file・試行履歴を保存し、budget超過またはworktree破損、scope違反等の非回復障害だけを最終blockedとして同期する。
-- スマートフォン直接pushは初期adapterとしてntfyだけに対応する。外部account、private topic、credential、mobile appの準備と実機到達確認は運用者が行う。
 - 実GitHub repositoryと実Codex workerを使うMac mini E2Eの結果は[`docs/e2e/2026-08-15-mac-mini.md`](e2e/2026-08-15-mac-mini.md)に記録している。スマートフォンからのCodex Remote接続は確認済みである。display off、logout、OS再起動はM3の受け入れTODOとせず、発生時または計画保守時の運用確認としてrunbookで扱う。
 - Codex CLI 0.136.0以降とGitHub CLI 2.69.0以降を対応下限とし、起動時に必須capabilityを検査する。resume非対応時は既存worktreeと永続状態を使う新規sessionへfallbackする。詳細は`docs/compatibility.md`を正本とする。
 - worker timeout、stop、restart時はIssue別の独立process groupへSIGTERMを送り、既定30秒のgrace period後も親子processが残る場合だけSIGKILLへ進む。複数workerのstopは全groupを先にcancelし、終了段階をIssue別eventへ残す。worktreeと途中成果は削除しない。

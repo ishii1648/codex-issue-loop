@@ -58,12 +58,38 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 	if !inspection.Exists || !inspection.Valid || !inspection.LocalBranchExists || inspection.RemoteBranchExists || inspection.Branch != result.Branch || inspection.Dirty {
 		t.Fatalf("inspection=%+v", inspection)
 	}
+	launch, err := (Manager{StateRoot: root}).ValidateLaunch(context.Background(), cfg, result.Path, result.Branch)
+	if err != nil || !launch.Valid || launch.CanonicalCWD != result.Path || launch.TopLevel != result.Path || launch.Branch != result.Branch || launch.CommonDir == "" {
+		t.Fatalf("launch validation=%+v err=%v", launch, err)
+	}
+	if _, err := (Manager{StateRoot: root}).ValidateLaunch(context.Background(), cfg, repo, "main"); err == nil {
+		t.Fatal("main checkout was accepted as a worker launch cwd")
+	}
+	if _, err := (Manager{StateRoot: root}).ValidateLaunch(context.Background(), cfg, result.Path, "codex/issue-12-tampered"); err == nil {
+		t.Fatal("tampered saved branch was accepted")
+	}
 	if err := os.WriteFile(filepath.Join(result.Path, "dirty.txt"), []byte("dirty\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	inspection, err = (Manager{StateRoot: root}).Inspect(context.Background(), cfg, result.Path, result.Branch)
 	if err != nil || !inspection.Dirty {
 		t.Fatalf("dirty inspection=%+v err=%v", inspection, err)
+	}
+	firstDigest, err := (Manager{StateRoot: root}).ContentDigest(context.Background(), result.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(result.Path, "dirty.txt"), []byte("changed dirty content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := (Manager{StateRoot: root}).ContentDigest(context.Background(), result.Path)
+	if err != nil || firstDigest == secondDigest {
+		t.Fatalf("worktree content digest did not detect untracked change: first=%s second=%s err=%v", firstDigest, secondDigest, err)
+	}
+	gitRun(t, "-C", result.Path, "push", "-q", "-u", "origin", result.Branch)
+	inspection, err = (Manager{StateRoot: root}).Inspect(context.Background(), cfg, result.Path, result.Branch)
+	if err != nil || !inspection.RemoteBranchExists || !inspection.RemoteConsistent || inspection.RemoteHead != inspection.Head {
+		t.Fatalf("remote branch relationship was not verified: inspection=%+v err=%v", inspection, err)
 	}
 
 	partialPath := filepath.Join(cfg.Git.WorktreeRoot, "repo-id", "issue-13")

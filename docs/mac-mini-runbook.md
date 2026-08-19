@@ -62,7 +62,7 @@ codex login
 
 ### 2.3 対象repositoryの設定とラベル
 
-対象repositoryのrootに`.agent-loop.yaml`を置き、[設定例](../.agent-loop.example.yaml)をもとにrepository名、ラベル、base branch、sandbox、timeoutを確認する。GitHub Issue本文や設定へtokenを保存しない。
+対象repositoryのrootに`.agent-loop.yaml`を置き、[設定例](../.agent-loop.example.yaml)をもとにrepository名、ラベル、base branch、sandbox、timeoutを確認する。Go publisher整形を使うrepositoryでは`formatters.go.enabled: true`を明示し、`gofmt`を利用できるPATHでregisterする。任意formatter commandや追加引数は指定できない。GitHub Issue本文や設定へtokenを保存しない。
 
 まず不足ラベルのplanだけを表示し、内容を確認してから適用する。
 
@@ -101,6 +101,8 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 `doctor`はread-onlyである。`schema_version: 1`、`ok: true`、LaunchAgentのloaded状態、supervisorの状態を確認する。失敗codeに応じた復旧は[doctor診断・復旧runbook](doctor.md)に従い、表示されたremediationを無条件に自動実行しない。
 
+formatterを有効にした場合は`FORMATTER_GO_AVAILABLE`も確認する。`FORMATTER_GO_NOT_REGISTERED`、`FORMATTER_GO_UNAVAILABLE`、`FORMATTER_GO_CAPABILITY_MISSING`ではloopを開始せず、Go toolchainと非対話LaunchAgentのPATHを直してregister、doctorを繰り返す。registerとdoctorは固定sourceをstdinへ渡すread-only probeで実際の整形capabilityも確認する。
+
 ### 2.6 Codex Remoteを接続する
 
 Mac miniのCodex desktop appでSettingsのConnectionsを開き、「Control this Mac or PC」を有効にする。表示されたQR codeをChatGPTモバイルアプリで読み取り、同じOpenAIアカウントの接続先としてMac miniが表示されることを確認する。
@@ -111,9 +113,11 @@ Codex desktop appを終了、sign out、またはRemote Controlを無効化す�
 
 通常運用ではrepositoryごとに監視taskを用意する。Issue作成taskを使う場合は監視taskと分けると、会話履歴や役割が混ざらず、監視taskがblocking watch中でも新しい仕事を投入できる。
 
+Desktopのquestion notifications、Activity、pin、複数repositoryのtask分離、Desktop/Mac再起動後の再接続を含む正式な運用契約は[Codex Desktop監視task運用](codex-desktop-monitoring.md)を参照する。
+
 ### 監視task
 
-名前の例は`[monitor] owner/repository`とする。最初に対象repositoryを明示し、次のように依頼する。
+名前は`[LOOP] owner/repository — monitor`とする。最初に対象repositoryを明示し、次のように依頼する。
 
 > `/absolute/path/to/repository`のagent-loopを監視して。doctorとstatusで状態を確認し、未回答質問がなければ`watch --until-attention --json`を1回実行して。needs_inputなら推奨案と選択肢を要約して私に質問し、回答後にrequest IDを維持してanswerへ渡してから監視を再開して。
 
@@ -149,7 +153,7 @@ Codex taskが終了または切断してもループ本体は継続する。同�
 agent-loop watch --repo /absolute/path/to/repository --until-attention --json
 ```
 
-監視task未接続時もスマートフォンへattentionを知らせる場合は、opt-inの外部pushを設定する。tokenを会話やcommand引数へ貼らず、[スマートフォン直接push通知](notifications.md)のprovider準備、`notification-token --token-file -`、実機到達確認に従う。通知は正本ではないため、tap後は必ず`status`から現在のrequestを読み直す。
+監視task未接続時のattentionは永続snapshotに保持される。再接続時は`status`から現在のrequestを読み直し、未回答requestをwatchより先に表示する。
 
 ### 質問へ回答
 
@@ -163,7 +167,7 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
   --json
 ```
 
-記録後、同じrequest IDがansweredになったことをstatusで確認し、1回のwatchへ戻る。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
+記録後、同じrequest IDがansweredになったことをstatusで確認する。`claim_waiting: true`または`status=answer_claim_waiting`なら回答は消えていない。`resource_admission.resource_parks`の保存run/claimと`claim_waiting_candidates[].blocked_by`を確認し、競合Issueの通常解放を待って1回のwatchへ戻る。ready/running label、state、leaseを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
 ### 停止
 
@@ -204,6 +208,8 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 worktreeのbranch変更、未commit変更、remote PRとの不一致がある場合は自動修復しない。対象Issueのworktreeを人が確認し、変更を保持する方針を決める。
 
+`publication_audited`の`reason`が`formatter_failed`なら、`formatter.failure_code`（`executable_unavailable`、`path_unsafe`、`exit_failure`、`timeout`、`canceled`、`verification_failed`等）を確認する。worktreeを削除せず、path safety違反は対象file種別とsymlinkを調査し、availabilityは停止後の再registerで直す。再試行は同じworktree・branchへ冪等に収束し、整形済みなら空commitを作らない。
+
 PR conflictは検出時点では`resolving_conflict`となり、base SHAごとの自動復旧とCI再確認を行う。budget超過等で最終`blocked`になった場合は、`status --json`の`conflict_recovery`にある試行履歴、base SHA、競合file、最終理由を確認する。worktree・branch・open PRの対応と停止原因を直した後だけ、次の明示操作を使う。
 
 ```sh
@@ -212,6 +218,88 @@ agent-loop status --repo /absolute/path/to/repository --json
 ```
 
 `retry`は無関係なblocked原因を初期化せず、保存済みbranchとPRが一致する場合だけ`resolving_conflict`へ戻す。新しいbranch/PRやforce pushは作らない。
+
+workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。現行supervisorはPID/PGID不在を確認してactive leaseを自動parkし、GitHub `blocked`、run/worktree/branch/dirty changes/session/Goal/answers/attempt/continuation、元leaseのresource/base/reservation provenanceを保持する。`resource_admission.resource_parks`で`status=parked`と保存claimを確認し、後続queueが同resourceを予約できることを確認する。`claim_waiting_candidates[].blocked_by`がある場合は、列挙されたIssueのresource conflictまたはworker slotが解消するまでresumeしない。
+
+`agent-loop watch --repo /absolute/path/to/repository --until-attention --json`はpark後もIssueのsticky `blocked` attentionを返す。監視taskはその通知をoperatorへ提示した後、queue継続のためにstate/labelを変更せず、`status --json`でparkと後続workerを確認する。
+
+導入前のworker blockだけは、CLIがdurable event historyにある同一Issue・同一runの隣接した`issue_blocked`（`failure_kind=issue`かつsupervisor生成の厳密な`worker blocked: ...` error。v0.6.9 fixtureの`issue: worker blocked: ...`も互換対象）と`github_state_synced(state=blocked)`を検証し、元reasonとevent timestampをtyped provenanceへ正規化する。startupが既にtyped化していても、origin/kind/resumable/reason/blocked_atがこの復元値と完全一致する場合だけ同じlegacy chainとして扱う。その他の部分一致や、旧startup reconciliationによる既知のmanual blocked label誤分類・typed正規化event以外に後続Issue eventがある場合は認定しない。失われたleaseは、同一runの`lease_reserved.base_sha`と後続`worker_started`のworktree/branchも現在値と一致する場合だけ`repo:*`として再予約する。外部前提を修復し、対象Issueにactive workerがなく、保存worktree・branch・run・resource park/leaseとGitHub label/PRが一致するときだけ次を使う。legacy recordで`lease=null`でもstateを手編集しない。
+
+```sh
+agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
+```
+
+保持中leaseの`base_sha`が空の場合はconfigured base branchのremote-tracking commitを検証し、非空の`base_sha`を同じtransactionで保存する。legacy missing leaseでは現在のbaseを推測せず、`lease_reserved` eventに保存されたSHAだけを回復・検証する。保存SHAをGit objectとして検証できない場合はGitHub labelとdurable stateが未変更のまま拒否されるため、正しいrepository historyを取得してから再実行する。既存またはeventから復元した非空`base_sha`は上書きしない。
+
+resumeはpark済みoriginal claimと全active lease/worker slotを再検証し、競合がなければ新しいowner generationを1回だけ取得する。競合中は表示されたIssueのleaseを奪わず待つ。dirty changes、branch、worktree、session/Goal/continuation、回答、resource/base metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`resource_park.resume_owner`と`lease.owner`が一致し、`lease.base_sha`が非空であることを確認する。後続Issueでbaseが進んでいてもrebase/resetせず、publication auditと通常のconflict recoveryへ委ねる。
+
+旧releaseで作られたenvironment blockの`workspace`だけが欠けている場合も、保存worktreeを移動・編集せず同じコマンドを使う。CLIはspawn前と同じ厳格validatorでcanonical path、managed root、symlink不在、branch、Git common dir、repository identity、registered main checkoutとの非同一性を確認し、成功時だけresume transitionと同じtransactionで`workspace`をbackfillする。`events.jsonl`の`environment_resume_requested.payload.workspace_recovery`で`old_provenance_missing=true`、`operator_confirmation.confirm_prerequisite_resolved=true`、expected/actual path・branch・repository・Git common dir・main checkout・checksを監査できる。startupはこのbackfillを行わない。
+
+既存`workspace`の不一致、main checkout、managed root外、symlinkを含むpath、detached/別branch、別repository/common dir、active worker、pending request、並行state変更、または既にresume途中なのに`workspace`が欠ける曖昧なstateは拒否される。拒否時はstate、label、dirty/staged/untracked差分を変更しない。main aheadは拒否理由ではなく、resume後も保存HEADをrebase/resetしない。GitHub同期障害後はstateを手編集せず同じコマンドを再実行し、保存済みworkspace、resume ID、lease owner generationが変わらないことを`status --json`で確認する。
+
+v0.6.14で一度resumeし、spawn前に`saved workspace provenance is missing`で再blockされたrecordもstateを編集せず同じコマンドを使う。実際のlegacy lease recovery recordは`status=blocked`、`workspace=null`、`session_id/session=null`、`environment_resume.status=running`、resource parkなし、active leaseありである。CLIは同一Issue/run/resume ID、保存worktree/branch、base/current-base SHA、current leaseとその直前generationの`lease_reserved`、旧key shapeの初回worker/process、`pull_requests=null`とremote field evolutionを含む6 reconciliation、`legacy_lease_recovered=true`かつowner/slotなしのrequest、resume IDなし→ありの2段階GitHub sync、resume worker、validator rejection、blocked同期の完全な27-event順序を一体で照合する。6件のreconciliation HEADは実行時dirty HEADと一致し、original lease baseとは別でなければならない。GitHubは`blocked` label、同じresume marker exactly 2件、original/workspace rejection reasonを各1件含むfailure marker exactly 2件、別resume ID 0件が必須である。status `running`、owner/slot欠損、2段階同期を個別には許可しない。成功後は`environment_resume_recovered`の`interrupted_workspace_recovery=true`、`workspace_recovery`、不変のresume ID/run/worktree/branch/base SHA/dirty HEAD、およびcurrentから1つ進んだ`lease_owner.generation`を確認する。旧sessionを推測せず、新規session start後に新しく得たsession provenanceだけが保存されることも確認する。
+
+chainの欠損・重複・順序不正・supersede・cross-run、lease generation/slot、base SHA、resume ID、GitHub marker、worktree/branch/sessionの不一致、workspace mismatch、symlink、branch/repository mismatch、別supervisor error、manual/security/publication blockは対象外である。拒否時はstate、label、worktreeを変更しない。GitHub同期で停止した場合は同じコマンドを再実行し、backfillやgenerationが増えず同じpending resumeへ収束することを確認する。
+
+通常`needs_input`へ回答した後にgeneration 2 leaseを保持したまま、`saved workspace provenance is missing`だけで`supervisor/worker_workspace/non-resumable` blockedになったv0.6.22以前のrecordには`resume-blocked`を使わない。まず次をpreviewし、request/answer/park/run/session/worktree/branch/base、11-event order、validator、HEAD/content fingerprint、GitHub request/failure markerを確認する。先に`recover-workspace --confirm-verified-workspace`を実行済みでもstate/eventを削除せず同じ専用commandを使う。この場合は11 events直後の単一`workspace_provenance_recovered`と、そのrun/status/workspace/repository/HEAD/fingerprint/validatorが現在値まで完全一致する必要がある。
+
+```sh
+agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 449 --dry-run --json
+agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 449 --confirm-exact-chain --json
+```
+
+限定recoveryに一致しないがmigration前にWorkspace provenanceだけを復旧するlegacy terminal recordは、loop停止中に次を使う。
+
+```sh
+agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --dry-run --json
+agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --confirm-verified-workspace --json
+```
+
+previewの`mutation_scope`が`workspace`、`workspace_provenance_recovery`、eventだけであること、run/status/branch/worktree/HEAD/content digest/PR identity/validatorが保存対象と一致することを確認する。`lifecycle_candidate=answered_missing_workspace`と専用command remediationが出た場合はgeneric confirmを実行せず、先の`recover-answered-workspace`へ戻る。適用後もstatus、lease/resource park、session、GitHub label、worktree内容が変わらず、`status --json`で非null `workspace`と`workspace_provenance_recovery.status=verified`が得られることを確認する。
+
+成功後は`status --json`で`status=resume_pending`、同じsession/worktree/branch、`resource_park.resume_owner.generation=2`、active `lease.owner.generation=3`、`answered_workspace_recovery.status=github_synced`、非null `workspace`を確認する。GitHub同期失敗や並行実行後も同じコマンドを再実行し、generation、recovery ID、markerが増えないことを確認する。state/label編集、rebase/reset、差分移植は行わない。
+
+GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動するか同じ`resume-blocked`を再実行して収束させる。旧版の競合で`status=blocked`、`environment_resume.status=requested|github_synced`、`lease=null`となった場合も、修正版の同じコマンドがeventに保存したbase SHAとGitHub/worktree/run/PRを再検証し、競合のない`repo:*` leaseを再予約する。legacy event chainがない、複数ある、別run、欠損・順序不正・payload改ざん、復元済みtyped cause不一致、既知の誤分類・正規化以外の後続event、`lease_reserved`/`worker_started`不一致、またはevent historyからbase SHAを回復できない場合はfail closedとする。durable legacy chainのない通常typed blockのmissing leaseも補わない。`conflict_recovery`、手動`blocked`/`do-not-automate`、security block、failed、active worker、unanswered request、running/completed、closed-without-merge、worktree/branch/PR不整合、未知または改変されたpark stateがある場合も修復・再開せず原因別runbookへ戻る。stateとsupervisor-owned labelは手編集しない。
+
+workerがschema-conformingな`completed` resultを保存した後、publisherがcommit/push/PR作成へ到達する前の`durable_base_sha_missing`だけでretry budgetを使い切った場合は、`status --json`で`status=failed`、空の`github_sync`、`publication_failure.origin=publisher`、`phase=pre_publication`、`code=durable_base_sha_missing`、`recoverable=true`を確認する。導入前のlegacy recordは、CLIが同じ厳密なfailure chain、空base SHAの`publication_audit`、上限到達済みworker attempts、保存済みcompleted resultをすべて確認できる場合だけ対象になる。
+
+外部前提を解消し、Issueがopenかつfailed labelと同期済みで、active PID/PGID・pending request・manual exclusionがなく、保存run/worktree/branch/resource/PRが一致することを確認してから次を使う。
+
+```sh
+agent-loop recover-publication --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
+```
+
+この操作はconfigured base branchの検証済みcommitをleaseと同じdurable transactionへ保存し、failed labelからrunningへの同期をwrite-aheadで行う。dirty changes、unpushed commit、answers、session、run history、resource metadata、元のworker attempt数は保持し、`publication_recovery`のgeneration・累積attempt・result SHA-256を別に監査記録する。GitHub同期やstate transactionの途中失敗は同じコマンドで冪等に収束させ、publisherは既存commit/remote branch/PRを再利用する。
+
+これは汎用failed retryではない。worker実装失敗、security/manual exclusion、closed-without-merge、PR conflict、open/closed PR不整合、unknown provenance、保存resultやworktreeの変更は拒否する。新branchへの移植、state/labelの手編集、retry budgetのreset、force pushで回避してはならない。
+
+保存済みPRのchecks retry exhaustionで`failed`となり、同じPR branchをoperatorが外部修正した場合は、`status --json`で`pull_request_checks_failure.code=checks_retry_exhausted`、失敗時head SHA、open PR、retained lease、`recoverable_checks_failure`を確認する。worktreeをcleanかつfully pushedにし、新headのrequired checksがpendingまたはgreenであることを確認してから次を実行する。
+
+```sh
+agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
+```
+
+この操作はsame-repositoryの同じbranch/PRだけを`awaiting_checks`へ戻し、worker retry budgetをresetしない。v0.6.20のpublisher decode bug後にprovenanceを失ったrecordは、完全なlegacy durable event chainがある場合だけ互換復旧する。checksがfailure、head未変更、dirty/unpushed worktree、active worker、pending request、manual/security exclusion、fork、別branch/PR、closed-without-mergeでは拒否する。GitHub同期途中で停止した場合はstateやlabelを編集せず、supervisor再起動または同じコマンドで冪等に収束させる。leaseはmerge確認まで保持される。
+
+terminal state後にoperatorが保存branchからPRを作成・merge済みで、durable stateの`pull_request_url`が空のままretained leaseがqueueを止めている場合は、statusとGitHubのPRを確認して次を使う。
+
+```sh
+agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
+```
+
+この操作は保存run/worktree/branch、lease owner generationとbase SHA、clean/fully pushedなlocal/remote head、supervisor-owned terminal marker、同一repo・configured baseの一意なmerged PRとmerge commit SHAを検証する。成功するとPR auditをdurable stateへ保存し、同じtransactionでcompleted化とlease解放を行う。worker attempt、continuation、session、回答は保持される。0件/複数PR、openまたはunmerged、別repo/branch/base/head、dirty/unpushed、active worker、pending request、manual/security exclusionでは拒否する。CLIはcommit、push、PR、mergeを作成しない。GitHub同期途中で止まった場合や、並行稼働中の旧supervisorが新しいsnapshot metadataを落とした場合もstate/labelを編集せず、同じコマンドでdurable eventから収束させる。
+
+実例では、target repositoryがCIでDeno 2.7.14を固定していた一方、worker環境のDeno 2.9.5で3 fileをformatしたため正準形が異なりchecks retryを使い切った。同じbranchへCI固定版Deno 2.7.14のformatter結果をcommit・pushしてgreenを確認し、この限定復旧を使う。再発防止にはworker verificationもrepositoryのpinned toolchainから起動し、host側の新しいformatterを直接使わない。
+
+terminal `blocked`/`failed`保存後、operatorが保存branchから手動でPRを作成してmergeしたため、durable stateにPR URLがなくleaseだけが残った場合は、Issue番号・保存run/worktree/branch/lease、GitHub failure markerとterminal label、merge済みPRのbranch/base/head/merge commitを確認する。active worker、pending request、dirty/unpushed worktree、manual/security exclusion、複数PRがないことを確認し、次を明示実行する。
+
+```sh
+agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
+```
+
+`lease_released=true`、`status=completed`、`adoption_status=completed`、期待したPR URL/number/head/merge commitを確認する。コマンドは新しいbranch/PR/commit/push/mergeを作らず、worker attempts、continuations、session、answers、元のblock provenanceを保持する。GitHub done同期で停止した場合はstateやlabelを編集せず、同じコマンドまたはsupervisor再起動で収束させる。PRがopen/closed-without-merge、保存headと不一致、merge commitが`origin/<base>`の祖先でない、terminal provenanceが曖昧な場合は使わない。#129を手動PR #132でbootstrapした事例では、この限定操作でretained `repo:*` leaseを解放してから次のready Issueを実行する。
+
+v0.6.0から修正版へ更新する場合は、[Release artifact検証](release.md#artifact検証)に従ってchecksum、GitHub artifact attestation、`version --json`のtag/commitを確認した新binaryだけを使い、そのbinaryから`update --json`を実行する。update後に`doctor --repo <repository> --json`を通してから上記resumeを実行し、返されたbackup pathはpublication完了まで保持する。
 
 ### Git transportまたはcommit署名で停止する
 
@@ -280,7 +368,27 @@ path、ユーザー、CLI version、state schemaが異なるMacへ移す場合�
 
 ## 7. 更新とrollback
 
-release artifactの検証と更新方針は[Release・install・update方針](release.md)を正本とする。
+release artifactの検証と更新方針は[Release・install・update方針](release.md)を正本とする。通常のschema-compatible updateはMac側pull型controllerを使う。
+
+```sh
+agent-loop delivery configure --json
+agent-loop delivery configure --apply --json
+agent-loop delivery status --json
+```
+
+`$HOME/.agent-loop-delivery.yaml`はownerがLaunchAgent user、mode `0600`、symlinkでないことを確認する。repository別`.agent-loop.yaml`へdelivery設定を追加しない。`status --json`でphase、current/desired/previous、drain進捗、backup、last/next checkを確認する。`rollback_failed`ではmaintenance fenceを手動削除せず、表示されたbackupを保全してdoctorの失敗codeを調査する。
+
+初回導入とrelease前の実Mac E2Eでは、test repositoryと検証済みstable releaseを使い、次を記録する。
+
+1. login後にdelivery LaunchAgentがstable releaseを検出する。
+2. worker実行中に`delivery apply`し、workerへSIGTERM/SIGKILLが送られずcheckpoint後に進む。
+3. update成功後、二度目のdoctor/soakまで新規Issueがclaimされない。
+4. doctor failure fixtureでprevious installへrollbackしてから通常処理が再開する。
+5. `downloaded`、`draining`、`applying`、`validating`各phaseでdelivery processを停止し、login後のreconcileが旧版継続、安全な再開、rollbackのいずれか一つへ収束する。
+
+実施日時、tester、Mac model、macOS、current/desired commit、transaction resultを記録し、未実施項目を成功と扱わない。
+
+controllerを使えない復旧時だけ、次の手動手順を使う。
 
 1. 全loopを停止し、[backup](#backup)を取る。
 2. `gh release download`、checksum、attestation、`version --json`でartifactを検証する。
@@ -404,3 +512,161 @@ display off、screen lock、logout、OS再起動はMac miniの通常運用では
 - [GitHub CLI: gh auth status](https://cli.github.com/manual/gh_auth_status)
 - [GitHub CLI: gh auth login](https://cli.github.com/manual/gh_auth_login)
 - [Apple: Set sleep and wake settings for your Mac](https://support.apple.com/en-gb/guide/mac-help/mchle41a6ccd/mac)
+
+## 12. Webhook brokerとreverse proxy
+
+Webhook modeはopt-inである。agent-loopはpublic endpoint、TLS certificate、DNS、reverse proxy providerのaccount・credential・daemonを作成または変更しない。運用者が管理する公開HTTPS URLから、同じMacのliteral loopback listener `http://127.0.0.1:8787/github/webhook`（または`http://[::1]:8787/github/webhook`）へraw request bodyとGitHub headerを変更せず転送する。
+
+reverse proxyは次のcontractを満たすものを選ぶ。
+
+- public側でTLS 1.2以上を終端し、certificate hostnameを検証可能にする
+- upstreamはloopbackだけとし、LAN/public interfaceやUnix socketを公開先にしない
+- `X-Hub-Signature-256`、`X-GitHub-Delivery`、`X-GitHub-Event`とraw bodyを保持する
+- body sizeと接続timeoutをbroker設定以下に制限し、request buffering中のdisk permissionも限定する
+- providerが対応する場合はGitHub公式Webhook送信元CIDRをallowlistし、更新を監視する。ただしCIDR制限をHMACの代用にしない
+- provider固有のaccess token、tunnel credential、daemon設定をrepositoryやagent-loop stateへ保存しない
+
+### Cloudflare Tunnelでの構成例
+
+Cloudflare Tunnelは上のcontractのうち送信元CIDR allowlistまで満たせるため、inbound portを開けずに構成できる。Tunnel本体、DNS、custom rule 1本はいずれも無料プランの範囲で、帯域課金もない。ここに書くのは一例であり、agent-loopはこのproviderに依存しない。
+
+Cloudflareアカウント、対象ドメインのCloudflareへの委任、`cloudflared tunnel login`のbrowser認証、`sudo cloudflared service install`、WAF custom ruleの作成は運用者が行う。agent-loopはこれらを作成も変更もしない。
+
+```sh
+brew install cloudflared
+cloudflared tunnel login
+cloudflared tunnel create agent-loop-hooks
+cloudflared tunnel route dns agent-loop-hooks hooks.example.invalid
+```
+
+`~/.cloudflared/config.yml`ではpathを`/github/webhook`だけに限定し、それ以外をloopbackへ到達させない。upstreamはliteral loopbackにする。
+
+```yaml
+tunnel: <TUNNEL-ID>
+credentials-file: /Users/example/.cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: hooks.example.invalid
+    path: ^/github/webhook$
+    service: http://127.0.0.1:8787
+    originRequest:
+      connectTimeout: 5s
+  - service: http_status:404
+```
+
+送信元CIDRは公式APIから取得し、WAF custom ruleでGitHub以外をBlockする。CIDRは6件程度でruleの式へ直接書けるため、IP Listは不要である。GitHubはchallengeを解けないのでManaged Challengeは選ばない。
+
+```sh
+gh api meta --jq '.hooks[]'
+```
+
+```text
+http.host eq "hooks.example.invalid"
+and not ip.src in {192.30.252.0/22 185.199.108.0/22 140.82.112.0/20 143.55.64.0/20 2a0a:a440::/29 2606:50c0::/32}
+```
+
+このCIDRは変更されるため、差分監視を運用に含める。記録値は`.github/github-hooks-cidr.txt`にあり、`scripts/check-hooks-cidr.sh`が現在値と比較して差分があれば`exit 1`する。`.github/workflows/hooks-cidr.yml`が毎週これを実行し、差分を検出したらIssueを作成する。同じ内容のopen Issueがある間は重複作成しない。
+
+このIssueにready labelは付かないため、loopは自動で着手しない。reverse proxyのallowlistを更新し、記録値も同じcommitで更新する。CIDR制限はHMACの代用にしないため、更新までの間もsignature検証は有効である。
+
+```sh
+./scripts/check-hooks-cidr.sh
+```
+
+無料プランでは次の2点がcontractに対して不足する。いずれも受け入れるか、上位プランを選ぶかを明示的に判断する。
+
+- request body sizeによる制限は`http.request.body.size`がEnterprise専用のため設定できない。brokerの`max_body_bytes`が最終防衛線になる。
+- WAFのLogアクションが使えないため、allowlistをdry-runで検証できない。Blockのまま投入し、GitHubのRecent Deliveriesが202を返すことで確認する。Blockされたrequestは無料プランでもSecurity Events（保持24時間、sampled）に残る。
+
+`cloudflared`はLaunchDaemon、brokerはLaunchAgentであるため、login前のdeliveryは5xxになる。取りこぼしはredeliveryとsafety sweepが回収する。
+
+### secretとrepository設定
+
+secret fileはrepository外へowner-onlyで作る。値をshell historyへ残さない組織のsecret provisioning手段を使い、最終状態だけ確認する。
+
+配置先はhome配下ではなくhostに依存しない固定pathにする。`.agent-loop.yaml`はrepositoryで共有され、`secret_source.file`は`~`も環境変数展開も受け付けない絶対pathのみを許す。home配下を指定すると、public repositoryではhostのuser名が公開され、他hostでは解決できない設定になる。directoryとfileはbrokerを実行するuserの所有にする。brokerはLaunchAgentとしてそのuser権限で動くため、root所有0600のfileは読めない。
+
+```sh
+sudo mkdir -p /usr/local/etc/codex-issue-loop
+sudo chown "$(id -un):$(id -gn)" /usr/local/etc/codex-issue-loop
+chmod 700 /usr/local/etc/codex-issue-loop
+umask 077
+touch /usr/local/etc/codex-issue-loop/owner-repository.webhook
+chmod 600 /usr/local/etc/codex-issue-loop/owner-repository.webhook
+```
+
+対象repositoryのnumeric repository IDとGitHub App installation IDをGitHubの管理画面または認証済みAPIで確認し、次をdefault branchの`.agent-loop.yaml`へ追加する。`public_url_identifier`は監査用の非secret識別子であり、query tokenを含むURLを書かない。LaunchAgent運用では環境変数がログインlaunchdへ安全に注入されていることを保証しにくいため、通常は0600 file sourceを使う。`safety_sweep_jitter`は`watch.reconcile_jitter`と異なりpercent表記のcustom unmarshalerを持たないため、小数で書く。
+
+```yaml
+github:
+  repo: owner/repository
+  repository_id: 123456789
+
+webhook:
+  mode: webhook
+  listener_address: 127.0.0.1:8787
+  public_url_identifier: hooks.example.invalid/agent-loop/owner-repository
+  secret_source:
+    file: /usr/local/etc/codex-issue-loop/owner-repository.webhook
+  installation_ids: [987654]
+  allow_repository_webhook: false
+  safety_sweep_interval: 15m
+  safety_sweep_jitter: 0.1
+  max_body_bytes: 2097152
+  read_timeout: 10s
+  read_header_timeout: 5s
+  idle_timeout: 30s
+  max_concurrent: 16
+```
+
+GitHub Appまたはrepository webhookのpayload URLは公開HTTPS URLの`/github/webhook`へ合わせ、content typeは`application/json`、SSL verificationは有効、secretは上のcredentialと同一にする。最低限`issues`、`issue_comment`、`pull_request`、`check_run`、`status`を購読し、Actionsの状態だけで必要な場合に`workflow_run`を追加する。登録後の`ping`が202になり、次を確認してからready labelを使う。
+
+GitHub Appでは`installation_ids`をallowlistとして維持する。installationを含まないclassic repository webhookを使う場合だけ、`installation_ids: []`と`allow_repository_webhook: true`を明示する。このopt-inはrepository ID/full nameとHMAC検証を緩和しない。
+
+classic repository webhookをCLIで登録する場合も、secretをargvへ展開しない。owner-onlyの一時fileへrequest bodyを書き、`--input`で渡して直ちに削除する。
+
+```sh
+umask 077
+# hook.json へ config.url、config.secret、config.content_type、events を書く
+gh api repos/OWNER/REPO/hooks --method POST --input hook.json
+rm -P hook.json
+gh api repos/OWNER/REPO/hooks --jq '.[] | {id, url: .config.url, active}'
+```
+
+`ping`の結果は`gh api repos/OWNER/REPO/hooks/<id>/deliveries`でも確認でき、GitHub UIのRecent Deliveriesと同じstatusを返す。
+
+```sh
+agent-loop register --repo /absolute/path/to/repository --json
+agent-loop doctor --repo /absolute/path/to/repository --json
+agent-loop start --repo /absolute/path/to/repository --json
+agent-loop status --repo /absolute/path/to/repository --json
+```
+
+`status --json`の`broker`でmode、listener、last accepted delivery、queue depth、reject/duplicate countを確認し、`repository_safety_sweep`でlast successful、HTTP status、304/200 count、ETagを確認する。secret、signature、Authorization、payloadは表示されない。listenerへの直接疎通はGitHubのredeliveryまたは署名済みの管理fixtureだけで行い、secretをcommand lineへ展開しない。
+
+### secret rotation
+
+1. 新secretを別の0600 fileへ配置する。
+2. 現在のsourceを`previous_secret_source`、新fileを`secret_source`に設定し、`register`、`doctor`、`restart`を行う。
+3. GitHub側を新secretへ切り替え、`ping`またはredeliveryがacceptedになることを確認する。
+4. `previous_secret_source`を削除して再度`register`、`doctor`、`restart`し、旧fileを組織のcredential廃棄手順で削除する。
+
+rotation期間を長期化しない。どちらのsecretが一致したかはlogへ出さない。
+
+### proxy停止・broker crash・redelivery
+
+proxy停止中のdeliveryは復旧後にGitHub UIからredeliveryできる。同じdelivery IDはdurable inboxでdedupeされる。redeliveryできない取りこぼしは15分のjitter付き条件付きREST sweepが収束させ、変更なし304を正常として記録する。brokerを停止してもrepo別supervisor、worker、state、worktree、未処理mailboxを削除しない。Mac再起動後はFileVault unlockとloginの後、broker LaunchAgentと各repository statusを確認する。
+
+### pollingへのrollback
+
+proxyまたはWebhook設定を安全に復旧できない場合は、対象repositoryを停止し、`webhook.mode: polling`へ明示的に戻して再登録する。
+
+```sh
+agent-loop stop --repo /absolute/path/to/repository --json
+# .agent-loop.yaml の webhook.mode を polling へ変更
+agent-loop register --repo /absolute/path/to/repository --json
+agent-loop doctor --repo /absolute/path/to/repository --json
+agent-loop start --repo /absolute/path/to/repository --json
+```
+
+他にWebhook repositoryが残っている間、共有brokerは停止しない。最後のWebhook repositoryを`unregister`した場合だけbroker LaunchAgentが削除される。rollbackはdurable inbox、repo state、worktreeを消さず、provider daemonやcredentialをagent-loopから変更しない。

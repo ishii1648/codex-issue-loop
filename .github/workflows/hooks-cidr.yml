@@ -1,0 +1,61 @@
+name: Hooks CIDR
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Check webhook source CIDRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compare recorded CIDRs
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          output=$(scripts/check-hooks-cidr.sh 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          {
+            printf 'status=%s\n' "$status"
+            printf 'report<<REPORT_EOF\n'
+            printf '%s\n' "$output"
+            printf 'REPORT_EOF\n'
+          } >>"$GITHUB_OUTPUT"
+          if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+            exit "$status"
+          fi
+
+      - name: Open issue on drift
+        if: steps.compare.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: GitHub webhook送信元CIDRが変更された
+          REPORT: ${{ steps.compare.outputs.report }}
+        run: |
+          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            printf 'issue #%s is already open\n' "$existing"
+            exit 0
+          fi
+          {
+            printf '%s\n\n' 'GitHubが公開するwebhook送信元CIDRが記録値と一致しない。'
+            printf '%s\n\n' 'reverse proxyのallowlistと`.github/github-hooks-cidr.txt`を更新する。CIDR制限はHMAC検証の代用ではないため、更新までの間もsignature検証は有効である。'
+            printf '%s\n' '```'
+            printf '%s\n' "$REPORT"
+            printf '%s\n\n' '```'
+            printf '%s\n' '手順は[Mac mini常駐運用runbook](../blob/main/docs/mac-mini-runbook.md)の「12. Webhook brokerとreverse proxy」を参照する。'
+          } >issue-body.md
+          gh issue create --title "$TITLE" --body-file issue-body.md
