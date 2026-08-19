@@ -192,6 +192,8 @@ metadata未指定Issueが2件あっても、片方の`repo:*` leaseが解放さ�
 
 ## 6. Producerの責務とready境界
 
+具体的なCodex intake、構造化proposal、preview/apply/audit手順は[Issue metadata producer runbook](resource-producer.md)を参照する。
+
 Issue producerはready labelを最後に付ける。更新時もいったんready labelを外し、次の順で共有状態を完成させる。
 
 1. 背景、変更範囲、完了条件を本文へ記載する。
@@ -296,13 +298,13 @@ v2からv3へ移行する際、既存のactive Issueは宣言resourceを推測�
 
 | Resource | 主なpath glob | 意図 |
 | --- | --- | --- |
-| `config` | `.agent-loop*.yaml`、`internal/config/**`、`docs/resource-admission.md`、`docs/specification.md` | config schemaとadmission契約 |
+| `config` | `.agent-loop*.yaml`、`internal/config/**`、`internal/producer/**`、`docs/resource-admission.md`、`docs/resource-producer.md`、`docs/specification.md` | config schema、producer、admission契約 |
 | `scheduler` | `internal/supervisor/**`、`internal/state/**`、`internal/schema/**`、`internal/failure/**`、`internal/fsutil/**` | 選択、lease、永続状態、transaction補助 |
 | `github` | `internal/github/**`、`internal/publish/**` | GitHub取得とpublication |
 | `worker` | `internal/worker/**`、`schemas/**` | worker processとresult contract |
 | `host` | `cmd/**`、`internal/app/**`、`internal/launchd/**`、`internal/registry/**`、`internal/layout/**`、`internal/lifecycle/**`、`internal/worktree/**` | CLI、LaunchAgent、host-local lifecycle |
 | `operations` | `internal/observe/**`、`internal/retention/**`、`internal/redact/**`、`docs/*runbook.md` | 監視、保持、運用 |
-| `release` | `.github/**`、`scripts/**`、`Makefile`、`go.mod`、`go.sum`、`assets.go`、`internal/compat/**`、`internal/migration/**`、`docs/release.md`、`docs/compatibility.md`、`docs/migration.md` | build、配布、互換性、migration |
+| `release` | `.github/**`、`skill/**`、`scripts/**`、`Makefile`、`go.mod`、`go.sum`、`assets.go`、`internal/compat/**`、`internal/migration/**`、`docs/release.md`、`docs/compatibility.md`、`docs/migration.md` | build、Skill、配布、互換性、migration |
 | `docs` | `.gitignore`、`README.md`、`AGENTS.md`、`docs/**` | 上記に含まれない横断文書 |
 
 globは重なり得るため、たとえば`docs/resource-admission.md`を変更するIssueは`area:config`と`area:docs`の両方をclaimする。複数領域を横断するrefactorは必要な全resourceをclaimし、taxonomy外の大規模変更や範囲が確定できないIssueはmetadataを省略して意図的に`repo:*`へ縮退させる。

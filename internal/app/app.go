@@ -220,6 +220,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.delivery(ctx, l, args)
 	case "bootstrap-labels":
 		return a.bootstrapLabels(ctx, args)
+	case "prepare-issue":
+		return a.prepareIssue(ctx, args)
 	case "run":
 		return a.supervise(ctx, l, args)
 	case "broker":
@@ -266,6 +268,7 @@ Commands:
   doctor        Validate dependencies, auth, config, and registration
   delivery      Configure and operate the host-level Release delivery controller
   bootstrap-labels  Preview or create required GitHub labels
+  prepare-issue  Validate, audit, or persist Issue admission metadata
   run           Run the supervisor (used by launchd)`)
 	// broker is intentionally omitted from the primary operator workflow; it is
 	// the shared LaunchAgent entrypoint managed by register/start/unregister.
