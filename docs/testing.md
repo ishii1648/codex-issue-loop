@@ -60,6 +60,7 @@ make test-race
 | merged PR adoptionのdone同期前停止とsupervisor再起動 | `TestRestartCompletesRequestedMergedPullRequestAdoption` |
 | environment resume保存とstartup/periodic reconciliationの競合 | `TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume`、`TestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume` |
 | park resumeのresource/slot raceと二重owner防止 | `TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
+| answered missing-Workspace exact chainのtransaction/GitHub faultと並行fence | `TestFaultRecoverAnsweredWorkspaceRetriesGitHubBoundaryWithoutRefencing`、`TestRecoverAnsweredWorkspaceParallelInvocationsFenceOnce` |
 | checks retry exhaustion後の外部head修正・fail-closed復旧・merge時lease解放 | `TestRecoverChecksReusesExternallyFixedBranchAndIsIdempotent`、`TestRecoverChecksAuthoritativeStateValidationFailsClosed`、`TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge` |
 | push後に未記録のPR | `TestFaultStartupReconciliationPersistsDiscoveredPullRequest` |
 | registry add/resolve/remove | `TestFaultRegistryAddResolveRemoveAndAmbiguity` |
@@ -79,6 +80,8 @@ make test-race
 障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
 
 `internal/recoveryfixture/testdata/zeitreise-442-full-history-v1.json`は、zeitreise #442のproduction recordを由来とする統合release-gate fixtureである。旧`internal/state/testdata/zeitreise-442-v0614-full-27-*`のexact historyを移行し、27 eventsのtype/order/payload shape、session null、original generation 1→legacy recovery generation 2、resume timestamp差、remote field evolution、GitHub marker cardinalityを一つのmanifest/hash付きfixtureで保持する。公式`resume-blocked` fault testはこのbundleを直接replayしてproduction predicateへ入力する。旧12-event synthetic short fixtureは互換性確認にだけ残し、その成功だけではrelease gateを満たさない。export、sanitization、review手順は[production recovery fixture runbook](recovery-fixtures.md)を参照する。
+
+`internal/state/testdata/zeitreise-449-v0622-answered-missing-workspace-{state.json,events.jsonl}`は#449由来のsanitized exact fixtureであり、generation 1 lease、claim/worker、needs-input park、単一answerとgeneration 2再取得、全validator check成功のmissing-Workspace rejection、blocked同期までの11 eventsを固定する。state/evidence負例とreal linked-worktree CLI/fault/race testsを組み合わせ、fixture単体の成功だけをrelease authorityにしない。
 
 Codex Desktopのquestion notification、macOS通知権限、Activityの回答待ち、pinした`codex-issue-loop` / `zeitreise`監視chatの責務分離はrepository内の自動testでは再現しない。[Codex Desktop監視task運用](codex-desktop-monitoring.md)の実機受け入れ手順で検証する。
 

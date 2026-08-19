@@ -128,6 +128,15 @@ workerが外部環境前提を理由にtyped `blocked`を返すと、supervisor�
 
 park済みstateでは元のresource集合、base SHA、reservation provenanceを使い、legacy stateでleaseが欠けている場合だけ、既存の厳密なdurable history検証後に保守的な`repo:*` leaseを補います。base SHAを検証できない場合はstateとGitHub labelを変更せず拒否するため、state fileを編集せずremote-tracking branchを復旧して再実行します。
 
+v0.6.22以前の通常`needs_input` workerが回答後にleaseをgeneration 2で再取得したものの、導入前の`Workspace`欠損だけでspawn直前にblockedへ収束したexact chainには、通常のenvironment recoveryと分離した専用操作を使います。必ずpreview後に明示確認し、state・label・worktreeを手編集しません。
+
+```sh
+"$agent_loop_bin" recover-answered-workspace --repo "$PWD" --issue 123 --dry-run --json
+"$agent_loop_bin" recover-answered-workspace --repo "$PWD" --issue 123 --confirm-exact-chain --json
+```
+
+CLIは同じrequest/answer/park/run/session/worktree/branch/base、generation 1→2、全check成功の`worker_workspace_rejected`、blocked GitHub markerまでの完全な11-event chainを照合します。成功時だけ検証済み`Workspace`、generation 3 fence、`resume_pending`を単一transactionへ保存し、同じsession/worktreeからcontinuationを再開します。
+
 worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missing`として最終`failed`になったIssueは、保存済みcompleted resultとdirty worktreeが一致する場合だけpublication-only recoveryを明示要求できます。workerは再実行せず、元のattempt budget、run、worktree、branch、回答、session、resource metadataを保持します。
 
 ```sh

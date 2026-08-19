@@ -241,6 +241,15 @@ v0.6.14で一度resumeし、spawn前に`saved workspace provenance is missing`�
 
 chainの欠損・重複・順序不正・supersede・cross-run、lease generation/slot、base SHA、resume ID、GitHub marker、worktree/branch/sessionの不一致、workspace mismatch、symlink、branch/repository mismatch、別supervisor error、manual/security/publication blockは対象外である。拒否時はstate、label、worktreeを変更しない。GitHub同期で停止した場合は同じコマンドを再実行し、backfillやgenerationが増えず同じpending resumeへ収束することを確認する。
 
+通常`needs_input`へ回答した後にgeneration 2 leaseを保持したまま、`saved workspace provenance is missing`だけで`supervisor/worker_workspace/non-resumable` blockedになったv0.6.22以前のrecordには`resume-blocked`を使わない。まず次をpreviewし、request/answer/park/run/session/worktree/branch/base、11-event order、validator、HEAD/content fingerprint、GitHub request/failure markerを確認する。
+
+```sh
+agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 449 --dry-run --json
+agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 449 --confirm-exact-chain --json
+```
+
+成功後は`status --json`で`status=resume_pending`、同じsession/worktree/branch、`resource_park.resume_owner.generation=2`、active `lease.owner.generation=3`、`answered_workspace_recovery.status=github_synced`、非null `workspace`を確認する。GitHub同期失敗や並行実行後も同じコマンドを再実行し、generation、recovery ID、markerが増えないことを確認する。state/label編集、rebase/reset、差分移植は行わない。
+
 GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動するか同じ`resume-blocked`を再実行して収束させる。旧版の競合で`status=blocked`、`environment_resume.status=requested|github_synced`、`lease=null`となった場合も、修正版の同じコマンドがeventに保存したbase SHAとGitHub/worktree/run/PRを再検証し、競合のない`repo:*` leaseを再予約する。legacy event chainがない、複数ある、別run、欠損・順序不正・payload改ざん、復元済みtyped cause不一致、既知の誤分類・正規化以外の後続event、`lease_reserved`/`worker_started`不一致、またはevent historyからbase SHAを回復できない場合はfail closedとする。durable legacy chainのない通常typed blockのmissing leaseも補わない。`conflict_recovery`、手動`blocked`/`do-not-automate`、security block、failed、active worker、unanswered request、running/completed、closed-without-merge、worktree/branch/PR不整合、未知または改変されたpark stateがある場合も修復・再開せず原因別runbookへ戻る。stateとsupervisor-owned labelは手編集しない。
 
 workerがschema-conformingな`completed` resultを保存した後、publisherがcommit/push/PR作成へ到達する前の`durable_base_sha_missing`だけでretry budgetを使い切った場合は、`status --json`で`status=failed`、空の`github_sync`、`publication_failure.origin=publisher`、`phase=pre_publication`、`code=durable_base_sha_missing`、`recoverable=true`を確認する。導入前のlegacy recordは、CLIが同じ厳密なfailure chain、空base SHAの`publication_audit`、上限到達済みworker attempts、保存済みcompleted resultをすべて確認できる場合だけ対象になる。

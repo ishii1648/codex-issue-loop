@@ -938,7 +938,10 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 		if item == nil || item.Status != "resume_pending" || item.RunID != current.RunID || item.Lease == nil || current.Lease == nil || item.Lease.Owner != current.Lease.Owner {
 			return fmt.Errorf("Issue #%d answered continuation changed before rejection", current.Number)
 		}
-		if item.ResourcePark == nil || item.ResourcePark.Kind != state.ResourceParkKindNeedsInput || item.ResourcePark.Status != "resuming" {
+		recoveredPark := item.ResourcePark != nil && item.ResourcePark.Status == "resumed" && item.AnsweredWorkspaceRecovery != nil &&
+			item.AnsweredWorkspaceRecovery.NewOwner == item.Lease.Owner && item.ResourcePark.ResumeOwner != nil &&
+			item.AnsweredWorkspaceRecovery.OldOwner == *item.ResourcePark.ResumeOwner
+		if item.ResourcePark == nil || item.ResourcePark.Kind != state.ResourceParkKindNeedsInput || (item.ResourcePark.Status != "resuming" && !recoveredPark) {
 			return fmt.Errorf("Issue #%d answered continuation park is inconsistent", current.Number)
 		}
 		item.ResourcePark.Status = "resumed"
@@ -2452,6 +2455,8 @@ func (l *Loop) blockWorkerEnvironment(ctx context.Context, number int, reason st
 	return l.syncGitHub(ctx, updated)
 }
 
+var errAnsweredWorkspaceSyncConverged = errors.New("answered workspace recovery GitHub synchronization already converged")
+
 func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 	var err error
 	switch issue.GitHubSync {
@@ -2512,6 +2517,27 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		} else {
 			err = l.GitHub.MarkRunning(ctx, l.Config, issue.Number)
 		}
+	case "answered_workspace_recovery":
+		if issue.AnsweredWorkspaceRecovery == nil || issue.AnsweredWorkspaceRecovery.ID == "" || issue.Status != "resume_pending" {
+			return fmt.Errorf("Issue #%d answered workspace recovery metadata is missing", issue.Number)
+		}
+		remote, inspectErr := l.GitHub.Inspect(ctx, l.Config, issue.Number, issue.Branch)
+		if inspectErr != nil {
+			return failure.Wrap(failure.Transient, "reinspect answered workspace recovery", inspectErr)
+		}
+		alreadySynced, validateErr := l.validateAnsweredWorkspaceRecoverySync(issue, remote)
+		if validateErr != nil {
+			return validateErr
+		}
+		if !alreadySynced {
+			resumer, ok := l.GitHub.(interface {
+				MarkAnsweredWorkspaceRecovery(context.Context, config.Config, int, string) error
+			})
+			if !ok {
+				return fmt.Errorf("GitHub client does not support answered workspace recovery synchronization")
+			}
+			err = resumer.MarkAnsweredWorkspaceRecovery(ctx, l.Config, issue.Number, issue.AnsweredWorkspaceRecovery.ID)
+		}
 	case "publication_recovery":
 		recoveryID := issue.RunID
 		if issue.PublicationRecovery != nil && issue.PublicationRecovery.ID != "" {
@@ -2549,6 +2575,11 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		if item == nil {
 			return fmt.Errorf("Issue #%d disappeared during GitHub sync", issue.Number)
 		}
+		if issue.GitHubSync == "answered_workspace_recovery" && item.GitHubSync == "" && item.AnsweredWorkspaceRecovery != nil &&
+			issue.AnsweredWorkspaceRecovery != nil && item.AnsweredWorkspaceRecovery.ID == issue.AnsweredWorkspaceRecovery.ID &&
+			item.AnsweredWorkspaceRecovery.Status == "github_synced" {
+			return errAnsweredWorkspaceSyncConverged
+		}
 		if item.GitHubSync == issue.GitHubSync {
 			item.GitHubSync = ""
 			if issue.GitHubSync == "done" && item.MergedPullRequestAdoption != nil && item.MergedPullRequestAdoption.Status == "github_sync_pending" {
@@ -2556,6 +2587,9 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			}
 			if issue.GitHubSync == "environment_resume" && item.EnvironmentResume != nil {
 				item.EnvironmentResume.Status = "github_synced"
+			}
+			if issue.GitHubSync == "answered_workspace_recovery" && item.AnsweredWorkspaceRecovery != nil {
+				item.AnsweredWorkspaceRecovery.Status = "github_synced"
 			}
 			if issue.GitHubSync == "publication_recovery" && item.PublicationRecovery != nil {
 				item.PublicationRecovery.Status = "github_synced"
@@ -2572,7 +2606,51 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		item.UpdatedAt = l.now()
 		return nil
 	})
+	if errors.Is(err, errAnsweredWorkspaceSyncConverged) {
+		return nil
+	}
 	return failure.Wrap(failure.Supervisor, "persist GitHub synchronization", err)
+}
+
+func (l *Loop) validateAnsweredWorkspaceRecoverySync(issue state.Issue, remote gh.RemoteState) (bool, error) {
+	if issue.AnsweredWorkspaceRecovery == nil || !strings.EqualFold(remote.Issue.State, "open") || len(remote.PullRequests) != 0 {
+		return false, fmt.Errorf("refuse answered workspace recovery synchronization: authoritative Issue identity changed")
+	}
+	labels := labelSet(remote.Issue.Labels)
+	blockedLabel := ""
+	for _, label := range l.Config.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			blockedLabel = label
+		} else if labels[label] {
+			return false, fmt.Errorf("refuse answered workspace recovery synchronization: manual exclusion label changed")
+		}
+	}
+	blocked, running := labels[blockedLabel], labels[l.Config.GitHub.RunningLabel]
+	alreadySynced := !blocked && running
+	if blocked == running || hasAnyLabel(labels, append(append([]string{l.Config.GitHub.NeedsInputLabel, l.Config.GitHub.DoneLabel, l.Config.GitHub.FailedLabel}, l.Config.GitHub.ReadyLabels...), "")) {
+		return false, fmt.Errorf("refuse answered workspace recovery synchronization: authoritative Issue labels changed")
+	}
+	requestMarker := "<!-- codex-issue-loop:request:" + issue.AnsweredWorkspaceRecovery.RequestID + " -->"
+	failedMarker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", issue.Number)
+	failureDigest := sha256.Sum256([]byte(issue.LastError))
+	failureMarker := fmt.Sprintf("<!-- codex-issue-loop:failure:%x -->", failureDigest[:8])
+	recoveryMarker := "<!-- codex-issue-loop:answered-workspace-recovery:" + issue.AnsweredWorkspaceRecovery.ID + " -->"
+	requestCount, failedCount := commentMarkerCount(remote.Issue.Comments, requestMarker), commentMarkerCount(remote.Issue.Comments, failedMarker)
+	failureCount, recoveryCount := commentMarkerCount(remote.Issue.Comments, failureMarker), commentMarkerCount(remote.Issue.Comments, recoveryMarker)
+	if requestCount != 1 || failedCount != 1 || failureCount != 1 || (alreadySynced && recoveryCount != 1) || (!alreadySynced && recoveryCount != 0) {
+		return false, fmt.Errorf("refuse answered workspace recovery synchronization: authoritative comment markers changed")
+	}
+	return alreadySynced, nil
+}
+
+func commentMarkerCount(comments []string, marker string) int {
+	count := 0
+	for _, comment := range comments {
+		if strings.Contains(comment, marker) {
+			count++
+		}
+	}
+	return count
 }
 
 func (l *Loop) validatePullRequestChecksRecoverySync(issue state.Issue, remote gh.RemoteState) error {
