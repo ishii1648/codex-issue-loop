@@ -288,6 +288,25 @@ type AnsweredWorkspaceRecovery struct {
 	NewOwner             LeaseOwner      `json:"new_owner"`
 }
 
+// WorkspaceProvenanceRecovery records an operator-confirmed, validation-only
+// backfill of immutable workspace identity for a stopped legacy terminal
+// record. It deliberately does not authorize a lifecycle transition, acquire
+// a lease, or mutate GitHub state.
+type WorkspaceProvenanceRecovery struct {
+	ID                   string          `json:"id"`
+	Status               string          `json:"status"`
+	ConfirmedAt          time.Time       `json:"confirmed_at"`
+	OperatorConfirmed    bool            `json:"operator_confirmed"`
+	OldProvenanceMissing bool            `json:"old_provenance_missing"`
+	PreviousStatus       string          `json:"previous_status"`
+	RunID                string          `json:"run_id"`
+	HeadSHA              string          `json:"head_sha"`
+	WorktreeSHA256       string          `json:"worktree_sha256"`
+	ExpectedWorkspace    WorkerWorkspace `json:"expected_workspace"`
+	ActualWorkspace      WorkerWorkspace `json:"actual_workspace"`
+	ValidatorChecks      map[string]bool `json:"validator_checks"`
+}
+
 // Matches reports whether immutable saved provenance identifies the validated
 // launch target. CapturedAt is audit metadata and is deliberately not part of
 // the identity comparison.
@@ -318,43 +337,44 @@ type MergedPullRequestAdoption struct {
 }
 
 type Issue struct {
-	Number                    int                        `json:"number"`
-	Title                     string                     `json:"title"`
-	Status                    string                     `json:"status"`
-	RunID                     string                     `json:"run_id,omitempty"`
-	LeaseGeneration           uint64                     `json:"lease_generation,omitempty"`
-	Lease                     *ResourceLease             `json:"lease,omitempty"`
-	ResourcePark              *ResourceLeasePark         `json:"resource_park,omitempty"`
-	DeclaredResources         []string                   `json:"declared_resources,omitempty"`
-	ActualResources           []string                   `json:"actual_resources,omitempty"`
-	PublicationAudit          *publication.Audit         `json:"publication_audit,omitempty"`
-	Branch                    string                     `json:"branch,omitempty"`
-	Worktree                  string                     `json:"worktree,omitempty"`
-	Workspace                 *WorkerWorkspace           `json:"workspace,omitempty"`
-	Attempts                  int                        `json:"attempts"`
-	Continuations             int                        `json:"continuations"`
-	ExecutionProfile          string                     `json:"execution_profile,omitempty"`
-	CapabilityRequirements    *capability.Requirements   `json:"capability_requirements,omitempty"`
-	WorkerCapabilities        *capability.Provider       `json:"worker_capabilities,omitempty"`
-	SessionID                 string                     `json:"session_id,omitempty"`
-	Session                   *WorkerSession             `json:"session,omitempty"`
-	WorkerIdentity            WorkerIdentity             `json:"worker_identity,omitempty"`
-	Goal                      *WorkerGoal                `json:"goal,omitempty"`
-	WorkerPID                 int                        `json:"worker_pid,omitempty"`
-	WorkerPGID                int                        `json:"worker_pgid,omitempty"`
-	PullRequestURL            string                     `json:"pull_request_url,omitempty"`
-	PullRequestNumber         int                        `json:"pull_request_number,omitempty"`
-	HeadSHA                   string                     `json:"head_sha,omitempty"`
-	PullRequestMerged         bool                       `json:"pull_request_merged,omitempty"`
-	GitHubSync                string                     `json:"github_sync,omitempty"`
-	FailureKind               string                     `json:"failure_kind,omitempty"`
-	LastError                 string                     `json:"last_error,omitempty"`
-	RetryAfter                *time.Time                 `json:"retry_after,omitempty"`
-	Answers                   []AnswerRecord             `json:"answers,omitempty"`
-	ConflictRecovery          *ConflictRecovery          `json:"conflict_recovery,omitempty"`
-	BlockedCause              *BlockedCause              `json:"blocked_cause,omitempty"`
-	EnvironmentResume         *EnvironmentResume         `json:"environment_resume,omitempty"`
-	AnsweredWorkspaceRecovery *AnsweredWorkspaceRecovery `json:"answered_workspace_recovery,omitempty"`
+	Number                    int                          `json:"number"`
+	Title                     string                       `json:"title"`
+	Status                    string                       `json:"status"`
+	RunID                     string                       `json:"run_id,omitempty"`
+	LeaseGeneration           uint64                       `json:"lease_generation,omitempty"`
+	Lease                     *ResourceLease               `json:"lease,omitempty"`
+	ResourcePark              *ResourceLeasePark           `json:"resource_park,omitempty"`
+	DeclaredResources         []string                     `json:"declared_resources,omitempty"`
+	ActualResources           []string                     `json:"actual_resources,omitempty"`
+	PublicationAudit          *publication.Audit           `json:"publication_audit,omitempty"`
+	Branch                    string                       `json:"branch,omitempty"`
+	Worktree                  string                       `json:"worktree,omitempty"`
+	Workspace                 *WorkerWorkspace             `json:"workspace,omitempty"`
+	Attempts                  int                          `json:"attempts"`
+	Continuations             int                          `json:"continuations"`
+	ExecutionProfile          string                       `json:"execution_profile,omitempty"`
+	CapabilityRequirements    *capability.Requirements     `json:"capability_requirements,omitempty"`
+	WorkerCapabilities        *capability.Provider         `json:"worker_capabilities,omitempty"`
+	SessionID                 string                       `json:"session_id,omitempty"`
+	Session                   *WorkerSession               `json:"session,omitempty"`
+	WorkerIdentity            WorkerIdentity               `json:"worker_identity,omitempty"`
+	Goal                      *WorkerGoal                  `json:"goal,omitempty"`
+	WorkerPID                 int                          `json:"worker_pid,omitempty"`
+	WorkerPGID                int                          `json:"worker_pgid,omitempty"`
+	PullRequestURL            string                       `json:"pull_request_url,omitempty"`
+	PullRequestNumber         int                          `json:"pull_request_number,omitempty"`
+	HeadSHA                   string                       `json:"head_sha,omitempty"`
+	PullRequestMerged         bool                         `json:"pull_request_merged,omitempty"`
+	GitHubSync                string                       `json:"github_sync,omitempty"`
+	FailureKind               string                       `json:"failure_kind,omitempty"`
+	LastError                 string                       `json:"last_error,omitempty"`
+	RetryAfter                *time.Time                   `json:"retry_after,omitempty"`
+	Answers                   []AnswerRecord               `json:"answers,omitempty"`
+	ConflictRecovery          *ConflictRecovery            `json:"conflict_recovery,omitempty"`
+	BlockedCause              *BlockedCause                `json:"blocked_cause,omitempty"`
+	EnvironmentResume         *EnvironmentResume           `json:"environment_resume,omitempty"`
+	AnsweredWorkspaceRecovery *AnsweredWorkspaceRecovery   `json:"answered_workspace_recovery,omitempty"`
+	WorkspaceRecovery         *WorkspaceProvenanceRecovery `json:"workspace_provenance_recovery,omitempty"`
 
 	PublicationFailure *publication.FailureProvenance `json:"publication_failure,omitempty"`
 

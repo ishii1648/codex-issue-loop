@@ -248,6 +248,15 @@ agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issu
 agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 449 --confirm-exact-chain --json
 ```
 
+限定recoveryに一致しないがmigration前にWorkspace provenanceだけを復旧するlegacy terminal recordは、loop停止中に次を使う。
+
+```sh
+agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --dry-run --json
+agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --confirm-verified-workspace --json
+```
+
+previewの`mutation_scope`が`workspace`、`workspace_provenance_recovery`、eventだけであること、run/status/branch/worktree/HEAD/content digest/PR identity/validatorが保存対象と一致することを確認する。適用後もstatus、lease/resource park、session、GitHub label、worktree内容が変わらず、`status --json`で非null `workspace`と`workspace_provenance_recovery.status=verified`が得られることを確認する。
+
 成功後は`status --json`で`status=resume_pending`、同じsession/worktree/branch、`resource_park.resume_owner.generation=2`、active `lease.owner.generation=3`、`answered_workspace_recovery.status=github_synced`、非null `workspace`を確認する。GitHub同期失敗や並行実行後も同じコマンドを再実行し、generation、recovery ID、markerが増えないことを確認する。state/label編集、rebase/reset、差分移植は行わない。
 
 GitHub sync失敗時もstateを手編集せず、network復旧後にsupervisorを起動するか同じ`resume-blocked`を再実行して収束させる。旧版の競合で`status=blocked`、`environment_resume.status=requested|github_synced`、`lease=null`となった場合も、修正版の同じコマンドがeventに保存したbase SHAとGitHub/worktree/run/PRを再検証し、競合のない`repo:*` leaseを再予約する。legacy event chainがない、複数ある、別run、欠損・順序不正・payload改ざん、復元済みtyped cause不一致、既知の誤分類・正規化以外の後続event、`lease_reserved`/`worker_started`不一致、またはevent historyからbase SHAを回復できない場合はfail closedとする。durable legacy chainのない通常typed blockのmissing leaseも補わない。`conflict_recovery`、手動`blocked`/`do-not-automate`、security block、failed、active worker、unanswered request、running/completed、closed-without-merge、worktree/branch/PR不整合、未知または改変されたpark stateがある場合も修復・再開せず原因別runbookへ戻る。stateとsupervisor-owned labelは手編集しない。

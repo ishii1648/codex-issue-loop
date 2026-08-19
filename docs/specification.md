@@ -495,7 +495,20 @@ confirmはoperator confirmation、old provenance missing、expected/actual works
 
 missing/duplicate/reordered/superseded/cross-run event、別request/park/session/branch/repository/base/lease、generation/slot/resource mismatch、既存Workspace、別validator error、active worker、pending request、manual/security label、closed Issue、PR、marker mismatchは副作用なく拒否する。startupでsilent backfillせず、通常のenvironment recoveryやerror文字列だけでは許可しない。transaction、GitHub同期、並行CLI、supervisor restartの再実行は保存recovery IDとgeneration 3へ収束し、fence、spawn、commentを二重化しない。
 
-### 6.9 recover-checks
+### 6.9 recover-workspace
+
+```sh
+agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --dry-run --json
+agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --confirm-verified-workspace --json
+```
+
+`recover-workspace`は、実行境界を越えたlegacy `blocked` / `failed` recordのmissing `Workspace`だけを検証してbackfillする。対象はfully synchronizedな保存run/worktree/branch、active PID/PGIDなし、pending requestなし、open GitHub Issue、durable statusと一致するsupervisorの`blocked`または`failed` lifecycle labelだけを持つrecordに限定する。保存PRがある場合はsame-repositoryのopen PRがちょうど1件で、URL、head/base branch、remote/local HEADが一致しなければならない。PRが保存されていない場合は同branchのPRが存在してはならない。
+
+初回worker spawnと同じ`ValidateLaunch`でcanonical path、managed root、symlink不在、Git top-level、branch、Git common dir、repository ID、main checkoutとの非同一性を検証し、worktree content digestとHEADを監査する。成功transactionは`workspace`、`workspace_provenance_recovery`、`workspace_provenance_recovered` eventだけを追加し、status、run、lease、resource park、session、retry accounting、GitHub、worktreeを変更しない。再実行は保存Workspaceと監査record、現在のHEAD/content digestを照合してstate revisionを増やさない。
+
+これは実行再開のauthorityを与えるコマンドではない。`resume-blocked`、`retry`、`recover-checks`、`recover-publication`、`recover-answered-workspace`のpredicateを緩和せず、各lifecycle transitionは引き続き専用コマンドまたはsupervisorが判断する。
+
+### 6.10 recover-checks
 
 ```sh
 agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
@@ -510,7 +523,7 @@ operatorが同じPR branchへ外部commitをpushした後、run、managed worktr
 
 同期後は同じbranch/PRの`awaiting_checks`へ戻し、通常のDraft解除、auto merge、done/close、merge確認後のlease releaseを再利用する。worker attempts、continuations、run historyをresetせず、新branch、PR、push、worker実行を作らない。GitHub同期途中の停止・再起動は保存intentをauthoritative Issue/PR/head/checksと再照合してから同じmarkerへ収束する。closed-without-merge、head/branch/PR不一致、dirty/unpushed worktree、active worker、pending request、manual/security exclusionはstateとlabelを変更せずfail closedとする。
 
-### 6.10 adopt-merged-pr
+### 6.11 adopt-merged-pr
 
 ```sh
 agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json

@@ -145,6 +145,15 @@ v0.6.22以前の通常`needs_input` workerが回答後にleaseをgeneration 2で
 
 CLIは同じrequest/answer/park/run/session/worktree/branch/base、generation 1→2、全check成功の`worker_workspace_rejected`、blocked GitHub markerまでの完全な11-event chainを照合します。成功時だけ検証済み`Workspace`、generation 3 fence、`resume_pending`を単一transactionへ保存し、同じsession/worktreeからcontinuationを再開します。
 
+実行再開を伴う限定recoveryに一致しないlegacy `blocked` / `failed` recordは、lifecycleを一切変更しない`recover-workspace`でWorkspace provenanceだけを復旧できます。必ずpreviewし、run/worktree/branch、HEAD/content digest、LaunchValidation、GitHub Issue/label、保存PR identityを確認してから適用します。
+
+```sh
+"$agent_loop_bin" recover-workspace --repo "$PWD" --issue 123 --dry-run --json
+"$agent_loop_bin" recover-workspace --repo "$PWD" --issue 123 --confirm-verified-workspace --json
+```
+
+成功時に変わるのは`workspace`、`workspace_provenance_recovery`監査record、対応eventだけです。status、lease/resource park、session、attempt/continuation、GitHub label/comment、worktree内容は変更しません。active process、pending request、別exclusion、closed Issue、保存PR/branch/HEAD不一致ではfail closedとなります。
+
 worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missing`として最終`failed`になったIssueは、保存済みcompleted resultとdirty worktreeが一致する場合だけpublication-only recoveryを明示要求できます。workerは再実行せず、元のattempt budget、run、worktree、branch、回答、session、resource metadataを保持します。
 
 ```sh
