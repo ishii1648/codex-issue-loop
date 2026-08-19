@@ -12,6 +12,7 @@ GitHub Releaseには次を公開する。
 - `agent-loop_Darwin_arm64`
 - `agent-loop_Darwin_arm64.spdx.json`（SPDX 2.3）
 - `checksums.txt`（SHA-256）
+- `release-manifest.json`（delivery protocol、tag/commit、target、artifact digest、schema互換範囲）
 - GitHub Actions artifact provenance attestation
 
 release jobは同じtag、commit、`SOURCE_DATE_EPOCH`から2回buildし、binary、SBOM、checksumのbyte一致を確認してから公開する。repository固有の長期secretは使わず、GitHub Actionsの短命OIDC tokenと`GITHUB_TOKEN`だけを使う。
@@ -46,6 +47,31 @@ chmod 0755 agent-loop_Darwin_arm64
 ```
 
 checksum、attestation、version/commitのいずれかが一致しなければ実行・installしない。
+
+## Mac側pull型delivery
+
+初回installとdoctor完了後、Macごとに1つのcontrollerをpreviewしてから有効化する。
+
+```sh
+agent-loop delivery configure --json
+agent-loop delivery configure --apply --json
+agent-loop delivery check --json
+agent-loop delivery status --json
+```
+
+設定は`$HOME/.agent-loop-delivery.yaml`だけに置き、regular file、現在userのowner、mode `0600`を必須とする。`--config`はtestまたは明示運用用のabsolute pathだけを受理する。credentialは保存せず既存の`gh`認証を使う。transaction、download cache、log、maintenance fenceは`$HOME/Library/Application Support/codex-issue-loop/delivery/`配下であり、設定fileや各repositoryへ展開しない。
+
+`check`/`reconcile`はdraft/prereleaseを除く最新production Releaseのannotated SemVer tagをcommitへpeelし、`release-manifest.json`、`checksums.txt`、binaryとmanifest双方のGitHub attestation、`darwin/arm64` target、binary埋め込みmetadataを照合する。checksumとtrusted release workflow attestationの完了前にcandidate binaryを実行しない。download中にRelease/tagが変化した場合はfresh candidateでやり直す。major、schema migration、downgrade、同一version異commit、未知manifest/protocolは自動適用しない。
+
+`com.codex-issue-loop.delivery`は`RunAtLoad`と`StartInterval`で短命な`delivery reconcile`を実行する。host lockで手動`apply`との多重実行を拒否し、永続phaseと固定backup pathから再開する。drain timeoutではworkerをkillせずfenceを解除してdeferする。apply後はfenceを維持したまま全repositoryを含む`doctor --json`を二度実行してsoakし、失敗時は通常Issue処理の再開前にrollbackする。rollbackも失敗した場合はfenceとbackupを保持してfail closedする。
+
+```sh
+agent-loop delivery pause --json
+agent-loop delivery resume --json
+agent-loop delivery apply --version v1.2.3 --json
+```
+
+pause/resumeはactive maintenance transaction中には変更できない。schema migrationとmajor updateは従来どおり全loop停止、migration preview、paired rollbackを明示承認する手動runbookへ移す。
 
 ## 新規install
 

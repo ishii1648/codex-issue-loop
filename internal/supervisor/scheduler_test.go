@@ -48,6 +48,39 @@ type startupRateLimitObserverGitHub struct {
 	statusCalls int
 }
 
+func TestDeliveryMaintenanceFenceDrainsWithoutDispatchOrCancellation(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	counter := &countingGitHub{fakeGitHub: base}
+	loop.GitHub = counter
+	fence := filepath.Join(t.TempDir(), "maintenance.json")
+	if err := os.WriteFile(fence, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loop.MaintenanceFencePath = fence
+	canceled := false
+	jobCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &scheduler{loop: loop, active: map[int]activeJob{7: {runID: "run_7", cancel: func() { canceled = true }}}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	if result, err := s.schedule(jobCtx, true); err != nil || result.dispatched {
+		t.Fatalf("draining result=%+v err=%v", result, err)
+	}
+	if canceled || counter.listCalls != 0 {
+		t.Fatalf("active worker was canceled=%v or queue was polled=%d", canceled, counter.listCalls)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil || snapshot.Supervisor.State != "draining" {
+		t.Fatalf("supervisor=%+v err=%v", snapshot.Supervisor, err)
+	}
+	delete(s.active, 7)
+	if _, err := s.schedule(jobCtx, true); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil || snapshot.Supervisor.State != "maintenance" {
+		t.Fatalf("supervisor=%+v err=%v", snapshot.Supervisor, err)
+	}
+}
+
 func (f *startupRateLimitObserverGitHub) PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool) {
 	f.statusCalls++
 	return f.status, true

@@ -77,3 +77,14 @@ func (l Layout) BrokerPlistPath() string {
 }
 
 func (l Layout) BrokerLabel() string { return "com.codex-issue-loop.broker" }
+
+// DeliveryDir contains host-level delivery runtime data.  The operator-owned
+// configuration deliberately lives outside this managed root at
+// $HOME/.agent-loop-delivery.yaml.
+func (l Layout) DeliveryDir() string { return filepath.Join(l.Root, "delivery") }
+
+func (l Layout) DeliveryPlistPath() string {
+	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop.delivery.plist")
+}
+
+func (l Layout) DeliveryLabel() string { return "com.codex-issue-loop.delivery" }

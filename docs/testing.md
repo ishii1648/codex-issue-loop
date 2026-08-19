@@ -73,6 +73,7 @@ make test-race
 | 回復不能なsnapshot/event不整合 | `TestFaultRevisionMismatchIsQuarantined`、`TestFaultCorruptSnapshotIsQuarantined` |
 | log世代上限とworker run保持 | `TestLongRunningWriterKeepsBoundedGenerations`、`TestWorkerRunLogPruningPreservesActiveAndAuditsDeletion` |
 | install manifest・update backup・rollback | `TestInstallArtifactsAreIdempotentAndVersioned`、`TestUpdateBackupCanRestoreBinarySkillAndManifest`、`TestDoctorDetectsInstalledBinaryAndSkillMismatch` |
+| host delivery config・release検証・drain・rollback | `TestConfigSecureAtomicWriteAndValidation`、`TestConfigRejectsSymlinkAndRelativeOverride`、`TestVerifierChecksEveryBoundaryBeforeExecutingCandidate`、`TestCompatibilityBlocksMajorSchemaDowngradeAndRetag`、`TestDeliveryMaintenanceFenceDrainsWithoutDispatchOrCancellation`、`TestFaultControllerApplyAndDoctorFailureRollback` |
 | SPDX SBOMの決定性 | `TestGenerateProducesDeterministicSPDXDocument` |
 | v1→v2 migration・backup restore・途中停止再開 | `TestApplyMigratesV1FixturesAndRestoreRecoversOriginalBytes`、`TestInterruptedApplyReusesJournalAndConvergesIdempotently`、`TestUnsupportedVersionIsRejectedWithoutBackup`、`TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback` |
 | worktree cleanup/purge・安全条件・監査 | `TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval`、`TestPurgeRequiresExactConfirmationAndCanRemoveDirtyWorktree` |

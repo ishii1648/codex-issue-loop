@@ -198,7 +198,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 					continue
 				}
 				base := filepath.Base(event.Name)
-				if filepath.Dir(event.Name) != webhook.MailboxDir(l.Store.Dir) && base != "state.json" && base != "events.jsonl" {
+				if filepath.Dir(event.Name) != webhook.MailboxDir(l.Store.Dir) && base != "state.json" && base != "events.jsonl" && base != "delivery-maintenance.wake" {
 					continue
 				}
 				stopSchedulerTimer(pollTimer)
@@ -277,6 +277,20 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		return result, failure.Wrap(failure.Supervisor, "load durable state", err)
 	}
 	if err := s.preflight(snapshot); err != nil {
+		return result, err
+	}
+	if s.loop.maintenanceRequested() {
+		maintenanceState := "maintenance"
+		if len(s.active) > 0 {
+			maintenanceState = "draining"
+		}
+		if snapshot.Supervisor.State != maintenanceState || snapshot.Supervisor.Message != "host delivery maintenance fence is active" {
+			_, err = s.loop.Store.Update("delivery_maintenance_observed", 0, "", map[string]string{"state": maintenanceState}, func(current *state.Snapshot) error {
+				current.Supervisor.State = maintenanceState
+				current.Supervisor.Message = "host delivery maintenance fence is active"
+				return nil
+			})
+		}
 		return result, err
 	}
 	now := s.loop.now()

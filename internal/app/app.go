@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,6 +53,8 @@ var (
 type versionInfo struct {
 	Version                  string `json:"version"`
 	Commit                   string `json:"commit"`
+	Target                   string `json:"target"`
+	DeliveryProtocol         int    `json:"delivery_protocol"`
 	StateSchemaCurrent       int    `json:"state_schema_current"`
 	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
 	SemanticContractCurrent  int    `json:"semantic_contract_current"`
@@ -100,7 +103,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 	}
 	if args[0] == "--version" || args[0] == "version" {
 		if len(args) > 1 && args[1] == "--json" {
-			_ = json.NewEncoder(a.Out).Encode(versionInfo{Version: Version, Commit: Commit,
+			_ = json.NewEncoder(a.Out).Encode(versionInfo{Version: Version, Commit: Commit, Target: runtime.GOOS + "/" + runtime.GOARCH, DeliveryProtocol: 1,
 				StateSchemaCurrent: schema.CurrentVersion, StateSchemaMigrationFrom: schemaversion.Previous,
 				SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion})
 		} else {
@@ -211,6 +214,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.purge(ctx, l, args)
 	case "doctor":
 		return a.doctor(ctx, l, args)
+	case "delivery":
+		return a.delivery(ctx, l, args)
 	case "bootstrap-labels":
 		return a.bootstrapLabels(ctx, args)
 	case "run":
@@ -256,6 +261,7 @@ Commands:
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree
   doctor        Validate dependencies, auth, config, and registration
+  delivery      Configure and operate the host-level Release delivery controller
   bootstrap-labels  Preview or create required GitHub labels
   run           Run the supervisor (used by launchd)`)
 	// broker is intentionally omitted from the primary operator workflow; it is
@@ -356,6 +362,7 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
 	jsonOut := fs.Bool("json", false, "emit JSON")
+	deliveryBackup := fs.String("delivery-backup", "", "managed backup path reserved by the delivery controller")
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
 	}
@@ -406,7 +413,15 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 			return err
 		}
 	}
-	backup, err := backupInstallation(l)
+	var backup string
+	if *deliveryBackup != "" {
+		backup, err = validateDeliveryBackupPath(l, *deliveryBackup)
+		if err == nil {
+			backup, err = backupInstallationAt(l, backup)
+		}
+	} else {
+		backup, err = backupInstallation(l)
+	}
 	if err != nil {
 		return fmt.Errorf("backup current installation: %w", err)
 	}
@@ -614,7 +629,39 @@ func backupInstallation(l layout.Layout) (string, error) {
 		return "", fmt.Errorf("existing install manifest is required: %w", err)
 	}
 	backup := filepath.Join(l.Root, "backups", time.Now().UTC().Format("20060102T150405.000000000Z")+"-"+safeVersion(manifest.Version))
+	return backupInstallationAt(l, backup)
+}
+
+func backupInstallationAt(l layout.Layout, backup string) (string, error) {
+	if info, err := os.Lstat(backup); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("installation backup path is not a regular directory")
+		}
+		if err := validateInstallationBackup(backup); err == nil {
+			// A delivery retry must retain the pre-update image captured by the
+			// first attempt, even if the live installation is now half-updated.
+			return backup, nil
+		}
+		current, currentErr := readInstallManifest(filepath.Join(l.Root, "install.json"))
+		if currentErr != nil {
+			return "", fmt.Errorf("incomplete backup exists and current installation cannot be verified: %w", currentErr)
+		}
+		matches, matchErr := installationMatches(l, filepath.Join(l.BinDir, "agent-loop"), current.Version, current.Commit)
+		if matchErr != nil || !matches {
+			return "", fmt.Errorf("incomplete backup exists and current installation is not internally consistent")
+		}
+		// Only an incomplete, controller-owned backup at this exact path is
+		// discarded. A complete previous image is never overwritten.
+		if err := os.RemoveAll(backup); err != nil {
+			return "", err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
 	if err := os.MkdirAll(backup, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(backup, 0o700); err != nil {
 		return "", err
 	}
 	files := map[string]string{
@@ -639,18 +686,38 @@ func backupInstallation(l layout.Layout) (string, error) {
 	return backup, nil
 }
 
-func restoreInstallation(l layout.Layout, backup string) error {
-	manifest, err := readInstallManifest(filepath.Join(backup, "install.json"))
+func validateDeliveryBackupPath(l layout.Layout, path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", fmt.Errorf("--delivery-backup must be an absolute managed path")
+	}
+	clean := filepath.Clean(path)
+	root := filepath.Join(l.Root, "backups")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(root, clean)
+	if err != nil || relative == "." || strings.Contains(relative, string(os.PathSeparator)) || strings.HasPrefix(relative, "..") || !strings.HasPrefix(relative, "delivery-") {
+		return "", fmt.Errorf("--delivery-backup must name a direct delivery-* child of %s", root)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
+		return "", err
+	}
+	clean = filepath.Join(resolvedRoot, relative)
+	if info, err := os.Lstat(clean); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+		return "", fmt.Errorf("delivery backup path is not a regular directory")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return clean, nil
+}
+
+func restoreInstallation(l layout.Layout, backup string) error {
+	if err := validateInstallationBackup(backup); err != nil {
 		return err
-	}
-	binaryHash, err := fileSHA256(filepath.Join(backup, "agent-loop"))
-	if err != nil || binaryHash != manifest.BinarySHA256 {
-		return fmt.Errorf("backup binary checksum mismatch")
-	}
-	skillHash, err := fileSHA256(filepath.Join(backup, "SKILL.md"))
-	if err != nil || skillHash != manifest.SkillSHA256 {
-		return fmt.Errorf("backup Skill checksum mismatch")
 	}
 	files := map[string]struct {
 		destination string
@@ -669,6 +736,32 @@ func restoreInstallation(l layout.Layout, backup string) error {
 		if err := fsutil.WriteFile(target.destination, data, target.mode); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateInstallationBackup(backup string) error {
+	for _, name := range []string{"agent-loop", "SKILL.md", "VERSION", "install.json"} {
+		info, err := os.Lstat(filepath.Join(backup, name))
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("backup %s is missing or not a regular file", name)
+		}
+	}
+	manifest, err := readInstallManifest(filepath.Join(backup, "install.json"))
+	if err != nil {
+		return err
+	}
+	binaryHash, err := fileSHA256(filepath.Join(backup, "agent-loop"))
+	if err != nil || binaryHash != manifest.BinarySHA256 {
+		return fmt.Errorf("backup binary checksum mismatch")
+	}
+	skillHash, err := fileSHA256(filepath.Join(backup, "SKILL.md"))
+	if err != nil || skillHash != manifest.SkillSHA256 {
+		return fmt.Errorf("backup Skill checksum mismatch")
+	}
+	version, err := os.ReadFile(filepath.Join(backup, "VERSION"))
+	if err != nil || strings.TrimSpace(string(version)) != manifest.Version {
+		return fmt.Errorf("backup Skill version mismatch")
 	}
 	return nil
 }
@@ -2215,13 +2308,14 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	defer safeLog.Flush()
 	loop := &supervisor.Loop{
 		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
-		RateLimits:     ratelimit.Store{Path: l.RateLimitPath()},
-		Worktrees:      worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
-		Worker:         backend,
-		WorkerIdentity: identity,
-		Publisher:      publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], GofmtPath: entry.Commands["gofmt"], Secrets: secrets},
-		Conflicts:      conflict.Manager{GitPath: entry.Commands["git"]},
-		Logger:         log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
+		RateLimits:           ratelimit.Store{Path: l.RateLimitPath()},
+		Worktrees:            worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
+		Worker:               backend,
+		WorkerIdentity:       identity,
+		Publisher:            publish.Manager{GitPath: entry.Commands["git"], GHPath: entry.Commands["gh"], GofmtPath: entry.Commands["gofmt"], Secrets: secrets},
+		Conflicts:            conflict.Manager{GitPath: entry.Commands["git"]},
+		Logger:               log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
+		MaintenanceFencePath: filepath.Join(l.DeliveryDir(), "maintenance.json"),
 	}
 	err = loop.Run(ctx)
 	var blocked supervisor.BlockedError

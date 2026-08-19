@@ -359,7 +359,27 @@ path、ユーザー、CLI version、state schemaが異なるMacへ移す場合�
 
 ## 7. 更新とrollback
 
-release artifactの検証と更新方針は[Release・install・update方針](release.md)を正本とする。
+release artifactの検証と更新方針は[Release・install・update方針](release.md)を正本とする。通常のschema-compatible updateはMac側pull型controllerを使う。
+
+```sh
+agent-loop delivery configure --json
+agent-loop delivery configure --apply --json
+agent-loop delivery status --json
+```
+
+`$HOME/.agent-loop-delivery.yaml`はownerがLaunchAgent user、mode `0600`、symlinkでないことを確認する。repository別`.agent-loop.yaml`へdelivery設定を追加しない。`status --json`でphase、current/desired/previous、drain進捗、backup、last/next checkを確認する。`rollback_failed`ではmaintenance fenceを手動削除せず、表示されたbackupを保全してdoctorの失敗codeを調査する。
+
+初回導入とrelease前の実Mac E2Eでは、test repositoryと検証済みstable releaseを使い、次を記録する。
+
+1. login後にdelivery LaunchAgentがstable releaseを検出する。
+2. worker実行中に`delivery apply`し、workerへSIGTERM/SIGKILLが送られずcheckpoint後に進む。
+3. update成功後、二度目のdoctor/soakまで新規Issueがclaimされない。
+4. doctor failure fixtureでprevious installへrollbackしてから通常処理が再開する。
+5. `downloaded`、`draining`、`applying`、`validating`各phaseでdelivery processを停止し、login後のreconcileが旧版継続、安全な再開、rollbackのいずれか一つへ収束する。
+
+実施日時、tester、Mac model、macOS、current/desired commit、transaction resultを記録し、未実施項目を成功と扱わない。
+
+controllerを使えない復旧時だけ、次の手動手順を使う。
 
 1. 全loopを停止し、[backup](#backup)を取る。
 2. `gh release download`、checksum、attestation、`version --json`でartifactを検証する。

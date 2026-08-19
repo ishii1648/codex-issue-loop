@@ -27,6 +27,7 @@
 | agent-loop Skill | Codexが読む手順 | 自然言語を安全なCLI操作へ対応づける |
 | agent-loop CLI | Goの短命プロセス | start、stop、status、watch、answer |
 | launchd | macOS | supervisorの起動と異常終了時の再起動 |
+| delivery controller | Macごとに1つの短命LaunchAgent | production Releaseのpull、検証、host-wide drain、update、health check、rollback |
 | supervisor | Goの常駐プロセス | Issue選択、claim、worker起動、状態遷移、復旧 |
 | Codex worker | `codex exec`、optional App Server | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
 | publisher | supervisor内の決定論的処理 | 差分検査、commit、push、draft PR作成・既存PR再利用 |
@@ -43,6 +44,10 @@ agent-loop     = 決定論的な制御と継続実行
 Codex worker   = 1 Issue内の非決定的な開発作業
 GitHub         = producerとループが共有する仕事のキュー
 ```
+
+Release deliveryではGitHub Actionsの責務をbuild、test、SBOM/checksum、provenance attestation、Release公開までに限定する。production Macへ接続するworkflow、inbound listener、self-hosted runnerは置かない。同じログインユーザーの`com.codex-issue-loop.delivery`が既存の`gh`認証を使ってproduction Releaseをpullする。設定の正本はMac単位の`$HOME/.agent-loop-delivery.yaml`、transaction/cache/logは`$HOME/Library/Application Support/codex-issue-loop/delivery/`であり、repositoryの`.agent-loop.yaml`とは別のtrust boundaryである。
+
+delivery controllerがmaintenance fenceを作ると、全repository schedulerは新規claim、retry/resume、conflict worker、PR maintenanceをdispatchしない。実行中workerへsignalを送らず、PID/PGIDが消えてsnapshotがflushされ、supervisorが`maintenance`へ到達するまで待つ。適用後のdoctorとbounded soakが完了するまでfenceを解除せず、失敗時はprevious installへrollbackする。LLM、Issue worker、GitHub Actionsはいずれもこのtransactionを所有しない。
 
 現行のownership境界は1 host・1 supervisor・1 workerである。将来の単一host並列化は同じsupervisor内のworker slotとして実装し、複数host冗長化は外部の線形化可能なcoordinatorとfenced publication gatewayを必須とする。GitHub labelを分散lockとして使わない。詳細は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
 
