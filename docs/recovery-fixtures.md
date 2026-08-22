@@ -52,9 +52,9 @@ production由来fixtureは、次をすべて実施してからrepositoryへ追�
 2. `verify-recovery-fixture`が成功し、manifestのIssue、source schema/version、取得範囲、event件数、first/last sequence、intentional omissionをproduction調査記録と照合する。
 3. `git diff --no-index /dev/null <fixture>`等で全stringをsecurity reviewerと確認する。username/home path、repository access token、API key、private key、authorization header、顧客名、自由記述本文が残っていないことを確認する。疑わしい値があれば追加せず、sanitizerとtestを先に修正して再exportする。
 4. run/resume/lease owner、request/resource park、failure/resume marker、PR URL/number/headの同一性とcardinalityが維持されていることをtestで明示する。後から判明したfieldを補完せず、新しいproduction captureとして取得する。
-5. maintainer review後にfixtureのfile SHA-256を`internal/recoveryfixture/testdata/blessed-fixtures.sha256`へ追加する。lockだけ、またはfixtureとlockを検証なしで同時更新しない。
+5. maintainer review後にfixtureのfile SHA-256を`internal/application/recoveryfixture/testdata/blessed-fixtures.sha256`へ追加する。lockだけ、またはfixtureとlockを検証なしで同時更新しない。
 6. `go test ./...`、fault suite、race、vet、`make release-check`を実行する。release checkはreview済みbyte lockとfixture内部hash/completenessの両方を検証する。
 
 ## zeitreise #442
 
-`internal/recoveryfixture/testdata/zeitreise-442-full-history-v1.json`は旧exact fixtureをv1形式へ移行したrelease fixtureである。27 event全件、sessionの明示的`null`、resume requestの約28ms timestamp差、6回のreconciliation、前半4回のremote key omission、後半2回の`RemoteHead=""` / `RemoteConsistent=false`、`pull_requests=null`、resume/failure marker cardinalityを一つのfixtureに保持する。移行手順は同directoryの`generate_zeitreise_442.go`に固定してあり、通常のfixture export代わりにsynthetic fixtureを作る用途には使用しない。
+`internal/application/recoveryfixture/testdata/zeitreise-442-full-history-v1.json`は旧exact fixtureをv1形式へ移行したrelease fixtureである。27 event全件、sessionの明示的`null`、resume requestの約28ms timestamp差、6回のreconciliation、前半4回のremote key omission、後半2回の`RemoteHead=""` / `RemoteConsistent=false`、`pull_requests=null`、resume/failure marker cardinalityを一つのfixtureに保持する。移行手順は同directoryの`generate_zeitreise_442.go`に固定してあり、通常のfixture export代わりにsynthetic fixtureを作る用途には使用しない。

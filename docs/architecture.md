@@ -55,20 +55,41 @@ delivery controllerがmaintenance fenceを作ると、全repository schedulerは
 
 ### 3.1 コードのドメイン境界と読解順
 
+`internal`直下は責務ではなく依存方向を表す4層に限定する。`cmd`は具象実装を組み立てるcomposition rootであり、この4層の外側に置く。
+
+```text
+internal/
+├── domain/       # 副作用のない語彙、不変条件、policy、decision
+├── application/  # use caseと外部effectのorchestration
+├── adapter/      # state、GitHub、workerなど外部境界の具象実装
+└── platform/     # config、filesystem、launchdなどhost共通機能
+```
+
+許可するpackage依存は次の向きだけである。applicationが現在のcomposition/use case境界を持つためadapterの具象型を利用するが、adapterからapplicationへ逆流させない。将来portを抽出する場合も、この規則を狭める方向で行う。
+
+| import元 | import可能な内部layer |
+| --- | --- |
+| `domain` | `domain` |
+| `platform` | `platform`, `domain` |
+| `adapter` | `adapter`, `platform`, `domain` |
+| `application` | `application`, `adapter`, `platform`, `domain` |
+
+production、内部test、外部testのimport graphをアーキテクチャテストで検査し、`internal`直下へのlayer外package追加と依存方向の逆流を拒否する。
+
 人が実装を読むときは、外部I/Oを起点にせず、次の順序を基本とする。
 
 1. `internal/domain/**`で状態名、不変条件、状態遷移の入力と出力を確認する。
-2. `internal/admission/**`と`internal/capability/**`で、Issue選択と実行能力の決定論的な判定を確認する。
-3. `internal/supervisor/**`で、ドメインdecisionを永続transactionと外部effectへ対応づけるapplication orchestrationを確認する。
-4. `internal/state/**`、`internal/github/**`、`internal/worker/**`、`internal/publish/**`で永続化・外部I/Oの実装詳細を確認する。
+2. `internal/domain/admission/**`と`internal/domain/capability/**`で、Issue選択と実行能力の決定論的な判定を確認する。
+3. `internal/application/supervisor/**`で、ドメインdecisionを永続transactionと外部effectへ対応づけるapplication orchestrationを確認する。
+4. `internal/adapter/state/**`、`internal/adapter/github/**`、`internal/adapter/worker/**`、`internal/adapter/publish/**`で永続化・外部I/Oの実装詳細を確認する。
 
 `internal/domain/**`はfilesystem、process、clock、network、永続storeを直接参照せず、観測済みの値を入力として副作用のないdecisionを返す。Issue lifecycleの主状態である`Status`、GitHub反映待ちを表す第二状態軸`GitHubSync`、resource parkや各recoveryのsub-stateを同packageで型付き語彙として定義する。reconciliationではsupervisorがGitHub、worktree、processの観測をDTOへ正規化し、遷移先、retry時刻、GitHub同期、lease解放可否をdomain decisionが決める。retry/continuation/conflict/publicationの予算判定も同じ純粋層に置く。
 
-`app`または`supervisor`はdecision作成後、`internal/state/issue_transition.go`のcommit境界を通して、永続snapshotのstatusがdecisionの観測したstatusから変化していないことを検証してcommitする。このfenceはstatus一致だけを保証し、Run IDやlease generationなどの所有権fenceは従来どおり各transaction closureが検証する。claim予約だけは、Issue recordの作成とlease競合検査を同じtransactionで線形化するため、`state.ReserveLease`がtransaction内のcurrent statusを`domain.StartClaim`へ渡す。
+`app`または`supervisor`はdecision作成後、`internal/adapter/state/issue_transition.go`のcommit境界を通して、永続snapshotのstatusがdecisionの観測したstatusから変化していないことを検証してcommitする。このfenceはstatus一致だけを保証し、Run IDやlease generationなどの所有権fenceは従来どおり各transaction closureが検証する。claim予約だけは、Issue recordの作成とlease競合検査を同じtransactionで線形化するため、`state.ReserveLease`がtransaction内のcurrent statusを`domain.StartClaim`へ渡す。
 
 新しいIssue lifecycle遷移を`Store.Update`のclosureへ直接追加してはならない。まず`internal/domain/**`へ名前付きdecisionとtable-driven testを追加し、`state.ApplyIssueTransition`から適用する。汎用的にstatusを書き換えるcompatibility APIは設けない。
 
-CLI recoveryとclaim予約を含むproduction codeの`Issue.Status`直接更新は、`internal/state/issue_transition.go`の`ApplyIssueTransition`へ集約している。アーキテクチャテストは`go list ./...`と`go/types`で全production packageと内部・外部test packageを走査し、`state.Issue.Status`への代入をこの1箇所だけの個数付きallowlistとして固定する。また、`Status`、`GitHubSync`、型付きsub-stateに対する文字列リテラルの代入、比較、`switch` caseと、判断箇所での`Status.String()`による型剥がしも拒否する。これにより、変数名、添字式、composite literal、package境界、test codeの違いに依存せず、生代入や未型付けのlifecycle語彙を追加できない。
+CLI recoveryとclaim予約を含むproduction codeの`Issue.Status`直接更新は、`internal/adapter/state/issue_transition.go`の`ApplyIssueTransition`へ集約している。アーキテクチャテストは`go list ./...`と`go/types`で全production packageと内部・外部test packageを走査し、`state.Issue.Status`への代入をこの1箇所だけの個数付きallowlistとして固定する。また、`Status`、`GitHubSync`、型付きsub-stateに対する文字列リテラルの代入、比較、`switch` caseと、判断箇所での`Status.String()`による型剥がしも拒否する。これにより、変数名、添字式、composite literal、package境界、test codeの違いに依存せず、生代入や未型付けのlifecycle語彙を追加できない。
 
 未知のlifecycle語彙はstate validationでfail-closedに拒否する。このため、新しいstatusやsub-stateを永続化した版からその語彙を知らない旧版へロールバックすると、旧バイナリはstate file全体を読み込めない。語彙追加時はschema/semantic migrationだけでなく、rollback可能範囲と復旧手順もRelease変更として定義する。
 

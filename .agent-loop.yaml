@@ -22,19 +22,19 @@ resources:
   metadata_version: 1
   definitions:
     - name: config
-      paths: [.agent-loop*.yaml, internal/config/**, docs/resource-admission.md, docs/specification.md]
+      paths: [.agent-loop*.yaml, internal/platform/config/**, internal/domain/admission/**, internal/domain/capability/**, docs/resource-admission.md, docs/specification.md]
     - name: scheduler
-      paths: [internal/domain/**, internal/supervisor/**, internal/state/**, internal/webhook/**, internal/schema/**, internal/failure/**, internal/fsutil/**]
+      paths: [internal/domain/issue/**, internal/domain/statecontract/**, internal/application/supervisor/**, internal/adapter/state/**, internal/adapter/webhook/**, internal/platform/schema/**, internal/platform/failure/**, internal/platform/fsutil/**]
     - name: github
-      paths: [internal/github/**, internal/publish/**, internal/publication/**]
+      paths: [internal/adapter/github/**, internal/adapter/publish/**, internal/domain/publication/**]
     - name: worker
-      paths: [internal/worker/**, schemas/**]
+      paths: [internal/adapter/worker/**, schemas/**]
     - name: host
-      paths: [cmd/**, internal/app/**, internal/launchd/**, internal/registry/**, internal/layout/**, internal/lifecycle/**, internal/worktree/**]
+      paths: [cmd/**, internal/application/app/**, internal/platform/launchd/**, internal/platform/registry/**, internal/platform/layout/**, internal/application/lifecycle/**, internal/adapter/worktree/**]
     - name: operations
-      paths: [internal/observe/**, internal/retention/**, internal/redact/**, docs/*runbook.md]
+      paths: [internal/application/observe/**, internal/platform/retention/**, internal/platform/redact/**, docs/*runbook.md]
     - name: release
-      paths: [.github/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/compat/**, internal/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
+      paths: [.github/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/platform/compat/**, internal/application/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
     - name: docs
       paths: [.gitignore, README.md, AGENTS.md, docs/**]
 

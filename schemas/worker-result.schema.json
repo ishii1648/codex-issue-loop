@@ -1,5 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Runtime schema is embedded from internal/worker/worker-result.schema.json.",
-  "$ref": "../internal/worker/worker-result.schema.json"
+  "description": "Runtime schema is embedded from internal/adapter/worker/worker-result.schema.json.",
+  "$ref": "../internal/adapter/worker/worker-result.schema.json"
 }

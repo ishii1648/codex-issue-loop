@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"regexp"
 
-	"github.com/ishii1648/codex-issue-loop/internal/delivery"
-	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
-	"github.com/ishii1648/codex-issue-loop/internal/schema"
-	"github.com/ishii1648/codex-issue-loop/internal/statecontract"
+	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 )
 
 var releaseVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$`)
