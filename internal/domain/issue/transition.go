@@ -255,3 +255,55 @@ func StartConflictAttempt(from Status) (Transition, error) {
 func ScheduleConflictRetry(from Status) (Transition, error) {
 	return newAllowedTransition("schedule_conflict_retry", from, StatusResolvingConflict, StatusResolvingConflict)
 }
+
+type PublicationRecoveryFailureDecision struct {
+	Outcome        OutcomeDecision
+	RetryAt        *time.Time
+	RecoveryStatus string
+}
+
+func RecordPublicationRecoveryFailure(from Status, reason, failureKind string, terminal bool, retryAt time.Time) (PublicationRecoveryFailureDecision, error) {
+	target, githubSync, recoveryStatus := StatusPublicationRecovery, "", "retry_wait"
+	if terminal {
+		target, githubSync, recoveryStatus = StatusFailed, StatusFailed.String(), "failed"
+	} else if retryAt.IsZero() {
+		return PublicationRecoveryFailureDecision{}, fmt.Errorf("non-terminal publication recovery failure requires retry time")
+	}
+	outcome, err := newOutcomeDecision("record_publication_recovery_failure", from, target, reason, failureKind, githubSync, StatusPublicationRecovery)
+	if err != nil {
+		return PublicationRecoveryFailureDecision{}, err
+	}
+	decision := PublicationRecoveryFailureDecision{Outcome: outcome, RecoveryStatus: recoveryStatus}
+	if !terminal {
+		retry := retryAt
+		decision.RetryAt = &retry
+	}
+	return decision, nil
+}
+
+func RefusePublicationRecovery(from Status, reason, failureKind string) (OutcomeDecision, error) {
+	return newOutcomeDecision("refuse_publication_recovery", from, StatusFailed, reason, failureKind, StatusFailed.String(), StatusPublicationRecovery)
+}
+
+// ReconcileObservation validates lifecycle convergence derived from durable,
+// GitHub, process, and worktree observations. Same-state convergence is
+// explicit so reconciliation remains idempotent.
+func ReconcileObservation(from, to Status) (Transition, error) {
+	if from == to {
+		return NewTransition("reconcile_observation", from, to)
+	}
+	switch to {
+	case StatusRetryWait:
+		return newAllowedTransition("reconcile_observation", from, to, StatusClaiming, StatusClaimed, StatusRunning)
+	case StatusAwaitingChecks, StatusAwaitingMerge:
+		return newAllowedTransition("reconcile_observation", from, to, StatusCompleted)
+	case StatusCompleted, StatusFailed, StatusBlocked:
+		return newAllowedTransition("reconcile_observation", from, to,
+			StatusClaiming, StatusClaimed, StatusRunning, StatusAnswerClaimWaiting,
+			StatusResumePending, StatusEnvironmentResumePending, StatusPublicationRecovery,
+			StatusChecksRecovery, StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks,
+			StatusAwaitingMerge, StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted)
+	default:
+		return Transition{}, fmt.Errorf("reconciliation does not allow status %q to converge to %q", from, to)
+	}
+}

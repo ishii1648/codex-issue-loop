@@ -114,6 +114,10 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			if decision.workerPID == 0 {
 				decision.workerPGID = 0
 			}
+			lifecycleTransition, transitionErr := issuedomain.ReconcileObservation(current.Status, decision.status)
+			if transitionErr != nil {
+				return fmt.Errorf("decide startup lifecycle reconciliation for Issue #%d: %w", number, transitionErr)
+			}
 			predicateReport := startupReconciliationPredicateReport(number, decision)
 			if decision.markRunning {
 				if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
@@ -183,7 +187,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 						return err
 					}
 				}
-				if err := setIssueStatus(item, decision.status); err != nil {
+				if err := applyIssueTransition(item, lifecycleTransition); err != nil {
 					return err
 				}
 				item.LastError = decision.lastError
@@ -321,6 +325,10 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 	if decision.workerPID == 0 {
 		decision.workerPGID = 0
 	}
+	lifecycleTransition, transitionErr := issuedomain.ReconcileObservation(current.Status, decision.status)
+	if transitionErr != nil {
+		return false, fmt.Errorf("decide webhook lifecycle reconciliation for Issue #%d: %w", current.Number, transitionErr)
+	}
 	_, err = l.Store.Update("webhook_terminal_reconciled", current.Number, current.RunID, map[string]any{
 		"delivery_id": delivery.DeliveryID,
 		"event":       delivery.Event,
@@ -342,7 +350,7 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 				return err
 			}
 		}
-		if err := setIssueStatus(item, decision.status); err != nil {
+		if err := applyIssueTransition(item, lifecycleTransition); err != nil {
 			return err
 		}
 		item.LastError = decision.lastError

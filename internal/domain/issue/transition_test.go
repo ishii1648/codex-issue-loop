@@ -193,6 +193,42 @@ func TestOutcomeDecisionsRejectIncompleteOrUnrelatedInput(t *testing.T) {
 	}
 }
 
+func TestPublicationRecoveryFailureDecision(t *testing.T) {
+	retryAt := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	retry, err := RecordPublicationRecoveryFailure(StatusPublicationRecovery, "formatter unavailable", "issue", false, retryAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Outcome.Transition.To != StatusPublicationRecovery || retry.RetryAt == nil || !retry.RetryAt.Equal(retryAt) || retry.RecoveryStatus != "retry_wait" {
+		t.Fatalf("unexpected retry decision: %+v", retry)
+	}
+	terminal, err := RecordPublicationRecoveryFailure(StatusPublicationRecovery, "unsafe path", "issue", true, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Outcome.Transition.To != StatusFailed || terminal.RetryAt != nil || terminal.Outcome.GitHubSync != "failed" || terminal.RecoveryStatus != "failed" {
+		t.Fatalf("unexpected terminal decision: %+v", terminal)
+	}
+}
+
+func TestReconcileObservationTransitions(t *testing.T) {
+	tests := []struct{ from, to Status }{
+		{from: StatusRunning, to: StatusRetryWait},
+		{from: StatusCompleted, to: StatusAwaitingChecks},
+		{from: StatusFailed, to: StatusCompleted},
+		{from: StatusNeedsInput, to: StatusBlocked},
+		{from: StatusRetryWait, to: StatusRetryWait},
+	}
+	for _, test := range tests {
+		if _, err := ReconcileObservation(test.from, test.to); err != nil {
+			t.Errorf("reconcile %q -> %q: %v", test.from, test.to, err)
+		}
+	}
+	if _, err := ReconcileObservation(StatusRetryWait, StatusRunning); err == nil {
+		t.Fatal("reconciliation must not implicitly start a worker")
+	}
+}
+
 func TestStatusOperationalPredicates(t *testing.T) {
 	tests := []struct {
 		status            Status
