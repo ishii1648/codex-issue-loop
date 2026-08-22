@@ -449,12 +449,16 @@ func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) er
 	if err := l.GitHub.Claim(ctx, l.Config, issue, runID); err != nil {
 		return failure.Wrap(failure.Transient, "claim GitHub Issue", err)
 	}
-	_, err := l.Store.Update("issue_claimed", issue.Number, runID, map[string]any{"title": issue.Title}, func(s *state.Snapshot) error {
+	claimTransition, err := issuedomain.ConfirmClaim(issuedomain.StatusClaiming)
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "decide claimed Issue", err)
+	}
+	_, err = l.Store.Update("issue_claimed", issue.Number, runID, map[string]any{"title": issue.Title}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
 		if item == nil {
 			return fmt.Errorf("Issue #%d disappeared while claiming", issue.Number)
 		}
-		if err := setIssueStatus(item, issuedomain.StatusClaimed); err != nil {
+		if err := applyIssueTransition(item, claimTransition); err != nil {
 			return err
 		}
 		item.UpdatedAt = l.now()
@@ -483,12 +487,16 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 		RepoID: l.Store.RepoID, Repository: l.Config.GitHub.Repo, RepositoryID: l.Config.GitHub.RepositoryID,
 		GitCommonDir: launch.CommonDir, MainCheckout: launch.MainCheckout, CapturedAt: l.now(),
 	}
+	workerTransition, err := issuedomain.StartClaimedWorker(issuedomain.StatusClaimed)
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "decide initial worker start", err)
+	}
 	_, err = l.Store.Update("worker_started", issue.Number, runID, map[string]any{
 		"worktree": wt.Path, "branch": wt.Branch, "identity": l.WorkerIdentity,
 		"expected_cwd": launch.CanonicalCWD, "workspace_validation": launch,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
-		if err := setIssueStatus(item, issuedomain.StatusRunning); err != nil {
+		if err := applyIssueTransition(item, workerTransition); err != nil {
 			return err
 		}
 		item.Worktree, item.Branch, item.UpdatedAt = launch.CanonicalCWD, wt.Branch, l.now()
@@ -544,6 +552,10 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		return l.reacquireAnsweredClaim(ctx, issue, current)
 	}
 	if current.Status == "resume_pending" {
+		resumeTransition, transitionErr := issuedomain.StartAnsweredResume(current.Status)
+		if transitionErr != nil {
+			return transitionErr
+		}
 		if current.ResourcePark != nil && current.ResourcePark.Kind == state.ResourceParkKindNeedsInput {
 			if reason := l.answeredResumeRemoteMismatch(issue, current); reason != "" {
 				return l.rejectAnsweredContinuation(current, reason)
@@ -552,7 +564,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if err := l.GitHub.MarkRunning(ctx, l.Config, current.Number); err != nil {
 			return failure.Wrap(failure.Transient, "mark resumed Issue running", err)
 		}
-		if err := setIssueStatus(&current, issuedomain.StatusRunning); err != nil {
+		if err := applyIssueTransition(&current, resumeTransition); err != nil {
 			return err
 		}
 		current.RetryAfter = nil
@@ -561,7 +573,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			if item == nil || item.Status != "resume_pending" || item.GitHubSync != "" || item.Lease == nil {
 				return fmt.Errorf("Issue #%d answered continuation is no longer pending", current.Number)
 			}
-			if err := setIssueStatus(item, issuedomain.StatusRunning); err != nil {
+			if err := applyIssueTransition(item, resumeTransition); err != nil {
 				return err
 			}
 			item.RetryAfter = nil
@@ -589,7 +601,11 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		return l.handleResult(ctx, issue, current, result, err)
 	}
 	if current.Status == "environment_resume_pending" {
-		if err := setIssueStatus(&current, issuedomain.StatusRunning); err != nil {
+		resumeTransition, transitionErr := issuedomain.StartEnvironmentResume(current.Status)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if err := applyIssueTransition(&current, resumeTransition); err != nil {
 			return err
 		}
 		current.RetryAfter = nil
@@ -598,7 +614,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			if item == nil || item.Status != "environment_resume_pending" || item.GitHubSync != "" {
 				return fmt.Errorf("Issue #%d environment resume is no longer pending", current.Number)
 			}
-			if err := setIssueStatus(item, issuedomain.StatusRunning); err != nil {
+			if err := applyIssueTransition(item, resumeTransition); err != nil {
 				return err
 			}
 			item.RetryAfter = nil
@@ -636,8 +652,12 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		return l.handleResult(ctx, issue, current, result, err)
 	}
 
+	retryTransition, transitionErr := issuedomain.StartRetry(current.Status)
+	if transitionErr != nil {
+		return transitionErr
+	}
 	current.RetryAfter = nil
-	if err := setIssueStatus(&current, issuedomain.StatusRunning); err != nil {
+	if err := applyIssueTransition(&current, retryTransition); err != nil {
 		return err
 	}
 	workerCfg := l.Config
@@ -647,7 +667,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		current.Continuations++
 		_, err = l.Store.Update("worker_continuation_started", current.Number, current.RunID, map[string]int{"continuation": current.Continuations}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			if err := setIssueStatus(item, issuedomain.StatusRunning); err != nil {
+			if err := applyIssueTransition(item, retryTransition); err != nil {
 				return err
 			}
 			item.Continuations = current.Continuations
@@ -681,7 +701,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			if owner != (state.LeaseOwner{}) {
 				payload["lease_owner"] = owner
 			}
-			if err := setIssueStatus(item, issuedomain.StatusRunning); err != nil {
+			if err := applyIssueTransition(item, retryTransition); err != nil {
 				return err
 			}
 			item.RunID, item.Attempts, item.SessionID = current.RunID, current.Attempts, ""
@@ -1007,6 +1027,10 @@ func (l *Loop) reacquireAnsweredClaim(ctx context.Context, remoteIssue gh.Issue,
 		return nil
 	}
 	now := l.now()
+	claimTransition, err := issuedomain.AcquireAnsweredClaim(current.Status)
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "decide answered claim acquisition", err)
+	}
 	_, err = l.Store.Update("answered_claim_acquired", current.Number, current.RunID, map[string]any{
 		"request_id": current.ResourcePark.RequestID, "resource_park_id": current.ResourcePark.ID,
 	}, func(snapshot *state.Snapshot) error {
@@ -1032,7 +1056,7 @@ func (l *Loop) reacquireAnsweredClaim(ctx context.Context, remoteIssue gh.Issue,
 			}
 			return resumeErr
 		}
-		if err := setIssueStatus(item, issuedomain.StatusResumePending); err != nil {
+		if err := applyIssueTransition(item, claimTransition); err != nil {
 			return err
 		}
 		item.RetryAfter = nil

@@ -73,9 +73,10 @@ type WorkerStopReport struct {
 }
 
 type workerStopTarget struct {
-	issue   state.Issue
-	stopped WorkerStop
-	alive   bool
+	issue      state.Issue
+	stopped    WorkerStop
+	alive      bool
+	transition *issuedomain.Transition
 }
 
 // StopWorkers terminates every saved worker group and records each Issue
@@ -113,7 +114,16 @@ func StopWorkers(ctx context.Context, store state.Store, grace time.Duration, re
 				return WorkerStopReport{}, fmt.Errorf("Issue #%d saved worker PID %d does not own process group %d", issue.Number, issue.WorkerPID, pgid)
 			}
 		}
-		targets = append(targets, workerStopTarget{issue: issue, stopped: stopped, alive: alive})
+		var transition *issuedomain.Transition
+		switch issue.Status {
+		case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusRunning:
+			decision, transitionErr := issuedomain.InterruptExecution(issue.Status)
+			if transitionErr != nil {
+				return WorkerStopReport{}, transitionErr
+			}
+			transition = &decision
+		}
+		targets = append(targets, workerStopTarget{issue: issue, stopped: stopped, alive: alive, transition: transition})
 	}
 
 	// All groups receive cancellation before the pool-wide grace period starts.
@@ -145,6 +155,7 @@ func StopWorkers(ctx context.Context, store state.Store, grace time.Duration, re
 	report := WorkerStopReport{Workers: make([]WorkerStop, 0, len(targets))}
 	for _, target := range targets {
 		issue, stopped := target.issue, target.stopped
+		transition := target.transition
 		now := time.Now().UTC()
 		_, err := store.Update("worker_process_stopped", issue.Number, issue.RunID, stopped, func(current *state.Snapshot) error {
 			item := current.Issues[strconv.Itoa(issue.Number)]
@@ -156,13 +167,16 @@ func StopWorkers(ctx context.Context, store state.Store, grace time.Duration, re
 			}
 			item.WorkerPID, item.WorkerPGID = 0, 0
 			switch item.Status {
-			case "claiming", "claimed", "running":
-				if err := setIssueStatus(item, issuedomain.StatusRetryWait); err != nil {
+			case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusRunning:
+				if transition == nil {
+					return fmt.Errorf("Issue #%d active worker is missing its interruption decision", issue.Number)
+				}
+				if err := applyIssueTransition(item, *transition); err != nil {
 					return err
 				}
 				item.RetryAfter = nil
 				item.LastError = reason
-			case "resolving_conflict":
+			case issuedomain.StatusResolvingConflict:
 				item.RetryAfter = nil
 				item.LastError = reason
 			}
