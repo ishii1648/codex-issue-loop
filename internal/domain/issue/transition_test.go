@@ -148,6 +148,51 @@ func TestExecutionTransitionsRejectUnrelatedSources(t *testing.T) {
 	}
 }
 
+func TestOutcomeDecisionsDeriveCompanionState(t *testing.T) {
+	tests := []struct {
+		name   string
+		make   func() (OutcomeDecision, error)
+		to     Status
+		sync   string
+		reason string
+	}{
+		{name: "workspace block", make: func() (OutcomeDecision, error) {
+			return RejectWorkerWorkspace(StatusRunning, "unsafe workspace", "issue")
+		}, to: StatusBlocked, sync: "blocked", reason: "unsafe workspace"},
+		{name: "resource correction", make: func() (OutcomeDecision, error) {
+			return RequestResourceCorrection(StatusRunning, "claim mismatch", "issue")
+		}, to: StatusNeedsInput, sync: "needs_input", reason: "claim mismatch"},
+		{name: "checks exhausted", make: func() (OutcomeDecision, error) {
+			return ExhaustPullRequestChecks(StatusAwaitingChecks, "checks failed", "issue")
+		}, to: StatusFailed, sync: "failed", reason: "checks failed"},
+		{name: "generic failure", make: func() (OutcomeDecision, error) { return Fail(StatusRunning, "worker failed", "issue", false) }, to: StatusFailed, sync: "failed", reason: "worker failed"},
+		{name: "generic block", make: func() (OutcomeDecision, error) { return Fail(StatusResolvingConflict, "manual repair", "issue", true) }, to: StatusBlocked, sync: "blocked", reason: "manual repair"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, err := test.make()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Transition.To != test.to || decision.GitHubSync != test.sync || decision.LastError != test.reason || decision.FailureKind != "issue" {
+				t.Fatalf("unexpected outcome decision: %+v", decision)
+			}
+		})
+	}
+}
+
+func TestOutcomeDecisionsRejectIncompleteOrUnrelatedInput(t *testing.T) {
+	if _, err := RejectAnsweredResume(StatusRunning, "remote changed", "issue"); err == nil {
+		t.Fatal("running Issue must not use answered resume rejection")
+	}
+	if _, err := RequestResourceCorrection(StatusRunning, "", "issue"); err == nil {
+		t.Fatal("outcome decision must require a reason")
+	}
+	if _, err := Fail(StatusCompleted, "failed", "issue", false); err == nil {
+		t.Fatal("completed Issue must not fail again")
+	}
+}
+
 func TestStatusOperationalPredicates(t *testing.T) {
 	tests := []struct {
 		status            Status

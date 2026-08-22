@@ -975,6 +975,10 @@ func (l *Loop) answeredResumeRemoteMismatch(issue gh.Issue, current state.Issue)
 
 func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) error {
 	now := l.now()
+	decision, decisionErr := issuedomain.RejectAnsweredResume(current.Status, "answered continuation rejected: "+reason, string(failure.Issue))
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide answered continuation rejection", decisionErr)
+	}
 	_, err := l.Store.Update("answered_resume_rejected", current.Number, current.RunID, map[string]string{"reason": reason}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
 		if item == nil || item.Status != "resume_pending" || item.RunID != current.RunID || item.Lease == nil || current.Lease == nil || item.Lease.Owner != current.Lease.Owner {
@@ -990,11 +994,12 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 		if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
 			return err
 		}
-		if err := setIssueStatus(item, issuedomain.StatusBlocked); err != nil {
+		if err := applyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.LastError = "answered continuation rejected: " + reason
-		item.FailureKind = string(failure.Issue)
+		item.LastError = decision.LastError
+		item.FailureKind = decision.FailureKind
+		item.GitHubSync = decision.GitHubSync
 		item.BlockedCause = &state.BlockedCause{Origin: "supervisor", Kind: "answer_resume", Resumable: false, Reason: reason, BlockedAt: now}
 		item.RetryAfter = nil
 		item.UpdatedAt = now
@@ -1093,6 +1098,10 @@ func availableSnapshotLeaseSlot(snapshot *state.Snapshot, limit, preferred, issu
 
 func (l *Loop) blockWorkerWorkspace(ctx context.Context, expected state.Issue, validationErr *workerWorkspaceError) error {
 	reason := validationErr.Error()
+	decision, decisionErr := issuedomain.RejectWorkerWorkspace(expected.Status, reason, string(failure.Issue))
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide worker workspace rejection", decisionErr)
+	}
 	payload := map[string]any{
 		"expected_cwd": validationErr.expected,
 		"validation":   validationErr.validation,
@@ -1104,12 +1113,12 @@ func (l *Loop) blockWorkerWorkspace(ctx context.Context, expected state.Issue, v
 		if item == nil || item.RunID != expected.RunID {
 			return fmt.Errorf("Issue #%d run changed while rejecting worker workspace", expected.Number)
 		}
-		if err := setIssueStatus(item, issuedomain.StatusBlocked); err != nil {
+		if err := applyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.LastError = reason
-		item.FailureKind = string(failure.Issue)
-		item.GitHubSync = "blocked"
+		item.LastError = decision.LastError
+		item.FailureKind = decision.FailureKind
+		item.GitHubSync = decision.GitHubSync
 		item.WorkerPID = 0
 		item.WorkerPGID = 0
 		item.RetryAfter = nil
@@ -1518,16 +1527,20 @@ var errWorkerResultSuperseded = errors.New("worker result superseded by authorit
 func (l *Loop) requestResourceCorrection(ctx context.Context, current state.Issue, audit publication.Audit, detail string) error {
 	requestID := state.NewID("req")
 	question := fmt.Sprintf("Issue #%d has changes outside its declared resource claim. How should the existing worktree be corrected?", current.Number)
+	decision, decisionErr := issuedomain.RequestResourceCorrection(current.Status, detail, string(failure.Issue))
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide resource correction request", decisionErr)
+	}
 	_, err := l.Store.Update("resource_claim_mismatch", current.Number, current.RunID, map[string]any{
 		"reason": publication.ReasonResourceClaimMismatch, "audit": audit,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if err := setIssueStatus(item, issuedomain.StatusNeedsInput); err != nil {
+		if err := applyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.LastError = detail
-		item.FailureKind = string(failure.Issue)
-		item.GitHubSync = "needs_input"
+		item.LastError = decision.LastError
+		item.FailureKind = decision.FailureKind
+		item.GitHubSync = decision.GitHubSync
 		item.RetryAfter = nil
 		item.UpdatedAt = l.now()
 		s.PendingRequests[requestID] = &state.Request{
@@ -1710,6 +1723,10 @@ func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, p
 		return l.failIssue(ctx, current.Number, cause, false)
 	}
 	now := l.now()
+	decision, decisionErr := issuedomain.ExhaustPullRequestChecks(current.Status, cause.Error(), string(failure.Issue))
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide Pull Request checks exhaustion", decisionErr)
+	}
 	_, err := l.Store.Update("pull_request_checks_retry_exhausted", current.Number, current.RunID, map[string]any{
 		"pull_request_url": pr.URL, "pull_request_number": pr.Number, "head_sha": pr.HeadSHA,
 		"checks_status": pr.ChecksStatus, "attempts": current.Attempts, "continuations": current.Continuations,
@@ -1718,12 +1735,12 @@ func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, p
 		if item == nil || item.RunID != current.RunID || item.PullRequestURL != pr.URL || item.Branch != pr.HeadRefName {
 			return fmt.Errorf("Issue #%d changed while recording Pull Request checks exhaustion", current.Number)
 		}
-		if err := setIssueStatus(item, issuedomain.StatusFailed); err != nil {
+		if err := applyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.LastError = cause.Error()
-		item.FailureKind = string(failure.Issue)
-		item.GitHubSync = "failed"
+		item.LastError = decision.LastError
+		item.FailureKind = decision.FailureKind
+		item.GitHubSync = decision.GitHubSync
 		item.RetryAfter = nil
 		item.SessionID = ""
 		item.Session = nil
@@ -1750,17 +1767,21 @@ func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, p
 
 func (l *Loop) blockPullRequestLifecycle(ctx context.Context, current state.Issue, prURL, reason string) error {
 	cause := "Pull Request lifecycle: " + reason
+	decision, decisionErr := issuedomain.BlockPullRequestLifecycle(current.Status, cause, string(failure.Issue))
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide Pull Request lifecycle block", decisionErr)
+	}
 	_, err := l.Store.Update("pull_request_lifecycle_blocked", current.Number, current.RunID, map[string]any{
 		"reason": reason, "pull_request_url": prURL,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if err := setIssueStatus(item, issuedomain.StatusBlocked); err != nil {
+		if err := applyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.PullRequestURL = prURL
-		item.LastError = cause
-		item.FailureKind = string(failure.Issue)
-		item.GitHubSync = "blocked"
+		item.LastError = decision.LastError
+		item.FailureKind = decision.FailureKind
+		item.GitHubSync = decision.GitHubSync
 		item.RetryAfter = nil
 		item.WorkerPID = 0
 		item.WorkerPGID = 0
@@ -1915,6 +1936,10 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		previousOwner = current.Lease.Owner
 	}
 	attemptNumber := len(current.ConflictRecovery.History) + 1
+	attemptTransition, decisionErr := issuedomain.StartConflictAttempt(current.Status)
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide conflict recovery attempt", decisionErr)
+	}
 	payload := map[string]any{
 		"attempt": current.ConflictRecovery.Attempts + 1, "base_sha": current.ConflictRecovery.TargetBaseSHA,
 		"conflict_files": current.ConflictRecovery.ConflictFiles,
@@ -1928,7 +1953,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		if owner != (state.LeaseOwner{}) {
 			payload["lease_owner"] = owner
 		}
-		if err := setIssueStatus(item, issuedomain.StatusResolvingConflict); err != nil {
+		if err := applyIssueTransition(item, attemptTransition); err != nil {
 			return err
 		}
 		item.RunID, item.WorkerPID, item.WorkerPGID = runID, 0, 0
@@ -2110,12 +2135,16 @@ func (l *Loop) scheduleConflictRetry(ctx context.Context, current state.Issue, r
 	}
 	delay := l.retryDelay(effectiveAttempts)
 	retryAt := l.now().Add(delay)
+	retryTransition, decisionErr := issuedomain.ScheduleConflictRetry(current.Status)
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide conflict recovery retry", decisionErr)
+	}
 	_, err := l.Store.Update("conflict_recovery_retry_scheduled", current.Number, current.RunID, map[string]any{
 		"reason": reason, "base_sha": current.ConflictRecovery.TargetBaseSHA,
 		"attempts": current.ConflictRecovery.Attempts, "retry_at": retryAt,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if err := setIssueStatus(item, issuedomain.StatusResolvingConflict); err != nil {
+		if err := applyIssueTransition(item, retryTransition); err != nil {
 			return err
 		}
 		item.LastError, item.RetryAfter = reason, &retryAt
@@ -2465,17 +2494,17 @@ func (l *Loop) schedulePublicationRetry(ctx context.Context, issue state.Issue, 
 }
 
 func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked bool) error {
-	status := issuedomain.StatusFailed
-	if blocked {
-		status = issuedomain.StatusBlocked
-	}
 	current, _ := l.issueState(number)
 	owner := state.LeaseOwner{}
 	if current.Lease != nil {
 		owner = current.Lease.Owner
 	}
 	kind := failure.KindOf(cause)
-	_, err := l.Store.Update("issue_"+status.String(), number, current.RunID, map[string]string{"error": cause.Error(), "failure_kind": string(kind)}, func(s *state.Snapshot) error {
+	decision, decisionErr := issuedomain.Fail(current.Status, cause.Error(), string(kind), blocked)
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide Issue failure", decisionErr)
+	}
+	_, err := l.Store.Update("issue_"+decision.Transition.To.String(), number, current.RunID, map[string]string{"error": cause.Error(), "failure_kind": string(kind)}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(number)]
 		if item == nil {
 			item = &state.Issue{Number: number}
@@ -2492,16 +2521,16 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 				return err
 			}
 		}
-		if err := setIssueStatus(item, status); err != nil {
+		if err := applyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.LastError = cause.Error()
+		item.LastError = decision.LastError
 		if !publicationRecoverable {
 			item.SessionID = ""
 			item.Session = nil
 		}
-		item.FailureKind = string(kind)
-		item.GitHubSync = status.String()
+		item.FailureKind = decision.FailureKind
+		item.GitHubSync = decision.GitHubSync
 		item.RetryAfter, item.UpdatedAt = nil, l.now()
 		return nil
 	})
@@ -2524,6 +2553,10 @@ func (l *Loop) blockWorkerEnvironment(ctx context.Context, number int, reason st
 		return err
 	}
 	cause := failure.Wrap(failure.Issue, "worker blocked", errors.New(reason))
+	decision, decisionErr := issuedomain.BlockWorkerEnvironment(current.Status, cause.Error(), string(failure.Issue))
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide worker environment block", decisionErr)
+	}
 	parkID := state.NewID("park")
 	parkedAt := l.now()
 	owner := state.LeaseOwner{}
@@ -2551,12 +2584,12 @@ func (l *Loop) blockWorkerEnvironment(ctx context.Context, number int, reason st
 			return err
 		}
 		item.ResourcePark.Kind = state.ResourceParkKindEnvironmentBlock
-		if err := setIssueStatus(item, issuedomain.StatusBlocked); err != nil {
+		if err := applyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.LastError = cause.Error()
-		item.FailureKind = string(failure.Issue)
-		item.GitHubSync = "blocked"
+		item.LastError = decision.LastError
+		item.FailureKind = decision.FailureKind
+		item.GitHubSync = decision.GitHubSync
 		item.BlockedCause = &state.BlockedCause{
 			Origin: "worker", Kind: "environment", Resumable: true,
 			Reason: reason, BlockedAt: l.now(),

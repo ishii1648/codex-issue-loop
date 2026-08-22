@@ -192,3 +192,66 @@ func InterruptExecution(from Status) (Transition, error) {
 	return newAllowedTransition("interrupt_execution", from, StatusRetryWait,
 		StatusClaiming, StatusClaimed, StatusRunning)
 }
+
+type OutcomeDecision struct {
+	Transition  Transition
+	LastError   string
+	FailureKind string
+	GitHubSync  string
+}
+
+func newOutcomeDecision(name string, from, to Status, reason, failureKind, githubSync string, allowed ...Status) (OutcomeDecision, error) {
+	transition, err := newAllowedTransition(name, from, to, allowed...)
+	if err != nil {
+		return OutcomeDecision{}, err
+	}
+	if reason == "" || failureKind == "" {
+		return OutcomeDecision{}, fmt.Errorf("Issue outcome %s requires reason and failure kind", name)
+	}
+	return OutcomeDecision{Transition: transition, LastError: reason, FailureKind: failureKind, GitHubSync: githubSync}, nil
+}
+
+func RejectAnsweredResume(from Status, reason, failureKind string) (OutcomeDecision, error) {
+	return newOutcomeDecision("reject_answered_resume", from, StatusBlocked, reason, failureKind, "", StatusResumePending)
+}
+
+func RejectWorkerWorkspace(from Status, reason, failureKind string) (OutcomeDecision, error) {
+	return newOutcomeDecision("reject_worker_workspace", from, StatusBlocked, reason, failureKind, StatusBlocked.String(),
+		StatusRunning, StatusResolvingConflict)
+}
+
+func RequestResourceCorrection(from Status, reason, failureKind string) (OutcomeDecision, error) {
+	return newOutcomeDecision("request_resource_correction", from, StatusNeedsInput, reason, failureKind, StatusNeedsInput.String(), StatusRunning)
+}
+
+func ExhaustPullRequestChecks(from Status, reason, failureKind string) (OutcomeDecision, error) {
+	return newOutcomeDecision("exhaust_pull_request_checks", from, StatusFailed, reason, failureKind, StatusFailed.String(),
+		StatusAwaitingChecks, StatusAwaitingMerge)
+}
+
+func BlockPullRequestLifecycle(from Status, reason, failureKind string) (OutcomeDecision, error) {
+	return newOutcomeDecision("block_pull_request_lifecycle", from, StatusBlocked, reason, failureKind, StatusBlocked.String(),
+		StatusAwaitingChecks, StatusAwaitingMerge)
+}
+
+func Fail(from Status, reason, failureKind string, blocked bool) (OutcomeDecision, error) {
+	name, target := "fail_issue", StatusFailed
+	if blocked {
+		name, target = "block_issue", StatusBlocked
+	}
+	return newOutcomeDecision(name, from, target, reason, failureKind, target.String(),
+		StatusUnset, StatusClaimed, StatusRunning, StatusAwaitingChecks, StatusAwaitingMerge,
+		StatusResolvingConflict, StatusPublicationRecovery, StatusRetryWait)
+}
+
+func BlockWorkerEnvironment(from Status, reason, failureKind string) (OutcomeDecision, error) {
+	return newOutcomeDecision("block_worker_environment", from, StatusBlocked, reason, failureKind, StatusBlocked.String(), StatusRunning)
+}
+
+func StartConflictAttempt(from Status) (Transition, error) {
+	return newAllowedTransition("start_conflict_attempt", from, StatusResolvingConflict, StatusResolvingConflict)
+}
+
+func ScheduleConflictRetry(from Status) (Transition, error) {
+	return newAllowedTransition("schedule_conflict_retry", from, StatusResolvingConflict, StatusResolvingConflict)
+}
