@@ -163,3 +163,32 @@ func RequestChecksRecovery(from Status) (Transition, error) {
 func RequestPublicationRecovery(from Status) (Transition, error) {
 	return newAllowedTransition("request_publication_recovery", from, StatusPublicationRecovery, StatusFailed)
 }
+
+func ConfirmClaim(from Status) (Transition, error) {
+	return newAllowedTransition("confirm_claim", from, StatusClaimed, StatusClaiming)
+}
+
+func StartClaimedWorker(from Status) (Transition, error) {
+	return newAllowedTransition("start_claimed_worker", from, StatusRunning, StatusClaimed)
+}
+
+func StartAnsweredResume(from Status) (Transition, error) {
+	return newAllowedTransition("start_answered_resume", from, StatusRunning, StatusResumePending)
+}
+
+func StartEnvironmentResume(from Status) (Transition, error) {
+	return newAllowedTransition("start_environment_resume", from, StatusRunning, StatusEnvironmentResumePending)
+}
+
+func StartRetry(from Status) (Transition, error) {
+	return newAllowedTransition("start_retry", from, StatusRunning, StatusRetryWait)
+}
+
+func AcquireAnsweredClaim(from Status) (Transition, error) {
+	return newAllowedTransition("acquire_answered_claim", from, StatusResumePending, StatusAnswerClaimWaiting)
+}
+
+func InterruptExecution(from Status) (Transition, error) {
+	return newAllowedTransition("interrupt_execution", from, StatusRetryWait,
+		StatusClaiming, StatusClaimed, StatusRunning)
+}

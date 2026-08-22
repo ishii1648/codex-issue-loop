@@ -107,6 +107,47 @@ func TestRecoveryTransitionsRejectUnrelatedStatesAndTargets(t *testing.T) {
 	}
 }
 
+func TestExecutionTransitions(t *testing.T) {
+	tests := []struct {
+		name string
+		make func() (Transition, error)
+		from Status
+		to   Status
+	}{
+		{name: "confirm claim", make: func() (Transition, error) { return ConfirmClaim(StatusClaiming) }, from: StatusClaiming, to: StatusClaimed},
+		{name: "start claimed worker", make: func() (Transition, error) { return StartClaimedWorker(StatusClaimed) }, from: StatusClaimed, to: StatusRunning},
+		{name: "start answered resume", make: func() (Transition, error) { return StartAnsweredResume(StatusResumePending) }, from: StatusResumePending, to: StatusRunning},
+		{name: "start environment resume", make: func() (Transition, error) { return StartEnvironmentResume(StatusEnvironmentResumePending) }, from: StatusEnvironmentResumePending, to: StatusRunning},
+		{name: "start retry", make: func() (Transition, error) { return StartRetry(StatusRetryWait) }, from: StatusRetryWait, to: StatusRunning},
+		{name: "acquire answered claim", make: func() (Transition, error) { return AcquireAnsweredClaim(StatusAnswerClaimWaiting) }, from: StatusAnswerClaimWaiting, to: StatusResumePending},
+		{name: "interrupt claim", make: func() (Transition, error) { return InterruptExecution(StatusClaiming) }, from: StatusClaiming, to: StatusRetryWait},
+		{name: "interrupt running", make: func() (Transition, error) { return InterruptExecution(StatusRunning) }, from: StatusRunning, to: StatusRetryWait},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transition, err := test.make()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if transition.From != test.from || transition.To != test.to {
+				t.Fatalf("transition=%+v want %q -> %q", transition, test.from, test.to)
+			}
+		})
+	}
+}
+
+func TestExecutionTransitionsRejectUnrelatedSources(t *testing.T) {
+	if _, err := ConfirmClaim(StatusRunning); err == nil {
+		t.Fatal("running Issue must not be confirmed as a claim")
+	}
+	if _, err := StartRetry(StatusClaimed); err == nil {
+		t.Fatal("claimed Issue must not use the retry start transition")
+	}
+	if _, err := InterruptExecution(StatusAwaitingChecks); err == nil {
+		t.Fatal("checks wait must not be interrupted as worker execution")
+	}
+}
+
 func TestStatusOperationalPredicates(t *testing.T) {
 	tests := []struct {
 		status            Status
