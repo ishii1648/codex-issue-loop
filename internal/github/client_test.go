@@ -453,36 +453,6 @@ func TestListReadyPreservesORFilteringForMultipleReadyLabels(t *testing.T) {
 	}
 }
 
-func TestSelectReadyIsDeterministic(t *testing.T) {
-	issues := []Issue{{Number: 9, Body: githubTestCapabilityContract}, {Number: 2, Body: githubTestCapabilityContract}, {Number: 5, Body: githubTestCapabilityContract}}
-	selected, ok := SelectReady(issues, map[string]string{"2": "completed"}, config.Defaults().Queue)
-	if !ok || selected.Number != 5 {
-		t.Fatalf("selected=%+v ok=%v", selected, ok)
-	}
-}
-
-func TestSelectReadyAppliesChangedOrderOnlyToUnclaimedIssues(t *testing.T) {
-	base := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
-	issues := []Issue{
-		{Number: 3, CreatedAt: base, Labels: []string{"priority:high"}, Body: githubTestCapabilityContract},
-		{Number: 2, CreatedAt: base.Add(time.Hour), Body: githubTestCapabilityContract},
-		{Number: 1, CreatedAt: base.Add(2 * time.Hour), Body: githubTestCapabilityContract},
-	}
-	queue := config.Queue{Order: "priority_then_created_at", PriorityLabels: []string{"priority:high"}}
-	selected, ok := SelectReady(issues, map[string]string{"3": "running"}, queue)
-	if !ok || selected.Number != 2 {
-		t.Fatalf("active Issue was reordered or selected: selected=%+v ok=%v", selected, ok)
-	}
-}
-
-func TestSelectReadyDoesNotReclaimAnsweredContinuationStates(t *testing.T) {
-	issues := []Issue{{Number: 1, Body: githubTestCapabilityContract}, {Number: 2, Body: githubTestCapabilityContract}, {Number: 3, Body: githubTestCapabilityContract}}
-	selected, ok := SelectReady(issues, map[string]string{"1": "answer_claim_waiting", "2": "resume_pending"}, config.Defaults().Queue)
-	if !ok || selected.Number != 3 {
-		t.Fatalf("answered continuation was selected as a new claim: selected=%+v ok=%v", selected, ok)
-	}
-}
-
 func TestOrderIssuesSupportsCreatedAtAndPriorityWithStableTieBreaks(t *testing.T) {
 	base := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
 	fixture := []Issue{

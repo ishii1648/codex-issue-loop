@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"strings"
 	"testing"
@@ -53,7 +54,7 @@ func TestScheduleRetryPersistsClassificationReasonAndTime(t *testing.T) {
 	loop.Clock = fixedClock{value: now}
 	loop.Random = fixedRandom(0.5)
 	_, err := loop.Store.Update("running", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: "running", RunID: "run_1", Attempts: 1}
+		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusRunning, RunID: "run_1", Attempts: 1}
 		return nil
 	})
 	if err != nil {
@@ -66,7 +67,7 @@ func TestScheduleRetryPersistsClassificationReasonAndTime(t *testing.T) {
 	snapshot, _ := loop.Store.Load()
 	got := snapshot.Issues["1"]
 	wantRetry := now.Add(5 * time.Second)
-	if got.Status != "retry_wait" || got.FailureKind != string(failure.Transient) || got.LastError != "worker timeout" || got.RetryAfter == nil || !got.RetryAfter.Equal(wantRetry) {
+	if got.Status != issuedomain.StatusRetryWait || got.FailureKind != string(failure.Transient) || got.LastError != "worker timeout" || got.RetryAfter == nil || !got.RetryAfter.Equal(wantRetry) {
 		t.Fatalf("issue=%+v want retry=%s", got, wantRetry)
 	}
 	events, err := os.ReadFile(loop.Store.EventsPath())
@@ -78,7 +79,7 @@ func TestScheduleRetryPersistsClassificationReasonAndTime(t *testing.T) {
 func TestInvalidRetryDecisionIsIssueScoped(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	err := loop.scheduleRetry(context.Background(), state.Issue{
-		Number: 1, Status: "completed", RunID: "run_1", Attempts: 1,
+		Number: 1, Status: issuedomain.StatusCompleted, RunID: "run_1", Attempts: 1,
 	}, "unexpected lifecycle state")
 	if got := failure.KindOf(err); got != failure.Issue {
 		t.Fatalf("kind=%s err=%v", got, err)
@@ -119,7 +120,7 @@ func TestRetryLimitBecomesIssueFailure(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	_, err := loop.Store.Update("running", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, Status: "running", RunID: "run_1", Attempts: loop.Config.Queue.MaxAttempts,
+			Number: 1, Status: issuedomain.StatusRunning, RunID: "run_1", Attempts: loop.Config.Queue.MaxAttempts,
 		}
 		return nil
 	})
@@ -132,7 +133,7 @@ func TestRetryLimitBecomesIssueFailure(t *testing.T) {
 	}
 	snapshot, _ := loop.Store.Load()
 	got := snapshot.Issues["1"]
-	if got.Status != "failed" || got.FailureKind != string(failure.Issue) || got.RetryAfter != nil {
+	if got.Status != issuedomain.StatusFailed || got.FailureKind != string(failure.Issue) || got.RetryAfter != nil {
 		t.Fatalf("issue=%+v", got)
 	}
 }
@@ -140,7 +141,7 @@ func TestRetryLimitBecomesIssueFailure(t *testing.T) {
 func TestGitHubSynchronizationFailureIsTransient(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.doneErr = context.DeadlineExceeded
-	err := loop.syncGitHub(context.Background(), state.Issue{Number: 1, GitHubSync: "done"})
+	err := loop.syncGitHub(context.Background(), state.Issue{Number: 1, GitHubSync: issuedomain.GitHubSyncDone})
 	if failure.KindOf(err) != failure.Transient {
 		t.Fatalf("kind=%s err=%v", failure.KindOf(err), err)
 	}

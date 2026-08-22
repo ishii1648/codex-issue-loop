@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"reflect"
 	"strings"
 	"syscall"
@@ -49,7 +50,7 @@ func TestRecoverWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 	after, _ := fixture.store.Load()
 	item := after.Issues["449"]
 	old := before.Issues["449"]
-	if item.Workspace == nil || item.WorkspaceRecovery == nil || item.WorkspaceRecovery.Status != "verified" ||
+	if item.Workspace == nil || item.WorkspaceRecovery == nil || item.WorkspaceRecovery.Status != issuedomain.WorkspaceProvenanceRecoveryStatusVerified ||
 		!item.WorkspaceRecovery.OperatorConfirmed || item.WorkspaceRecovery.HeadSHA == "" ||
 		item.WorkspaceRecovery.WorktreeSHA256 != beforeDigest {
 		t.Fatalf("recovery audit is incomplete: %+v", item)
@@ -108,7 +109,7 @@ func TestRecoverWorkspaceRejectsMissingConfirmationActiveWorkerAndPendingRequest
 	if _, err := fixture.store.Update("fixture_pending_request", 449, "run_0c0123ac8570c0a8", nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["449"]
 		item.WorkerPID, item.WorkerPGID = 0, 0
-		snapshot.PendingRequests["req_other"] = &state.Request{ID: "req_other", IssueNumber: 449, Status: "pending"}
+		snapshot.PendingRequests["req_other"] = &state.Request{ID: "req_other", IssueNumber: 449, Status: issuedomain.RequestStatusPending}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -157,7 +158,7 @@ func TestValidateWorkspaceRecoveryRemoteRequiresExactLifecycleAndPullRequestIden
 	cfg.GitHub.ReadyLabels = []string{"ready"}
 	cfg.GitHub.ExcludeLabels = []string{"blocked", "do-not-automate"}
 	cfg.Git.BaseBranch = "main"
-	issue := &state.Issue{Number: 65, Status: "blocked", Branch: "codex/issue-65", PullRequestURL: "https://example.test/pr/85"}
+	issue := &state.Issue{Number: 65, Status: issuedomain.StatusBlocked, Branch: "codex/issue-65", PullRequestURL: "https://example.test/pr/85"}
 	inspection := worktree.Inspection{Exists: true, Valid: true, Branch: issue.Branch, Head: "head", RemoteHead: "head", RemoteBranchExists: true, RemoteConsistent: true}
 	remote := gh.RemoteState{
 		Issue:        gh.Issue{Number: 65, State: "OPEN", Labels: []string{"blocked"}},
@@ -167,7 +168,7 @@ func TestValidateWorkspaceRecoveryRemoteRequiresExactLifecycleAndPullRequestIden
 		t.Fatalf("valid remote rejected: %v", err)
 	}
 	failedIssue := *issue
-	failedIssue.Status = "failed"
+	failedIssue.Status = issuedomain.StatusFailed
 	failedRemote := remote
 	failedRemote.Issue.Labels = []string{"failed"}
 	if err := validateWorkspaceRecoveryRemote(cfg, &failedIssue, inspection, failedRemote); err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +12,8 @@ import (
 	"time"
 )
 
-func predicateStatuses(report RecoveryPredicateReport) map[string]string {
-	result := map[string]string{}
+func predicateStatuses(report RecoveryPredicateReport) map[RecoveryPredicateCode]string {
+	result := map[RecoveryPredicateCode]string{}
 	for _, predicate := range report.Predicates {
 		result[predicate.Code] = predicate.Status
 	}
@@ -97,9 +98,9 @@ func TestInterruptedWorkspaceResumePredicateReportListsIndependentFullHistoryMis
 		t.Fatalf("report header=%+v", report)
 	}
 	statuses := predicateStatuses(report)
-	for _, code := range []string{
-		"RECOVERY_EVENT_COUNT", "RECOVERY_PAYLOAD_SHAPE", "RECOVERY_SESSION_IDENTITY",
-		"RECOVERY_GITHUB_MARKERS", "RECOVERY_TIMESTAMPS", "RECOVERY_REMOTE_IDENTITY",
+	for _, code := range []RecoveryPredicateCode{
+		RecoveryCodeEventCount, RecoveryCodePayloadShape, RecoveryCodeSessionIdentity,
+		RecoveryCodeGitHubMarkers, RecoveryCodeTimestamps, RecoveryCodeRemoteIdentity,
 	} {
 		if statuses[code] != "fail" {
 			t.Fatalf("predicate %s=%q report=%+v", code, statuses[code], report)
@@ -130,13 +131,13 @@ func TestInterruptedWorkspaceResumeMutationAndDiagnosisUseSamePredicateCode(t *t
 		t.Fatal("diagnosis unexpectedly passed")
 	} else {
 		var predicateErr RecoveryPredicateError
-		if !errors.As(got, &predicateErr) || predicateErr.Code != "RECOVERY_PAYLOAD_SHAPE" {
+		if !errors.As(got, &predicateErr) || predicateErr.Code != RecoveryCodePayloadShape {
 			t.Fatalf("diagnostic refusal=%v", got)
 		}
 	}
 	_, mutationErr := store.InterruptedWorkspaceResumeEvidence(issue)
 	var predicateErr RecoveryPredicateError
-	if !errors.As(mutationErr, &predicateErr) || predicateErr.Code != "RECOVERY_PAYLOAD_SHAPE" {
+	if !errors.As(mutationErr, &predicateErr) || predicateErr.Code != RecoveryCodePayloadShape {
 		t.Fatalf("mutating path refusal=%v", mutationErr)
 	}
 }
@@ -489,8 +490,8 @@ func TestInterruptedWorkspaceResumeEvidenceRejectsCurrentStateMismatches(t *test
 		name   string
 		mutate func(*Issue)
 	}{
-		{name: "status requested alone", mutate: func(issue *Issue) { issue.EnvironmentResume.Status = "requested" }},
-		{name: "status github synced alone", mutate: func(issue *Issue) { issue.EnvironmentResume.Status = "github_synced" }},
+		{name: "status requested alone", mutate: func(issue *Issue) { issue.EnvironmentResume.Status = issuedomain.EnvironmentResumeStatusRequested }},
+		{name: "status github synced alone", mutate: func(issue *Issue) { issue.EnvironmentResume.Status = issuedomain.EnvironmentResumeStatusGitHubSynced }},
 		{name: "lease generation", mutate: func(issue *Issue) { issue.Lease.Owner.Generation++; issue.LeaseGeneration++ }},
 		{name: "lease slot", mutate: func(issue *Issue) { issue.Lease.Slot = 1 }},
 		{name: "lease reservation time", mutate: func(issue *Issue) { issue.Lease.ReservedAt = issue.Lease.ReservedAt.Add(-1) }},

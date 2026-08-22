@@ -11,8 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ishii1648/codex-issue-loop/internal/admission"
-	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
 )
@@ -641,40 +639,4 @@ func OrderIssues(issues []Issue, queue config.Queue) {
 			return issues[i].Number < issues[j].Number
 		}
 	})
-}
-
-func SelectReady(issues []Issue, snapshotIssues map[string]string, queue config.Queue) (Issue, bool) {
-	candidates := make([]admission.Candidate, 0, len(issues))
-	byNumber := make(map[int]Issue, len(issues))
-	for _, issue := range issues {
-		candidates = append(candidates, admission.Candidate{
-			Number: issue.Number, CreatedAt: issue.CreatedAt, Labels: append([]string(nil), issue.Labels...), Body: issue.Body,
-		})
-		byNumber[issue.Number] = issue
-	}
-	ineligible := map[int]string{}
-	for _, issue := range issues {
-		status := snapshotIssues[fmt.Sprint(issue.Number)]
-		if status == "running" || status == "claimed" || status == "needs_input" || status == "answer_claim_waiting" || status == "resume_pending" || status == "completed" || status == "blocked" || status == "resolving_conflict" {
-			ineligible[issue.Number] = status
-		}
-	}
-	concurrency := queue.Concurrency
-	if concurrency < 1 {
-		// Unit callers historically supplied only the ordering fields. Loaded
-		// schema-v2 configurations are validated as concurrency 1.
-		concurrency = 1
-	}
-	result, err := admission.Select(admission.Input{
-		Settings: admission.Settings{Concurrency: concurrency, MetadataVersion: 1, Legacy: true, CapabilityProfiles: map[string]capability.Provider{
-			"standard": {Version: 1, Profile: "standard", Network: capability.NetworkNone},
-		}},
-		Queue:      admission.Queue{Order: queue.Order, PriorityLabels: append([]string(nil), queue.PriorityLabels...)},
-		Candidates: candidates,
-		Ineligible: ineligible,
-	})
-	if err != nil || len(result.Selected) == 0 {
-		return Issue{}, false
-	}
-	return byNumber[result.Selected[0].Candidate.Number], true
 }

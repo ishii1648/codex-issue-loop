@@ -157,7 +157,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				stopSchedulerTimer(retryTimer)
 				s.cancelAndDrain()
 				_, _ = l.Store.Update("supervisor_stopped", 0, "", map[string]string{"reason": ctx.Err().Error()}, func(snapshot *state.Snapshot) error {
-					snapshot.Supervisor.State = "stopped"
+					snapshot.Supervisor.State = state.SupervisorStateStopped
 					snapshot.Supervisor.PID = 0
 					snapshot.Supervisor.Message = ctx.Err().Error()
 					return nil
@@ -281,12 +281,12 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		return result, err
 	}
 	if s.loop.maintenanceRequested() {
-		maintenanceState := "maintenance"
+		maintenanceState := state.SupervisorStateMaintenance
 		if len(s.active) > 0 {
-			maintenanceState = "draining"
+			maintenanceState = state.SupervisorStateDraining
 		}
 		if snapshot.Supervisor.State != maintenanceState || snapshot.Supervisor.Message != "host delivery maintenance fence is active" {
-			_, err = s.loop.Store.Update("delivery_maintenance_observed", 0, "", map[string]string{"state": maintenanceState}, func(current *state.Snapshot) error {
+			_, err = s.loop.Store.Update("delivery_maintenance_observed", 0, "", map[string]string{"state": string(maintenanceState)}, func(current *state.Snapshot) error {
 				current.Supervisor.State = maintenanceState
 				current.Supervisor.Message = "host delivery maintenance fence is active"
 				return nil
@@ -548,7 +548,7 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 				}
 				continue
 			}
-			if !local.Status.WebhookRoutable() && local.GitHubSync == "" {
+			if !local.Status.WebhookRoutable() && !local.GitHubSync.Pending() {
 				continue
 			}
 			_, updateErr := s.loop.Store.Update("webhook_scheduler_wake", number, local.RunID, map[string]any{
@@ -645,7 +645,7 @@ func (s *scheduler) dispatchTerminalPullRequestReconciliation(ctx context.Contex
 
 func hasPendingRequests(snapshot state.Snapshot) bool {
 	for _, request := range snapshot.PendingRequests {
-		if request != nil && request.Status == "pending" {
+		if request != nil && request.Status == issuedomain.RequestStatusPending {
 			return true
 		}
 	}
@@ -917,7 +917,7 @@ func (s *scheduler) nextRetryDelay() (time.Duration, bool) {
 }
 
 func (s *scheduler) markPollingIfIdle(snapshot state.Snapshot, message string) error {
-	if len(s.active) != 0 || (snapshot.Supervisor.State == "polling" && snapshot.Supervisor.Message == message) {
+	if len(s.active) != 0 || (snapshot.Supervisor.State == state.SupervisorStatePolling && snapshot.Supervisor.Message == message) {
 		return nil
 	}
 	return s.loop.markPolling(message)
@@ -936,14 +936,14 @@ func pendingIssues(snapshot state.Snapshot, now time.Time, concurrency int) []st
 }
 
 func pendingIssue(issue state.Issue, now time.Time) bool {
-	if !issue.Status.PendingDispatch() && issue.GitHubSync == "" {
+	if !issue.Status.DispatchPending(issue.GitHubSync) {
 		return false
 	}
 	return issue.RetryAfter == nil || !issue.RetryAfter.After(now)
 }
 
 func answeredClaimAvailable(snapshot state.Snapshot, issue state.Issue, concurrency int) bool {
-	if issue.ResourcePark == nil || issue.ResourcePark.Kind != state.ResourceParkKindNeedsInput || issue.ResourcePark.Status != "parked" || issue.Lease != nil {
+	if issue.ResourcePark == nil || issue.ResourcePark.Kind != state.ResourceParkKindNeedsInput || issue.ResourcePark.Status != issuedomain.ResourceParkStatusParked || issue.Lease != nil {
 		return false
 	}
 	copy := snapshot
@@ -962,8 +962,5 @@ func answeredClaimAvailable(snapshot state.Snapshot, issue state.Issue, concurre
 }
 
 func issueUsesWorkerSlot(issue state.Issue) bool {
-	if issue.GitHubSync != "" {
-		return false
-	}
-	return issue.Status.UsesWorkerSlot()
+	return issue.Status.UsesWorkerSlotWhile(issue.GitHubSync)
 }

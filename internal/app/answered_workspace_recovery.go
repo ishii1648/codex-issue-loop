@@ -85,7 +85,7 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 		if *dryRun {
 			return a.output(*jsonOut, answeredWorkspaceRecoveryOutput(current, true))
 		}
-		if current.GitHubSync == "answered_workspace_recovery" {
+		if current.GitHubSync == issuedomain.GitHubSyncAnsweredWorkspaceRecovery {
 			if err := syncAnsweredWorkspaceRecovery(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
 				return err
 			}
@@ -227,7 +227,7 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 			return fmt.Errorf("Issue #%d gained an active worker process while recovery was being prepared", current.Number)
 		}
 		for _, pending := range s.PendingRequests {
-			if pending != nil && pending.IssueNumber == current.Number && pending.Status == "pending" {
+			if pending != nil && pending.IssueNumber == current.Number && pending.Status == issuedomain.RequestStatusPending {
 				return fmt.Errorf("Issue #%d gained a pending manual request while recovery was being prepared", current.Number)
 			}
 		}
@@ -237,7 +237,7 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 		}
 		item.Workspace = &workspace
 		item.AnsweredWorkspaceRecovery = &state.AnsweredWorkspaceRecovery{
-			ID: recoveryID, Status: "requested", ConfirmedAt: now, OperatorConfirmed: true, OldProvenanceMissing: true,
+			ID: recoveryID, Status: issuedomain.AnsweredWorkspaceRecoveryStatusRequested, ConfirmedAt: now, OperatorConfirmed: true, OldProvenanceMissing: true,
 			RequestID: request.ID, ResourceParkID: current.ResourcePark.ID, AnswerSHA256: answerDigest,
 			HeadSHA: inspection.Head, WorktreeSHA256: digest, ExpectedWorkspace: plan.ExpectedWorkspace,
 			ActualWorkspace: plan.ActualWorkspace, ValidatorChecks: cloneBoolMap(launch.Checks),
@@ -246,7 +246,7 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 		if err := state.ApplyIssueTransition(item, resumeTransition); err != nil {
 			return err
 		}
-		item.GitHubSync = "answered_workspace_recovery"
+		item.GitHubSync = issuedomain.GitHubSyncAnsweredWorkspaceRecovery
 		item.RetryAfter = nil
 		item.UpdatedAt = now
 		return nil
@@ -268,7 +268,7 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 			return err
 		}
 	}
-	if current.GitHubSync == "answered_workspace_recovery" {
+	if current.GitHubSync == issuedomain.GitHubSyncAnsweredWorkspaceRecovery {
 		if err := syncAnsweredWorkspaceRecovery(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
 			return err
 		}
@@ -283,9 +283,9 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 func validateExistingAnsweredWorkspaceRecovery(snapshot state.Snapshot, issue *state.Issue) error {
 	recovery := issue.AnsweredWorkspaceRecovery
 	if recovery == nil || !state.ValidID(recovery.ID, "answered_workspace_recovery_") ||
-		(recovery.Status != "requested" && recovery.Status != "github_synced") || !recovery.OperatorConfirmed || !recovery.OldProvenanceMissing ||
+		(recovery.Status != issuedomain.AnsweredWorkspaceRecoveryStatusRequested && recovery.Status != issuedomain.AnsweredWorkspaceRecoveryStatusGitHubSynced) || !recovery.OperatorConfirmed || !recovery.OldProvenanceMissing ||
 		recovery.RequestID == "" || recovery.ResourceParkID == "" || recovery.AnswerSHA256 == "" || recovery.HeadSHA == "" || recovery.WorktreeSHA256 == "" ||
-		recovery.OldOwner.RunID != issue.RunID || recovery.OldOwner.Generation != 2 || recovery.NewOwner.RunID != issue.RunID || recovery.NewOwner.Generation != 3 ||
+		recovery.OldOwner.RunID != issue.RunID || recovery.OldOwner.Generation != state.AnsweredWorkspaceResumeLeaseGeneration || recovery.NewOwner.RunID != issue.RunID || recovery.NewOwner.Generation != state.AnsweredWorkspaceRepairLeaseGeneration ||
 		issue.Workspace == nil || issue.Workspace.CapturedAt.IsZero() || recovery.ExpectedWorkspace.CapturedAt.IsZero() || recovery.ActualWorkspace.CapturedAt.IsZero() ||
 		*issue.Workspace != recovery.ActualWorkspace || !recovery.ExpectedWorkspace.Matches(recovery.ActualWorkspace.Path, recovery.ActualWorkspace.Branch,
 		recovery.ActualWorkspace.RepoID, recovery.ActualWorkspace.Repository, recovery.ActualWorkspace.RepositoryID,
@@ -293,20 +293,20 @@ func validateExistingAnsweredWorkspaceRecovery(snapshot state.Snapshot, issue *s
 		return fmt.Errorf("Issue #%d existing answered workspace recovery audit is inconsistent", issue.Number)
 	}
 	request := snapshot.PendingRequests[recovery.RequestID]
-	if request == nil || request.Status != "answered" || request.ResourceParkID != recovery.ResourceParkID || request.RunID != issue.RunID ||
+	if request == nil || request.Status != issuedomain.RequestStatusAnswered || request.ResourceParkID != recovery.ResourceParkID || request.RunID != issue.RunID ||
 		fmt.Sprintf("%x", sha256.Sum256([]byte(request.Answer))) != recovery.AnswerSHA256 {
 		return fmt.Errorf("Issue #%d existing answered workspace recovery request is inconsistent", issue.Number)
 	}
 	park := issue.ResourcePark
-	if park == nil || park.ID != recovery.ResourceParkID || park.RequestID != recovery.RequestID || park.Status != "resumed" ||
-		park.OriginalLease.Owner.Generation != 1 || park.ResumeOwner == nil || *park.ResumeOwner != recovery.OldOwner {
+	if park == nil || park.ID != recovery.ResourceParkID || park.RequestID != recovery.RequestID || park.Status != issuedomain.ResourceParkStatusResumed ||
+		park.OriginalLease.Owner.Generation != state.AnsweredWorkspaceInitialLeaseGeneration || park.ResumeOwner == nil || *park.ResumeOwner != recovery.OldOwner {
 		return fmt.Errorf("Issue #%d existing answered workspace recovery park is inconsistent", issue.Number)
 	}
 	if issue.Lease != nil && issue.Lease.Owner.Generation == recovery.NewOwner.Generation && issue.Lease.Owner != recovery.NewOwner {
 		return fmt.Errorf("Issue #%d existing answered workspace recovery lease fence is inconsistent", issue.Number)
 	}
-	if issue.GitHubSync == "answered_workspace_recovery" &&
-		(issue.Status != issuedomain.StatusResumePending || recovery.Status != "requested" || issue.Lease == nil || issue.Lease.Owner != recovery.NewOwner ||
+	if issue.GitHubSync == issuedomain.GitHubSyncAnsweredWorkspaceRecovery &&
+		(issue.Status != issuedomain.StatusResumePending || recovery.Status != issuedomain.AnsweredWorkspaceRecoveryStatusRequested || issue.Lease == nil || issue.Lease.Owner != recovery.NewOwner ||
 			issue.LeaseGeneration != recovery.NewOwner.Generation || issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
 		return fmt.Errorf("Issue #%d pending answered workspace recovery synchronization is inconsistent", issue.Number)
 	}
@@ -322,7 +322,7 @@ func exactAnsweredRequest(snapshot state.Snapshot, issue *state.Issue) (*state.R
 		return nil, fmt.Errorf("Issue #%d answered request %s is missing", issue.Number, issue.ResourcePark.RequestID)
 	}
 	for _, candidate := range snapshot.PendingRequests {
-		if candidate != nil && candidate.IssueNumber == issue.Number && candidate.Status == "pending" {
+		if candidate != nil && candidate.IssueNumber == issue.Number && candidate.Status == issuedomain.RequestStatusPending {
 			return nil, fmt.Errorf("Issue #%d has a pending manual request", issue.Number)
 		}
 	}
@@ -360,7 +360,7 @@ func answeredWorkspaceRecoveryOutput(issue *state.Issue, idempotent bool) map[st
 }
 
 func syncAnsweredWorkspaceRecovery(ctx context.Context, store state.Store, cfg config.Config, ghPath string, issue *state.Issue) error {
-	if issue == nil || issue.AnsweredWorkspaceRecovery == nil || issue.GitHubSync != "answered_workspace_recovery" {
+	if issue == nil || issue.AnsweredWorkspaceRecovery == nil || issue.GitHubSync != issuedomain.GitHubSyncAnsweredWorkspaceRecovery {
 		return fmt.Errorf("answered workspace recovery synchronization metadata is inconsistent")
 	}
 	client := gh.CLI{Path: ghPath, Secrets: cfg.RedactionValues()}
@@ -382,19 +382,19 @@ func syncAnsweredWorkspaceRecovery(ctx context.Context, store state.Store, cfg c
 		"state": "answered_workspace_recovery", "recovery_id": issue.AnsweredWorkspaceRecovery.ID,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
-		if item == nil || item.GitHubSync != "answered_workspace_recovery" || item.AnsweredWorkspaceRecovery == nil ||
+		if item == nil || item.GitHubSync != issuedomain.GitHubSyncAnsweredWorkspaceRecovery || item.AnsweredWorkspaceRecovery == nil ||
 			item.AnsweredWorkspaceRecovery.ID != issue.AnsweredWorkspaceRecovery.ID {
 			return fmt.Errorf("Issue #%d answered workspace recovery changed during GitHub synchronization", issue.Number)
 		}
-		item.GitHubSync = ""
-		item.AnsweredWorkspaceRecovery.Status = "github_synced"
+		item.GitHubSync = issuedomain.GitHubSyncNone
+		item.AnsweredWorkspaceRecovery.Status = issuedomain.AnsweredWorkspaceRecoveryStatusGitHubSynced
 		item.UpdatedAt = time.Now().UTC()
 		return nil
 	})
 	if err != nil {
 		latest, loadErr := issueFromStore(store, issue.Number)
-		if loadErr == nil && latest.GitHubSync == "" && latest.AnsweredWorkspaceRecovery != nil &&
-			latest.AnsweredWorkspaceRecovery.ID == issue.AnsweredWorkspaceRecovery.ID && latest.AnsweredWorkspaceRecovery.Status == "github_synced" {
+		if loadErr == nil && latest.GitHubSync == issuedomain.GitHubSyncNone && latest.AnsweredWorkspaceRecovery != nil &&
+			latest.AnsweredWorkspaceRecovery.ID == issue.AnsweredWorkspaceRecovery.ID && latest.AnsweredWorkspaceRecovery.Status == issuedomain.AnsweredWorkspaceRecoveryStatusGitHubSynced {
 			return nil
 		}
 	}
@@ -408,7 +408,7 @@ func validateAnsweredWorkspaceRemote(cfg config.Config, issue *state.Issue, requ
 
 func answeredWorkspaceRemoteMode(cfg config.Config, issue *state.Issue, request *state.Request, remote gh.RemoteState, recoveryID string) (string, error) {
 	if !strings.EqualFold(remote.Issue.State, "open") || len(remote.PullRequests) != 0 {
-		return "", state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d is not the open no-Pull-Request boundary", issue.Number)}
+		return "", state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubIdentity, Err: fmt.Errorf("Issue #%d is not the open no-Pull-Request boundary", issue.Number)}
 	}
 	labels := lowerLabelSet(remote.Issue.Labels)
 	blockedLabel := ""
@@ -416,7 +416,7 @@ func answeredWorkspaceRemoteMode(cfg config.Config, issue *state.Issue, request 
 		if strings.EqualFold(label, "blocked") {
 			blockedLabel = strings.ToLower(label)
 		} else if labels[strings.ToLower(label)] {
-			return "", state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_LABELS", Err: fmt.Errorf("Issue #%d has manual exclusion label %q", issue.Number, label)}
+			return "", state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubLabels, Err: fmt.Errorf("Issue #%d has manual exclusion label %q", issue.Number, label)}
 		}
 	}
 	if blockedLabel == "" {
@@ -427,11 +427,11 @@ func answeredWorkspaceRemoteMode(cfg config.Config, issue *state.Issue, request 
 	if recoveryID != "" && !blocked && running {
 		mode = "running"
 	} else if !blocked || running {
-		return "", state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_LABELS", Err: fmt.Errorf("Issue #%d blocked/running labels changed", issue.Number)}
+		return "", state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubLabels, Err: fmt.Errorf("Issue #%d blocked/running labels changed", issue.Number)}
 	}
 	for _, label := range append(append([]string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}, cfg.GitHub.ReadyLabels...), "") {
 		if label != "" && labels[strings.ToLower(label)] {
-			return "", state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_LABELS", Err: fmt.Errorf("Issue #%d has incompatible label %q", issue.Number, label)}
+			return "", state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubLabels, Err: fmt.Errorf("Issue #%d has incompatible label %q", issue.Number, label)}
 		}
 	}
 	requestMarker := "<!-- codex-issue-loop:request:" + request.ID + " -->"
@@ -440,13 +440,13 @@ func answeredWorkspaceRemoteMode(cfg config.Config, issue *state.Issue, request 
 	failureMarker := fmt.Sprintf("<!-- codex-issue-loop:failure:%x -->", failureDigest[:8])
 	if countCommentMarker(remote.Issue.Comments, requestMarker) != 1 || countCommentMarker(remote.Issue.Comments, failedMarker) != 1 ||
 		countCommentMarker(remote.Issue.Comments, failureMarker) != 1 {
-		return "", state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_COMMENT_MARKERS", Err: fmt.Errorf("Issue #%d request/blocked comment markers do not match the durable chain", issue.Number)}
+		return "", state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubCommentMarkers, Err: fmt.Errorf("Issue #%d request/blocked comment markers do not match the durable chain", issue.Number)}
 	}
 	if recoveryID != "" {
 		recoveryMarker := "<!-- codex-issue-loop:answered-workspace-recovery:" + recoveryID + " -->"
 		count := countCommentMarker(remote.Issue.Comments, recoveryMarker)
 		if (mode == "running" && count != 1) || (mode == "blocked" && count != 0) {
-			return "", state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_COMMENT_MARKERS", Err: fmt.Errorf("Issue #%d recovery marker does not match its synchronization boundary", issue.Number)}
+			return "", state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubCommentMarkers, Err: fmt.Errorf("Issue #%d recovery marker does not match its synchronization boundary", issue.Number)}
 		}
 	}
 	return mode, nil

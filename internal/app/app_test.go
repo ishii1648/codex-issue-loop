@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"io"
 	"os"
 	"os/exec"
@@ -346,7 +347,7 @@ func addParkedNeedsInput(t *testing.T, snapshot *state.Snapshot, issue *state.Is
 		now = time.Now().UTC()
 	}
 	owner := state.LeaseOwner{RunID: issue.RunID, Generation: 1}
-	issue.Status = "needs_input"
+	issue.Status = issuedomain.StatusNeedsInput
 	issue.LeaseGeneration = 1
 	issue.Lease = &state.ResourceLease{
 		Owner: owner, Slot: slot, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-sha", ReservedAt: now,
@@ -379,7 +380,7 @@ func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 	}
 	_, err = store.Update("input_requested", 4, "run", nil, func(s *state.Snapshot) error {
 		s.Supervisor.State = "running"
-		addParkedNeedsInput(t, s, &state.Issue{Number: 4, RunID: "run_4"}, &state.Request{ID: "req_1", IssueNumber: 4, Question: "Choose", Status: "pending"}, 0)
+		addParkedNeedsInput(t, s, &state.Issue{Number: 4, RunID: "run_4"}, &state.Request{ID: "req_1", IssueNumber: 4, Question: "Choose", Status: issuedomain.RequestStatusPending}, 0)
 		return nil
 	})
 	if err != nil {
@@ -398,7 +399,7 @@ func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 		}
 	}
 	snapshot, _ := store.Load()
-	if snapshot.Issues["4"].Status != "resume_pending" || len(snapshot.Issues["4"].Answers) != 1 {
+	if snapshot.Issues["4"].Status != issuedomain.StatusResumePending || len(snapshot.Issues["4"].Answers) != 1 {
 		t.Fatalf("issue=%+v", snapshot.Issues["4"])
 	}
 }
@@ -421,7 +422,7 @@ func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
 		ID: "req_desktop_1", IssueNumber: 89, Question: "Which behavior should be used?",
 		Reason: "The choice changes user-visible behavior.", Recommended: "safe",
 		Options:       []state.Option{{ID: "safe", Label: "Keep durable state"}, {ID: "fast", Label: "Use transient signal only"}},
-		AllowFreeText: true, Status: "pending", CreatedAt: createdAt,
+		AllowFreeText: true, Status: issuedomain.RequestStatusPending, CreatedAt: createdAt,
 	}
 	_, err = store.Update("input_requested", 89, "run_89", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Supervisor.State = "running"
@@ -486,10 +487,10 @@ func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request := snapshot.PendingRequests[firstRequest.ID]; request.Status != "answered" || request.Answer != "safe" {
+	if request := snapshot.PendingRequests[firstRequest.ID]; request.Status != issuedomain.RequestStatusAnswered || request.Answer != "safe" {
 		t.Fatalf("answered request=%+v", request)
 	}
-	if issue := snapshot.Issues["89"]; issue.Status != "resume_pending" || len(issue.Answers) != 1 || issue.Answers[0].RequestID != firstRequest.ID {
+	if issue := snapshot.Issues["89"]; issue.Status != issuedomain.StatusResumePending || len(issue.Answers) != 1 || issue.Answers[0].RequestID != firstRequest.ID {
 		t.Fatalf("issue after answer=%+v", issue)
 	}
 	if snapshot.StateRevision != firstAnswerRevision {
@@ -513,10 +514,10 @@ func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
 	secondRequest := &state.Request{
 		ID: "req_desktop_2", IssueNumber: 90, Question: "Continue?", Recommended: "continue",
 		Options: []state.Option{{ID: "continue", Label: "Continue"}, {ID: "stop", Label: "Stop"}},
-		Status:  "pending", CreatedAt: createdAt.Add(time.Minute),
+		Status:  issuedomain.RequestStatusPending, CreatedAt: createdAt.Add(time.Minute),
 	}
 	_, err = store.Update("input_requested", 90, "run_90", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["90"] = &state.Issue{Number: 90, RunID: "run_90", Status: "needs_input"}
+		snapshot.Issues["90"] = &state.Issue{Number: 90, RunID: "run_90", Status: issuedomain.StatusNeedsInput}
 		snapshot.PendingRequests[secondRequest.ID] = secondRequest
 		return nil
 	})
@@ -548,7 +549,7 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 	_, err = store.Update("workers_running", 0, "", nil, func(snapshot *state.Snapshot) error {
 		for _, number := range []int{1, 2} {
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
-				Number: number, RunID: fmt.Sprintf("run_%d", number), Status: "running",
+				Number: number, RunID: fmt.Sprintf("run_%d", number), Status: issuedomain.StatusRunning,
 				WorkerPID: 100 + number, WorkerPGID: 100 + number,
 			}
 		}
@@ -571,7 +572,7 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 		t.Fatalf("supervisor=%+v signals=%v", snapshot.Supervisor, groups.signals)
 	}
 	for _, key := range []string{"1", "2"} {
-		if issue := snapshot.Issues[key]; issue.Status != "retry_wait" || issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
+		if issue := snapshot.Issues[key]; issue.Status != issuedomain.StatusRetryWait || issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
 			t.Fatalf("Issue %s=%+v", key, issue)
 		}
 	}
@@ -677,7 +678,7 @@ func TestStartRefusesLegacySemanticStateBeforeLaunchdOrStateMutation(t *testing.
 		t.Fatal(err)
 	}
 	snapshot, err := store.Update("legacy_retry", 169, "run_169", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["169"] = &state.Issue{Number: 169, Status: "retry_wait", RunID: "run_169", Worktree: "/tmp/legacy", Branch: "codex/issue-169", Attempts: 1}
+		snapshot.Issues["169"] = &state.Issue{Number: 169, Status: issuedomain.StatusRetryWait, RunID: "run_169", Worktree: "/tmp/legacy", Branch: "codex/issue-169", Attempts: 1}
 		return nil
 	})
 	if err != nil {
@@ -713,7 +714,7 @@ func TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID(t *testing.T) {
 	}
 	_, err = store.Update("input_requested", 0, "", nil, func(snapshot *state.Snapshot) error {
 		for _, number := range []int{4, 7} {
-			request := &state.Request{ID: fmt.Sprintf("req_%d", number), IssueNumber: number, Question: fmt.Sprintf("%d?", number), Status: "pending"}
+			request := &state.Request{ID: fmt.Sprintf("req_%d", number), IssueNumber: number, Question: fmt.Sprintf("%d?", number), Status: issuedomain.RequestStatusPending}
 			addParkedNeedsInput(t, snapshot, &state.Issue{Number: number, RunID: fmt.Sprintf("run_%d", number)}, request, number-4)
 		}
 		snapshot.PendingRequests["req_4"].Question = "Four?"
@@ -732,10 +733,10 @@ func TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.PendingRequests["req_4"].Status != "pending" || snapshot.PendingRequests["req_4"].Answer != "" || snapshot.Issues["4"].Status != "needs_input" || len(snapshot.Issues["4"].Answers) != 0 {
+	if snapshot.PendingRequests["req_4"].Status != issuedomain.RequestStatusPending || snapshot.PendingRequests["req_4"].Answer != "" || snapshot.Issues["4"].Status != issuedomain.StatusNeedsInput || len(snapshot.Issues["4"].Answers) != 0 {
 		t.Fatalf("unrelated request or Issue changed: request=%+v issue=%+v", snapshot.PendingRequests["req_4"], snapshot.Issues["4"])
 	}
-	if snapshot.PendingRequests["req_7"].Status != "answered" || snapshot.Issues["7"].Status != "resume_pending" || len(snapshot.Issues["7"].Answers) != 1 {
+	if snapshot.PendingRequests["req_7"].Status != issuedomain.RequestStatusAnswered || snapshot.Issues["7"].Status != issuedomain.StatusResumePending || len(snapshot.Issues["7"].Answers) != 1 {
 		t.Fatalf("target request or Issue not updated: request=%+v issue=%+v", snapshot.PendingRequests["req_7"], snapshot.Issues["7"])
 	}
 }
@@ -757,11 +758,11 @@ func TestAnswerDurablyWaitsWithoutStealingConflictingLease(t *testing.T) {
 	var competingOwner state.LeaseOwner
 	_, err = store.Update("fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
 		addParkedNeedsInput(t, snapshot, &state.Issue{Number: 4, RunID: "run_4"}, &state.Request{
-			ID: "req_4", IssueNumber: 4, Question: "Continue?", Status: "pending", CreatedAt: now,
+			ID: "req_4", IssueNumber: 4, Question: "Continue?", Status: issuedomain.RequestStatusPending, CreatedAt: now,
 		}, 0)
 		competingOwner = state.LeaseOwner{RunID: "run_5", Generation: 1}
 		snapshot.Issues["5"] = &state.Issue{
-			Number: 5, RunID: "run_5", Status: "running", LeaseGeneration: 1,
+			Number: 5, RunID: "run_5", Status: issuedomain.StatusRunning, LeaseGeneration: 1,
 			Lease: &state.ResourceLease{Owner: competingOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-5", ReservedAt: now},
 		}
 		return nil
@@ -782,10 +783,10 @@ func TestAnswerDurablyWaitsWithoutStealingConflictingLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue := afterFirst.Issues["4"]; issue.Status != "answer_claim_waiting" || issue.Lease != nil || issue.ResourcePark.Status != "parked" || len(issue.Answers) != 1 {
+	if issue := afterFirst.Issues["4"]; issue.Status != issuedomain.StatusAnswerClaimWaiting || issue.Lease != nil || issue.ResourcePark.Status != issuedomain.ResourceParkStatusParked || len(issue.Answers) != 1 {
 		t.Fatalf("answered Issue=%+v", issue)
 	}
-	if request := afterFirst.PendingRequests["req_4"]; request.Status != "answered" || request.Answer != "continue" {
+	if request := afterFirst.PendingRequests["req_4"]; request.Status != issuedomain.RequestStatusAnswered || request.Answer != "continue" {
 		t.Fatalf("request=%+v", request)
 	}
 	if lease := afterFirst.Issues["5"].Lease; lease == nil || lease.Owner != competingOwner {
@@ -865,7 +866,7 @@ esac
 	prURL := "https://example.test/pull/9"
 	_, err = store.Update("blocked", 4, "run_4", nil, func(s *state.Snapshot) error {
 		s.Issues["4"] = &state.Issue{
-			Number: 4, Status: "blocked", RunID: "run_4", Branch: branch, Worktree: repo,
+			Number: 4, Status: issuedomain.StatusBlocked, RunID: "run_4", Branch: branch, Worktree: repo,
 			PullRequestURL: prURL, LastError: "Pull Request lifecycle: Pull Request has merge conflicts",
 		}
 		return nil
@@ -883,7 +884,7 @@ esac
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["4"]
-	if item.Status != "resolving_conflict" || item.GitHubSync != "" || item.Branch != branch || item.PullRequestURL != prURL || item.ConflictRecovery == nil {
+	if item.Status != issuedomain.StatusResolvingConflict || item.GitHubSync != issuedomain.GitHubSyncNone || item.Branch != branch || item.PullRequestURL != prURL || item.ConflictRecovery == nil {
 		t.Fatalf("item=%+v", item)
 	}
 	calls, err := os.ReadFile(logPath)
@@ -971,7 +972,7 @@ esac
 	}
 	_, err = store.Update("worker_started", 8, owner.RunID, map[string]string{"worktree": repo, "branch": branch}, func(s *state.Snapshot) error {
 		item := s.Issues["8"]
-		item.Status = "running"
+		item.Status = issuedomain.StatusRunning
 		item.Branch = branch
 		item.Worktree = repo
 		item.SessionID = "session-8"
@@ -987,7 +988,7 @@ esac
 	legacyError := "worker blocked: localhost bind denied"
 	_, err = store.Update("issue_blocked", 8, "run_8", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(s *state.Snapshot) error {
 		item := s.Issues["8"]
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		item.FailureKind = "issue"
 		item.LastError = legacyError
 		item.UpdatedAt = time.Now().UTC()
@@ -1070,7 +1071,7 @@ esac
 				t.Fatal("injected GitHub synchronization failure was not reported")
 			}
 			pending, loadErr := store.Load()
-			if loadErr != nil || pending.StateRevision != blockedRevision+1 || pending.Issues["8"].Status != "environment_resume_pending" || pending.Issues["8"].GitHubSync != "environment_resume" {
+			if loadErr != nil || pending.StateRevision != blockedRevision+1 || pending.Issues["8"].Status != issuedomain.StatusEnvironmentResumePending || pending.Issues["8"].GitHubSync != issuedomain.GitHubSyncEnvironmentResume {
 				t.Fatalf("write-ahead resume was not retained: issue=%+v err=%v", pending.Issues["8"], loadErr)
 			}
 			durableResumeID = pending.Issues["8"].EnvironmentResume.ID
@@ -1087,7 +1088,7 @@ esac
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["8"]
-	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.RunID != "run_8" || item.Branch != branch || item.Worktree != repo || item.SessionID != "session-8" || item.Lease == nil {
+	if item.Status != issuedomain.StatusEnvironmentResumePending || item.GitHubSync != issuedomain.GitHubSyncNone || item.RunID != "run_8" || item.Branch != branch || item.Worktree != repo || item.SessionID != "session-8" || item.Lease == nil {
 		t.Fatalf("item=%+v", item)
 	}
 	if item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" || item.BlockedCause.Reason != "localhost bind denied" || item.BlockedCause.BlockedAt.IsZero() || item.EnvironmentResume.PreviousReason != "localhost bind denied" || item.Lease.ResolvedResources[0] != state.RepositoryResource {
@@ -1214,7 +1215,7 @@ esac
 	blockedAt := time.Now().UTC().Add(-time.Minute)
 	_, err = store.Update("issue_blocked", 148, owner.RunID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["148"]
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		item.Worktree = managedWorktree
 		item.Branch = branch
 		item.SessionID = "session-workspace-recovery"
@@ -1258,7 +1259,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if afterRace.Issues["148"].Status != "blocked" || afterRace.Issues["148"].Workspace != nil || afterRace.Issues["148"].EnvironmentResume != nil || afterRace.Issues["148"].Lease.Owner != owner {
+	if afterRace.Issues["148"].Status != issuedomain.StatusBlocked || afterRace.Issues["148"].Workspace != nil || afterRace.Issues["148"].EnvironmentResume != nil || afterRace.Issues["148"].Lease.Owner != owner {
 		t.Fatalf("fenced recovery partially mutated lifecycle/provenance: %+v", afterRace.Issues["148"])
 	}
 	out.Reset()
@@ -1271,7 +1272,7 @@ esac
 		t.Fatal(err)
 	}
 	item := pending.Issues["148"]
-	if item.Status != "environment_resume_pending" || item.GitHubSync != "environment_resume" || item.Workspace == nil || item.Lease == nil {
+	if item.Status != issuedomain.StatusEnvironmentResumePending || item.GitHubSync != issuedomain.GitHubSyncEnvironmentResume || item.Workspace == nil || item.Lease == nil {
 		t.Fatalf("workspace and lifecycle were not persisted together: %+v", item)
 	}
 	validation, err := (worktree.Manager{StateRoot: l.Root, GitPath: "/usr/bin/git"}).ValidateLaunch(context.Background(), cfg, managedWorktree, branch)
@@ -1635,8 +1636,8 @@ esac
 	}
 	pendingItem := pending.Issues["150"]
 	pendingOwner := state.LeaseOwner{RunID: owner.RunID, Generation: owner.Generation + 1}
-	if pendingItem.Status != "environment_resume_pending" || pendingItem.GitHubSync != "environment_resume" || pendingItem.Workspace == nil ||
-		pendingItem.EnvironmentResume == nil || pendingItem.EnvironmentResume.Status != "requested" || pendingItem.Lease == nil ||
+	if pendingItem.Status != issuedomain.StatusEnvironmentResumePending || pendingItem.GitHubSync != issuedomain.GitHubSyncEnvironmentResume || pendingItem.Workspace == nil ||
+		pendingItem.EnvironmentResume == nil || pendingItem.EnvironmentResume.Status != issuedomain.EnvironmentResumeStatusRequested || pendingItem.Lease == nil ||
 		pendingItem.Lease.Owner != pendingOwner || pendingItem.LeaseGeneration != pendingOwner.Generation {
 		t.Fatalf("exact v0.6.14 crash boundary partially persisted recovery: %+v", pendingItem)
 	}
@@ -1650,8 +1651,8 @@ esac
 	}
 	item := recovered.Issues["150"]
 	recoveredOwner := pendingOwner
-	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.Workspace == nil ||
-		item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != "github_synced" ||
+	if item.Status != issuedomain.StatusEnvironmentResumePending || item.GitHubSync != issuedomain.GitHubSyncNone || item.Workspace == nil ||
+		item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != issuedomain.EnvironmentResumeStatusGitHubSynced ||
 		item.Lease == nil || item.Lease.Owner != recoveredOwner || item.LeaseGeneration != recoveredOwner.Generation || item.Lease.BaseSHA != baseSHA || worktreeHead == baseSHA ||
 		item.SessionID != "" || item.Session != nil ||
 		item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" ||
@@ -1778,12 +1779,12 @@ esac
 	resumeID := "resume_interrupted"
 	_, err = store.Update("environment_resume_requested", 8, owner.RunID, map[string]string{"resume_id": resumeID, "base_sha": baseSHA}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["8"]
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		item.Branch = branch
 		item.Worktree = cfg.RepoPath
 		item.SessionID = "session-8"
 		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: time.Now().UTC()}
-		item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: time.Now().UTC(), PreviousReason: "network unavailable"}
+		item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: issuedomain.EnvironmentResumeStatusRequested, ConfirmedAt: time.Now().UTC(), PreviousReason: "network unavailable"}
 		item.LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
 		return state.ReleaseIssueLease(item, owner)
 	})
@@ -1805,7 +1806,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rejected.StateRevision != broken.StateRevision || rejected.Issues["8"].Lease != nil || rejected.Issues["8"].Status != "blocked" {
+	if rejected.StateRevision != broken.StateRevision || rejected.Issues["8"].Lease != nil || rejected.Issues["8"].Status != issuedomain.StatusBlocked {
 		t.Fatalf("manual exclusion changed interrupted state: before=%d after=%d issue=%+v", broken.StateRevision, rejected.StateRevision, rejected.Issues["8"])
 	}
 	if err := os.Remove(manualExclusion); err != nil {
@@ -1821,7 +1822,7 @@ esac
 		t.Fatal(err)
 	}
 	item := loaded.Issues["8"]
-	if item.Status != "environment_resume_pending" || item.GitHubSync != "" || item.Lease == nil || item.Lease.BaseSHA != baseSHA || item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != "github_synced" || item.EnvironmentResume.BaseSHA != baseSHA {
+	if item.Status != issuedomain.StatusEnvironmentResumePending || item.GitHubSync != issuedomain.GitHubSyncNone || item.Lease == nil || item.Lease.BaseSHA != baseSHA || item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != issuedomain.EnvironmentResumeStatusGitHubSynced || item.EnvironmentResume.BaseSHA != baseSHA {
 		t.Fatalf("interrupted resume did not converge: %+v", item)
 	}
 	if item.Lease.Owner.RunID != "run_8" || item.Lease.Owner.Generation != owner.Generation+1 || !reflect.DeepEqual(item.Lease.ResolvedResources, []string{state.RepositoryResource}) {
@@ -1904,7 +1905,7 @@ func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testi
 	}
 	_, err = store.Update("worker_started", 9, owner.RunID, map[string]string{"worktree": cfg.RepoPath, "branch": branch}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["9"]
-		item.Status = "running"
+		item.Status = issuedomain.StatusRunning
 		item.Branch = branch
 		item.Worktree = cfg.RepoPath
 		item.SessionID = "session-9"
@@ -1917,7 +1918,7 @@ func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testi
 	legacyError := "issue: worker blocked: legacy environment"
 	_, err = store.Update("issue_blocked", 9, "run_9", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["9"]
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		item.FailureKind = "issue"
 		item.LastError = legacyError
 		item.UpdatedAt = blockedAt
@@ -1958,7 +1959,7 @@ func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testi
 		t.Fatal(err)
 	}
 	item := after.Issues["9"]
-	if after.StateRevision != before.StateRevision || item.Status != "blocked" || item.Lease != nil || item.EnvironmentResume != nil || item.GitHubSync != "" {
+	if after.StateRevision != before.StateRevision || item.Status != issuedomain.StatusBlocked || item.Lease != nil || item.EnvironmentResume != nil || item.GitHubSync != issuedomain.GitHubSyncNone {
 		t.Fatalf("failed resume changed durable state: before_revision=%d after_revision=%d issue=%+v", before.StateRevision, after.StateRevision, item)
 	}
 	if calls, err := os.ReadFile(ghLog); err == nil && strings.TrimSpace(string(calls)) != "" {
@@ -2039,7 +2040,7 @@ esac
 	}
 	_, err = store.Update("issue_blocked", 10, "run_10", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["10"] = &state.Issue{
-			Number: 10, Status: "blocked", RunID: "run_10", LeaseGeneration: 7, Lease: originalLease,
+			Number: 10, Status: issuedomain.StatusBlocked, RunID: "run_10", LeaseGeneration: 7, Lease: originalLease,
 			Branch: branch, Worktree: cfg.RepoPath, SessionID: "session-10",
 			BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "environment", BlockedAt: reservedAt},
 			LastError:    "environment", UpdatedAt: reservedAt,
@@ -2144,7 +2145,7 @@ esac
 	parkedAt := reservedAt.Add(time.Minute)
 	_, err = store.Update("issue_blocked", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["11"]
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		item.Branch = branch
 		item.Worktree = cfg.RepoPath
 		item.SessionID = "session-11"
@@ -2168,7 +2169,7 @@ esac
 		t.Fatal(err)
 	}
 	if _, err := store.Update("input_requested", 12, competitor.RunID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["12"].Status = "needs_input"
+		snapshot.Issues["12"].Status = issuedomain.StatusNeedsInput
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -2184,7 +2185,7 @@ esac
 		t.Fatalf("competing parked resume was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
 	afterConflict, err := store.Load()
-	if err != nil || afterConflict.StateRevision != beforeConflict.StateRevision || afterConflict.Issues["11"].Lease != nil || afterConflict.Issues["11"].ResourcePark.Status != "parked" {
+	if err != nil || afterConflict.StateRevision != beforeConflict.StateRevision || afterConflict.Issues["11"].Lease != nil || afterConflict.Issues["11"].ResourcePark.Status != issuedomain.ResourceParkStatusParked {
 		t.Fatalf("conflict changed parked state: before=%d after=%d issue=%+v err=%v", beforeConflict.StateRevision, afterConflict.StateRevision, afterConflict.Issues["11"], err)
 	}
 	if _, err := store.ReleaseLease(12, competitor, "test competitor finished"); err != nil {
@@ -2207,7 +2208,7 @@ esac
 	if _, err := store.Update("test_pending_request", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["11"].WorkerPID = 0
 		snapshot.Issues["11"].WorkerPGID = 0
-		snapshot.PendingRequests["req-pending-11"] = &state.Request{ID: "req-pending-11", IssueNumber: 11, Status: "pending"}
+		snapshot.PendingRequests["req-pending-11"] = &state.Request{ID: "req-pending-11", IssueNumber: 11, Status: issuedomain.RequestStatusPending}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -2218,7 +2219,7 @@ esac
 		t.Fatalf("pending request was accepted: code=%d stderr=%s", code, stderr.String())
 	}
 	if _, err := store.Update("test_request_answered", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req-pending-11"].Status = "answered"
+		snapshot.PendingRequests["req-pending-11"].Status = issuedomain.RequestStatusAnswered
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -2245,7 +2246,7 @@ esac
 		t.Fatal(err)
 	}
 	pendingIssue := pending.Issues["11"]
-	if pendingIssue.Status != "environment_resume_pending" || pendingIssue.GitHubSync != "environment_resume" || pendingIssue.Lease == nil || pendingIssue.Lease.Owner.Generation != owner.Generation+1 || pendingIssue.ResourcePark.Status != "resuming" {
+	if pendingIssue.Status != issuedomain.StatusEnvironmentResumePending || pendingIssue.GitHubSync != issuedomain.GitHubSyncEnvironmentResume || pendingIssue.Lease == nil || pendingIssue.Lease.Owner.Generation != owner.Generation+1 || pendingIssue.ResourcePark.Status != issuedomain.ResourceParkStatusResuming {
 		t.Fatalf("write-ahead parked resume is inconsistent: %+v", pendingIssue)
 	}
 	resumeOwner := pendingIssue.Lease.Owner
@@ -2301,7 +2302,7 @@ func TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = store.Update("manual_block", 9, "run_9", nil, func(s *state.Snapshot) error {
-		s.Issues["9"] = &state.Issue{Number: 9, Status: "blocked", RunID: "run_9", Worktree: repo, Branch: "manual", LastError: "manual exclusion"}
+		s.Issues["9"] = &state.Issue{Number: 9, Status: issuedomain.StatusBlocked, RunID: "run_9", Worktree: repo, Branch: "manual", LastError: "manual exclusion"}
 		return nil
 	})
 	if err != nil {
@@ -2320,11 +2321,11 @@ func TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks(t *testing.T) {
 		name  string
 		issue state.Issue
 	}{
-		{name: "conflict", issue: state.Issue{Number: 9, Status: "blocked", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}, ConflictRecovery: &state.ConflictRecovery{PullRequestURL: "https://example.test/pr/9"}}},
-		{name: "running", issue: state.Issue{Number: 9, Status: "running", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
-		{name: "failed", issue: state.Issue{Number: 9, Status: "failed", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
-		{name: "completed", issue: state.Issue{Number: 9, Status: "completed", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
-		{name: "security", issue: state.Issue{Number: 9, Status: "blocked", RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "supervisor", Kind: "security", Resumable: false}}},
+		{name: "conflict", issue: state.Issue{Number: 9, Status: issuedomain.StatusBlocked, RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}, ConflictRecovery: &state.ConflictRecovery{PullRequestURL: "https://example.test/pr/9"}}},
+		{name: "running", issue: state.Issue{Number: 9, Status: issuedomain.StatusRunning, RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
+		{name: "failed", issue: state.Issue{Number: 9, Status: issuedomain.StatusFailed, RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
+		{name: "completed", issue: state.Issue{Number: 9, Status: issuedomain.StatusCompleted, RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true}}},
+		{name: "security", issue: state.Issue{Number: 9, Status: issuedomain.StatusBlocked, RunID: "run_9", BlockedCause: &state.BlockedCause{Origin: "supervisor", Kind: "security", Resumable: false}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := store.Update("replace_block", 9, "run_9", nil, func(s *state.Snapshot) error {
@@ -2416,13 +2417,13 @@ esac
 	now := time.Now().UTC()
 	_, err = store.Update("issue_failed", 102, runID, nil, func(s *state.Snapshot) error {
 		s.Issues["102"] = &state.Issue{
-			Number: 102, Title: "Legacy publication", Status: "failed", RunID: runID,
+			Number: 102, Title: "Legacy publication", Status: issuedomain.StatusFailed, RunID: runID,
 			Branch: branch, Worktree: cfg.RepoPath, Attempts: cfg.Queue.MaxAttempts,
 			SessionID: "session-102", Session: &state.WorkerSession{Backend: "codex", ID: "session-102"},
 			Answers:           []state.AnswerRecord{{RequestID: "req-102", Question: "Continue?", Answer: "yes", AnsweredAt: now}},
 			DeclaredResources: []string{state.RepositoryResource},
 			BlockedCause:      &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "legacy localhost prerequisite", BlockedAt: now},
-			EnvironmentResume: &state.EnvironmentResume{ID: "resume-102", Status: "running", ConfirmedAt: now},
+			EnvironmentResume: &state.EnvironmentResume{ID: "resume-102", Status: issuedomain.EnvironmentResumeStatusRunning, ConfirmedAt: now},
 			PublicationAudit:  &publication.Audit{BaseSHA: "", DeclaredResources: []string{state.RepositoryResource}},
 			FailureKind:       "issue", LastError: "issue: worker retry limit reached: publish completed work: inspect publish changes: durable base SHA is missing",
 			UpdatedAt: now,
@@ -2453,7 +2454,7 @@ esac
 	assertRefused("active worker", App{ProcessController: &appProcessGroups{alive: map[int]bool{4242: true}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-prerequisite-resolved"))
 	_, err = store.Update("fault_pending_request", 102, runID, nil, func(s *state.Snapshot) error {
 		s.Issues["102"].WorkerPID, s.Issues["102"].WorkerPGID = 0, 0
-		s.PendingRequests["req-pending-102"] = &state.Request{ID: "req-pending-102", IssueNumber: 102, Status: "pending"}
+		s.PendingRequests["req-pending-102"] = &state.Request{ID: "req-pending-102", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -2483,7 +2484,7 @@ esac
 		if attempt == 0 {
 			recoveryID = item.PublicationRecovery.ID
 		}
-		if item.Status != "publication_recovery_pending" || item.GitHubSync != "" || item.Lease == nil || item.Lease.BaseSHA != baseSHA || item.PublicationRecovery.ID != recoveryID || item.PublicationRecovery.Attempts != 0 {
+		if item.Status != issuedomain.StatusPublicationRecovery || item.GitHubSync != issuedomain.GitHubSyncNone || item.Lease == nil || item.Lease.BaseSHA != baseSHA || item.PublicationRecovery.ID != recoveryID || item.PublicationRecovery.Attempts != 0 {
 			t.Fatalf("recovery was not durable/idempotent: %+v", item)
 		}
 		if item.Attempts != cfg.Queue.MaxAttempts || item.SessionID != "session-102" || item.Session == nil || len(item.Answers) != 1 || item.BlockedCause == nil || item.EnvironmentResume == nil {
@@ -2669,7 +2670,7 @@ esac
 	}
 	_, err = store.Update("pull_request_checks_retry_exhausted", 102, runID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["102"]
-		item.Status = "failed"
+		item.Status = issuedomain.StatusFailed
 		item.Worktree = managedWorktree
 		item.Branch = branch
 		item.PullRequestURL = "https://example.test/pr/447"
@@ -2712,7 +2713,7 @@ esac
 	_, err = store.Update("fault_pending_request", 102, runID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["102"].WorkerPID = 0
 		snapshot.Issues["102"].WorkerPGID = 0
-		snapshot.PendingRequests["req-102"] = &state.Request{ID: "req-102", IssueNumber: 102, Status: "pending"}
+		snapshot.PendingRequests["req-102"] = &state.Request{ID: "req-102", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -2763,7 +2764,7 @@ esac
 		t.Fatal(err)
 	}
 	failedItem := failedSnapshot.Issues["102"]
-	if failedItem.Status != "failed" || failedItem.Lease == nil || failedItem.PullRequestChecksRecovery == nil || failedItem.PullRequestChecksRecovery.Status != "checks_failed" {
+	if failedItem.Status != issuedomain.StatusFailed || failedItem.Lease == nil || failedItem.PullRequestChecksRecovery == nil || failedItem.PullRequestChecksRecovery.Status != issuedomain.PullRequestChecksRecoveryStatusChecksFailed {
 		t.Fatalf("failed replacement checks did not remain terminal: %+v", failedItem)
 	}
 	writeFakeGH("SUCCESS")
@@ -2784,11 +2785,11 @@ esac
 		if attempt == 0 {
 			recoveryID = item.PullRequestChecksRecovery.ID
 		}
-		if item.Status != "awaiting_checks" || item.GitHubSync != "" || item.Lease == nil || item.RunID != runID ||
+		if item.Status != issuedomain.StatusAwaitingChecks || item.GitHubSync != issuedomain.GitHubSyncNone || item.Lease == nil || item.RunID != runID ||
 			item.Attempts != cfg.Queue.MaxAttempts || item.Continuations != cfg.Worker.Profiles["extended"].MaxContinuations ||
 			item.PullRequestChecksRecovery == nil || item.PullRequestChecksRecovery.ID != recoveryID ||
 			item.PullRequestChecksRecovery.OldHeadSHA != oldHead || item.PullRequestChecksRecovery.NewHeadSHA != newHead ||
-			item.PullRequestChecksRecovery.Status != "resumed" {
+			item.PullRequestChecksRecovery.Status != issuedomain.PullRequestChecksRecoveryStatusResumed {
 			t.Fatalf("recovery was not durable/idempotent: %+v", item)
 		}
 	}
@@ -2951,7 +2952,7 @@ esac
 	answer := state.AnswerRecord{RequestID: "req-old", Question: "continue?", Answer: "yes", AnsweredAt: time.Now().UTC()}
 	_, err = store.Update("worker_blocked", 102, runID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["102"]
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		item.Worktree = managedWorktree
 		item.Branch = branch
 		item.Attempts = 3
@@ -2993,7 +2994,7 @@ esac
 	controller.alive[4321] = false
 	_, err = store.Update("test_pending_request", 102, runID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["102"].WorkerPID = 0
-		snapshot.PendingRequests["req-pending"] = &state.Request{ID: "req-pending", IssueNumber: 102, Status: "pending"}
+		snapshot.PendingRequests["req-pending"] = &state.Request{ID: "req-pending", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -3003,7 +3004,7 @@ esac
 		t.Fatal("pending manual answer was accepted")
 	}
 	_, err = store.Update("test_request_answered", 102, runID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req-pending"].Status = "answered"
+		snapshot.PendingRequests["req-pending"].Status = issuedomain.RequestStatusAnswered
 		return nil
 	})
 	if err != nil {
@@ -3036,8 +3037,8 @@ esac
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["102"]
-	if item.Lease != nil || item.Status != "completed" || !item.PullRequestMerged || item.PullRequestNumber != 132 || item.GitHubSync != "" ||
-		item.MergedPullRequestAdoption == nil || item.MergedPullRequestAdoption.MergeSHA != mergeSHA || item.MergedPullRequestAdoption.Status != "synced" {
+	if item.Lease != nil || item.Status != issuedomain.StatusCompleted || !item.PullRequestMerged || item.PullRequestNumber != 132 || item.GitHubSync != issuedomain.GitHubSyncNone ||
+		item.MergedPullRequestAdoption == nil || item.MergedPullRequestAdoption.MergeSHA != mergeSHA || item.MergedPullRequestAdoption.Status != issuedomain.MergedPullRequestAdoptionStatusSynced {
 		t.Fatalf("adopted Issue=%+v", item)
 	}
 	if item.Attempts != 3 || item.Continuations != 2 || item.SessionID != "session-102" || !reflect.DeepEqual(item.Answers, []state.AnswerRecord{answer}) {

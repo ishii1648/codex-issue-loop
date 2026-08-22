@@ -13,6 +13,16 @@ import "fmt"
 // renamed without a schema/semantic migration.
 type Status string
 
+type WorktreeRetentionClass string
+
+const (
+	WorktreeRetainIndefinitely WorktreeRetentionClass = "retain_indefinitely"
+	WorktreeRetainCompleted    WorktreeRetentionClass = "completed"
+	WorktreeRetainFailed       WorktreeRetentionClass = "failed"
+	WorktreeRetainBlocked      WorktreeRetentionClass = "blocked"
+	WorktreeRetainAttention    WorktreeRetentionClass = "attention"
+)
+
 const (
 	StatusUnset                    Status = ""
 	StatusClaiming                 Status = "claiming"
@@ -33,12 +43,26 @@ const (
 	StatusCompleted                Status = "completed"
 )
 
-var knownStatuses = map[Status]struct{}{
-	StatusUnset: {}, StatusClaiming: {}, StatusClaimed: {}, StatusRunning: {},
-	StatusAnswerClaimWaiting: {}, StatusResumePending: {}, StatusEnvironmentResumePending: {},
-	StatusPublicationRecovery: {}, StatusChecksRecovery: {}, StatusRetryWait: {},
-	StatusNeedsInput: {}, StatusAwaitingChecks: {}, StatusAwaitingMerge: {},
-	StatusResolvingConflict: {}, StatusBlocked: {}, StatusFailed: {}, StatusCompleted: {},
+var allStatuses = [...]Status{
+	StatusUnset, StatusClaiming, StatusClaimed, StatusRunning,
+	StatusAnswerClaimWaiting, StatusResumePending, StatusEnvironmentResumePending,
+	StatusPublicationRecovery, StatusChecksRecovery, StatusRetryWait,
+	StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
+	StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted,
+}
+
+var knownStatuses = func() map[Status]struct{} {
+	known := make(map[Status]struct{}, len(allStatuses))
+	for _, status := range allStatuses {
+		known[status] = struct{}{}
+	}
+	return known
+}()
+
+// AllStatuses returns a copy of every value in the durable lifecycle contract.
+// Callers may derive secondary contracts without maintaining another status list.
+func AllStatuses() []Status {
+	return append([]Status(nil), allStatuses[:]...)
 }
 
 func (s Status) String() string { return string(s) }
@@ -53,6 +77,35 @@ func (s Status) Validate() error {
 
 func (s Status) Terminal() bool {
 	return s == StatusCompleted || s == StatusFailed || s == StatusBlocked
+}
+
+func (s Status) WorktreeRetentionClass() WorktreeRetentionClass {
+	switch s {
+	case StatusCompleted:
+		return WorktreeRetainCompleted
+	case StatusFailed:
+		return WorktreeRetainFailed
+	case StatusBlocked:
+		return WorktreeRetainBlocked
+	case StatusNeedsInput, StatusAnswerClaimWaiting, StatusResumePending:
+		return WorktreeRetainAttention
+	default:
+		return WorktreeRetainIndefinitely
+	}
+}
+
+// RequiresWorkspaceProvenance reports whether execution or recovery may need
+// the Issue's immutable worker workspace identity.
+func (s Status) RequiresWorkspaceProvenance() bool {
+	switch s {
+	case StatusClaimed, StatusRunning, StatusAnswerClaimWaiting, StatusResumePending,
+		StatusEnvironmentResumePending, StatusPublicationRecovery, StatusChecksRecovery,
+		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
+		StatusResolvingConflict, StatusBlocked, StatusFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // OccupiesWorkerSlot reports whether an Issue owns one of the bounded worker
@@ -83,12 +136,7 @@ func (s Status) RequiresCapabilityRecheck() bool {
 // TerminalForWebhook reports whether webhook reconciliation treats the Issue
 // as an attention/terminal record rather than an active lifecycle owner.
 func (s Status) TerminalForWebhook() bool {
-	switch s {
-	case StatusBlocked, StatusFailed, StatusNeedsInput, StatusCompleted:
-		return true
-	default:
-		return false
-	}
+	return s.Terminal() || s == StatusNeedsInput
 }
 
 // WebhookRoutable reports whether a webhook delivery may be routed directly
@@ -118,6 +166,12 @@ func (s Status) PendingDispatch() bool {
 	}
 }
 
+// DispatchPending models the two durable lifecycle axes together. GitHub
+// synchronization always takes precedence over status-specific dispatch.
+func (s Status) DispatchPending(sync GitHubSync) bool {
+	return sync.Pending() || s.PendingDispatch()
+}
+
 func (s Status) RetainsRunLogs() bool {
 	return s.PendingDispatch() || s == StatusClaimed || s == StatusRunning || s == StatusNeedsInput
 }
@@ -127,9 +181,12 @@ func (s Status) PreventsIdle() bool {
 }
 
 func (s Status) IneligibleForAdmission() bool {
+	if s.Terminal() {
+		return true
+	}
 	switch s {
 	case StatusRunning, StatusClaimed, StatusNeedsInput, StatusAnswerClaimWaiting,
-		StatusResumePending, StatusCompleted, StatusBlocked, StatusResolvingConflict:
+		StatusResumePending, StatusResolvingConflict:
 		return true
 	default:
 		return false
@@ -143,6 +200,10 @@ func (s Status) UsesWorkerSlot() bool {
 	default:
 		return true
 	}
+}
+
+func (s Status) UsesWorkerSlotWhile(sync GitHubSync) bool {
+	return !sync.Pending() && s.UsesWorkerSlot()
 }
 
 func (s Status) BlocksQueueForPullRequest(autoMerge bool) bool {

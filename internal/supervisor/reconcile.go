@@ -36,7 +36,7 @@ type reconciliationDecision struct {
 	lastError    string
 	branch       string
 	pullRequest  string
-	githubSync   string
+	githubSync   issuedomain.GitHubSync
 	retryAt      *time.Time
 	workerPID    int
 	workerPGID   int
@@ -124,13 +124,13 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
 				}
 			}
-			parkEnvironmentLease := current.Status == issuedomain.StatusBlocked && current.GitHubSync == "" && current.Lease != nil && current.ResourcePark == nil &&
+			parkEnvironmentLease := current.Status == issuedomain.StatusBlocked && current.GitHubSync == issuedomain.GitHubSyncNone && current.Lease != nil && current.ResourcePark == nil &&
 				current.PullRequestURL == "" && current.WorkerPID == 0 && current.WorkerPGID == 0 && decision.status == issuedomain.StatusBlocked &&
-				decision.githubSync == "" && decision.pullRequest == "" && resumableWorkerBlock(decision.blockedCause) && onlyBlockedExclusion
+				decision.githubSync == issuedomain.GitHubSyncNone && decision.pullRequest == "" && resumableWorkerBlock(decision.blockedCause) && onlyBlockedExclusion
 			request := singlePendingRequest(latest, number)
-			parkInputLease := current.Status == issuedomain.StatusNeedsInput && current.GitHubSync == "" && current.Lease != nil && current.ResourcePark == nil &&
+			parkInputLease := current.Status == issuedomain.StatusNeedsInput && current.GitHubSync == issuedomain.GitHubSyncNone && current.Lease != nil && current.ResourcePark == nil &&
 				current.PullRequestURL == "" && current.WorkerPID == 0 && current.WorkerPGID == 0 && decision.status == issuedomain.StatusNeedsInput &&
-				decision.githubSync == "" && decision.pullRequest == "" && request != nil && request.ResumeStatus == issuedomain.StatusUnset && current.ConflictRecovery == nil
+				decision.githubSync == issuedomain.GitHubSyncNone && decision.pullRequest == "" && request != nil && request.ResumeStatus == issuedomain.StatusUnset && current.ConflictRecovery == nil
 			parkReconciledLease := parkEnvironmentLease || parkInputLease
 			parkID := ""
 			parkedAt := time.Time{}
@@ -171,17 +171,9 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 						item.ResourcePark.Kind = state.ResourceParkKindEnvironmentBlock
 					}
 				}
-				if decision.status == issuedomain.StatusCompleted && item.Lease != nil {
-					if item.ResourcePark != nil && item.ResourcePark.Status == "resuming" {
-						item.ResourcePark.Status = "resumed"
-					}
-					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
-						return err
-					}
-				}
-				if (decision.status == issuedomain.StatusFailed || decision.status == issuedomain.StatusBlocked) && decision.pullRequest == "" && item.Lease != nil && !retainsWorkerBoundary(decision.blockedCause) {
-					if item.ResourcePark != nil && item.ResourcePark.Status == "resuming" {
-						item.ResourcePark.Status = "resumed"
+				if issuedomain.DecideLease(decision.status, decision.pullRequest != "", retainsWorkerBoundary(decision.blockedCause)) == issuedomain.ReleaseLease && item.Lease != nil {
+					if item.ResourcePark != nil && item.ResourcePark.Status == issuedomain.ResourceParkStatusResuming {
+						item.ResourcePark.Status = issuedomain.ResourceParkStatusResumed
 					}
 					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
 						return err
@@ -221,19 +213,19 @@ func startupReconciliationPredicateReport(issueNumber int, decision reconciliati
 		IssueNumber: issueNumber, Eligible: true, Predicates: []state.RecoveryPredicate{},
 	}
 	blocked := strings.HasPrefix(decision.lastError, "startup reconciliation blocked:")
-	code := "RECOVERY_STARTUP_RECONCILIATION"
+	code := state.RecoveryCodeStartupReconciliation
 	source := "shared startup reconciliation decision"
 	if blocked {
 		reason := strings.ToLower(decision.reason)
 		switch {
 		case strings.Contains(reason, "worktree") || strings.Contains(reason, "branch"):
-			code = "RECOVERY_WORKSPACE"
+			code = state.RecoveryCodeWorkspace
 		case strings.Contains(reason, "pull request"):
-			code = "RECOVERY_GITHUB_IDENTITY"
+			code = state.RecoveryCodeGitHubIdentity
 		case strings.Contains(reason, "label") || strings.Contains(reason, "github"):
-			code = "RECOVERY_GITHUB_LABELS"
+			code = state.RecoveryCodeGitHubLabels
 		case strings.Contains(reason, "worker pid"):
-			code = "RECOVERY_WORKER_PROCESS"
+			code = state.RecoveryCodeWorkerProcess
 		}
 		report.AddPredicate(code, "fail", source, "authoritative state safely converges", "startup reconciliation refused the observed boundary", "operator", "inspect the named durable/GitHub/worktree boundary before retrying")
 		return report
@@ -258,7 +250,7 @@ func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
 	if item == nil {
 		return false
 	}
-	if item.GitHubSync != "" {
+	if item.GitHubSync != issuedomain.GitHubSyncNone {
 		return true
 	}
 	switch item.Status {
@@ -340,12 +332,7 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		if !reflect.DeepEqual(item, &current) {
 			return errReconciliationStateChanged
 		}
-		if decision.status == issuedomain.StatusCompleted && item.Lease != nil {
-			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
-				return err
-			}
-		}
-		if (decision.status == issuedomain.StatusFailed || decision.status == issuedomain.StatusBlocked) && decision.pullRequest == "" && item.Lease != nil && !retainsWorkerBoundary(decision.blockedCause) {
+		if issuedomain.DecideLease(decision.status, decision.pullRequest != "", retainsWorkerBoundary(decision.blockedCause)) == issuedomain.ReleaseLease && item.Lease != nil {
 			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
 				return err
 			}
@@ -401,271 +388,59 @@ func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg confi
 }
 
 func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) reconciliationDecision {
-	decision := reconciliationDecision{
-		status: current.Status, lastError: current.LastError, branch: current.Branch,
-		pullRequest: current.PullRequestURL, githubSync: current.GitHubSync,
-		retryAt: current.RetryAfter, workerPID: current.WorkerPID, workerPGID: current.WorkerPGID, prMerged: current.PullRequestMerged,
-		reason: "state already converged", blockedCause: current.BlockedCause,
+	currentState, observation := l.reconciliationInputs(snapshot, current, remote, inspection)
+	decision := issuedomain.DecideReconciliation(currentState, observation)
+	return reconciliationDecision{
+		status: decision.Status, lastError: decision.LastError, branch: decision.Branch,
+		pullRequest: decision.PullRequest, githubSync: decision.GitHubSync, retryAt: decision.RetryAt,
+		workerPID: decision.WorkerPID, workerPGID: decision.WorkerPGID, prMerged: decision.PullRequestMerged,
+		markRunning: decision.MarkRunning, reason: decision.Reason, blockedCause: current.BlockedCause,
+	}
+}
+
+func (l *Loop) reconciliationInputs(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) (issuedomain.ReconciliationState, issuedomain.ReconciliationObservation) {
+	currentState := issuedomain.ReconciliationState{
+		Number: current.Number, Status: current.Status, LastError: current.LastError, Branch: current.Branch,
+		PullRequest: current.PullRequestURL, GitHubSync: current.GitHubSync, RetryAt: current.RetryAfter,
+		WorkerPID: current.WorkerPID, WorkerPGID: current.WorkerPGID, PullRequestMerged: current.PullRequestMerged,
+		WorktreeSaved: current.Worktree != "",
+	}
+	if current.BlockedCause != nil {
+		currentState.BlockedOrigin = current.BlockedCause.Origin
+		currentState.BlockedKind = current.BlockedCause.Kind
+		currentState.BlockedResumable = current.BlockedCause.Resumable
+	}
+	if current.PublicationRecovery != nil {
+		currentState.PublicationRecoveryStatus = current.PublicationRecovery.Status
 	}
 	labels := labelSet(remote.Issue.Labels)
-	ready := hasAnyLabel(labels, l.Config.GitHub.ReadyLabels)
-	running := labels[l.Config.GitHub.RunningLabel]
-	needsInput := labels[l.Config.GitHub.NeedsInputLabel]
-	done := labels[l.Config.GitHub.DoneLabel]
-	failed := labels[l.Config.GitHub.FailedLabel]
-	excluded := hasAnyLabel(labels, l.Config.GitHub.ExcludeLabels)
-	if terminalDecision, ok := l.decideTerminalPullRequestReconciliation(current, remote); ok && terminalDecision.status == issuedomain.StatusCompleted && terminalDecision.prMerged {
-		return terminalDecision
+	observation := issuedomain.ReconciliationObservation{
+		Now: l.now(), IssueOpen: strings.EqualFold(remote.Issue.State, "open"),
+		Ready: hasAnyLabel(labels, l.Config.GitHub.ReadyLabels), Running: labels[l.Config.GitHub.RunningLabel],
+		NeedsInput: labels[l.Config.GitHub.NeedsInputLabel], Done: labels[l.Config.GitHub.DoneLabel],
+		Failed: labels[l.Config.GitHub.FailedLabel], Excluded: hasAnyLabel(labels, l.Config.GitHub.ExcludeLabels),
+		OnlyBlockedExclusion: l.hasOnlyBlockedExclusion(labels), ManualExclusion: l.hasManualExclusion(remote.Issue, current),
+		DoneMarker:   hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->"),
+		FailedMarker: hasComment(remote.Issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number)),
+		Workspace: issuedomain.ReconciliationWorkspace{
+			Exists: inspection.Exists, Valid: inspection.Valid, Branch: inspection.Branch,
+			LocalBranchExists: inspection.LocalBranchExists, RemoteBranchExists: inspection.RemoteBranchExists,
+		},
 	}
-	if current.Status == issuedomain.StatusCompleted && strings.EqualFold(remote.Issue.State, "open") {
-		open := []gh.PullRequest{}
-		for _, pr := range remote.PullRequests {
-			if pr.MergedAt == nil && strings.EqualFold(pr.State, "open") {
-				open = append(open, pr)
-			}
-		}
-		if len(open) == 1 {
-			decision.status = issuedomain.StatusAwaitingMerge
-			if open[0].IsDraft {
-				decision.status = issuedomain.StatusAwaitingChecks
-			}
-			decision.pullRequest = open[0].URL
-			decision.prMerged = false
-			decision.githubSync = ""
-			decision.retryAt = nil
-			decision.workerPID = 0
-			decision.markRunning = true
-			decision.reason = "legacy completed Issue with open Pull Request returned to lifecycle monitoring"
-			return decision
-		}
+	if request := pendingRequest(snapshot, current.Number); request != nil {
+		observation.PendingRequestMarker = observation.NeedsInput && hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:request:"+request.ID+" -->")
 	}
-
-	// A done label cannot release an existing PR lease. Only an observed merge
-	// below is authoritative once a Pull Request URL has been recorded.
-	if done && current.PullRequestURL == "" && len(remote.PullRequests) == 0 {
-		decision.status, decision.lastError = issuedomain.StatusCompleted, ""
-		for _, pr := range remote.PullRequests {
-			if pr.MergedAt != nil {
-				decision.pullRequest = pr.URL
-				decision.prMerged = true
-				break
-			}
-		}
-		if current.GitHubSync == "done" && !hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->") {
-			decision.githubSync = "done"
-		} else {
-			decision.githubSync = ""
-		}
-		decision.workerPID, decision.retryAt, decision.reason = 0, nil, "GitHub done label is authoritative"
-		return decision
+	for _, pr := range remote.PullRequests {
+		observation.PullRequests = append(observation.PullRequests, issuedomain.ReconciliationPullRequest{
+			URL: pr.URL, State: pr.State, HeadRefName: pr.HeadRefName, Draft: pr.IsDraft, Merged: pr.MergedAt != nil,
+		})
 	}
-	if excluded {
-		if current.Status == issuedomain.StatusBlocked && workspaceSafetyBlock(current.BlockedCause) && l.hasOnlyBlockedExclusion(labels) {
-			decision.status, decision.workerPID, decision.retryAt, decision.githubSync = issuedomain.StatusBlocked, 0, nil, ""
-			decision.reason = "supervisor-owned worker workspace safety block preserved"
-			return decision
-		} else if current.Status == issuedomain.StatusBlocked && current.BlockedCause != nil && current.BlockedCause.Origin == "worker" &&
-			current.BlockedCause.Kind == "environment" && current.BlockedCause.Resumable && l.hasOnlyBlockedExclusion(labels) {
-			decision.status, decision.workerPID, decision.retryAt, decision.githubSync = issuedomain.StatusBlocked, 0, nil, ""
-			decision.reason = "supervisor-owned worker environment block provenance preserved"
-			return decision
-		} else if current.GitHubSync == "environment_resume" && current.Status == issuedomain.StatusEnvironmentResumePending {
-			decision.reason = "explicit environment resume is waiting for GitHub label synchronization"
-		} else if current.GitHubSync == "conflict_retry" && current.Status == issuedomain.StatusResolvingConflict {
-			decision.reason = "explicit conflict retry is waiting for GitHub label synchronization"
-		} else if current.GitHubSync == "blocked" {
-			decision.status, decision.workerPID, decision.retryAt = issuedomain.StatusBlocked, 0, nil
-			if hasComment(remote.Issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number)) {
-				decision.githubSync = ""
-			}
-			decision.reason = "partially synchronized blocked state recovered"
-			return decision
-		} else {
-			return blockDecision(decision, "GitHub exclusion label was applied manually")
-		}
-	}
-	if failed {
-		if current.GitHubSync == "pull_request_checks_recovery" && current.Status == issuedomain.StatusChecksRecovery {
-			decision.reason = "explicit Pull Request checks recovery is waiting for GitHub label synchronization"
-			return decision
-		}
-		if current.GitHubSync == "publication_recovery" && current.Status == issuedomain.StatusPublicationRecovery {
-			decision.reason = "explicit publication recovery is waiting for GitHub label synchronization"
-			return decision
-		}
-		if current.PublicationRecovery != nil {
-			for _, pr := range remote.PullRequests {
-				if pr.MergedAt != nil {
-					decision.status, decision.lastError, decision.pullRequest = issuedomain.StatusCompleted, "", pr.URL
-					decision.prMerged = true
-					decision.workerPID, decision.retryAt, decision.githubSync = 0, nil, "done"
-					decision.reason = "merged recovered Pull Request discovered"
-					return decision
-				}
-			}
-		}
-		decision.status, decision.workerPID, decision.retryAt = issuedomain.StatusFailed, 0, nil
-		if current.PublicationRecovery != nil && current.PublicationRecovery.Status == "failed" && decision.pullRequest == "" {
-			for _, pr := range remote.PullRequests {
-				if pr.MergedAt == nil && strings.EqualFold(pr.State, "open") {
-					decision.pullRequest = pr.URL
-					break
-				}
-			}
-		}
-		if current.GitHubSync == "failed" && !hasComment(remote.Issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number)) {
-			decision.githubSync = "failed"
-		} else {
-			decision.githubSync = ""
-		}
-		decision.reason = "GitHub failed label is authoritative"
-		return decision
-	}
-	if ready && (running || needsInput) {
-		return blockDecision(decision, "GitHub labels contain conflicting ready and active states")
-	}
-
-	openPRs := []gh.PullRequest{}
-	var mergedPR *gh.PullRequest
-	var closedPR *gh.PullRequest
-	for index := range remote.PullRequests {
-		pr := &remote.PullRequests[index]
-		if pr.MergedAt != nil {
-			if mergedPR == nil {
-				mergedPR = pr
-			}
-			continue
-		}
-		if strings.EqualFold(pr.State, "open") {
-			openPRs = append(openPRs, *pr)
-		} else if closedPR == nil {
-			closedPR = pr
-		}
-	}
-	if len(remote.PullRequests) > 1 {
-		return blockDecision(decision, "multiple Pull Requests target the saved branch")
-	}
-	if mergedPR != nil {
-		decision.status, decision.lastError, decision.pullRequest = issuedomain.StatusCompleted, "", mergedPR.URL
-		decision.prMerged = true
-		decision.workerPID, decision.retryAt, decision.reason = 0, nil, "merged Pull Request discovered"
-		if hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->") && done {
-			decision.githubSync = ""
-		} else {
-			decision.githubSync = "done"
-		}
-		return decision
-	}
-	if len(openPRs) > 1 {
-		return blockDecision(decision, "multiple open Pull Requests target the saved branch")
-	}
-	if len(openPRs) == 1 {
-		decision.pullRequest = openPRs[0].URL
-		if decision.branch == "" {
-			decision.branch = openPRs[0].HeadRefName
-		}
-	} else if closedPR != nil {
-		decision.pullRequest = closedPR.URL
-		return blockDecision(decision, "Pull Request was closed without merge")
-	}
-	if strings.EqualFold(remote.Issue.State, "closed") {
-		return blockDecision(decision, "GitHub Issue was closed without a done label or merged Pull Request")
-	}
-
-	if current.Worktree != "" {
-		if !inspection.Exists || !inspection.Valid {
-			return blockDecision(decision, "saved worktree is missing or invalid")
-		}
-		if current.Branch != "" && inspection.Branch != current.Branch {
-			return blockDecision(decision, fmt.Sprintf("worktree branch changed from %s to %s", current.Branch, inspection.Branch))
-		}
-		if current.Branch != "" && !inspection.LocalBranchExists {
-			return blockDecision(decision, "saved local branch is missing")
-		}
-		if len(openPRs) == 1 && !inspection.RemoteBranchExists {
-			return blockDecision(decision, "open Pull Request head branch is missing from origin")
-		}
-	} else if len(openPRs) == 1 {
-		return blockDecision(decision, "open Pull Request exists but the saved worktree is missing")
-	}
-
 	processes := l.Processes
 	if processes == nil {
 		processes = osProcessInspector{}
 	}
-	if current.WorkerPID > 0 && processes.Alive(current.WorkerPID) {
-		return blockDecision(decision, fmt.Sprintf("saved worker PID %d is still alive", current.WorkerPID))
-	}
-	decision.workerPID = 0
-	decision.workerPGID = 0
-
-	if current.GitHubSync == "needs_input" {
-		if request := pendingRequest(snapshot, current.Number); request != nil && needsInput && hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:request:"+request.ID+" -->") {
-			decision.githubSync = ""
-		}
-	}
-	if current.GitHubSync == "done" && done && hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->") {
-		decision.githubSync = ""
-	}
-
-	switch current.Status {
-	case issuedomain.StatusClaiming:
-		if running && !ready {
-			now := l.now()
-			decision.status, decision.retryAt = issuedomain.StatusRetryWait, &now
-			decision.lastError, decision.reason = "claim completed before supervisor restart", "write-ahead claim converged from GitHub"
-		} else if ready && !running {
-			decision.reason = "claim did not reach GitHub and will be retried idempotently"
-		} else if !ready && !running {
-			return blockDecision(decision, "claim labels were removed manually")
-		}
-	case issuedomain.StatusRunning, issuedomain.StatusClaimed:
-		now := l.now()
-		decision.status, decision.retryAt = issuedomain.StatusRetryWait, &now
-		decision.lastError, decision.reason = "worker disappeared before supervisor restart", "dead worker scheduled for retry"
-		if !running && inspection.Valid {
-			decision.markRunning = true
-		}
-	case issuedomain.StatusRetryWait:
-		decision.reason = "existing retry schedule preserved"
-		if !running && inspection.Valid {
-			decision.markRunning = true
-		}
-	case issuedomain.StatusResumePending:
-		decision.reason = "recorded answer remains pending for resume"
-	case issuedomain.StatusAnswerClaimWaiting:
-		decision.reason = "recorded answer is waiting for its parked resource claim"
-	case issuedomain.StatusEnvironmentResumePending:
-		decision.reason = "operator-confirmed environment resume remains pending in the saved worktree"
-	case issuedomain.StatusPublicationRecovery:
-		decision.reason = "operator-confirmed publication recovery remains pending in the saved worktree"
-		if !running {
-			decision.githubSync = "publication_recovery"
-		}
-	case issuedomain.StatusChecksRecovery:
-		decision.reason = "operator-confirmed Pull Request checks recovery remains pending in the saved worktree"
-		if !running {
-			decision.githubSync = "pull_request_checks_recovery"
-		}
-	case issuedomain.StatusNeedsInput:
-		decision.reason = "unanswered request remains sticky"
-		if !needsInput {
-			decision.githubSync = "needs_input"
-		}
-	case issuedomain.StatusResolvingConflict:
-		decision.reason = "durable Pull Request conflict recovery will resume in the saved worktree"
-		if decision.retryAt == nil {
-			now := l.now()
-			decision.retryAt = &now
-		}
-		if !running && inspection.Valid {
-			decision.markRunning = true
-		}
-	}
-	if len(openPRs) == 1 && (current.Status == issuedomain.StatusRunning || current.Status == issuedomain.StatusClaimed) {
-		decision.reason = "open Pull Request discovered and dead worker scheduled for retry"
-	}
-	return decision
+	observation.WorkerAlive = current.WorkerPID > 0 && processes.Alive(current.WorkerPID)
+	return currentState, observation
 }
 
 func (l *Loop) hasOnlyBlockedExclusion(labels map[string]bool) bool {
@@ -692,60 +467,14 @@ func (l *Loop) hasOnlyBlockedExclusion(labels map[string]bool) bool {
 // Pull Request recorded in durable state. An exclusion label remains sticky
 // unless it is the automation-owned blocked label evidenced by our comment.
 func (l *Loop) decideTerminalPullRequestReconciliation(current state.Issue, remote gh.RemoteState) (reconciliationDecision, bool) {
-	decision := reconciliationDecision{
-		status: current.Status, lastError: current.LastError, branch: current.Branch,
-		pullRequest: current.PullRequestURL, githubSync: current.GitHubSync,
-		retryAt: current.RetryAfter, workerPID: current.WorkerPID, workerPGID: current.WorkerPGID,
-		prMerged: current.PullRequestMerged, reason: "terminal Issue remains sticky",
-	}
-	if !terminalPullRequestCandidate(current) {
-		return decision, false
-	}
-	if len(remote.PullRequests) != 1 {
-		if len(remote.PullRequests) > 1 {
-			decision.reason = "multiple Pull Requests target the saved branch"
-		} else {
-			decision.reason = "saved Pull Request was not found for the saved branch"
-		}
-		return decision, true
-	}
-	pr := remote.PullRequests[0]
-	if pr.URL != current.PullRequestURL {
-		decision.reason = "Pull Request for the saved branch does not match the saved Pull Request URL"
-		return decision, true
-	}
-	if current.Branch == "" || pr.HeadRefName == "" || pr.HeadRefName != current.Branch {
-		decision.reason = "Pull Request head does not match the saved branch"
-		return decision, true
-	}
-	if pr.MergedAt == nil {
-		if strings.EqualFold(pr.State, "open") {
-			decision.reason = "saved Pull Request is not merged"
-		} else {
-			decision.reason = "saved Pull Request was closed without merge"
-		}
-		return decision, true
-	}
-	if l.hasManualExclusion(remote.Issue, current) {
-		decision.reason = "GitHub exclusion label was applied manually"
-		return decision, true
-	}
-	decision.status = issuedomain.StatusCompleted
-	decision.lastError = ""
-	decision.prMerged = true
-	decision.githubSync = "done"
-	decision.retryAt = nil
-	decision.workerPID = 0
-	decision.workerPGID = 0
-	decision.reason = "saved Pull Request merge discovered for terminal Issue"
-	return decision, true
-}
-
-func terminalPullRequestCandidate(issue state.Issue) bool {
-	if issue.Status != issuedomain.StatusBlocked && issue.Status != issuedomain.StatusFailed {
-		return false
-	}
-	return issue.PullRequestURL != "" && !issue.PullRequestMerged && issue.GitHubSync == ""
+	currentState, observation := l.reconciliationInputs(state.Snapshot{}, current, remote, worktree.Inspection{})
+	decision, ok := issuedomain.DecideTerminalPullRequestReconciliation(currentState, observation)
+	return reconciliationDecision{
+		status: decision.Status, lastError: decision.LastError, branch: decision.Branch,
+		pullRequest: decision.PullRequest, githubSync: decision.GitHubSync, retryAt: decision.RetryAt,
+		workerPID: decision.WorkerPID, workerPGID: decision.WorkerPGID, prMerged: decision.PullRequestMerged,
+		markRunning: decision.MarkRunning, reason: decision.Reason, blockedCause: current.BlockedCause,
+	}, ok
 }
 
 func (l *Loop) hasManualExclusion(issue gh.Issue, current state.Issue) bool {
@@ -763,15 +492,24 @@ func (l *Loop) hasManualExclusion(issue gh.Issue, current state.Issue) bool {
 	return false
 }
 
+// blockDecision is an adapter only; the lifecycle outcome is owned by the
+// domain decision so webhook/startup callers cannot grow a parallel rule.
 func blockDecision(decision reconciliationDecision, reason string) reconciliationDecision {
-	decision.status = issuedomain.StatusBlocked
-	decision.lastError = "startup reconciliation blocked: " + reason
-	decision.githubSync = ""
-	decision.retryAt = nil
-	decision.workerPID = 0
-	decision.workerPGID = 0
-	decision.reason = reason
+	domainDecision := issuedomain.BlockReconciliation(issuedomain.ReconciliationDecision{
+		Status: decision.status, LastError: decision.lastError, Branch: decision.branch,
+		PullRequest: decision.pullRequest, GitHubSync: decision.githubSync, RetryAt: decision.retryAt,
+		WorkerPID: decision.workerPID, WorkerPGID: decision.workerPGID, PullRequestMerged: decision.prMerged,
+		MarkRunning: decision.markRunning, Reason: decision.reason,
+	}, reason)
+	decision.status, decision.lastError, decision.githubSync = domainDecision.Status, domainDecision.LastError, domainDecision.GitHubSync
+	decision.retryAt, decision.workerPID, decision.workerPGID, decision.reason = domainDecision.RetryAt, domainDecision.WorkerPID, domainDecision.WorkerPGID, domainDecision.Reason
 	return decision
+}
+
+func terminalPullRequestCandidate(issue state.Issue) bool {
+	return issuedomain.TerminalPullRequestCandidate(issuedomain.ReconciliationState{
+		Status: issue.Status, PullRequest: issue.PullRequestURL, PullRequestMerged: issue.PullRequestMerged, GitHubSync: issue.GitHubSync,
+	})
 }
 
 func labelSet(labels []string) map[string]bool {
@@ -802,7 +540,7 @@ func hasComment(comments []string, marker string) bool {
 
 func pendingRequest(snapshot state.Snapshot, issueNumber int) *state.Request {
 	for _, request := range snapshot.PendingRequests {
-		if request.IssueNumber == issueNumber && request.Status == "pending" {
+		if request.IssueNumber == issueNumber && request.Status == issuedomain.RequestStatusPending {
 			return request
 		}
 	}
@@ -812,7 +550,7 @@ func pendingRequest(snapshot state.Snapshot, issueNumber int) *state.Request {
 func singlePendingRequest(snapshot state.Snapshot, issueNumber int) *state.Request {
 	var found *state.Request
 	for _, request := range snapshot.PendingRequests {
-		if request == nil || request.IssueNumber != issueNumber || request.Status != "pending" {
+		if request == nil || request.IssueNumber != issueNumber || request.Status != issuedomain.RequestStatusPending {
 			continue
 		}
 		if found != nil {

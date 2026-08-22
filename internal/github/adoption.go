@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 )
 
 // MergedPullRequestAdoptionExpectation is the immutable boundary used while
@@ -13,7 +14,7 @@ import (
 // validation; non-empty fields fence every later synchronization retry.
 type MergedPullRequestAdoptionExpectation struct {
 	IssueNumber       int
-	PreviousStatus    string
+	PreviousStatus    issuedomain.Status
 	Branch            string
 	BaseBranch        string
 	HeadSHA           string
@@ -31,7 +32,7 @@ func ValidateMergedPullRequestAdoption(cfg config.Config, remote RemoteState, ex
 	if expected.IssueNumber <= 0 || expected.Branch == "" || expected.BaseBranch == "" || expected.HeadSHA == "" {
 		return PullRequest{}, fmt.Errorf("merged Pull Request adoption expectation is incomplete")
 	}
-	if expected.PreviousStatus != "blocked" && expected.PreviousStatus != "failed" {
+	if expected.PreviousStatus != issuedomain.StatusBlocked && expected.PreviousStatus != issuedomain.StatusFailed {
 		return PullRequest{}, fmt.Errorf("Issue #%d previous status %q is not an adoptable terminal state", expected.IssueNumber, expected.PreviousStatus)
 	}
 	if !strings.EqualFold(remote.Issue.State, "open") && !strings.EqualFold(remote.Issue.State, "closed") {
@@ -54,14 +55,14 @@ func ValidateMergedPullRequestAdoption(cfg config.Config, remote RemoteState, ex
 		return PullRequest{}, fmt.Errorf("Issue #%d is already marked done", expected.IssueNumber)
 	}
 	failed := labels[strings.ToLower(cfg.GitHub.FailedLabel)]
-	if (done || expected.PreviousStatus == "blocked") && failed {
+	if (done || expected.PreviousStatus == issuedomain.StatusBlocked) && failed {
 		return PullRequest{}, fmt.Errorf("Issue #%d has conflicting supervisor terminal labels", expected.IssueNumber)
 	}
 	for _, label := range append(append([]string{cfg.GitHub.RunningLabel, cfg.GitHub.NeedsInputLabel}, cfg.GitHub.ReadyLabels...), cfg.GitHub.ExcludeLabels...) {
 		if !labels[strings.ToLower(label)] {
 			continue
 		}
-		if !done && strings.EqualFold(label, "blocked") && expected.PreviousStatus == "blocked" &&
+		if !done && strings.EqualFold(label, "blocked") && expected.PreviousStatus == issuedomain.StatusBlocked &&
 			hasComment(fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", expected.IssueNumber)) {
 			continue
 		}
@@ -69,7 +70,7 @@ func ValidateMergedPullRequestAdoption(cfg config.Config, remote RemoteState, ex
 	}
 	if !done {
 		required := cfg.GitHub.FailedLabel
-		if expected.PreviousStatus == "blocked" {
+		if expected.PreviousStatus == issuedomain.StatusBlocked {
 			required = ""
 			for _, label := range cfg.GitHub.ExcludeLabels {
 				if strings.EqualFold(label, "blocked") {

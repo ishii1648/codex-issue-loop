@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,7 +21,7 @@ func TestLegacyWorkerBlockFromDurableRecordFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	issue := Issue{
-		Number: 442, Status: "blocked", RunID: "run_zeitreise_442", FailureKind: "issue",
+		Number: 442, Status: issuedomain.StatusBlocked, RunID: "run_zeitreise_442", FailureKind: "issue",
 		LastError: legacyManualExclusionError,
 	}
 
@@ -45,7 +46,7 @@ func TestTypedLegacyWorkerBlockRecoveryFromMissingLeaseFixture(t *testing.T) {
 	}
 	blockedAt := time.Date(2026, 8, 17, 12, 30, 0, 0, time.UTC)
 	issue := Issue{
-		Number: 442, Status: "blocked", RunID: "run_zeitreise_442", LeaseGeneration: 7,
+		Number: 442, Status: issuedomain.StatusBlocked, RunID: "run_zeitreise_442", LeaseGeneration: 7,
 		Worktree: "/tmp/zeitreise-442", Branch: "codex/issue-442-legacy-block", FailureKind: "issue",
 		LastError: "worker blocked: localhost listen denied",
 		BlockedCause: &BlockedCause{
@@ -78,7 +79,7 @@ func TestLegacyWorkerBlockFromEventsRequiresExactSameRunChain(t *testing.T) {
 	legacyOverwrite := event(3, "startup_reconciled", "run_12", map[string]string{
 		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
 	})
-	issue := Issue{Number: 12, Status: "blocked", RunID: "run_12", FailureKind: "issue", LastError: legacyManualExclusionError}
+	issue := Issue{Number: 12, Status: issuedomain.StatusBlocked, RunID: "run_12", FailureKind: "issue", LastError: legacyManualExclusionError}
 
 	cause, err := legacyWorkerBlockFromEvents([]Event{blocked, synced, legacyOverwrite}, issue)
 	if err != nil {
@@ -119,7 +120,7 @@ func TestLegacyWorkerBlockFromEventsRequiresExactSameRunChain(t *testing.T) {
 }
 
 func TestMayHaveLegacyWorkerBlockProvenanceUsesExactMarkerAllowlist(t *testing.T) {
-	base := Issue{Number: 12, Status: "blocked", RunID: "run_12", FailureKind: "issue"}
+	base := Issue{Number: 12, Status: issuedomain.StatusBlocked, RunID: "run_12", FailureKind: "issue"}
 	for _, marker := range []string{"worker blocked: reason", "issue: worker blocked: reason", legacyManualExclusionError} {
 		issue := base
 		issue.LastError = marker
@@ -141,7 +142,7 @@ func TestLegacyWorkerBlockProvenanceRejectsAmbiguousHistory(t *testing.T) {
 	legacyError := "issue: worker blocked: CDP unavailable"
 	writeBlock := func() {
 		_, err := store.Update("issue_blocked", 4, "run_4", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *Snapshot) error {
-			snapshot.Issues["4"] = &Issue{Number: 4, Status: "blocked", RunID: "run_4", FailureKind: "issue", LastError: legacyError}
+			snapshot.Issues["4"] = &Issue{Number: 4, Status: issuedomain.StatusBlocked, RunID: "run_4", FailureKind: "issue", LastError: legacyError}
 			return nil
 		})
 		if err != nil {
@@ -187,7 +188,7 @@ func TestTypedLegacyWorkerBlockRequiresExactDurableCause(t *testing.T) {
 	}
 	want := BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "localhost listen denied", BlockedAt: blockedAt}
 	issue := Issue{
-		Number: 12, Status: "blocked", RunID: "run_12", FailureKind: "issue",
+		Number: 12, Status: issuedomain.StatusBlocked, RunID: "run_12", FailureKind: "issue",
 		LastError: "worker blocked: localhost listen denied", BlockedCause: &want,
 	}
 
@@ -239,7 +240,7 @@ func TestLegacyWorkerBlockRecoveryRequiresSameRunLeaseWorktreeAndBranch(t *testi
 	blocked.Timestamp = blockedAt
 	events := []Event{lease, started, blocked, event(4, "github_state_synced", map[string]string{"state": "blocked"})}
 	issue := Issue{
-		Number: 12, Status: "blocked", RunID: "run_12", LeaseGeneration: 3, Worktree: "/tmp/worktree", Branch: "codex/issue-12",
+		Number: 12, Status: issuedomain.StatusBlocked, RunID: "run_12", LeaseGeneration: 3, Worktree: "/tmp/worktree", Branch: "codex/issue-12",
 		FailureKind: "issue", LastError: "worker blocked: localhost listen denied",
 	}
 	block, err := legacyWorkerBlockEvidenceFromEvents(events, issue)

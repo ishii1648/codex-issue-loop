@@ -57,14 +57,14 @@ func (a App) recoverPublication(ctx context.Context, l layout.Layout, args []str
 	}
 	idempotentStatus := current.Status == issuedomain.StatusPublicationRecovery || current.Status == issuedomain.StatusAwaitingChecks || current.Status == issuedomain.StatusAwaitingMerge || current.Status == issuedomain.StatusCompleted
 	if current.PublicationRecovery != nil && current.PublicationRecovery.ID != "" && idempotentStatus {
-		if current.GitHubSync == "publication_recovery" {
+		if current.GitHubSync == issuedomain.GitHubSyncPublicationRecovery {
 			if err := syncPublicationRecovery(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
 				return err
 			}
 		}
 		return a.output(*jsonOut, publicationRecoveryOutput(current, true))
 	}
-	if current.Status != issuedomain.StatusFailed || current.GitHubSync != "" {
+	if current.Status != issuedomain.StatusFailed || current.GitHubSync != issuedomain.GitHubSyncNone {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and failed before publication recovery (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
 	controller := a.ProcessController
@@ -79,7 +79,7 @@ func (a App) recoverPublication(ctx context.Context, l layout.Layout, args []str
 		return exitError{4, fmt.Errorf("Issue #%d still has an active worker process", *issueNumber)}
 	}
 	for _, request := range snapshot.PendingRequests {
-		if request != nil && request.IssueNumber == *issueNumber && request.Status == "pending" {
+		if request != nil && request.IssueNumber == *issueNumber && request.Status == issuedomain.RequestStatusPending {
 			return exitError{4, fmt.Errorf("Issue #%d has a pending manual answer request", *issueNumber)}
 		}
 	}
@@ -235,10 +235,10 @@ func (a App) recoverPublication(ctx context.Context, l layout.Layout, args []str
 		if err := state.ApplyIssueTransition(item, recoveryTransition); err != nil {
 			return err
 		}
-		item.GitHubSync = "publication_recovery"
+		item.GitHubSync = issuedomain.GitHubSyncPublicationRecovery
 		item.RetryAfter = nil
 		item.PublicationRecovery = &state.PublicationRecovery{
-			ID: recoveryID, Status: "requested", Generation: generation, Attempts: priorAttempts,
+			ID: recoveryID, Status: issuedomain.PublicationRecoveryStatusRequested, Generation: generation, Attempts: priorAttempts,
 			MaxAttempts: maxAttempts, History: priorHistory, ConfirmedAt: now,
 			PreviousReason: previousReason, ResultSHA256: resultDigest, Summary: result.Summary,
 			ExpectedHeadSHA: inspection.Head, WorktreeSHA256: worktreeDigest,
@@ -322,9 +322,9 @@ func syncPublicationRecovery(ctx context.Context, store state.Store, cfg config.
 		"state": "publication_recovery", "recovery_id": current.PublicationRecovery.ID,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if item != nil && item.GitHubSync == "publication_recovery" && item.PublicationRecovery != nil && item.PublicationRecovery.ID == current.PublicationRecovery.ID {
-			item.GitHubSync = ""
-			item.PublicationRecovery.Status = "github_synced"
+		if item != nil && item.GitHubSync == issuedomain.GitHubSyncPublicationRecovery && item.PublicationRecovery != nil && item.PublicationRecovery.ID == current.PublicationRecovery.ID {
+			item.GitHubSync = issuedomain.GitHubSyncNone
+			item.PublicationRecovery.Status = issuedomain.PublicationRecoveryStatusGitHubSynced
 			item.UpdatedAt = time.Now().UTC()
 		}
 		return nil

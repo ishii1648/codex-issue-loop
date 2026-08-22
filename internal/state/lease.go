@@ -133,7 +133,7 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 			ResolvedResources: resolved, BaseSHA: reservation.BaseSHA, ReservedAt: reservation.ReservedAt,
 		}
 		issue.UpdatedAt = reservation.ReservedAt
-		snapshot.Supervisor.State = "running"
+		snapshot.Supervisor.State = SupervisorStateRunning
 		return nil
 	})
 	return snapshot, owner, err
@@ -233,7 +233,7 @@ func ParkIssueLease(issue *Issue, owner LeaseOwner, parkID string, parkedAt time
 	copy.ResolvedResources = append([]string(nil), issue.Lease.ResolvedResources...)
 	copy.ActualResources = append([]string(nil), issue.Lease.ActualResources...)
 	issue.ResourcePark = &ResourceLeasePark{
-		ID: parkID, Status: "parked", OriginalLease: copy, ParkedAt: parkedAt.UTC(),
+		ID: parkID, Status: issuedomain.ResourceParkStatusParked, OriginalLease: copy, ParkedAt: parkedAt.UTC(),
 	}
 	issue.Lease = nil
 	return nil
@@ -258,7 +258,7 @@ func ResumeParkedLease(snapshot *Snapshot, issueNumber int, parkID string, slot 
 		}
 		return LeaseOwner{}, fmt.Errorf("Issue #%d already has an unrelated active lease", issueNumber)
 	}
-	if park.Status != "parked" || park.ResumeOwner != nil || !park.ResumedAt.IsZero() {
+	if park.Status != issuedomain.ResourceParkStatusParked || park.ResumeOwner != nil || !park.ResumedAt.IsZero() {
 		return LeaseOwner{}, fmt.Errorf("Issue #%d resource claim is not parked", issueNumber)
 	}
 	if park.OriginalLease.Owner.Generation != issue.LeaseGeneration {
@@ -285,7 +285,7 @@ func ResumeParkedLease(snapshot *Snapshot, issueNumber int, parkID string, slot 
 	claim.Slot = slot
 	claim.ReservedAt = resumedAt.UTC()
 	issue.Lease = &claim
-	park.Status = "resuming"
+	park.Status = issuedomain.ResourceParkStatusResuming
 	park.ResumedAt = resumedAt.UTC()
 	park.ResumeOwner = &owner
 	return owner, nil
@@ -310,13 +310,13 @@ func ValidateNeedsInputPark(issue *Issue, request *Request) error {
 	if request.RunID == "" || originalOwner.RunID != request.RunID || originalOwner.Generation == 0 {
 		return fmt.Errorf("Issue #%d needs-input resource provenance is inconsistent", issue.Number)
 	}
-	if park.Status != "resumed" {
+	if park.Status != issuedomain.ResourceParkStatusResumed {
 		if issue.RunID == "" || request.RunID != issue.RunID {
 			return fmt.Errorf("Issue #%d needs-input resource provenance is inconsistent", issue.Number)
 		}
 		return nil
 	}
-	if request.Status != "answered" || park.ResumeOwner == nil || park.ResumeOwner.RunID != request.RunID ||
+	if request.Status != issuedomain.RequestStatusAnswered || park.ResumeOwner == nil || park.ResumeOwner.RunID != request.RunID ||
 		park.ResumeOwner.Generation <= originalOwner.Generation || park.ResumeOwner.Generation > issue.LeaseGeneration {
 		return fmt.Errorf("Issue #%d resumed needs-input provenance is inconsistent", issue.Number)
 	}
@@ -407,11 +407,72 @@ func issueOccupiesWorkerSlot(issue *Issue) bool {
 }
 
 func validateResourceLeases(snapshot Snapshot) error {
+	if err := snapshot.Supervisor.State.Validate(); err != nil {
+		return err
+	}
+	if snapshot.Recovery != nil {
+		if err := snapshot.Recovery.Status.Validate(); err != nil {
+			return err
+		}
+	}
+	for id, request := range snapshot.PendingRequests {
+		if request == nil {
+			continue
+		}
+		if err := request.Status.Validate(); err != nil {
+			return fmt.Errorf("request %s: %w", id, err)
+		}
+	}
 	active := []*Issue{}
 	for key, issue := range snapshot.Issues {
 		if issue != nil {
 			if err := issue.Status.Validate(); err != nil {
 				return fmt.Errorf("Issue #%d lifecycle: %w", issue.Number, err)
+			}
+			if err := issue.GitHubSync.Validate(); err != nil {
+				return fmt.Errorf("Issue #%d lifecycle: %w", issue.Number, err)
+			}
+			if issue.EnvironmentResume != nil {
+				if err := issue.EnvironmentResume.Status.Validate(); err != nil {
+					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
+				}
+			}
+			if issue.PullRequestChecksRecovery != nil {
+				if err := issue.PullRequestChecksRecovery.Status.Validate(); err != nil {
+					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
+				}
+			}
+			if issue.AnsweredWorkspaceRecovery != nil {
+				if err := issue.AnsweredWorkspaceRecovery.Status.Validate(); err != nil {
+					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
+				}
+			}
+			if issue.WorkspaceRecovery != nil {
+				if err := issue.WorkspaceRecovery.Status.Validate(); err != nil {
+					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
+				}
+			}
+			if issue.MergedPullRequestAdoption != nil {
+				if err := issue.MergedPullRequestAdoption.Status.Validate(); err != nil {
+					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
+				}
+			}
+			if issue.PublicationRecovery != nil {
+				if err := issue.PublicationRecovery.Status.Validate(); err != nil {
+					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
+				}
+				for _, attempt := range issue.PublicationRecovery.History {
+					if err := attempt.Status.Validate(); err != nil {
+						return fmt.Errorf("Issue #%d publication attempt %d: %w", issue.Number, attempt.Number, err)
+					}
+				}
+			}
+			if issue.ConflictRecovery != nil {
+				for _, attempt := range issue.ConflictRecovery.History {
+					if err := attempt.Status.Validate(); err != nil {
+						return fmt.Errorf("Issue #%d conflict attempt %d: %w", issue.Number, attempt.Number, err)
+					}
+				}
 			}
 		}
 		if issue != nil && issue.ResourcePark != nil {
@@ -436,7 +497,7 @@ func validateResourceLeases(snapshot Snapshot) error {
 					return fmt.Errorf("Issue #%d parked actual resources are not canonical", issue.Number)
 				}
 			}
-			if park.Status != "parked" && park.Status != "resuming" && park.Status != "resumed" {
+			if park.Status != issuedomain.ResourceParkStatusParked && park.Status != issuedomain.ResourceParkStatusResuming && park.Status != issuedomain.ResourceParkStatusResumed {
 				return fmt.Errorf("Issue #%d has invalid resource park status %q", issue.Number, park.Status)
 			}
 			if park.Kind != "" && park.Kind != ResourceParkKindEnvironmentBlock && park.Kind != ResourceParkKindNeedsInput {
@@ -450,19 +511,19 @@ func validateResourceLeases(snapshot Snapshot) error {
 			} else if park.RequestID != "" {
 				return fmt.Errorf("Issue #%d non-input resource park has a request ID", issue.Number)
 			}
-			if park.Status == "parked" && (original.Owner.RunID != issue.RunID || issue.LeaseGeneration != original.Owner.Generation || issue.Lease != nil || park.ResumeOwner != nil || !park.ResumedAt.IsZero()) {
+			if park.Status == issuedomain.ResourceParkStatusParked && (original.Owner.RunID != issue.RunID || issue.LeaseGeneration != original.Owner.Generation || issue.Lease != nil || park.ResumeOwner != nil || !park.ResumedAt.IsZero()) {
 				return fmt.Errorf("Issue #%d parked resource claim is still active", issue.Number)
 			}
 			if park.ResumeOwner != nil && (park.ResumeOwner.RunID != original.Owner.RunID || park.ResumeOwner.Generation <= original.Owner.Generation || park.ResumeOwner.Generation > issue.LeaseGeneration) {
 				return fmt.Errorf("Issue #%d resource park resume owner is invalid", issue.Number)
 			}
-			if park.Status == "resuming" && (original.Owner.RunID != issue.RunID || issue.Lease == nil || park.ResumeOwner == nil || park.ResumeOwner.RunID != issue.RunID || issue.Lease.Owner != *park.ResumeOwner || issue.LeaseGeneration != park.ResumeOwner.Generation || park.ResumedAt.IsZero()) {
+			if park.Status == issuedomain.ResourceParkStatusResuming && (original.Owner.RunID != issue.RunID || issue.Lease == nil || park.ResumeOwner == nil || park.ResumeOwner.RunID != issue.RunID || issue.Lease.Owner != *park.ResumeOwner || issue.LeaseGeneration != park.ResumeOwner.Generation || park.ResumedAt.IsZero()) {
 				return fmt.Errorf("Issue #%d resumed resource claim is inconsistent", issue.Number)
 			}
-			if park.Status == "resumed" && (park.ResumeOwner == nil || park.ResumedAt.IsZero()) {
+			if park.Status == issuedomain.ResourceParkStatusResumed && (park.ResumeOwner == nil || park.ResumedAt.IsZero()) {
 				return fmt.Errorf("Issue #%d completed resource park lacks resume provenance", issue.Number)
 			}
-			if park.Status == "resumed" && issue.LeaseGeneration == park.ResumeOwner.Generation && issue.RunID != park.ResumeOwner.RunID {
+			if park.Status == issuedomain.ResourceParkStatusResumed && issue.LeaseGeneration == park.ResumeOwner.Generation && issue.RunID != park.ResumeOwner.RunID {
 				return fmt.Errorf("Issue #%d completed resource park changed run without a fenced lease transfer", issue.Number)
 			}
 			// A completed park is historical provenance. A fresh retry transfers
@@ -470,7 +531,7 @@ func validateResourceLeases(snapshot Snapshot) error {
 			// retaining the earlier ResumeOwner must not turn that valid transfer
 			// back into an active parked claim. At the resume generation, however,
 			// the owner still has to match exactly so ambiguous state fails closed.
-			if park.Status == "resumed" && issue.Lease != nil &&
+			if park.Status == issuedomain.ResourceParkStatusResumed && issue.Lease != nil &&
 				(issue.Lease.Owner.Generation < park.ResumeOwner.Generation ||
 					(issue.Lease.Owner.Generation == park.ResumeOwner.Generation && issue.Lease.Owner != *park.ResumeOwner)) {
 				return fmt.Errorf("Issue #%d completed resource park has an unrelated active lease", issue.Number)

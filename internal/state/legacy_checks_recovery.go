@@ -16,7 +16,7 @@ const legacyPublisherRepositoryMismatchPrefix = "pull_request_mismatch: Pull Req
 // boundary lost by the v0.6.20 publisher-retry sequence. This compatibility
 // path intentionally recognizes only the complete, ordered legacy chain.
 func (s Store) LegacyPullRequestChecksFailure(issue Issue, repository, baseBranch string) (*PullRequestChecksFailure, error) {
-	if issue.Status != issuedomain.StatusFailed || issue.GitHubSync != "" || issue.FailureKind != "issue" || issue.PullRequestMerged ||
+	if issue.Status != issuedomain.StatusFailed || issue.GitHubSync != issuedomain.GitHubSyncNone || issue.FailureKind != "issue" || issue.PullRequestMerged ||
 		issue.PullRequestChecksFailure != nil || issue.PullRequestChecksRecovery != nil || issue.PublicationFailure != nil ||
 		issue.PublicationRecovery != nil || issue.RunID == "" || issue.Worktree == "" ||
 		issue.Branch == "" || issue.PullRequestURL == "" || issue.PullRequestNumber <= 0 || issue.HeadSHA == "" ||
@@ -42,7 +42,7 @@ func completedLegacyConflictRecovery(issue Issue) bool {
 		return false
 	}
 	last := recovery.History[len(recovery.History)-1]
-	return last.Status == "completed" && last.BaseSHA == recovery.TargetBaseSHA && !last.FinishedAt.IsZero()
+	return last.Status == issuedomain.ConflictAttemptStatusCompleted && last.BaseSHA == recovery.TargetBaseSHA && !last.FinishedAt.IsZero()
 }
 
 func legacyPullRequestChecksFailureFromEvents(events []Event, issue Issue, repository, baseBranch string) (*PullRequestChecksFailure, error) {

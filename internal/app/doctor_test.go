@@ -255,8 +255,8 @@ func TestFaultDoctorDetectsCorruptStateWithoutModifyingIt(t *testing.T) {
 }
 
 func TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog(t *testing.T) {
-	for _, supervisorState := range []string{"blocked", "stopped"} {
-		t.Run(supervisorState, func(t *testing.T) {
+	for _, supervisorState := range []state.SupervisorState{state.SupervisorStateBlocked, state.SupervisorStateStopped} {
+		t.Run(string(supervisorState), func(t *testing.T) {
 			repo, l := testEnvironment(t)
 			if err := l.Ensure(); err != nil {
 				t.Fatal(err)
@@ -267,7 +267,7 @@ func TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog(t *testing.T) {
 			if err := store.Initialize(); err != nil {
 				t.Fatal(err)
 			}
-			_, err := store.Update("fixture_"+supervisorState, 0, "", nil, func(snapshot *state.Snapshot) error {
+			_, err := store.Update("fixture_"+string(supervisorState), 0, "", nil, func(snapshot *state.Snapshot) error {
 				snapshot.Supervisor.State = supervisorState
 				snapshot.Supervisor.Message = "authentication expired"
 				return nil
@@ -278,9 +278,9 @@ func TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(store.Dir, "launchd.stderr.log"), []byte("older\nlatest failure context\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			code := "SUPERVISOR_" + strings.ToUpper(supervisorState)
+			code := "SUPERVISOR_" + strings.ToUpper(string(supervisorState))
 			item := diagnosticByCode(t, diagnoseDurableState(l, entry, cfg), code)
-			if item.OK || !strings.Contains(item.Detail, "fixture_"+supervisorState) || !strings.Contains(item.Detail, "latest failure context") || len(item.Remediations) < 2 {
+			if item.OK || !strings.Contains(item.Detail, "fixture_"+string(supervisorState)) || !strings.Contains(item.Detail, "latest failure context") || len(item.Remediations) < 2 {
 				t.Fatalf("diagnostic=%+v", item)
 			}
 			for _, fix := range item.Remediations {

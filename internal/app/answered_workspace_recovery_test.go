@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,9 +52,9 @@ func TestRecoverAnsweredWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 	}
 	after, _ := fixture.store.Load()
 	item := after.Issues["449"]
-	if item.Status != "resume_pending" || item.GitHubSync != "" || item.Workspace == nil ||
+	if item.Status != issuedomain.StatusResumePending || item.GitHubSync != issuedomain.GitHubSyncNone || item.Workspace == nil ||
 		item.LeaseGeneration != 3 || item.Lease.Owner.Generation != 3 || item.ResourcePark.ResumeOwner.Generation != 2 ||
-		item.AnsweredWorkspaceRecovery == nil || item.AnsweredWorkspaceRecovery.Status != "github_synced" ||
+		item.AnsweredWorkspaceRecovery == nil || item.AnsweredWorkspaceRecovery.Status != issuedomain.AnsweredWorkspaceRecoveryStatusGitHubSynced ||
 		!item.AnsweredWorkspaceRecovery.OperatorConfirmed || !item.AnsweredWorkspaceRecovery.OldProvenanceMissing {
 		t.Fatalf("recovered issue=%+v", item)
 	}
@@ -98,8 +99,8 @@ func TestRecoverAnsweredWorkspaceAfterVerifiedGenericProvenanceRecovery(t *testi
 	}
 	after, _ := fixture.store.Load()
 	item := after.Issues["449"]
-	if item.Status != "resume_pending" || item.LeaseGeneration != 3 || item.AnsweredWorkspaceRecovery == nil ||
-		item.AnsweredWorkspaceRecovery.Status != "github_synced" || item.WorkspaceRecovery == nil ||
+	if item.Status != issuedomain.StatusResumePending || item.LeaseGeneration != 3 || item.AnsweredWorkspaceRecovery == nil ||
+		item.AnsweredWorkspaceRecovery.Status != issuedomain.AnsweredWorkspaceRecoveryStatusGitHubSynced || item.WorkspaceRecovery == nil ||
 		item.WorkspaceRecovery.ID != originalRecoveryID || *item.Workspace != originalWorkspace {
 		t.Fatalf("verified provenance was not retained across lifecycle recovery: %+v", item)
 	}
@@ -155,7 +156,7 @@ func TestValidateAnsweredWorkspaceRemoteRequiresExactMarkers(t *testing.T) {
 	cfg.GitHub.ExcludeLabels = []string{"blocked", "do-not-automate"}
 	reason := "worker workspace validation failed for /worktree: saved workspace provenance is missing"
 	digest := sha256.Sum256([]byte(reason))
-	issue := &state.Issue{Number: 449, Status: "blocked", LastError: reason}
+	issue := &state.Issue{Number: 449, Status: issuedomain.StatusBlocked, LastError: reason}
 	request := &state.Request{ID: "req_exact"}
 	remote := gh.RemoteState{Issue: gh.Issue{
 		Number: 449, State: "OPEN", Labels: []string{"blocked"},
@@ -193,8 +194,8 @@ func TestFaultRecoverAnsweredWorkspaceRetriesGitHubBoundaryWithoutRefencing(t *t
 		t.Fatal("injected GitHub synchronization failure was ignored")
 	}
 	pending, _ := fixture.store.Load()
-	if pending.Issues["449"].LeaseGeneration != 3 || pending.Issues["449"].GitHubSync != "answered_workspace_recovery" ||
-		pending.Issues["449"].AnsweredWorkspaceRecovery.Status != "requested" {
+	if pending.Issues["449"].LeaseGeneration != 3 || pending.Issues["449"].GitHubSync != issuedomain.GitHubSyncAnsweredWorkspaceRecovery ||
+		pending.Issues["449"].AnsweredWorkspaceRecovery.Status != issuedomain.AnsweredWorkspaceRecoveryStatusRequested {
 		t.Fatalf("fault boundary was not durable: %+v", pending.Issues["449"])
 	}
 	out.Reset()
@@ -203,8 +204,8 @@ func TestFaultRecoverAnsweredWorkspaceRetriesGitHubBoundaryWithoutRefencing(t *t
 		t.Fatalf("retry code=%d stderr=%s", code, stderr.String())
 	}
 	resumed, _ := fixture.store.Load()
-	if resumed.Issues["449"].LeaseGeneration != 3 || resumed.Issues["449"].GitHubSync != "" ||
-		resumed.Issues["449"].AnsweredWorkspaceRecovery.Status != "github_synced" {
+	if resumed.Issues["449"].LeaseGeneration != 3 || resumed.Issues["449"].GitHubSync != issuedomain.GitHubSyncNone ||
+		resumed.Issues["449"].AnsweredWorkspaceRecovery.Status != issuedomain.AnsweredWorkspaceRecoveryStatusGitHubSynced {
 		t.Fatalf("fault retry duplicated or failed recovery: %+v", resumed.Issues["449"])
 	}
 }
@@ -236,7 +237,7 @@ func TestRecoverAnsweredWorkspaceParallelInvocationsFenceOnce(t *testing.T) {
 	}
 	snapshot, _ := fixture.store.Load()
 	item := snapshot.Issues["449"]
-	if item.LeaseGeneration != 3 || item.AnsweredWorkspaceRecovery == nil || item.AnsweredWorkspaceRecovery.Status != "github_synced" {
+	if item.LeaseGeneration != 3 || item.AnsweredWorkspaceRecovery == nil || item.AnsweredWorkspaceRecovery.Status != issuedomain.AnsweredWorkspaceRecoveryStatusGitHubSynced {
 		t.Fatalf("parallel recovery duplicated or lost its fence: %+v", item)
 	}
 }
@@ -277,7 +278,7 @@ func TestRecoverAnsweredWorkspaceRejectsAnotherPendingRequestWithoutMutation(t *
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	if _, err := fixture.store.Update("fixture_pending_request", 449, "run_0c0123ac8570c0a8", nil, func(snapshot *state.Snapshot) error {
 		snapshot.PendingRequests["req_other"] = &state.Request{
-			ID: "req_other", IssueNumber: 449, RunID: "run_0c0123ac8570c0a8", Status: "pending", Question: "Other?",
+			ID: "req_other", IssueNumber: 449, RunID: "run_0c0123ac8570c0a8", Status: issuedomain.RequestStatusPending, Question: "Other?",
 		}
 		return nil
 	}); err != nil {
@@ -414,14 +415,14 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 		t.Fatal(err)
 	}
 	if _, err := store.Update("issue_claimed", 449, runID, map[string]string{"title": "Sanitized 449"}, func(s *state.Snapshot) error {
-		s.Issues["449"].Status = "claimed"
+		s.Issues["449"].Status = issuedomain.StatusClaimed
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = store.Update("worker_started", 449, runID, map[string]string{"worktree": worktreePath, "branch": branch}, func(s *state.Snapshot) error {
 		item := s.Issues["449"]
-		item.Status, item.Worktree, item.Branch = "running", worktreePath, branch
+		item.Status, item.Worktree, item.Branch = issuedomain.StatusRunning, worktreePath, branch
 		item.Attempts = 1
 		return nil
 	})
@@ -450,18 +451,18 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 			return err
 		}
 		item.ResourcePark.Kind, item.ResourcePark.RequestID = state.ResourceParkKindNeedsInput, requestID
-		item.Status, item.GitHubSync = "needs_input", "needs_input"
+		item.Status, item.GitHubSync = issuedomain.StatusNeedsInput, issuedomain.GitHubSyncNeedsInput
 		s.PendingRequests[requestID] = &state.Request{
 			ID: requestID, IssueNumber: 449, Question: "Which extent should be used?", Reason: "product behavior", Recommended: "121",
 			Options: []state.Option{{ID: "121", Label: "Extent 121"}}, AllowFreeText: true, RunID: runID,
-			ResourceParkID: parkID, ReleasedOwner: &owner, Status: "pending", CreatedAt: times[4],
+			ResourceParkID: parkID, ReleasedOwner: &owner, Status: issuedomain.RequestStatusPending, CreatedAt: times[4],
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Update("github_state_synced", 449, runID, map[string]string{"state": "needs_input"}, func(s *state.Snapshot) error {
-		s.Issues["449"].GitHubSync = ""
+		s.Issues["449"].GitHubSync = issuedomain.GitHubSyncNone
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -470,13 +471,13 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 	payload := map[string]any{"request_id": requestID}
 	if _, err := store.Update("answer_recorded", 449, runID, payload, func(s *state.Snapshot) error {
 		item, request := s.Issues["449"], s.PendingRequests[requestID]
-		request.Status, request.Answer, request.AnsweredAt = "answered", "121", &answerTime
+		request.Status, request.Answer, request.AnsweredAt = issuedomain.RequestStatusAnswered, "121", &answerTime
 		resumeOwner, err := state.ResumeParkedLease(s, 449, parkID, 0, answerTime)
 		if err != nil {
 			return err
 		}
 		payload["lease_owner"], payload["lease_slot"] = resumeOwner, 0
-		item.Status = "resume_pending"
+		item.Status = issuedomain.StatusResumePending
 		item.Answers = []state.AnswerRecord{{RequestID: requestID, Question: request.Question, Answer: request.Answer, AnsweredAt: answerTime}}
 		return nil
 	}); err != nil {
@@ -484,7 +485,7 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 	}
 	if _, err := store.Update("worker_started", 449, runID, map[string]string{"mode": "user_answer_resume"}, func(s *state.Snapshot) error {
 		item := s.Issues["449"]
-		item.Status, item.ResourcePark.Status = "running", "resumed"
+		item.Status, item.ResourcePark.Status = issuedomain.StatusRunning, issuedomain.ResourceParkStatusResumed
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -500,14 +501,14 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 	validation := worktree.LaunchValidation{Valid: true, ExpectedCWD: worktreePath, CanonicalCWD: worktreePath, TopLevel: worktreePath, Branch: branch, CommonDir: commonDir, MainCheckout: mainCheckout, Checks: checks}
 	if _, err := store.Update("worker_workspace_rejected", 449, runID, map[string]any{"expected_cwd": worktreePath, "error": reason, "run_id": runID, "validation": validation}, func(s *state.Snapshot) error {
 		item := s.Issues["449"]
-		item.Status, item.FailureKind, item.LastError, item.GitHubSync = "blocked", "issue", reason, "blocked"
+		item.Status, item.FailureKind, item.LastError, item.GitHubSync = issuedomain.StatusBlocked, "issue", reason, issuedomain.GitHubSyncBlocked
 		item.BlockedCause = &state.BlockedCause{Origin: "supervisor", Kind: "worker_workspace", Resumable: false, Reason: reason, BlockedAt: times[8]}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Update("github_state_synced", 449, runID, map[string]string{"state": "blocked"}, func(s *state.Snapshot) error {
-		s.Issues["449"].GitHubSync = ""
+		s.Issues["449"].GitHubSync = issuedomain.GitHubSyncNone
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -553,8 +554,8 @@ func persistVerifiedAnsweredWorkspace(t *testing.T, fixture answeredWorkspaceApp
 		current := s.Issues["449"]
 		current.Workspace = &workspace
 		current.WorkspaceRecovery = &state.WorkspaceProvenanceRecovery{
-			ID: recoveryID, Status: "verified", ConfirmedAt: now, OperatorConfirmed: true, OldProvenanceMissing: true,
-			PreviousStatus: current.Status.String(), RunID: current.RunID, HeadSHA: inspection.Head, WorktreeSHA256: digest,
+			ID: recoveryID, Status: issuedomain.WorkspaceProvenanceRecoveryStatusVerified, ConfirmedAt: now, OperatorConfirmed: true, OldProvenanceMissing: true,
+			PreviousStatus: current.Status, RunID: current.RunID, HeadSHA: inspection.Head, WorktreeSHA256: digest,
 			ExpectedWorkspace: workspace, ActualWorkspace: workspace, ValidatorChecks: cloneBoolMap(validation.Checks),
 		}
 		current.UpdatedAt = now

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,7 +110,7 @@ esac
 	}
 	_, err = store.Update("worker_environment_blocked", 129, runID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["129"]
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		item.Worktree = managedWorktree
 		item.Branch = branch
 		item.Attempts = 3
@@ -170,9 +171,9 @@ esac
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["129"]
-	if item.Status != "completed" || item.Lease != nil || !item.PullRequestMerged || item.PullRequestURL != "https://example.test/pull/132" ||
-		item.PullRequestNumber != 132 || item.HeadSHA != headSHA || item.GitHubSync != "" || item.MergedPullRequestAdoption == nil ||
-		item.MergedPullRequestAdoption.Status != "synced" || item.MergedPullRequestAdoption.MergeSHA != mergeSHA ||
+	if item.Status != issuedomain.StatusCompleted || item.Lease != nil || !item.PullRequestMerged || item.PullRequestURL != "https://example.test/pull/132" ||
+		item.PullRequestNumber != 132 || item.HeadSHA != headSHA || item.GitHubSync != issuedomain.GitHubSyncNone || item.MergedPullRequestAdoption == nil ||
+		item.MergedPullRequestAdoption.Status != issuedomain.MergedPullRequestAdoptionStatusSynced || item.MergedPullRequestAdoption.MergeSHA != mergeSHA ||
 		item.Attempts != 3 || item.Continuations != 2 || item.SessionID != "session-129" || item.Session == nil {
 		t.Fatalf("adopted state is inconsistent: %+v", item)
 	}
@@ -191,7 +192,7 @@ esac
 func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 	repo, _ := testEnvironment(t)
 	cfg := mustConfig(t, repo)
-	current := &state.Issue{Number: 129, Status: "blocked", Branch: "codex/issue-129-adopt"}
+	current := &state.Issue{Number: 129, Status: issuedomain.StatusBlocked, Branch: "codex/issue-129-adopt"}
 	mergedAt := time.Now().UTC()
 	baseline := github.RemoteState{
 		Issue: github.Issue{Number: 129, State: "CLOSED", Labels: []string{"blocked"}, Comments: []string{"<!-- codex-issue-loop:failed:129 -->"}},
@@ -199,7 +200,7 @@ func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 			HeadRefName: current.Branch, BaseRefName: cfg.Git.BaseBranch, HeadSHA: "head", MergeCommitSHA: "merge", HeadRepository: cfg.GitHub.Repo}},
 	}
 	expected := github.MergedPullRequestAdoptionExpectation{
-		IssueNumber: current.Number, PreviousStatus: current.Status.String(), Branch: current.Branch,
+		IssueNumber: current.Number, PreviousStatus: current.Status, Branch: current.Branch,
 		BaseBranch: cfg.Git.BaseBranch, HeadSHA: "head",
 	}
 	if _, err := github.ValidateMergedPullRequestAdoption(cfg, baseline, expected); err != nil {

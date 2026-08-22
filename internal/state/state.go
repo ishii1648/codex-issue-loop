@@ -37,15 +37,15 @@ func (e SchemaVersionError) Error() string {
 }
 
 type Supervisor struct {
-	State               string     `json:"state"`
-	PID                 int        `json:"pid,omitempty"`
-	StartedAt           time.Time  `json:"started_at,omitempty"`
-	UpdatedAt           time.Time  `json:"updated_at"`
-	Message             string     `json:"message,omitempty"`
-	FailureKind         string     `json:"failure_kind,omitempty"`
-	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
-	RetryAfter          *time.Time `json:"retry_after,omitempty"`
-	RateLimit           *RateLimit `json:"rate_limit,omitempty"`
+	State               SupervisorState `json:"state"`
+	PID                 int             `json:"pid,omitempty"`
+	StartedAt           time.Time       `json:"started_at,omitempty"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	Message             string          `json:"message,omitempty"`
+	FailureKind         string          `json:"failure_kind,omitempty"`
+	ConsecutiveFailures int             `json:"consecutive_failures,omitempty"`
+	RetryAfter          *time.Time      `json:"retry_after,omitempty"`
+	RateLimit           *RateLimit      `json:"rate_limit,omitempty"`
 }
 
 type RateLimit struct {
@@ -101,27 +101,27 @@ type ResourceLease struct {
 // active lease; keeping it separate from Issue.Lease makes it visible to
 // operators without participating in resource admission.
 type ResourceLeasePark struct {
-	ID            string        `json:"id"`
-	Kind          string        `json:"kind,omitempty"`
-	RequestID     string        `json:"request_id,omitempty"`
-	Status        string        `json:"status"`
-	OriginalLease ResourceLease `json:"original_lease"`
-	ParkedAt      time.Time     `json:"parked_at"`
-	ResumedAt     time.Time     `json:"resumed_at,omitempty"`
-	ResumeOwner   *LeaseOwner   `json:"resume_owner,omitempty"`
+	ID            string                         `json:"id"`
+	Kind          string                         `json:"kind,omitempty"`
+	RequestID     string                         `json:"request_id,omitempty"`
+	Status        issuedomain.ResourceParkStatus `json:"status"`
+	OriginalLease ResourceLease                  `json:"original_lease"`
+	ParkedAt      time.Time                      `json:"parked_at"`
+	ResumedAt     time.Time                      `json:"resumed_at,omitempty"`
+	ResumeOwner   *LeaseOwner                    `json:"resume_owner,omitempty"`
 }
 
 // ConflictAttempt is an append-only audit record for one autonomous conflict
 // recovery worker invocation. A new base SHA starts a new per-base budget while
 // preserving the earlier records.
 type ConflictAttempt struct {
-	Number        int       `json:"number"`
-	BaseSHA       string    `json:"base_sha"`
-	Status        string    `json:"status"`
-	Reason        string    `json:"reason,omitempty"`
-	ConflictFiles []string  `json:"conflict_files,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
-	FinishedAt    time.Time `json:"finished_at,omitempty"`
+	Number        int                               `json:"number"`
+	BaseSHA       string                            `json:"base_sha"`
+	Status        issuedomain.ConflictAttemptStatus `json:"status"`
+	Reason        string                            `json:"reason,omitempty"`
+	ConflictFiles []string                          `json:"conflict_files,omitempty"`
+	StartedAt     time.Time                         `json:"started_at"`
+	FinishedAt    time.Time                         `json:"finished_at,omitempty"`
 }
 
 type ConflictVerification struct {
@@ -164,41 +164,41 @@ type BlockedCause struct {
 }
 
 type EnvironmentResume struct {
-	ID             string    `json:"id"`
-	Status         string    `json:"status"`
-	ConfirmedAt    time.Time `json:"confirmed_at"`
-	PreviousReason string    `json:"previous_reason"`
-	BaseSHA        string    `json:"base_sha,omitempty"`
-	CurrentBaseSHA string    `json:"current_base_sha,omitempty"`
+	ID             string                              `json:"id"`
+	Status         issuedomain.EnvironmentResumeStatus `json:"status"`
+	ConfirmedAt    time.Time                           `json:"confirmed_at"`
+	PreviousReason string                              `json:"previous_reason"`
+	BaseSHA        string                              `json:"base_sha,omitempty"`
+	CurrentBaseSHA string                              `json:"current_base_sha,omitempty"`
 }
 
 type PublicationRecoveryAttempt struct {
-	Number     int       `json:"number"`
-	Generation int       `json:"generation"`
-	Status     string    `json:"status"`
-	Reason     string    `json:"reason,omitempty"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at,omitempty"`
+	Number     int                                          `json:"number"`
+	Generation int                                          `json:"generation"`
+	Status     issuedomain.PublicationRecoveryAttemptStatus `json:"status"`
+	Reason     string                                       `json:"reason,omitempty"`
+	StartedAt  time.Time                                    `json:"started_at"`
+	FinishedAt time.Time                                    `json:"finished_at,omitempty"`
 }
 
 // PublicationRecovery records an operator-confirmed, publication-only retry.
 // Worker attempt counters and history are intentionally separate and are never
 // reset by this recovery path.
 type PublicationRecovery struct {
-	ID               string                       `json:"id"`
-	Status           string                       `json:"status"`
-	Generation       int                          `json:"generation"`
-	Attempts         int                          `json:"attempts"`
-	MaxAttempts      int                          `json:"max_attempts"`
-	History          []PublicationRecoveryAttempt `json:"history,omitempty"`
-	ConfirmedAt      time.Time                    `json:"confirmed_at"`
-	PreviousReason   string                       `json:"previous_reason"`
-	ResultSHA256     string                       `json:"result_sha256"`
-	Summary          string                       `json:"summary"`
-	ExpectedHeadSHA  string                       `json:"expected_head_sha"`
-	WorktreeSHA256   string                       `json:"worktree_sha256"`
-	OriginalDirty    bool                         `json:"original_dirty"`
-	OriginalUnpushed bool                         `json:"original_unpushed_commits"`
+	ID               string                                `json:"id"`
+	Status           issuedomain.PublicationRecoveryStatus `json:"status"`
+	Generation       int                                   `json:"generation"`
+	Attempts         int                                   `json:"attempts"`
+	MaxAttempts      int                                   `json:"max_attempts"`
+	History          []PublicationRecoveryAttempt          `json:"history,omitempty"`
+	ConfirmedAt      time.Time                             `json:"confirmed_at"`
+	PreviousReason   string                                `json:"previous_reason"`
+	ResultSHA256     string                                `json:"result_sha256"`
+	Summary          string                                `json:"summary"`
+	ExpectedHeadSHA  string                                `json:"expected_head_sha"`
+	WorktreeSHA256   string                                `json:"worktree_sha256"`
+	OriginalDirty    bool                                  `json:"original_dirty"`
+	OriginalUnpushed bool                                  `json:"original_unpushed_commits"`
 }
 
 const (
@@ -228,14 +228,14 @@ type PullRequestChecksFailure struct {
 // an externally repaired head to the existing Pull Request lifecycle. Worker
 // attempts, continuations, run history, and leases are deliberately separate.
 type PullRequestChecksRecovery struct {
-	ID             string    `json:"id"`
-	Status         string    `json:"status"`
-	Generation     int       `json:"generation"`
-	ConfirmedAt    time.Time `json:"confirmed_at"`
-	PreviousReason string    `json:"previous_reason"`
-	OldHeadSHA     string    `json:"old_head_sha"`
-	NewHeadSHA     string    `json:"new_head_sha"`
-	ChecksStatus   string    `json:"checks_status"`
+	ID             string                                      `json:"id"`
+	Status         issuedomain.PullRequestChecksRecoveryStatus `json:"status"`
+	Generation     int                                         `json:"generation"`
+	ConfirmedAt    time.Time                                   `json:"confirmed_at"`
+	PreviousReason string                                      `json:"previous_reason"`
+	OldHeadSHA     string                                      `json:"old_head_sha"`
+	NewHeadSHA     string                                      `json:"new_head_sha"`
+	ChecksStatus   string                                      `json:"checks_status"`
 }
 
 // WorkerWorkspace is immutable provenance captured before the first worker
@@ -256,21 +256,21 @@ type WorkerWorkspace struct {
 // provenance was introduced, then failed solely because Workspace was absent.
 // It is deliberately separate from EnvironmentResume.
 type AnsweredWorkspaceRecovery struct {
-	ID                   string          `json:"id"`
-	Status               string          `json:"status"`
-	ConfirmedAt          time.Time       `json:"confirmed_at"`
-	OperatorConfirmed    bool            `json:"operator_confirmed"`
-	OldProvenanceMissing bool            `json:"old_provenance_missing"`
-	RequestID            string          `json:"request_id"`
-	ResourceParkID       string          `json:"resource_park_id"`
-	AnswerSHA256         string          `json:"answer_sha256"`
-	HeadSHA              string          `json:"head_sha"`
-	WorktreeSHA256       string          `json:"worktree_sha256"`
-	ExpectedWorkspace    WorkerWorkspace `json:"expected_workspace"`
-	ActualWorkspace      WorkerWorkspace `json:"actual_workspace"`
-	ValidatorChecks      map[string]bool `json:"validator_checks"`
-	OldOwner             LeaseOwner      `json:"old_owner"`
-	NewOwner             LeaseOwner      `json:"new_owner"`
+	ID                   string                                      `json:"id"`
+	Status               issuedomain.AnsweredWorkspaceRecoveryStatus `json:"status"`
+	ConfirmedAt          time.Time                                   `json:"confirmed_at"`
+	OperatorConfirmed    bool                                        `json:"operator_confirmed"`
+	OldProvenanceMissing bool                                        `json:"old_provenance_missing"`
+	RequestID            string                                      `json:"request_id"`
+	ResourceParkID       string                                      `json:"resource_park_id"`
+	AnswerSHA256         string                                      `json:"answer_sha256"`
+	HeadSHA              string                                      `json:"head_sha"`
+	WorktreeSHA256       string                                      `json:"worktree_sha256"`
+	ExpectedWorkspace    WorkerWorkspace                             `json:"expected_workspace"`
+	ActualWorkspace      WorkerWorkspace                             `json:"actual_workspace"`
+	ValidatorChecks      map[string]bool                             `json:"validator_checks"`
+	OldOwner             LeaseOwner                                  `json:"old_owner"`
+	NewOwner             LeaseOwner                                  `json:"new_owner"`
 }
 
 // WorkspaceProvenanceRecovery records an operator-confirmed, validation-only
@@ -278,18 +278,18 @@ type AnsweredWorkspaceRecovery struct {
 // record. It deliberately does not authorize a lifecycle transition, acquire
 // a lease, or mutate GitHub state.
 type WorkspaceProvenanceRecovery struct {
-	ID                   string          `json:"id"`
-	Status               string          `json:"status"`
-	ConfirmedAt          time.Time       `json:"confirmed_at"`
-	OperatorConfirmed    bool            `json:"operator_confirmed"`
-	OldProvenanceMissing bool            `json:"old_provenance_missing"`
-	PreviousStatus       string          `json:"previous_status"`
-	RunID                string          `json:"run_id"`
-	HeadSHA              string          `json:"head_sha"`
-	WorktreeSHA256       string          `json:"worktree_sha256"`
-	ExpectedWorkspace    WorkerWorkspace `json:"expected_workspace"`
-	ActualWorkspace      WorkerWorkspace `json:"actual_workspace"`
-	ValidatorChecks      map[string]bool `json:"validator_checks"`
+	ID                   string                                        `json:"id"`
+	Status               issuedomain.WorkspaceProvenanceRecoveryStatus `json:"status"`
+	ConfirmedAt          time.Time                                     `json:"confirmed_at"`
+	OperatorConfirmed    bool                                          `json:"operator_confirmed"`
+	OldProvenanceMissing bool                                          `json:"old_provenance_missing"`
+	PreviousStatus       issuedomain.Status                            `json:"previous_status"`
+	RunID                string                                        `json:"run_id"`
+	HeadSHA              string                                        `json:"head_sha"`
+	WorktreeSHA256       string                                        `json:"worktree_sha256"`
+	ExpectedWorkspace    WorkerWorkspace                               `json:"expected_workspace"`
+	ActualWorkspace      WorkerWorkspace                               `json:"actual_workspace"`
+	ValidatorChecks      map[string]bool                               `json:"validator_checks"`
 }
 
 // Matches reports whether immutable saved provenance identifies the validated
@@ -306,19 +306,19 @@ func (w WorkerWorkspace) Matches(path, branch, repoID, repository string, reposi
 // It exists only for publication that happened outside the supervisor after a
 // worker stopped, and is never used to infer or adopt an open Pull Request.
 type MergedPullRequestAdoption struct {
-	ID                string    `json:"id"`
-	Status            string    `json:"status"`
-	Generation        int       `json:"generation"`
-	ConfirmedAt       time.Time `json:"confirmed_at"`
-	AdoptedAt         time.Time `json:"adopted_at"`
-	PreviousStatus    string    `json:"previous_status"`
-	PreviousReason    string    `json:"previous_reason"`
-	PullRequestURL    string    `json:"pull_request_url"`
-	PullRequestNumber int       `json:"pull_request_number"`
-	Branch            string    `json:"branch"`
-	HeadSHA           string    `json:"head_sha"`
-	MergeSHA          string    `json:"merge_sha"`
-	BaseBranch        string    `json:"base_branch"`
+	ID                string                                      `json:"id"`
+	Status            issuedomain.MergedPullRequestAdoptionStatus `json:"status"`
+	Generation        int                                         `json:"generation"`
+	ConfirmedAt       time.Time                                   `json:"confirmed_at"`
+	AdoptedAt         time.Time                                   `json:"adopted_at"`
+	PreviousStatus    issuedomain.Status                          `json:"previous_status"`
+	PreviousReason    string                                      `json:"previous_reason"`
+	PullRequestURL    string                                      `json:"pull_request_url"`
+	PullRequestNumber int                                         `json:"pull_request_number"`
+	Branch            string                                      `json:"branch"`
+	HeadSHA           string                                      `json:"head_sha"`
+	MergeSHA          string                                      `json:"merge_sha"`
+	BaseBranch        string                                      `json:"base_branch"`
 }
 
 type Issue struct {
@@ -349,7 +349,7 @@ type Issue struct {
 	PullRequestNumber         int                          `json:"pull_request_number,omitempty"`
 	HeadSHA                   string                       `json:"head_sha,omitempty"`
 	PullRequestMerged         bool                         `json:"pull_request_merged,omitempty"`
-	GitHubSync                string                       `json:"github_sync,omitempty"`
+	GitHubSync                issuedomain.GitHubSync       `json:"github_sync,omitempty"`
 	FailureKind               string                       `json:"failure_kind,omitempty"`
 	LastError                 string                       `json:"last_error,omitempty"`
 	RetryAfter                *time.Time                   `json:"retry_after,omitempty"`
@@ -377,28 +377,28 @@ type Option struct {
 }
 
 type Request struct {
-	ID             string             `json:"id"`
-	IssueNumber    int                `json:"issue_number"`
-	Question       string             `json:"question"`
-	Reason         string             `json:"reason,omitempty"`
-	Recommended    string             `json:"recommended_option,omitempty"`
-	Options        []Option           `json:"options,omitempty"`
-	AllowFreeText  bool               `json:"allow_free_text"`
-	ResumeStatus   issuedomain.Status `json:"resume_status,omitempty"`
-	RunID          string             `json:"run_id,omitempty"`
-	ResourceParkID string             `json:"resource_park_id,omitempty"`
-	ReleasedOwner  *LeaseOwner        `json:"released_owner,omitempty"`
-	Status         string             `json:"status"`
-	Answer         string             `json:"answer,omitempty"`
-	CreatedAt      time.Time          `json:"created_at"`
-	AnsweredAt     *time.Time         `json:"answered_at,omitempty"`
+	ID             string                    `json:"id"`
+	IssueNumber    int                       `json:"issue_number"`
+	Question       string                    `json:"question"`
+	Reason         string                    `json:"reason,omitempty"`
+	Recommended    string                    `json:"recommended_option,omitempty"`
+	Options        []Option                  `json:"options,omitempty"`
+	AllowFreeText  bool                      `json:"allow_free_text"`
+	ResumeStatus   issuedomain.Status        `json:"resume_status,omitempty"`
+	RunID          string                    `json:"run_id,omitempty"`
+	ResourceParkID string                    `json:"resource_park_id,omitempty"`
+	ReleasedOwner  *LeaseOwner               `json:"released_owner,omitempty"`
+	Status         issuedomain.RequestStatus `json:"status"`
+	Answer         string                    `json:"answer,omitempty"`
+	CreatedAt      time.Time                 `json:"created_at"`
+	AnsweredAt     *time.Time                `json:"answered_at,omitempty"`
 }
 
 type Recovery struct {
-	Status     string    `json:"status"`
-	Reason     string    `json:"reason"`
-	BackupDir  string    `json:"backup_dir"`
-	DetectedAt time.Time `json:"detected_at"`
+	Status     RecoveryState `json:"status"`
+	Reason     string        `json:"reason"`
+	BackupDir  string        `json:"backup_dir"`
+	DetectedAt time.Time     `json:"detected_at"`
 }
 
 type Snapshot struct {
@@ -473,7 +473,7 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if snapshot.Recovery != nil && snapshot.Recovery.Status == "blocked" {
+	if snapshot.Recovery != nil && snapshot.Recovery.Status == RecoveryStateBlocked {
 		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
 	}
 	if err := s.rotateEventsUnlocked(snapshot); err != nil {
@@ -657,7 +657,7 @@ func unlock(f *os.File) {
 func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 	requests := make([]string, 0)
 	for id, request := range s.PendingRequests {
-		if request.Status == "pending" {
+		if request.Status == issuedomain.RequestStatusPending {
 			requests = append(requests, id)
 		}
 	}
@@ -680,12 +680,12 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			return "recoverable_checks_failure", true
 		}
 	}
-	if s.Supervisor.State == "blocked" || s.Supervisor.State == "stopped" {
-		return s.Supervisor.State, true
+	if s.Supervisor.State == SupervisorStateBlocked || s.Supervisor.State == SupervisorStateStopped {
+		return string(s.Supervisor.State), true
 	}
-	if untilIdle && s.Supervisor.State == "polling" {
+	if untilIdle && s.Supervisor.State == SupervisorStatePolling {
 		for _, issue := range s.Issues {
-			if issue.GitHubSync != "" {
+			if issue.GitHubSync.Pending() {
 				return "", false
 			}
 			if issue.Status.PreventsIdle() {

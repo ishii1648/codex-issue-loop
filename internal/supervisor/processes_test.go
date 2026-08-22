@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -45,7 +46,7 @@ func TestStopWorkersTerminatesAndRecordsEveryIssueIndependently(t *testing.T) {
 		}
 		_, err = loop.Store.Update("running", number, run, nil, func(snapshot *state.Snapshot) error {
 			item := snapshot.Issues[strconv.Itoa(number)]
-			item.Status, item.WorkerPID, item.WorkerPGID = "running", 100+number, 100+number
+			item.Status, item.WorkerPID, item.WorkerPGID = issuedomain.StatusRunning, 100+number, 100+number
 			return nil
 		})
 		if err != nil {
@@ -69,7 +70,7 @@ func TestStopWorkersTerminatesAndRecordsEveryIssueIndependently(t *testing.T) {
 	}
 	for _, key := range []string{"1", "2"} {
 		issue := snapshot.Issues[key]
-		if issue.Status != "retry_wait" || issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease == nil || issue.LastError != "test stop" {
+		if issue.Status != issuedomain.StatusRetryWait || issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease == nil || issue.LastError != "test stop" {
 			t.Fatalf("Issue %s=%+v", key, issue)
 		}
 	}
@@ -78,7 +79,7 @@ func TestStopWorkersTerminatesAndRecordsEveryIssueIndependently(t *testing.T) {
 func TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{Number: 1, RunID: "run_1", Status: "running", WorkerPID: 101, WorkerPGID: 101}
+		snapshot.Issues["1"] = &state.Issue{Number: 1, RunID: "run_1", Status: issuedomain.StatusRunning, WorkerPID: 101, WorkerPGID: 101}
 		return nil
 	})
 	if err != nil {
@@ -147,7 +148,7 @@ func TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases(t *testing.T)
 		}
 		_, err = loop.Store.Update("worker_process_started", number, runID, nil, func(snapshot *state.Snapshot) error {
 			item := snapshot.Issues[strconv.Itoa(number)]
-			item.Status = "running"
+			item.Status = issuedomain.StatusRunning
 			item.WorkerPID = command.Process.Pid
 			item.WorkerPGID = command.Process.Pid
 			return nil
@@ -193,7 +194,7 @@ func TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases(t *testing.T)
 	}
 	for _, key := range []string{"1", "2"} {
 		item := loaded.Issues[key]
-		if item.Status != "retry_wait" || item.WorkerPID != 0 || item.WorkerPGID != 0 || item.Lease == nil {
+		if item.Status != issuedomain.StatusRetryWait || item.WorkerPID != 0 || item.WorkerPGID != 0 || item.Lease == nil {
 			t.Fatalf("Issue %s after restart=%+v", key, item)
 		}
 	}

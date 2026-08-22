@@ -1182,8 +1182,8 @@ func (a App) runBroker(ctx context.Context, l layout.Layout, args []string) erro
 	return broker.Run(ctx)
 }
 
-func recordSupervisorControl(store state.Store, supervisorState, message string) error {
-	_, err := store.Update("supervisor_"+supervisorState, 0, "", map[string]string{"reason": message}, func(s *state.Snapshot) error {
+func recordSupervisorControl(store state.Store, supervisorState state.SupervisorState, message string) error {
+	_, err := store.Update("supervisor_"+string(supervisorState), 0, "", map[string]string{"reason": message}, func(s *state.Snapshot) error {
 		s.Supervisor.State = supervisorState
 		s.Supervisor.PID = 0
 		s.Supervisor.Message = message
@@ -1363,13 +1363,13 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 	if currentRequest == nil {
 		return exitError{4, fmt.Errorf("unknown request ID %s", *requestID)}
 	}
-	if currentRequest.Status == "answered" {
+	if currentRequest.Status == issuedomain.RequestStatusAnswered {
 		if currentRequest.Answer != answer {
 			return exitError{4, fmt.Errorf("request %s already has a different answer", *requestID)}
 		}
 		return a.answerOutput(*jsonOut, currentSnapshot, cfg.Queue.Concurrency, currentRequest)
 	}
-	if currentRequest.Status != "pending" {
+	if currentRequest.Status != issuedomain.RequestStatusPending {
 		return exitError{4, fmt.Errorf("request %s is not pending", *requestID)}
 	}
 	currentIssue := currentSnapshot.Issues[fmt.Sprint(currentRequest.IssueNumber)]
@@ -1380,7 +1380,7 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 	if parkedNeedsInput {
 		pendingForIssue := 0
 		for _, request := range currentSnapshot.PendingRequests {
-			if request != nil && request.IssueNumber == currentIssue.Number && request.Status == "pending" {
+			if request != nil && request.IssueNumber == currentIssue.Number && request.Status == issuedomain.RequestStatusPending {
 				pendingForIssue++
 			}
 		}
@@ -1412,17 +1412,17 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 		if request == nil {
 			return exitError{4, fmt.Errorf("unknown request ID %s", *requestID)}
 		}
-		if request.Status == "answered" {
+		if request.Status == issuedomain.RequestStatusAnswered {
 			if request.Answer == answer {
 				return nil
 			}
 			return exitError{4, fmt.Errorf("request %s already has a different answer", *requestID)}
 		}
-		if request.Status != "pending" {
+		if request.Status != issuedomain.RequestStatusPending {
 			return exitError{4, fmt.Errorf("request %s is not pending", *requestID)}
 		}
 		now := time.Now().UTC()
-		request.Status, request.Answer, request.AnsweredAt = "answered", answer, &now
+		request.Status, request.Answer, request.AnsweredAt = issuedomain.RequestStatusAnswered, answer, &now
 		issue := s.Issues[fmt.Sprint(request.IssueNumber)]
 		if issue == nil {
 			return fmt.Errorf("Issue #%d is missing from state", request.IssueNumber)
@@ -1431,7 +1431,7 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 		if resumeStatus == issuedomain.StatusUnset {
 			pendingForIssue := 0
 			for _, candidate := range s.PendingRequests {
-				if candidate != nil && candidate.IssueNumber == issue.Number && candidate.Status == "pending" {
+				if candidate != nil && candidate.IssueNumber == issue.Number && candidate.Status == issuedomain.RequestStatusPending {
 					pendingForIssue++
 				}
 			}
@@ -1473,7 +1473,7 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 		}
 		issue.RetryAfter, issue.UpdatedAt = nil, now
 		if resumeStatus == issuedomain.StatusResolvingConflict {
-			issue.GitHubSync = "conflict_retry"
+			issue.GitHubSync = issuedomain.GitHubSyncConflictRetry
 		}
 		issue.Answers = append(issue.Answers, state.AnswerRecord{RequestID: request.ID, Question: request.Question, Answer: answer, AnsweredAt: now})
 		return nil
@@ -1544,7 +1544,7 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 			return exitError{4, fmt.Errorf("Issue #%d capability mismatch: %s", *issueNumber, data)}
 		}
 	}
-	if current.Status != issuedomain.StatusBlocked || current.GitHubSync != "" {
+	if current.Status != issuedomain.StatusBlocked || current.GitHubSync != issuedomain.GitHubSyncNone {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before retry (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
 	reason := strings.ToLower(current.LastError)
@@ -1586,7 +1586,7 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 		"retry_id": retryID, "pull_request_url": current.PullRequestURL, "previous_reason": current.LastError,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(*issueNumber)]
-		if item.Status != issuedomain.StatusBlocked || item.GitHubSync != "" {
+		if item.Status != issuedomain.StatusBlocked || item.GitHubSync != issuedomain.GitHubSyncNone {
 			return fmt.Errorf("Issue #%d changed while retry was being prepared", *issueNumber)
 		}
 		if item.ConflictRecovery == nil {
@@ -1597,7 +1597,7 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 		if err := state.ApplyIssueTransition(item, retryTransition); err != nil {
 			return err
 		}
-		item.GitHubSync = "conflict_retry"
+		item.GitHubSync = issuedomain.GitHubSyncConflictRetry
 		item.FailureKind = ""
 		item.LastError = "explicit conflict recovery retry requested"
 		item.RetryAfter = nil
@@ -1617,8 +1617,8 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 	}
 	_, err = store.Update("github_state_synced", *issueNumber, current.RunID, map[string]string{"state": "conflict_retry", "retry_id": retryID}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(*issueNumber)]
-		if item.GitHubSync == "conflict_retry" {
-			item.GitHubSync = ""
+		if item.GitHubSync == issuedomain.GitHubSyncConflictRetry {
+			item.GitHubSync = issuedomain.GitHubSyncNone
 		}
 		item.UpdatedAt = time.Now().UTC()
 		return nil
@@ -1676,8 +1676,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			return exitError{4, fmt.Errorf("Issue #%d capability mismatch: %s", *issueNumber, data)}
 		}
 	}
-	pendingResume := false
-	idempotentResume := false
+	progress := environmentResumeProgress(current)
+	pendingResume := progress == recoveryProgressPendingSync
+	idempotentResume := progress == recoveryProgressIdempotent
 	if current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" && current.Status != issuedomain.StatusBlocked {
 		if current.Status != issuedomain.StatusEnvironmentResumePending {
 			return exitError{4, fmt.Errorf("Issue #%d is not waiting for an environment resume (status=%s)", *issueNumber, current.Status)}
@@ -1685,22 +1686,14 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		if current.Lease == nil || current.RunID == "" || current.Worktree == "" || current.Branch == "" {
 			return exitError{4, fmt.Errorf("Issue #%d pending environment resume does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
 		}
-		if current.GitHubSync == "environment_resume" {
-			if current.EnvironmentResume.Status != "requested" {
-				return exitError{4, fmt.Errorf("Issue #%d pending environment resume has inconsistent durable synchronization state", *issueNumber)}
-			}
-			pendingResume = true
-		} else if current.GitHubSync != "" || current.EnvironmentResume.Status != "github_synced" {
+		if progress != recoveryProgressPendingSync && progress != recoveryProgressIdempotent {
 			return exitError{4, fmt.Errorf("Issue #%d pending environment resume has inconsistent durable synchronization state", *issueNumber)}
-		} else {
-			idempotentResume = true
 		}
 	}
-	if !pendingResume && !idempotentResume && (current.Status != issuedomain.StatusBlocked || current.GitHubSync != "") {
+	if progress == recoveryProgressInvalid {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before environment resume (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
-	interruptedResume := current.Status == issuedomain.StatusBlocked && current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" &&
-		(current.EnvironmentResume.Status == "requested" || current.EnvironmentResume.Status == "github_synced")
+	interruptedResume := progress == recoveryProgressInterrupted
 	interruptedWorkspaceRecovery := false
 	var interruptedWorkspaceEvidence *state.InterruptedWorkspaceResumeEvidence
 	if state.MayHaveInterruptedWorkspaceResumeEvidence(current) {
@@ -1729,7 +1722,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if current.ConflictRecovery != nil {
 		return exitError{4, fmt.Errorf("Issue #%d is a Pull Request conflict block; use agent-loop retry", *issueNumber)}
 	}
-	parkedClaim := current.ResourcePark != nil && current.ResourcePark.Status == "parked" && current.ResourcePark.ID != ""
+	parkedClaim := current.ResourcePark != nil && current.ResourcePark.Status == issuedomain.ResourceParkStatusParked && current.ResourcePark.ID != ""
 	if current.RunID == "" || current.Worktree == "" || current.Branch == "" || (current.Lease == nil && !parkedClaim && legacyRecovery == nil && !interruptedResume) {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent run, worktree, branch, and resource lease", *issueNumber)}
 	}
@@ -1745,7 +1738,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		return exitError{4, fmt.Errorf("Issue #%d still has an active worker process", *issueNumber)}
 	}
 	for _, request := range snapshot.PendingRequests {
-		if request != nil && request.IssueNumber == *issueNumber && request.Status == "pending" {
+		if request != nil && request.IssueNumber == *issueNumber && request.Status == issuedomain.RequestStatusPending {
 			return exitError{4, fmt.Errorf("Issue #%d has a pending manual answer request and is not an environment-blocked resume candidate", *issueNumber)}
 		}
 	}
@@ -1758,11 +1751,11 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		return exitError{4, fmt.Errorf("saved worktree/branch is not consistent enough to resume: %+v", inspection)}
 	}
 	if interruptedWorkspaceRecovery && interruptedWorkspaceEvidence.WorktreeHead != "" && inspection.Head != interruptedWorkspaceEvidence.WorktreeHead {
-		return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_WORKTREE_HEAD_REMOTE", Err: fmt.Errorf("Issue #%d interrupted environment resume worktree HEAD changed; state was not changed", *issueNumber)}}
+		return exitError{4, state.RecoveryPredicateError{Code: state.RecoveryCodeWorktreeHeadRemote, Err: fmt.Errorf("Issue #%d interrupted environment resume worktree HEAD changed; state was not changed", *issueNumber)}}
 	}
 	if interruptedWorkspaceRecovery && interruptedWorkspaceEvidence.WorktreeHead != "" &&
 		!interruptedWorkspaceInspectionMatches(interruptedWorkspaceEvidence.WorktreeHead, inspection) {
-		return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_WORKTREE_HEAD_REMOTE", Err: fmt.Errorf("Issue #%d interrupted environment resume worktree is not the exact dirty local-only branch; state was not changed", *issueNumber)}}
+		return exitError{4, state.RecoveryPredicateError{Code: state.RecoveryCodeWorktreeHeadRemote, Err: fmt.Errorf("Issue #%d interrupted environment resume worktree is not the exact dirty local-only branch; state was not changed", *issueNumber)}}
 	}
 	launchValidator := a.validateResumeWorkspace
 	if launchValidator == nil {
@@ -1826,7 +1819,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		return exitError{4, err}
 	}
 	if interruptedWorkspaceRecovery && (baseSHA != interruptedWorkspaceEvidence.BaseSHA || currentBaseSHA != interruptedWorkspaceEvidence.CurrentBaseSHA) {
-		return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_BASE_SHA_IDENTITY", Err: fmt.Errorf("Issue #%d interrupted environment resume base SHA provenance changed; state was not changed", *issueNumber)}}
+		return exitError{4, state.RecoveryPredicateError{Code: state.RecoveryCodeBaseSHAIdentity, Err: fmt.Errorf("Issue #%d interrupted environment resume base SHA provenance changed; state was not changed", *issueNumber)}}
 	}
 	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
 	remote, err := client.Inspect(ctx, cfg, *issueNumber, current.Branch)
@@ -1857,15 +1850,15 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	blocked := labels[blockedLabel]
 	if interruptedWorkspaceRecovery {
 		if !interruptedWorkspaceRemoteMarkersMatch(cfg, current, remote) {
-			return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_COMMENT_MARKERS", Err: fmt.Errorf("Issue #%d GitHub state does not prove the interrupted missing-workspace resume", *issueNumber)}}
+			return exitError{4, state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubCommentMarkers, Err: fmt.Errorf("Issue #%d GitHub state does not prove the interrupted missing-workspace resume", *issueNumber)}}
 		}
 	} else if resumeIntent {
 		switch current.EnvironmentResume.Status {
-		case "requested":
+		case issuedomain.EnvironmentResumeStatusRequested:
 			if blocked == runningLabel {
 				return exitError{4, fmt.Errorf("Issue #%d interrupted environment resume has ambiguous GitHub blocked/running labels", *issueNumber)}
 			}
-		case "github_synced":
+		case issuedomain.EnvironmentResumeStatusGitHubSynced:
 			marker := "<!-- codex-issue-loop:environment-resume:" + current.EnvironmentResume.ID + " -->"
 			commented := false
 			for _, comment := range remote.Issue.Comments {
@@ -1949,7 +1942,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				return fmt.Errorf("Issue #%d durable state changed while environment resume was being prepared", *issueNumber)
 			}
 			item := s.Issues[strconv.Itoa(*issueNumber)]
-			if item == nil || item.RunID != current.RunID || item.Status != issuedomain.StatusBlocked || item.GitHubSync != "" ||
+			if item == nil || item.RunID != current.RunID || item.Status != issuedomain.StatusBlocked || item.GitHubSync != issuedomain.GitHubSyncNone ||
 				(interruptedResume && (item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != current.EnvironmentResume.Status)) {
 				return fmt.Errorf("Issue #%d changed while environment resume was being prepared", *issueNumber)
 			}
@@ -1966,7 +1959,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				return fmt.Errorf("Issue #%d block provenance or worker process changed while environment resume was being prepared", *issueNumber)
 			}
 			for _, request := range s.PendingRequests {
-				if request != nil && request.IssueNumber == *issueNumber && request.Status == "pending" {
+				if request != nil && request.IssueNumber == *issueNumber && request.Status == issuedomain.RequestStatusPending {
 					return fmt.Errorf("Issue #%d gained a pending manual answer request while environment resume was being prepared", *issueNumber)
 				}
 			}
@@ -2038,7 +2031,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			if err := state.ApplyIssueTransition(item, resumeTransition); err != nil {
 				return err
 			}
-			item.GitHubSync = "environment_resume"
+			item.GitHubSync = issuedomain.GitHubSyncEnvironmentResume
 			if interruptedWorkspaceRecovery {
 				blockedAt := item.EnvironmentResume.ConfirmedAt
 				if item.ResourcePark != nil && !item.ResourcePark.ParkedAt.IsZero() {
@@ -2065,11 +2058,11 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				item.Lease.BaseSHA = baseSHA
 			}
 			if interruptedResume {
-				item.EnvironmentResume.Status = "requested"
+				item.EnvironmentResume.Status = issuedomain.EnvironmentResumeStatusRequested
 				item.EnvironmentResume.BaseSHA = baseSHA
 				item.EnvironmentResume.CurrentBaseSHA = currentBaseSHA
 			} else {
-				item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: "requested", ConfirmedAt: now, PreviousReason: previousReason, BaseSHA: baseSHA, CurrentBaseSHA: currentBaseSHA}
+				item.EnvironmentResume = &state.EnvironmentResume{ID: resumeID, Status: issuedomain.EnvironmentResumeStatusRequested, ConfirmedAt: now, PreviousReason: previousReason, BaseSHA: baseSHA, CurrentBaseSHA: currentBaseSHA}
 			}
 			item.RetryAfter = nil
 			item.UpdatedAt = now
@@ -2084,9 +2077,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	}
 	updated, err := store.Update("github_state_synced", *issueNumber, current.RunID, map[string]string{"state": "environment_resume", "resume_id": resumeID}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(*issueNumber)]
-		if item != nil && item.GitHubSync == "environment_resume" && item.EnvironmentResume != nil && item.EnvironmentResume.ID == resumeID {
-			item.GitHubSync = ""
-			item.EnvironmentResume.Status = "github_synced"
+		if item != nil && item.GitHubSync == issuedomain.GitHubSyncEnvironmentResume && item.EnvironmentResume != nil && item.EnvironmentResume.ID == resumeID {
+			item.GitHubSync = issuedomain.GitHubSyncNone
+			item.EnvironmentResume.Status = issuedomain.EnvironmentResumeStatusGitHubSynced
 			item.UpdatedAt = time.Now().UTC()
 		}
 		return nil

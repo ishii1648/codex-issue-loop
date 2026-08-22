@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -32,8 +34,7 @@ func TestIssueStatusAssignmentsStayWithinKnownBoundaries(t *testing.T) {
 		t.Fatal("resolve test source path")
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
-	loaded := loadTypedProductionPackages(t, repoRoot,
-		"./internal/app", "./internal/state", "./internal/supervisor")
+	loaded := loadTypedPackages(t, repoRoot, false)
 
 	allowed := map[string]int{
 		"internal/state/issue_transition.go": 1, // the named decision commit boundary
@@ -80,46 +81,15 @@ func TestIssueStatusLogicUsesTypedVocabulary(t *testing.T) {
 		t.Fatal("resolve test source path")
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
-	loaded := loadTypedProductionPackages(t, repoRoot,
-		"./internal/app", "./internal/state", "./internal/supervisor")
+	loaded := loadTypedPackages(t, repoRoot, true)
 	for _, pkg := range loaded {
 		for _, file := range pkg.syntax {
+			definitions := statusConstantDefinitionLiterals(file)
 			ast.Inspect(file, func(node ast.Node) bool {
-				switch expression := node.(type) {
-				case *ast.AssignStmt:
-					for index, target := range expression.Lhs {
-						if index >= len(expression.Rhs) || !isIssueStatusType(pkg.info.TypeOf(target)) {
-							continue
-						}
-						if literal, ok := expression.Rhs[index].(*ast.BasicLit); ok && literal.Kind == token.STRING {
-							position := pkg.fset.Position(literal.Pos())
-							relative, _ := filepath.Rel(repoRoot, position.Filename)
-							t.Errorf("%s:%d assigns an untyped string to issue.Status; use an issuedomain.Status constant", filepath.ToSlash(relative), position.Line)
-						}
-					}
-				case *ast.BinaryExpr:
-					if expression.Op != token.EQL && expression.Op != token.NEQ {
-						return true
-					}
-					if issueStatusComparedWithString(pkg.info, expression.X, expression.Y) || issueStatusComparedWithString(pkg.info, expression.Y, expression.X) {
-						position := pkg.fset.Position(expression.Pos())
-						relative, _ := filepath.Rel(repoRoot, position.Filename)
-						t.Errorf("%s:%d compares issue.Status with an untyped string; use an issuedomain.Status constant", filepath.ToSlash(relative), position.Line)
-					}
-				case *ast.SwitchStmt:
-					if expression.Tag == nil || !isIssueStatusType(pkg.info.TypeOf(expression.Tag)) {
-						return true
-					}
-					for _, statement := range expression.Body.List {
-						clause := statement.(*ast.CaseClause)
-						for _, candidate := range clause.List {
-							if literal, ok := candidate.(*ast.BasicLit); ok && literal.Kind == token.STRING {
-								position := pkg.fset.Position(candidate.Pos())
-								relative, _ := filepath.Rel(repoRoot, position.Filename)
-								t.Errorf("%s:%d switches on issue.Status with an untyped string; use an issuedomain.Status constant", filepath.ToSlash(relative), position.Line)
-							}
-						}
-					}
+				if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING && isIssueLifecycleVocabularyType(pkg.info.TypeOf(literal)) && !definitions[literal] {
+					position := pkg.fset.Position(literal.Pos())
+					relative, _ := filepath.Rel(repoRoot, position.Filename)
+					t.Errorf("%s:%d uses an untyped lifecycle string; use an issuedomain constant", filepath.ToSlash(relative), position.Line)
 				}
 				return true
 			})
@@ -127,12 +97,73 @@ func TestIssueStatusLogicUsesTypedVocabulary(t *testing.T) {
 	}
 }
 
-func issueStatusComparedWithString(info *types.Info, status, other ast.Expr) bool {
-	if !isIssueStatusType(info.TypeOf(status)) {
-		return false
+func statusConstantDefinitionLiterals(file *ast.File) map[*ast.BasicLit]bool {
+	definitions := map[*ast.BasicLit]bool{}
+	for _, declaration := range file.Decls {
+		group, ok := declaration.(*ast.GenDecl)
+		if !ok || group.Tok != token.CONST {
+			continue
+		}
+		for _, specification := range group.Specs {
+			value, ok := specification.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, expression := range value.Values {
+				if literal, ok := expression.(*ast.BasicLit); ok {
+					definitions[literal] = true
+				}
+			}
+		}
 	}
-	literal, ok := other.(*ast.BasicLit)
-	return ok && literal.Kind == token.STRING
+	return definitions
+}
+
+func TestIssueStatusStringConversionsStayAtSerializationBoundaries(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
+	loaded := loadTypedPackages(t, repoRoot, false)
+	allowed := map[string]int{
+		"internal/app/status.go":             1,
+		"internal/app/workspace_recovery.go": 1,
+		"internal/lifecycle/worktrees.go":    1,
+		"internal/migration/migration.go":    2,
+		"internal/state/semantic.go":         1,
+		"internal/supervisor/scheduler.go":   1,
+		"internal/supervisor/supervisor.go":  1,
+	}
+	seen := map[string]int{}
+	for _, pkg := range loaded {
+		for _, file := range pkg.syntax {
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok || !isIssueStatusStringCall(pkg.info, call) {
+					return true
+				}
+				position := pkg.fset.Position(call.Pos())
+				relative, _ := filepath.Rel(repoRoot, position.Filename)
+				path := filepath.ToSlash(relative)
+				if _, ok := allowed[path]; !ok {
+					t.Errorf("%s:%d strips the issue.Status type outside a serialization boundary", path, position.Line)
+				}
+				seen[path]++
+				return true
+			})
+		}
+	}
+	for path, want := range allowed {
+		if got := seen[path]; got != want {
+			t.Errorf("%s has %d issue.Status String calls; want %d", path, got, want)
+		}
+	}
+}
+
+func isIssueStatusStringCall(info *types.Info, call *ast.CallExpr) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && selector.Sel.Name == "String" && isIssueStatusType(info.TypeOf(selector.X))
 }
 
 func isIssueStatusType(value types.Type) bool {
@@ -140,11 +171,31 @@ func isIssueStatusType(value types.Type) bool {
 	return ok && named.Obj().Name() == "Status" && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == issueDomainPackagePath
 }
 
+func isIssueLifecycleVocabularyType(value types.Type) bool {
+	named, ok := value.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != issueDomainPackagePath {
+		return false
+	}
+	switch named.Obj().Name() {
+	case "Status", "GitHubSync", "ResourceParkStatus", "RequestStatus", "EnvironmentResumeStatus",
+		"PublicationRecoveryStatus", "PublicationRecoveryAttemptStatus", "ConflictAttemptStatus",
+		"PullRequestChecksRecoveryStatus", "AnsweredWorkspaceRecoveryStatus", "WorkspaceProvenanceRecoveryStatus",
+		"MergedPullRequestAdoptionStatus":
+		return true
+	default:
+		return false
+	}
+}
+
 type listedPackage struct {
-	Dir        string
-	ImportPath string
-	Export     string
-	GoFiles    []string
+	Dir          string
+	ImportPath   string
+	Export       string
+	GoFiles      []string
+	TestGoFiles  []string
+	XTestGoFiles []string
+	ForTest      string
+	Module       *struct{ Path string }
 }
 
 type typedProductionPackage struct {
@@ -157,9 +208,9 @@ type typedProductionPackage struct {
 // package metadata and export files, then performs the source type check with
 // the standard library. This avoids coupling the architecture guard to a
 // golang.org/x/tools version tied to one Go release.
-func loadTypedProductionPackages(t *testing.T, repoRoot string, patterns ...string) []typedProductionPackage {
+func loadTypedPackages(t *testing.T, repoRoot string, includeTests bool) []typedProductionPackage {
 	t.Helper()
-	args := append([]string{"list", "-json", "-export", "-deps"}, patterns...)
+	args := []string{"list", "-json", "-export", "-deps", "-test", "./..."}
 	command := exec.Command("go", args...)
 	command.Dir = repoRoot
 	var stdout, stderr bytes.Buffer
@@ -180,14 +231,18 @@ func loadTypedProductionPackages(t *testing.T, repoRoot string, patterns ...stri
 		if err != nil {
 			t.Fatalf("decode go list output: %v", err)
 		}
-		all[listed.ImportPath] = listed
+		if listed.ForTest == "" && !strings.Contains(listed.ImportPath, " [") && !strings.HasSuffix(listed.ImportPath, ".test") {
+			all[listed.ImportPath] = listed
+		}
 	}
 
-	wanted := []string{
-		"github.com/ishii1648/codex-issue-loop/internal/app",
-		statePackagePath,
-		"github.com/ishii1648/codex-issue-loop/internal/supervisor",
+	wanted := make([]string, 0)
+	for importPath, listed := range all {
+		if listed.Module != nil && listed.Module.Path == "github.com/ishii1648/codex-issue-loop" {
+			wanted = append(wanted, importPath)
+		}
 	}
+	sort.Strings(wanted)
 	loaded := make([]typedProductionPackage, 0, len(wanted))
 	for _, importPath := range wanted {
 		listed, ok := all[importPath]
@@ -195,8 +250,12 @@ func loadTypedProductionPackages(t *testing.T, repoRoot string, patterns ...stri
 			t.Fatalf("go list omitted %s", importPath)
 		}
 		fset := token.NewFileSet()
-		syntax := make([]*ast.File, 0, len(listed.GoFiles))
-		for _, name := range listed.GoFiles {
+		files := append([]string(nil), listed.GoFiles...)
+		if includeTests {
+			files = append(files, listed.TestGoFiles...)
+		}
+		syntax := make([]*ast.File, 0, len(files))
+		for _, name := range files {
 			file, err := parser.ParseFile(fset, filepath.Join(listed.Dir, name), nil, 0)
 			if err != nil {
 				t.Fatalf("parse %s: %v", name, err)
@@ -219,6 +278,23 @@ func loadTypedProductionPackages(t *testing.T, repoRoot string, patterns ...stri
 			t.Fatalf("type-check %s: %v", importPath, err)
 		}
 		loaded = append(loaded, typedProductionPackage{fset: fset, syntax: syntax, info: info})
+		if includeTests && len(listed.XTestGoFiles) > 0 {
+			testSet := token.NewFileSet()
+			testSyntax := make([]*ast.File, 0, len(listed.XTestGoFiles))
+			for _, name := range listed.XTestGoFiles {
+				file, err := parser.ParseFile(testSet, filepath.Join(listed.Dir, name), nil, 0)
+				if err != nil {
+					t.Fatalf("parse %s: %v", name, err)
+				}
+				testSyntax = append(testSyntax, file)
+			}
+			testInfo := &types.Info{Selections: map[*ast.SelectorExpr]*types.Selection{}, Types: map[ast.Expr]types.TypeAndValue{}}
+			testChecker := types.Config{Importer: importer.ForCompiler(testSet, runtime.Compiler, lookup)}
+			if _, err := testChecker.Check(importPath+"_test", testSet, testSyntax, testInfo); err != nil {
+				t.Fatalf("type-check %s external tests: %v", importPath, err)
+			}
+			loaded = append(loaded, typedProductionPackage{fset: testSet, syntax: testSyntax, info: testInfo})
+		}
 	}
 	return loaded
 }

@@ -36,7 +36,7 @@ func TestSemanticContractValidatesSupportedRecoveryStates(t *testing.T) {
 }
 
 func TestSemanticContractDoesNotRequireProvenanceBeforeWorkerBoundary(t *testing.T) {
-	snapshot := Snapshot{RepoID: "repo-1", Issues: map[string]*Issue{"7": {Number: 7, Status: "blocked"}}}
+	snapshot := Snapshot{RepoID: "repo-1", Issues: map[string]*Issue{"7": {Number: 7, Status: issuedomain.StatusBlocked}}}
 	if err := ValidateSemanticContract(snapshot); err != nil {
 		t.Fatal(err)
 	}

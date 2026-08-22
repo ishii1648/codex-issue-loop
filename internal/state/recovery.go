@@ -387,7 +387,7 @@ func (s Store) quarantineUnlocked(cause error) (Snapshot, error) {
 		State: "blocked", UpdatedAt: now,
 		Message: fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", safeCause, backupDir),
 	}
-	snapshot.Recovery = &Recovery{Status: "blocked", Reason: safeCause, BackupDir: backupDir, DetectedAt: now}
+	snapshot.Recovery = &Recovery{Status: RecoveryStateBlocked, Reason: safeCause, BackupDir: backupDir, DetectedAt: now}
 	payload, _ := redact.Marshal(map[string]string{"reason": safeCause, "backup_dir": backupDir}, s.Secrets)
 	event := Event{
 		Version: CurrentVersion, EventID: NewID("evt"), Sequence: 1, Timestamp: now,

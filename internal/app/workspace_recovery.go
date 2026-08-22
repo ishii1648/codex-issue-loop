@@ -84,7 +84,7 @@ func (a App) recoverWorkspace(ctx context.Context, l layout.Layout, args []strin
 	if current.Workspace == nil && current.WorkspaceRecovery != nil {
 		return exitError{4, fmt.Errorf("Issue #%d has a workspace recovery audit without workspace provenance", *issueNumber)}
 	}
-	if current.GitHubSync != "" || current.RunID == "" || current.Worktree == "" || current.Branch == "" {
+	if current.GitHubSync != issuedomain.GitHubSyncNone || current.RunID == "" || current.Worktree == "" || current.Branch == "" {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain a fully synchronized run, worktree, and branch", *issueNumber)}
 	}
 	if request, requestErr := exactAnsweredRequest(snapshot, current); requestErr == nil {
@@ -112,7 +112,7 @@ func (a App) recoverWorkspace(ctx context.Context, l layout.Layout, args []strin
 		return exitError{4, fmt.Errorf("Issue #%d still has an active worker process", *issueNumber)}
 	}
 	for _, request := range snapshot.PendingRequests {
-		if request != nil && request.IssueNumber == current.Number && request.Status == "pending" {
+		if request != nil && request.IssueNumber == current.Number && request.Status == issuedomain.RequestStatusPending {
 			return exitError{4, fmt.Errorf("Issue #%d has a pending manual request", *issueNumber)}
 		}
 	}
@@ -211,14 +211,14 @@ func (a App) recoverWorkspace(ctx context.Context, l layout.Layout, args []strin
 			return fmt.Errorf("Issue #%d gained an active worker process while workspace recovery was being prepared", current.Number)
 		}
 		for _, request := range s.PendingRequests {
-			if request != nil && request.IssueNumber == current.Number && request.Status == "pending" {
+			if request != nil && request.IssueNumber == current.Number && request.Status == issuedomain.RequestStatusPending {
 				return fmt.Errorf("Issue #%d gained a pending manual request while workspace recovery was being prepared", current.Number)
 			}
 		}
 		item.Workspace = &workspace
 		item.WorkspaceRecovery = &state.WorkspaceProvenanceRecovery{
-			ID: recoveryID, Status: "verified", ConfirmedAt: now, OperatorConfirmed: true,
-			OldProvenanceMissing: true, PreviousStatus: current.Status.String(), RunID: current.RunID,
+			ID: recoveryID, Status: issuedomain.WorkspaceProvenanceRecoveryStatusVerified, ConfirmedAt: now, OperatorConfirmed: true,
+			OldProvenanceMissing: true, PreviousStatus: current.Status, RunID: current.RunID,
 			HeadSHA: inspection.Head, WorktreeSHA256: digest,
 			ExpectedWorkspace: plan.ExpectedWorkspace, ActualWorkspace: plan.ActualWorkspace,
 			ValidatorChecks: cloneBoolMap(launch.Checks),
@@ -289,8 +289,8 @@ func validateWorkspaceRecoveryRemote(cfg config.Config, issue *state.Issue, insp
 
 func validExistingWorkspaceRecovery(issue *state.Issue, digest, head string) bool {
 	recovery := issue.WorkspaceRecovery
-	return recovery != nil && state.ValidID(recovery.ID, "workspace_recovery_") && recovery.Status == "verified" &&
-		recovery.OperatorConfirmed && recovery.OldProvenanceMissing && recovery.PreviousStatus == issue.Status.String() &&
+	return recovery != nil && state.ValidID(recovery.ID, "workspace_recovery_") && recovery.Status == issuedomain.WorkspaceProvenanceRecoveryStatusVerified &&
+		recovery.OperatorConfirmed && recovery.OldProvenanceMissing && recovery.PreviousStatus == issue.Status &&
 		recovery.RunID == issue.RunID && recovery.HeadSHA == head && recovery.WorktreeSHA256 == digest &&
 		issue.Workspace != nil && !issue.Workspace.CapturedAt.IsZero() && *issue.Workspace == recovery.ActualWorkspace &&
 		recovery.ExpectedWorkspace.Matches(recovery.ActualWorkspace.Path, recovery.ActualWorkspace.Branch,

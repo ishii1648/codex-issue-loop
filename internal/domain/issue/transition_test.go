@@ -31,7 +31,7 @@ func TestCompleteDerivesPublicationState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !decision.PullRequestMerged || decision.GitHubSync != "done" || decision.Transition.To != StatusCompleted {
+	if !decision.PullRequestMerged || decision.GitHubSync != GitHubSyncDone || decision.Transition.To != StatusCompleted {
 		t.Fatalf("unexpected completion decision: %+v", decision)
 	}
 }
@@ -153,20 +153,20 @@ func TestOutcomeDecisionsDeriveCompanionState(t *testing.T) {
 		name   string
 		make   func() (OutcomeDecision, error)
 		to     Status
-		sync   string
+		sync   GitHubSync
 		reason string
 	}{
 		{name: "workspace block", make: func() (OutcomeDecision, error) {
 			return RejectWorkerWorkspace(StatusRunning, "unsafe workspace", "issue")
-		}, to: StatusBlocked, sync: "blocked", reason: "unsafe workspace"},
+		}, to: StatusBlocked, sync: GitHubSyncBlocked, reason: "unsafe workspace"},
 		{name: "resource correction", make: func() (OutcomeDecision, error) {
 			return RequestResourceCorrection(StatusRunning, "claim mismatch", "issue")
-		}, to: StatusNeedsInput, sync: "needs_input", reason: "claim mismatch"},
+		}, to: StatusNeedsInput, sync: GitHubSyncNeedsInput, reason: "claim mismatch"},
 		{name: "checks exhausted", make: func() (OutcomeDecision, error) {
 			return ExhaustPullRequestChecks(StatusAwaitingChecks, "checks failed", "issue")
-		}, to: StatusFailed, sync: "failed", reason: "checks failed"},
-		{name: "generic failure", make: func() (OutcomeDecision, error) { return Fail(StatusRunning, "worker failed", "issue", false) }, to: StatusFailed, sync: "failed", reason: "worker failed"},
-		{name: "generic block", make: func() (OutcomeDecision, error) { return Fail(StatusResolvingConflict, "manual repair", "issue", true) }, to: StatusBlocked, sync: "blocked", reason: "manual repair"},
+		}, to: StatusFailed, sync: GitHubSyncFailed, reason: "checks failed"},
+		{name: "generic failure", make: func() (OutcomeDecision, error) { return Fail(StatusRunning, "worker failed", "issue", false) }, to: StatusFailed, sync: GitHubSyncFailed, reason: "worker failed"},
+		{name: "generic block", make: func() (OutcomeDecision, error) { return Fail(StatusResolvingConflict, "manual repair", "issue", true) }, to: StatusBlocked, sync: GitHubSyncBlocked, reason: "manual repair"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -199,14 +199,14 @@ func TestPublicationRecoveryFailureDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if retry.Outcome.Transition.To != StatusPublicationRecovery || retry.RetryAt == nil || !retry.RetryAt.Equal(retryAt) || retry.RecoveryStatus != "retry_wait" {
+	if retry.Outcome.Transition.To != StatusPublicationRecovery || retry.RetryAt == nil || !retry.RetryAt.Equal(retryAt) || retry.RecoveryStatus != PublicationRecoveryStatusRetryWait {
 		t.Fatalf("unexpected retry decision: %+v", retry)
 	}
 	terminal, err := RecordPublicationRecoveryFailure(StatusPublicationRecovery, "unsafe path", "issue", true, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if terminal.Outcome.Transition.To != StatusFailed || terminal.RetryAt != nil || terminal.Outcome.GitHubSync != "failed" || terminal.RecoveryStatus != "failed" {
+	if terminal.Outcome.Transition.To != StatusFailed || terminal.RetryAt != nil || terminal.Outcome.GitHubSync != GitHubSyncFailed || terminal.RecoveryStatus != PublicationRecoveryStatusFailed {
 		t.Fatalf("unexpected terminal decision: %+v", terminal)
 	}
 }
@@ -301,5 +301,45 @@ func TestStatusSchedulingPredicates(t *testing.T) {
 	}
 	if !StatusAwaitingMerge.BlocksQueueForPullRequest(true) {
 		t.Fatal("awaiting merge must block an auto-merge queue")
+	}
+}
+
+func TestAllStatusesAreValidAndClassifiedForWorkspaceProvenance(t *testing.T) {
+	statuses := AllStatuses()
+	seen := make(map[Status]bool, len(statuses))
+	for _, status := range statuses {
+		if seen[status] {
+			t.Fatalf("duplicate status %q", status)
+		}
+		seen[status] = true
+		if err := status.Validate(); err != nil {
+			t.Errorf("AllStatuses contains invalid value %q: %v", status, err)
+		}
+	}
+	if len(statuses) != len(knownStatuses) {
+		t.Fatalf("AllStatuses has %d values, validation knows %d", len(statuses), len(knownStatuses))
+	}
+	if StatusClaiming.RequiresWorkspaceProvenance() || StatusCompleted.RequiresWorkspaceProvenance() {
+		t.Fatal("pre-execution and completed records must not require retained workspace provenance")
+	}
+	if !StatusRunning.RequiresWorkspaceProvenance() || !StatusFailed.RequiresWorkspaceProvenance() {
+		t.Fatal("execution and recoverable terminal records must require workspace provenance")
+	}
+}
+
+func TestGitHubSyncVocabularyAndCombinedDispatch(t *testing.T) {
+	for _, sync := range AllGitHubSyncs() {
+		if err := sync.Validate(); err != nil {
+			t.Errorf("AllGitHubSyncs contains invalid value %q: %v", sync, err)
+		}
+	}
+	if StatusCompleted.DispatchPending(GitHubSyncNone) {
+		t.Fatal("synchronized completed Issue must not be dispatched")
+	}
+	if !StatusCompleted.DispatchPending(GitHubSyncDone) {
+		t.Fatal("completed Issue with pending done synchronization must be dispatched")
+	}
+	if StatusRunning.UsesWorkerSlotWhile(GitHubSyncFailed) {
+		t.Fatal("GitHub synchronization must not consume a worker slot")
 	}
 }

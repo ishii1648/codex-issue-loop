@@ -12,6 +12,40 @@ import (
 
 const RecoveryPredicateReportSchemaVersion = 1
 
+type RecoveryPredicateCode string
+
+const (
+	RecoveryCodeStatus                  RecoveryPredicateCode = "RECOVERY_STATUS"
+	RecoveryCodeChecksFailureProvenance RecoveryPredicateCode = "RECOVERY_CHECKS_FAILURE_PROVENANCE"
+	RecoveryCodePRFailureIdentity       RecoveryPredicateCode = "RECOVERY_PR_FAILURE_IDENTITY"
+	RecoveryCodeRunWorkspace            RecoveryPredicateCode = "RECOVERY_RUN_WORKSPACE"
+	RecoveryCodeLeasePark               RecoveryPredicateCode = "RECOVERY_LEASE_PARK"
+	RecoveryCodeIncompatibleState       RecoveryPredicateCode = "RECOVERY_INCOMPATIBLE_STATE"
+	RecoveryCodeWorkerProcess           RecoveryPredicateCode = "RECOVERY_WORKER_PROCESS"
+	RecoveryCodePendingRequest          RecoveryPredicateCode = "RECOVERY_PENDING_REQUEST"
+	RecoveryCodeWorktreeRemote          RecoveryPredicateCode = "RECOVERY_WORKTREE_REMOTE"
+	RecoveryCodeGitHubIdentity          RecoveryPredicateCode = "RECOVERY_GITHUB_IDENTITY"
+	RecoveryCodeReplacementChecks       RecoveryPredicateCode = "RECOVERY_REPLACEMENT_CHECKS"
+	RecoveryCodeReadOnlyInvariant       RecoveryPredicateCode = "RECOVERY_READ_ONLY_INVARIANT"
+	RecoveryCodeBlockedCause            RecoveryPredicateCode = "RECOVERY_BLOCKED_CAUSE"
+	RecoveryCodeCapability              RecoveryPredicateCode = "RECOVERY_CAPABILITY"
+	RecoveryCodeWorkspace               RecoveryPredicateCode = "RECOVERY_WORKSPACE"
+	RecoveryCodeWorkspaceProvenance     RecoveryPredicateCode = "RECOVERY_WORKSPACE_PROVENANCE"
+	RecoveryCodeWorktreeHeadRemote      RecoveryPredicateCode = "RECOVERY_WORKTREE_HEAD_REMOTE"
+	RecoveryCodeBaseSHAIdentity         RecoveryPredicateCode = "RECOVERY_BASE_SHA_IDENTITY"
+	RecoveryCodeGitHubCommentMarkers    RecoveryPredicateCode = "RECOVERY_GITHUB_COMMENT_MARKERS"
+	RecoveryCodeGitHubLabels            RecoveryPredicateCode = "RECOVERY_GITHUB_LABELS"
+	RecoveryCodeEventCount              RecoveryPredicateCode = "RECOVERY_EVENT_COUNT"
+	RecoveryCodeEventOrder              RecoveryPredicateCode = "RECOVERY_EVENT_ORDER"
+	RecoveryCodeGitHubMarkers           RecoveryPredicateCode = "RECOVERY_GITHUB_MARKERS"
+	RecoveryCodeLeaseIdentity           RecoveryPredicateCode = "RECOVERY_LEASE_IDENTITY"
+	RecoveryCodePayloadShape            RecoveryPredicateCode = "RECOVERY_PAYLOAD_SHAPE"
+	RecoveryCodeRemoteIdentity          RecoveryPredicateCode = "RECOVERY_REMOTE_IDENTITY"
+	RecoveryCodeSessionIdentity         RecoveryPredicateCode = "RECOVERY_SESSION_IDENTITY"
+	RecoveryCodeTimestamps              RecoveryPredicateCode = "RECOVERY_TIMESTAMPS"
+	RecoveryCodeStartupReconciliation   RecoveryPredicateCode = "RECOVERY_STARTUP_RECONCILIATION"
+)
+
 // RecoveryPredicateReport is the stable, automation-facing result of a
 // read-only recovery eligibility evaluation. The report intentionally carries
 // summaries rather than raw values so paths, tokens, and comment bodies cannot
@@ -25,11 +59,11 @@ type RecoveryPredicateReport struct {
 }
 
 type RecoveryPredicate struct {
-	Code        string            `json:"code"`
-	Status      string            `json:"status"`
-	Evidence    PredicateEvidence `json:"evidence"`
-	Fixability  string            `json:"fixability"`
-	Remediation string            `json:"remediation"`
+	Code        RecoveryPredicateCode `json:"code"`
+	Status      string                `json:"status"`
+	Evidence    PredicateEvidence     `json:"evidence"`
+	Fixability  string                `json:"fixability"`
+	Remediation string                `json:"remediation"`
 	detail      string
 }
 
@@ -43,7 +77,7 @@ type PredicateEvidence struct {
 // refusal to the exact predicate emitted by the immediately preceding
 // read-only report.
 type RecoveryPredicateError struct {
-	Code string
+	Code RecoveryPredicateCode
 	Err  error
 }
 
@@ -66,7 +100,7 @@ func newRecoveryPredicateReport(operation string, issueNumber int) RecoveryPredi
 	}
 }
 
-func (r *RecoveryPredicateReport) add(code, status, source, expected, actual, fixability, remediation, detail string) {
+func (r *RecoveryPredicateReport) add(code RecoveryPredicateCode, status, source, expected, actual, fixability, remediation, detail string) {
 	if status != "pass" {
 		r.Eligible = false
 	}
@@ -79,7 +113,7 @@ func (r *RecoveryPredicateReport) add(code, status, source, expected, actual, fi
 
 // AddPredicate appends an externally evaluated predicate while preserving the
 // report's eligibility invariant. Callers must pass redacted summaries only.
-func (r *RecoveryPredicateReport) AddPredicate(code, status, source, expected, actual, fixability, remediation string) {
+func (r *RecoveryPredicateReport) AddPredicate(code RecoveryPredicateCode, status, source, expected, actual, fixability, remediation string) {
 	r.add(code, status, source, expected, actual, fixability, remediation, actual)
 }
 
