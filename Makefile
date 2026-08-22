@@ -32,7 +32,7 @@ fmt-check:
 	fi
 
 schema-check:
-	$(GO) test ./internal/worker -run '^TestPublishedSchemaReferencesRuntimeSchema$$' -count=1
+	$(GO) test ./internal/adapter/worker -run '^TestPublishedSchemaReferencesRuntimeSchema$$' -count=1
 
 tidy-check:
 	$(GO) mod tidy

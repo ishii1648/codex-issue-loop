@@ -2,7 +2,7 @@
 
 現行artifactのstorage schemaはv4、semantic contractはv1である。storageはv3からv4へのforward migrationを、v4 stateは暗黙contract v0から明示contract v1へのmigrationをサポートする。binaryの`version --json`、install manifest、`migrate --json`はstorage schemaのcurrent/migration-fromとsemantic contractのcurrent/minimumを表示する。
 
-contract v1はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。`issues[].workspace`はworker実行境界を越えたactive、blocked、needs-input、retry、Pull Request / publication recovery stateでexecution-requiredである。宣言、対象status、validator、migration ruleは`internal/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
+contract v1はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。`issues[].workspace`はworker実行境界を越えたactive、blocked、needs-input、retry、Pull Request / publication recovery stateでexecution-requiredである。宣言、対象status、validator、migration ruleは`internal/domain/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
 
 ## Read-only preview
 

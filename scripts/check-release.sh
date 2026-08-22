@@ -31,7 +31,7 @@ grep -Fq '"semantic_contract_minimum": 0' "$temporary_root/first/release-manifes
 
 # A new execution-required field without an explicit compatibility or
 # migration decision must fail both normal CI and the release gate.
-go test ./internal/statecontract ./internal/state \
+go test ./internal/domain/statecontract ./internal/adapter/state \
   -run '^Test(CurrentContractHasMigrationRulesForEveryExecutionRequirement|EveryExecutionRequiredFieldHasRuntimeValidator)$' \
   -count=1
 
@@ -40,8 +40,8 @@ go test ./internal/statecontract ./internal/state \
 # longer verifies. Updating both files requires an explicit fixture review.
 while read -r expected fixture; do
   [ -n "$expected" ] || continue
-  fixture_path="internal/recoveryfixture/testdata/$fixture"
+  fixture_path="internal/application/recoveryfixture/testdata/$fixture"
   actual=$(shasum -a 256 "$fixture_path" | awk '{print $1}')
   [ "$actual" = "$expected" ]
   "$temporary_root/first/agent-loop_Darwin_arm64" verify-recovery-fixture --fixture "$fixture_path" --json >/dev/null
-done < internal/recoveryfixture/testdata/blessed-fixtures.sha256
+done < internal/application/recoveryfixture/testdata/blessed-fixtures.sha256
