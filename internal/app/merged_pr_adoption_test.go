@@ -199,7 +199,7 @@ func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 			HeadRefName: current.Branch, BaseRefName: cfg.Git.BaseBranch, HeadSHA: "head", MergeCommitSHA: "merge", HeadRepository: cfg.GitHub.Repo}},
 	}
 	expected := github.MergedPullRequestAdoptionExpectation{
-		IssueNumber: current.Number, PreviousStatus: current.Status, Branch: current.Branch,
+		IssueNumber: current.Number, PreviousStatus: current.Status.String(), Branch: current.Branch,
 		BaseBranch: cfg.Git.BaseBranch, HeadSHA: "head",
 	}
 	if _, err := github.ValidateMergedPullRequestAdoption(cfg, baseline, expected); err != nil {

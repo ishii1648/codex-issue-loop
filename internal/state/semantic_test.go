@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/statecontract"
 )
 
@@ -44,7 +45,7 @@ func TestSemanticContractDoesNotRequireProvenanceBeforeWorkerBoundary(t *testing
 func semanticFixture(status string) Snapshot {
 	now := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
 	return Snapshot{RepoID: "repo-1", Issues: map[string]*Issue{"442": {
-		Number: 442, Status: status, RunID: "run-442", Worktree: "/state/worktrees/442", Branch: "codex/issue-442", Attempts: 1,
+		Number: 442, Status: issuedomain.Status(status), RunID: "run-442", Worktree: "/state/worktrees/442", Branch: "codex/issue-442", Attempts: 1,
 		Workspace: &WorkerWorkspace{Path: "/state/worktrees/442", Branch: "codex/issue-442", RepoID: "repo-1", Repository: "owner/repo", GitCommonDir: "/repo/.git", MainCheckout: "/repo", CapturedAt: now},
 	}}}
 }

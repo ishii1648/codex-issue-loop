@@ -275,12 +275,12 @@ func inspectSemanticState(path string) ([]SemanticFinding, error) {
 			continue
 		}
 		if violation, found := byIssue[issue.Number]; found {
-			findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: issue.Number, Status: issue.Status,
+			findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: issue.Number, Status: issue.Status.String(),
 				Field: violation.Field, Code: violation.Code, Migratable: false, Reason: violation.Reason,
 				MigrationRule: violation.MigrationRule, OperatorGuide: violation.OperatorGuide})
 			continue
 		}
-		findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: issue.Number, Status: issue.Status,
+		findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: issue.Number, Status: issue.Status.String(),
 			Field: "issues[].workspace", Code: state.SemanticCodeCompatible, Migratable: true,
 			Reason: "current execution invariants are satisfied or the worker execution boundary has not been crossed", MigrationRule: "PRESERVE_VERIFIED_PROVENANCE"})
 	}

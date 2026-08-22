@@ -1175,6 +1175,45 @@ func TestFailedPullRequestChecksReturnWorkerToRetry(t *testing.T) {
 	}
 }
 
+func TestFailedChecksWhileAwaitingAutoMergeReturnIssueToRetry(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{
+			Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true,
+			HeadRefName: "codex/issue-1-test", MergeStateStatus: "CLEAN", ChecksStatus: "success",
+		}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	loop.Config.Completion.AutoMerge = true
+	github.remote.PullRequests[0].IsDraft = false
+	github.remote.PullRequests[0].MergeStateStatus = "BLOCKED"
+	github.remote.PullRequests[0].ChecksStatus = "failure"
+	_, err := loop.Store.Update("test_retry_due", 1, "", nil, func(s *state.Snapshot) error {
+		s.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatalf("awaiting_merge checks failure stopped the lifecycle: %v", err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item := snapshot.Issues["1"]; item.Status != "retry_wait" || !strings.Contains(item.LastError, "checks failed") {
+		t.Fatalf("issue=%+v", item)
+	}
+}
+
 func TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Config.Completion.AutoMerge = true

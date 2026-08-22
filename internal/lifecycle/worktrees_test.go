@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
@@ -40,7 +41,7 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 			t.Fatalf("ensure #%d: %v", number, err)
 		}
 		issues[fmt.Sprint(number)] = &state.Issue{
-			Number: number, Status: status, Branch: result.Branch, Worktree: result.Path,
+			Number: number, Status: issuedomain.Status(status), Branch: result.Branch, Worktree: result.Path,
 			UpdatedAt: now.Add(-48 * time.Hour),
 		}
 	}

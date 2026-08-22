@@ -395,20 +395,17 @@ func resourcesConflict(left, right []string) bool {
 }
 
 func issueOccupiesWorkerSlot(issue *Issue) bool {
-	if issue == nil {
-		return false
-	}
-	switch issue.Status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
-		return true
-	default:
-		return false
-	}
+	return issue != nil && issue.Status.OccupiesWorkerSlot()
 }
 
 func validateResourceLeases(snapshot Snapshot) error {
 	active := []*Issue{}
 	for key, issue := range snapshot.Issues {
+		if issue != nil {
+			if err := issue.Status.Validate(); err != nil {
+				return fmt.Errorf("Issue #%d lifecycle: %w", issue.Number, err)
+			}
+		}
 		if issue != nil && issue.ResourcePark != nil {
 			park := issue.ResourcePark
 			original := &park.OriginalLease

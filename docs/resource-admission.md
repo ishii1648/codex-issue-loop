@@ -297,7 +297,7 @@ v2からv3へ移行する際、既存のactive Issueは宣言resourceを推測�
 | Resource | 主なpath glob | 意図 |
 | --- | --- | --- |
 | `config` | `.agent-loop*.yaml`、`internal/config/**`、`docs/resource-admission.md`、`docs/specification.md` | config schemaとadmission契約 |
-| `scheduler` | `internal/supervisor/**`、`internal/state/**`、`internal/schema/**`、`internal/failure/**`、`internal/fsutil/**` | 選択、lease、永続状態、transaction補助 |
+| `scheduler` | `internal/domain/**`、`internal/supervisor/**`、`internal/state/**`、`internal/webhook/**`、`internal/schema/**`、`internal/failure/**`、`internal/fsutil/**` | ドメインdecision、選択、lease、永続状態、transaction補助 |
 | `github` | `internal/github/**`、`internal/publish/**` | GitHub取得とpublication |
 | `worker` | `internal/worker/**`、`schemas/**` | worker processとresult contract |
 | `host` | `cmd/**`、`internal/app/**`、`internal/launchd/**`、`internal/registry/**`、`internal/layout/**`、`internal/lifecycle/**`、`internal/worktree/**` | CLI、LaunchAgent、host-local lifecycle |

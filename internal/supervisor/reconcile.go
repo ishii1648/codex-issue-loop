@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
@@ -31,7 +32,7 @@ func (osProcessInspector) Alive(pid int) bool {
 }
 
 type reconciliationDecision struct {
-	status       string
+	status       issuedomain.Status
 	lastError    string
 	branch       string
 	pullRequest  string
@@ -182,7 +183,9 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 						return err
 					}
 				}
-				item.Status = decision.status
+				if err := setIssueStatus(item, decision.status); err != nil {
+					return err
+				}
 				item.LastError = decision.lastError
 				item.Branch = decision.branch
 				item.PullRequestURL = decision.pullRequest
@@ -290,10 +293,10 @@ func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue,
 	if err != nil {
 		return false, fmt.Errorf("inspect collection exit for Issue #%d from webhook %s: %w", current.Number, delivery.DeliveryID, err)
 	}
-	if !terminalWebhookStatus(current.Status) && expectedActiveCollectionExit(current, remote.Issue, l.Config.GitHub) {
+	if !current.Status.TerminalForWebhook() && expectedActiveCollectionExit(current, remote.Issue, l.Config.GitHub) {
 		return false, nil
 	}
-	return l.applyWebhookReconciliation(ctx, current, delivery, remote, !terminalWebhookStatus(current.Status))
+	return l.applyWebhookReconciliation(ctx, current, delivery, remote, !current.Status.TerminalForWebhook())
 }
 
 func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Issue, delivery webhook.Delivery, remote gh.RemoteState, forceTerminal bool) (bool, error) {
@@ -306,10 +309,10 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		}
 	}
 	decision := l.decideReconciliation(state.Snapshot{}, current, remote, inspection)
-	if forceTerminal && !terminalWebhookStatus(decision.status) {
+	if forceTerminal && !decision.status.TerminalForWebhook() {
 		decision = blockDecision(decision, "GitHub Issue left the configured ready collection")
 	}
-	if !terminalWebhookStatus(decision.status) {
+	if !decision.status.TerminalForWebhook() {
 		// The event was read successfully, but the remote state does not carry
 		// terminal authority. Preserve manual exclusions and failed/completed
 		// states instead of turning a webhook into an implicit resume.
@@ -339,7 +342,9 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 				return err
 			}
 		}
-		item.Status = decision.status
+		if err := setIssueStatus(item, decision.status); err != nil {
+			return err
+		}
 		item.LastError = decision.lastError
 		item.Branch = decision.branch
 		item.PullRequestURL = decision.pullRequest

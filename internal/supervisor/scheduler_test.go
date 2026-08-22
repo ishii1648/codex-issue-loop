@@ -710,7 +710,7 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 				t.Fatal(err)
 			}
 			snapshot, err = loop.Store.Load()
-			if err != nil || snapshot.Issues["1"].Status != test.wantStatus || snapshot.Issues["1"].PullRequestMerged != test.wantMerged {
+			if err != nil || snapshot.Issues["1"].Status.String() != test.wantStatus || snapshot.Issues["1"].PullRequestMerged != test.wantMerged {
 				t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
 			}
 			remaining, err := webhook.ReadMailbox(loop.Store.Dir)
@@ -1226,7 +1226,7 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 			}
 			for number, want := range test.want {
 				item := snapshot.Issues[strconv.Itoa(number)]
-				if item.Status != want || (item.Lease != nil) != test.leases[number] {
+				if item.Status.String() != want || (item.Lease != nil) != test.leases[number] {
 					t.Fatalf("Issue #%d=%+v want_status=%s want_lease=%v", number, item, want, test.leases[number])
 				}
 			}

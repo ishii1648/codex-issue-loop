@@ -13,6 +13,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/conflict"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
@@ -43,7 +44,7 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 		remote     gh.RemoteState
 		inspection worktree.Inspection
 		alive      bool
-		status     string
+		status     issuedomain.Status
 		prURL      string
 		githubSync string
 		prMerged   bool

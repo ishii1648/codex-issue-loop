@@ -89,11 +89,11 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 	}
 	issues := make([]activeIssueStatus, 0)
 	for _, issue := range snapshot.Issues {
-		if issue == nil || !occupiesWorkerSlot(issue.Status) {
+		if issue == nil || !issue.Status.OccupiesWorkerSlot() {
 			continue
 		}
 		value := activeIssueStatus{
-			IssueNumber: issue.Number, RunID: issue.RunID, Phase: issue.Status,
+			IssueNumber: issue.Number, RunID: issue.RunID, Phase: issue.Status.String(),
 			PID: issue.WorkerPID, PGID: issue.WorkerPGID, Resources: []string{},
 		}
 		if issue.Lease != nil {
@@ -136,7 +136,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 				if state.ResourcesConflict(claim.Resources, other.Lease.ResolvedResources) {
 					blockers[other.Number] = &resourceBlocker{IssueNumber: other.Number, Resources: append([]string(nil), other.Lease.ResolvedResources...), Reasons: []string{"resource_conflict"}}
 				}
-				if occupiesWorkerSlot(other.Status) {
+				if other.Status.OccupiesWorkerSlot() {
 					occupiedSlots++
 				}
 			}
@@ -145,7 +145,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 			}
 			if occupiedSlots >= limit {
 				for _, other := range snapshot.Issues {
-					if other == nil || other.Number == issue.Number || other.Lease == nil || !occupiesWorkerSlot(other.Status) {
+					if other == nil || other.Number == issue.Number || other.Lease == nil || !other.Status.OccupiesWorkerSlot() {
 						continue
 					}
 					blocker := blockers[other.Number]
@@ -187,14 +187,5 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 		ResourceAdmission: resourceAdmissionStatus{ResourceParks: parked, ClaimWaitingCandidates: waiting},
 		PendingRequests:   requests,
 		State:             snapshot,
-	}
-}
-
-func occupiesWorkerSlot(status string) bool {
-	switch status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
-		return true
-	default:
-		return false
 	}
 }

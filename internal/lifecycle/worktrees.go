@@ -136,13 +136,13 @@ func (m Manager) Purge(ctx context.Context, cfg config.Config, repoID string, st
 }
 
 func (m Manager) inspect(ctx context.Context, cfg config.Config, repoID string, snapshot state.Snapshot, issue *state.Issue, now time.Time) (Entry, error) {
-	maxAge, policyReason := maxAgeForStatus(cfg.Worktrees, issue.Status)
+	maxAge, policyReason := maxAgeForStatus(cfg.Worktrees, issue.Status.String())
 	age := time.Duration(0)
 	if !issue.UpdatedAt.IsZero() && now.After(issue.UpdatedAt) {
 		age = now.Sub(issue.UpdatedAt)
 	}
 	entry := Entry{
-		IssueNumber: issue.Number, Status: issue.Status, Path: issue.Worktree, Branch: issue.Branch,
+		IssueNumber: issue.Number, Status: issue.Status.String(), Path: issue.Worktree, Branch: issue.Branch,
 		UpdatedAt: issue.UpdatedAt, MaxAge: maxAge.String(), Age: age.Round(time.Second).String(),
 		Action: "retain", PurgeConfirmation: ConfirmationToken(repoID, issue.Number),
 	}

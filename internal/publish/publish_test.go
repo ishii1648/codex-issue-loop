@@ -254,12 +254,14 @@ func TestPublishRejectsGoSymlinkBeforeCommitOrPush(t *testing.T) {
 }
 
 func TestPublishFormatterFailureAndTimeoutDoNotCommitOrPush(t *testing.T) {
+	// Leave enough headroom for process scheduling during cold parallel package
+	// builds; the dedicated timeout case below still verifies the bounded path.
 	for _, test := range []struct {
 		name, script, code string
 		timeout            time.Duration
 		cancel             bool
 	}{
-		{name: "exit", script: "#!/bin/sh\nexit 42\n", code: "exit_failure", timeout: time.Second},
+		{name: "exit", script: "#!/bin/sh\nexit 42\n", code: "exit_failure", timeout: 5 * time.Second},
 		{name: "timeout", script: "#!/bin/sh\nexec sleep 2\n", code: "timeout", timeout: 20 * time.Millisecond},
 		{name: "canceled", script: "#!/bin/sh\nexec sleep 2\n", code: "canceled", timeout: 3 * time.Second, cancel: true},
 	} {
