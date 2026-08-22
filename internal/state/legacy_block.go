@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
 
@@ -32,7 +33,7 @@ type LegacyWorkerBlockRecovery struct {
 // overwritten by the old startup reconciliation behavior. It is only a hint;
 // LegacyWorkerBlockProvenance is the authority for normalization.
 func MayHaveLegacyWorkerBlockProvenance(issue *Issue) bool {
-	if issue == nil || issue.Status != "blocked" || issue.BlockedCause != nil || issue.RunID == "" || issue.FailureKind != "issue" {
+	if issue == nil || issue.Status != issuedomain.StatusBlocked || issue.BlockedCause != nil || issue.RunID == "" || issue.FailureKind != "issue" {
 		return false
 	}
 	_, workerBlock := legacyWorkerBlockReason(issue.LastError)
@@ -47,7 +48,7 @@ func MayHaveLegacyWorkerBlockRecoveryProvenance(issue *Issue) bool {
 	if MayHaveLegacyWorkerBlockProvenance(issue) {
 		return true
 	}
-	return issue != nil && issue.Status == "blocked" && issue.RunID != "" && issue.FailureKind == "issue" &&
+	return issue != nil && issue.Status == issuedomain.StatusBlocked && issue.RunID != "" && issue.FailureKind == "issue" &&
 		issue.BlockedCause != nil && issue.BlockedCause.Origin == "worker" && issue.BlockedCause.Kind == "environment" &&
 		issue.BlockedCause.Resumable && issue.BlockedCause.Reason != "" && !issue.BlockedCause.BlockedAt.IsZero()
 }

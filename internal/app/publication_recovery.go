@@ -55,7 +55,7 @@ func (a App) recoverPublication(ctx context.Context, l layout.Layout, args []str
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
-	idempotentStatus := current.Status == "publication_recovery_pending" || current.Status == "awaiting_checks" || current.Status == "awaiting_merge" || current.Status == "completed"
+	idempotentStatus := current.Status == issuedomain.StatusPublicationRecovery || current.Status == issuedomain.StatusAwaitingChecks || current.Status == issuedomain.StatusAwaitingMerge || current.Status == issuedomain.StatusCompleted
 	if current.PublicationRecovery != nil && current.PublicationRecovery.ID != "" && idempotentStatus {
 		if current.GitHubSync == "publication_recovery" {
 			if err := syncPublicationRecovery(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
@@ -64,7 +64,7 @@ func (a App) recoverPublication(ctx context.Context, l layout.Layout, args []str
 		}
 		return a.output(*jsonOut, publicationRecoveryOutput(current, true))
 	}
-	if current.Status != "failed" || current.GitHubSync != "" {
+	if current.Status != issuedomain.StatusFailed || current.GitHubSync != "" {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and failed before publication recovery (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
 	controller := a.ProcessController

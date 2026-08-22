@@ -306,7 +306,7 @@ func validateExistingAnsweredWorkspaceRecovery(snapshot state.Snapshot, issue *s
 		return fmt.Errorf("Issue #%d existing answered workspace recovery lease fence is inconsistent", issue.Number)
 	}
 	if issue.GitHubSync == "answered_workspace_recovery" &&
-		(issue.Status != "resume_pending" || recovery.Status != "requested" || issue.Lease == nil || issue.Lease.Owner != recovery.NewOwner ||
+		(issue.Status != issuedomain.StatusResumePending || recovery.Status != "requested" || issue.Lease == nil || issue.Lease.Owner != recovery.NewOwner ||
 			issue.LeaseGeneration != recovery.NewOwner.Generation || issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
 		return fmt.Errorf("Issue #%d pending answered workspace recovery synchronization is inconsistent", issue.Number)
 	}

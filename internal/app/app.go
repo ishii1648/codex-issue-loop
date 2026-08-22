@@ -1376,7 +1376,7 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 	if currentIssue == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from state", currentRequest.IssueNumber)}
 	}
-	parkedNeedsInput := currentRequest.ResumeStatus == ""
+	parkedNeedsInput := currentRequest.ResumeStatus == issuedomain.StatusUnset
 	if parkedNeedsInput {
 		pendingForIssue := 0
 		for _, request := range currentSnapshot.PendingRequests {
@@ -1387,7 +1387,7 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 		if pendingForIssue != 1 {
 			return exitError{4, fmt.Errorf("Issue #%d has ambiguous pending requests", currentIssue.Number)}
 		}
-		if currentIssue.Status != "needs_input" || currentIssue.WorkerPID != 0 || currentIssue.WorkerPGID != 0 || currentIssue.Lease != nil {
+		if currentIssue.Status != issuedomain.StatusNeedsInput || currentIssue.WorkerPID != 0 || currentIssue.WorkerPGID != 0 || currentIssue.Lease != nil {
 			return exitError{4, fmt.Errorf("Issue #%d is not a stopped parked needs-input continuation", currentIssue.Number)}
 		}
 		if err := state.ValidateNeedsInputPark(currentIssue, currentRequest); err != nil {
@@ -1428,7 +1428,7 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 			return fmt.Errorf("Issue #%d is missing from state", request.IssueNumber)
 		}
 		resumeStatus := request.ResumeStatus
-		if resumeStatus == "" {
+		if resumeStatus == issuedomain.StatusUnset {
 			pendingForIssue := 0
 			for _, candidate := range s.PendingRequests {
 				if candidate != nil && candidate.IssueNumber == issue.Number && candidate.Status == "pending" {
@@ -1438,17 +1438,17 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 			if pendingForIssue != 0 {
 				return exitError{4, fmt.Errorf("Issue #%d has ambiguous pending requests", issue.Number)}
 			}
-			if issue.Status != "needs_input" || issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease != nil {
+			if issue.Status != issuedomain.StatusNeedsInput || issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease != nil {
 				return exitError{4, fmt.Errorf("Issue #%d changed before its answer was recorded", issue.Number)}
 			}
 			if err := state.ValidateNeedsInputPark(issue, request); err != nil {
 				return exitError{4, err}
 			}
-			resumeStatus = "answer_claim_waiting"
+			resumeStatus = issuedomain.StatusAnswerClaimWaiting
 			if slot, ok := availableLeaseSlot(s, cfg.Queue.Concurrency, issue.ResourcePark.OriginalLease.Slot, issue.Number); ok {
 				owner, resumeErr := state.ResumeParkedLease(s, issue.Number, issue.ResourcePark.ID, slot, now)
 				if resumeErr == nil {
-					resumeStatus = "resume_pending"
+					resumeStatus = issuedomain.StatusResumePending
 					payload["lease_owner"] = owner
 					payload["lease_slot"] = slot
 				} else {
@@ -1472,7 +1472,7 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 			return err
 		}
 		issue.RetryAfter, issue.UpdatedAt = nil, now
-		if resumeStatus == "resolving_conflict" {
+		if resumeStatus == issuedomain.StatusResolvingConflict {
 			issue.GitHubSync = "conflict_retry"
 		}
 		issue.Answers = append(issue.Answers, state.AnswerRecord{RequestID: request.ID, Question: request.Question, Answer: answer, AnsweredAt: now})
@@ -1492,7 +1492,7 @@ func (a App) answerOutput(jsonOut bool, snapshot state.Snapshot, concurrency int
 		output["status"] = issue.Status
 		if issue.ResourcePark != nil && issue.ResourcePark.Kind == state.ResourceParkKindNeedsInput {
 			output["resource_park_id"] = issue.ResourcePark.ID
-			output["claim_waiting"] = issue.Status == "answer_claim_waiting"
+			output["claim_waiting"] = issue.Status == issuedomain.StatusAnswerClaimWaiting
 			if issue.Lease != nil {
 				output["lease_owner"] = issue.Lease.Owner
 			}
@@ -1544,7 +1544,7 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 			return exitError{4, fmt.Errorf("Issue #%d capability mismatch: %s", *issueNumber, data)}
 		}
 	}
-	if current.Status != "blocked" || current.GitHubSync != "" {
+	if current.Status != issuedomain.StatusBlocked || current.GitHubSync != "" {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before retry (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
 	reason := strings.ToLower(current.LastError)
@@ -1586,7 +1586,7 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 		"retry_id": retryID, "pull_request_url": current.PullRequestURL, "previous_reason": current.LastError,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(*issueNumber)]
-		if item.Status != "blocked" || item.GitHubSync != "" {
+		if item.Status != issuedomain.StatusBlocked || item.GitHubSync != "" {
 			return fmt.Errorf("Issue #%d changed while retry was being prepared", *issueNumber)
 		}
 		if item.ConflictRecovery == nil {
@@ -1678,8 +1678,8 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	}
 	pendingResume := false
 	idempotentResume := false
-	if current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" && current.Status != "blocked" {
-		if current.Status != "environment_resume_pending" {
+	if current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" && current.Status != issuedomain.StatusBlocked {
+		if current.Status != issuedomain.StatusEnvironmentResumePending {
 			return exitError{4, fmt.Errorf("Issue #%d is not waiting for an environment resume (status=%s)", *issueNumber, current.Status)}
 		}
 		if current.Lease == nil || current.RunID == "" || current.Worktree == "" || current.Branch == "" {
@@ -1696,10 +1696,10 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 			idempotentResume = true
 		}
 	}
-	if !pendingResume && !idempotentResume && (current.Status != "blocked" || current.GitHubSync != "") {
+	if !pendingResume && !idempotentResume && (current.Status != issuedomain.StatusBlocked || current.GitHubSync != "") {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and blocked before environment resume (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
-	interruptedResume := current.Status == "blocked" && current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" &&
+	interruptedResume := current.Status == issuedomain.StatusBlocked && current.EnvironmentResume != nil && current.EnvironmentResume.ID != "" &&
 		(current.EnvironmentResume.Status == "requested" || current.EnvironmentResume.Status == "github_synced")
 	interruptedWorkspaceRecovery := false
 	var interruptedWorkspaceEvidence *state.InterruptedWorkspaceResumeEvidence
@@ -1949,7 +1949,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				return fmt.Errorf("Issue #%d durable state changed while environment resume was being prepared", *issueNumber)
 			}
 			item := s.Issues[strconv.Itoa(*issueNumber)]
-			if item == nil || item.RunID != current.RunID || item.Status != "blocked" || item.GitHubSync != "" ||
+			if item == nil || item.RunID != current.RunID || item.Status != issuedomain.StatusBlocked || item.GitHubSync != "" ||
 				(interruptedResume && (item.EnvironmentResume == nil || item.EnvironmentResume.ID != resumeID || item.EnvironmentResume.Status != current.EnvironmentResume.Status)) {
 				return fmt.Errorf("Issue #%d changed while environment resume was being prepared", *issueNumber)
 			}

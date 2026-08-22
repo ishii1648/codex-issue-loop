@@ -171,7 +171,7 @@ func StopWorkers(ctx context.Context, store state.Store, grace time.Duration, re
 				if transition == nil {
 					return fmt.Errorf("Issue #%d active worker is missing its interruption decision", issue.Number)
 				}
-				if err := applyIssueTransition(item, *transition); err != nil {
+				if err := state.ApplyIssueTransition(item, *transition); err != nil {
 					return err
 				}
 				item.RetryAfter = nil

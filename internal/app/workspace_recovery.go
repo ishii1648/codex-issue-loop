@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
@@ -77,7 +78,7 @@ func (a App) recoverWorkspace(ctx context.Context, l layout.Layout, args []strin
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
-	if current.Status != "blocked" && current.Status != "failed" {
+	if current.Status != issuedomain.StatusBlocked && current.Status != issuedomain.StatusFailed {
 		return exitError{4, fmt.Errorf("Issue #%d must be blocked or failed for validation-only workspace recovery (status=%s)", *issueNumber, current.Status)}
 	}
 	if current.Workspace == nil && current.WorkspaceRecovery != nil {
@@ -260,7 +261,7 @@ func validateWorkspaceRecoveryRemote(cfg config.Config, issue *state.Issue, insp
 	}
 	blocked := labels[blockedLabel]
 	failed := labels[strings.ToLower(cfg.GitHub.FailedLabel)]
-	if (issue.Status == "blocked" && (!blocked || failed)) || (issue.Status == "failed" && (!failed || blocked)) {
+	if (issue.Status == issuedomain.StatusBlocked && (!blocked || failed)) || (issue.Status == issuedomain.StatusFailed && (!failed || blocked)) {
 		return fmt.Errorf("Issue #%d durable status and GitHub terminal label do not match", issue.Number)
 	}
 	for _, label := range append(append([]string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel}, cfg.GitHub.ReadyLabels...), "") {

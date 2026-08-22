@@ -18,6 +18,7 @@ import (
 )
 
 const statePackagePath = "github.com/ishii1648/codex-issue-loop/internal/state"
+const issueDomainPackagePath = "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 
 // TestIssueStatusAssignmentsStayWithinKnownBoundaries uses type information,
 // rather than receiver variable names, to find every production assignment to
@@ -35,7 +36,7 @@ func TestIssueStatusAssignmentsStayWithinKnownBoundaries(t *testing.T) {
 		"./internal/app", "./internal/state", "./internal/supervisor")
 
 	allowed := map[string]int{
-		"internal/state/issue_transition.go": 2, // named decision and compatibility commit boundaries
+		"internal/state/issue_transition.go": 1, // the named decision commit boundary
 	}
 	seen := map[string]int{}
 	for _, pkg := range loaded {
@@ -71,6 +72,72 @@ func TestIssueStatusAssignmentsStayWithinKnownBoundaries(t *testing.T) {
 			t.Errorf("%s has %d state.Issue.Status assignments; want %d at the central commit boundary", path, got, want)
 		}
 	}
+}
+
+func TestIssueStatusLogicUsesTypedVocabulary(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
+	loaded := loadTypedProductionPackages(t, repoRoot,
+		"./internal/app", "./internal/state", "./internal/supervisor")
+	for _, pkg := range loaded {
+		for _, file := range pkg.syntax {
+			ast.Inspect(file, func(node ast.Node) bool {
+				switch expression := node.(type) {
+				case *ast.AssignStmt:
+					for index, target := range expression.Lhs {
+						if index >= len(expression.Rhs) || !isIssueStatusType(pkg.info.TypeOf(target)) {
+							continue
+						}
+						if literal, ok := expression.Rhs[index].(*ast.BasicLit); ok && literal.Kind == token.STRING {
+							position := pkg.fset.Position(literal.Pos())
+							relative, _ := filepath.Rel(repoRoot, position.Filename)
+							t.Errorf("%s:%d assigns an untyped string to issue.Status; use an issuedomain.Status constant", filepath.ToSlash(relative), position.Line)
+						}
+					}
+				case *ast.BinaryExpr:
+					if expression.Op != token.EQL && expression.Op != token.NEQ {
+						return true
+					}
+					if issueStatusComparedWithString(pkg.info, expression.X, expression.Y) || issueStatusComparedWithString(pkg.info, expression.Y, expression.X) {
+						position := pkg.fset.Position(expression.Pos())
+						relative, _ := filepath.Rel(repoRoot, position.Filename)
+						t.Errorf("%s:%d compares issue.Status with an untyped string; use an issuedomain.Status constant", filepath.ToSlash(relative), position.Line)
+					}
+				case *ast.SwitchStmt:
+					if expression.Tag == nil || !isIssueStatusType(pkg.info.TypeOf(expression.Tag)) {
+						return true
+					}
+					for _, statement := range expression.Body.List {
+						clause := statement.(*ast.CaseClause)
+						for _, candidate := range clause.List {
+							if literal, ok := candidate.(*ast.BasicLit); ok && literal.Kind == token.STRING {
+								position := pkg.fset.Position(candidate.Pos())
+								relative, _ := filepath.Rel(repoRoot, position.Filename)
+								t.Errorf("%s:%d switches on issue.Status with an untyped string; use an issuedomain.Status constant", filepath.ToSlash(relative), position.Line)
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+func issueStatusComparedWithString(info *types.Info, status, other ast.Expr) bool {
+	if !isIssueStatusType(info.TypeOf(status)) {
+		return false
+	}
+	literal, ok := other.(*ast.BasicLit)
+	return ok && literal.Kind == token.STRING
+}
+
+func isIssueStatusType(value types.Type) bool {
+	named, ok := value.(*types.Named)
+	return ok && named.Obj().Name() == "Status" && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == issueDomainPackagePath
 }
 
 type listedPackage struct {
@@ -136,7 +203,10 @@ func loadTypedProductionPackages(t *testing.T, repoRoot string, patterns ...stri
 			}
 			syntax = append(syntax, file)
 		}
-		info := &types.Info{Selections: map[*ast.SelectorExpr]*types.Selection{}}
+		info := &types.Info{
+			Selections: map[*ast.SelectorExpr]*types.Selection{},
+			Types:      map[ast.Expr]types.TypeAndValue{},
+		}
 		lookup := func(path string) (io.ReadCloser, error) {
 			dependency, ok := all[path]
 			if !ok || dependency.Export == "" {
