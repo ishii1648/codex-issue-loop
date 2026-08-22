@@ -424,7 +424,7 @@ func TestCapabilityMismatchPrecedesLeaseClaimWorktreeAndGitHubMutation(t *testin
 	}
 	github.issue.Body = "<!-- agent-loop:capabilities\nversion: 1\nprofile: standard\nnetwork: public\nbrowser_cdp: false\ndownload: false\nexternal_time_gate: false\n-->"
 	loop.GitHub = rawCapabilityGitHub{fakeGitHub: github}
-	if err := loop.startIssueAtSlotWithResources(context.Background(), github.issue, "run_capability", 0, []string{state.RepositoryResource}, []string{state.RepositoryResource}); err != nil {
+	if err := loop.startIssueAtSlotWithResources(context.Background(), github.issue, "run_capability", 0); err != nil {
 		t.Fatal(err)
 	}
 	after, err := loop.Store.Load()
@@ -1667,11 +1667,7 @@ func TestMergedPullRequestCompletesAndClosesIssue(t *testing.T) {
 }
 
 func TestRunOncePersistsQuestion(t *testing.T) {
-	budget := int64(4321)
-	result := worker.Result{Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "decision", SessionID: "session", Question: &worker.Question{Text: "Choose?", Reason: "public API", AllowFreeText: true}, Goal: &worker.Goal{
-		ThreadID: "session", Objective: "Complete Issue", Status: "blocked", TokenBudget: &budget,
-		TimeBudgetSeconds: 3600, TokensUsed: 123, TimeUsedSeconds: 17,
-	}}
+	result := worker.Result{Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "decision", SessionID: "session", Question: &worker.Question{Text: "Choose?", Reason: "public API", AllowFreeText: true}}
 	loop, github := testLoop(t, result)
 	_, err := loop.RunOnce(context.Background())
 	if err != nil {
@@ -1683,9 +1679,6 @@ func TestRunOncePersistsQuestion(t *testing.T) {
 	snapshot, _ := loop.Store.Load()
 	if snapshot.Issues["1"].Status != "needs_input" || snapshot.Issues["1"].Lease != nil || snapshot.Issues["1"].ResourcePark == nil || snapshot.Issues["1"].ResourcePark.Kind != state.ResourceParkKindNeedsInput {
 		t.Fatalf("issue=%+v", snapshot.Issues["1"])
-	}
-	if goal := snapshot.Issues["1"].Goal; goal == nil || goal.Status != "blocked" || goal.TokensUsed != 123 || goal.TimeBudgetSeconds != 3600 {
-		t.Fatalf("goal=%+v", goal)
 	}
 	if len(snapshot.PendingRequests) != 1 {
 		t.Fatalf("requests=%d", len(snapshot.PendingRequests))
@@ -1711,7 +1704,6 @@ func TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce(t *testing.T) {
 			Number: 1, Title: "Test", Status: "needs_input", RunID: "run_1", LeaseGeneration: 1,
 			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
 			SessionID: "session-1", Session: &state.WorkerSession{Backend: "codex", ID: "session-1"},
-			Goal:     &state.WorkerGoal{ThreadID: "session-1", Objective: "finish", Status: "blocked"},
 			Attempts: 2, Continuations: 1, Answers: []state.AnswerRecord{answer},
 			Lease: &state.ResourceLease{Owner: originalOwner, Slot: 0, DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-1", ReservedAt: now},
 		}

@@ -92,29 +92,6 @@ exit 2
 	}
 }
 
-func TestCodexProbeDetectsGeneratedAppServerGoalContract(t *testing.T) {
-	dir := t.TempDir()
-	codex := filepath.Join(dir, "codex")
-	writeExecutable(t, codex, `#!/bin/sh
-if [ "$1 $2 $3" = "app-server generate-json-schema --help" ]; then echo '--out --experimental'; exit 0; fi
-if [ "$1 $2 $3" = "app-server generate-json-schema --experimental" ]; then
-  schema_out=''
-  while [ "$#" -gt 0 ]; do
-    if [ "$1" = "--out" ]; then schema_out="$2"; break; fi
-    shift
-  done
-  printf '%s' 'thread/start thread/resume thread/goal/set thread/goal/get thread/goal/clear turn/start turn/steer' > "$schema_out/ClientRequest.json"
-  printf '%s' 'item/tool/requestUserInput item/commandExecution/requestApproval item/fileChange/requestApproval' > "$schema_out/ServerRequest.json"
-  printf '%s' 'thread/tokenUsage/updated turn/completed' > "$schema_out/ServerNotification.json"
-  exit 0
-fi
-exit 2
-`)
-	if !probeCodexAppServerGoal(context.Background(), codex) {
-		t.Fatal("generated App Server Goal contract was not detected")
-	}
-}
-
 func TestBuiltInBackendCapabilityProbes(t *testing.T) {
 	dir := t.TempDir()
 	claude := filepath.Join(dir, "claude")

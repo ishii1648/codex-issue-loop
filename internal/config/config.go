@@ -90,7 +90,6 @@ type Worker struct {
 	Command          string             `yaml:"command" json:"command"`
 	Model            string             `yaml:"model" json:"model,omitempty"`
 	Variant          string             `yaml:"variant" json:"variant,omitempty"`
-	AppServer        AppServer          `yaml:"app_server" json:"app_server"`
 	CommandNetwork   CommandNetwork     `yaml:"command_network" json:"command_network"`
 	Sandbox          string             `yaml:"sandbox" json:"sandbox"`
 	SessionMode      string             `yaml:"session_mode" json:"session_mode"`
@@ -108,15 +107,6 @@ type CommandNetwork struct {
 	Policy       string   `yaml:"policy" json:"policy"`
 	Proxy        bool     `yaml:"proxy" json:"proxy"`
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts,omitempty"`
-}
-
-// AppServer controls the opt-in Codex App Server Goal adapter. It is only
-// eligible for continuations already classified as extended; initial and
-// standard executions keep using the codex exec adapter.
-type AppServer struct {
-	Enabled         bool     `yaml:"enabled" json:"enabled"`
-	GoalTokenBudget int64    `yaml:"goal_token_budget" json:"goal_token_budget"`
-	GoalTimeBudget  Duration `yaml:"goal_time_budget" json:"goal_time_budget"`
 }
 
 type Profile struct {
@@ -275,12 +265,8 @@ func Defaults() Config {
 		},
 		Resources: Resources{MetadataVersion: 1},
 		Worker: Worker{
-			Backend:        "codex",
-			CommandNetwork: CommandNetwork{Policy: "disabled"},
-			AppServer: AppServer{
-				GoalTokenBudget: 200000,
-				GoalTimeBudget:  Duration{2 * time.Hour},
-			},
+			Backend:          "codex",
+			CommandNetwork:   CommandNetwork{Policy: "disabled"},
 			Sandbox:          "workspace-write",
 			SessionMode:      "resumable",
 			Timeout:          Duration{2 * time.Hour},
@@ -450,12 +436,6 @@ func (c Config) Validate() error {
 	if c.Worker.Backend != "opencode" && c.Worker.Variant != "" && c.Worker.Backend != "claude-code" {
 		return fmt.Errorf("worker.variant is supported by claude-code and opencode only")
 	}
-	if c.Worker.AppServer.Enabled && c.Worker.Backend != "codex" {
-		return fmt.Errorf("worker.app_server is supported by the codex backend only")
-	}
-	if c.Worker.AppServer.Enabled && (c.Worker.AppServer.GoalTokenBudget <= 0 || c.Worker.AppServer.GoalTimeBudget.Duration <= 0) {
-		return fmt.Errorf("worker.app_server requires positive goal_token_budget and goal_time_budget")
-	}
 	if err := c.Worker.CommandNetwork.Validate(c.Worker); err != nil {
 		return err
 	}
@@ -610,9 +590,6 @@ func (n CommandNetwork) Validate(worker Worker) error {
 		}
 		if worker.Sandbox != "workspace-write" {
 			return fmt.Errorf("worker.command_network localhost-only requires worker.sandbox=workspace-write")
-		}
-		if worker.AppServer.Enabled {
-			return fmt.Errorf("worker.command_network localhost-only cannot be combined with worker.app_server; codex exec isolation is required")
 		}
 		if !n.Proxy {
 			return fmt.Errorf("worker.command_network localhost-only requires proxy=true")

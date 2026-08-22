@@ -15,7 +15,13 @@
 
 Codexの`exec resume`と、その`--json`、`--output-schema`、`--output-last-message`は任意capabilityとして扱う。probeはadapterと同じ`codex exec --cd . resume --help`の順序を検証する。利用できる場合は保存したsession IDを再開し、利用できない場合は同じIssue worktree、run ID、回答履歴をpromptへ再構成して新規sessionを起動する。新規sessionでもsandboxと承認禁止の制約は変えない。
 
-Codex App Server Goalも任意capabilityである。`generate-json-schema --experimental`が生成するschemaから`thread/start|resume`、`thread/goal/set|get|clear`、`turn/start|steer`、`item/tool/requestUserInput`、approval request、`thread/tokenUsage/updated`、`turn/completed`をすべて検出した場合だけoptional adapterを選択する。設定が有効でもcapabilityが不足するversionでは起動を拒否せず既存`codex exec` adapterへfallbackする。詳細は[App Server Goal adapter](app-server-goal-adapter.md)を参照する。
+## App Server Goal adapter削除時の互換性
+
+`worker.app_server`は現行設定ではない。旧設定を使っていたrepositoryは、更新前に`worker.app_server` block全体を削除してから`register`と`doctor`を実行する。strict YAML decoderは残存するkeyを`field app_server not found in type config.Worker`として拒否するため、誤って有効な設定として扱われることはない。
+
+旧durable stateの`goal` snapshotは読み込み時に無視され、次の通常state更新で書き戻されない。`session_id` / `session`、worktree、branch、answers、attempts、continuationsなどの継続情報はそのまま保持されるため、state fileやworktreeを削除しない。
+
+App Server方式は恒久禁止ではなくdeferred featureである。中核worker lifecycleが安定し、`codex exec resume`では満たせない具体的要件、token/time budget、再接続、二重実行防止の継続的なintegration/replay testを定義できた場合に、[#189](https://github.com/ishii1648/codex-issue-loop/issues/189)とは別のIssueで再評価する。
 
 Claude Codeは`claude -p`へpromptをstdinで渡し、`--json-schema`の`structured_output`と`session_id`を正規化する。OpenCodeはrunごとにloopback serverをprocess group内で起動し、promptをmessage API bodyへ渡す。timeout/cancel時はsession abortを試行してからserver process groupを終了する。OpenCode CLIのprompt argv fallbackは実装しない。
 
@@ -40,7 +46,6 @@ Claude Codeは`claude -p`へpromptをstdinで渡し、`--json-schema`の`structu
 codex --version
 codex exec --help
 codex exec --cd . resume --help
-codex app-server generate-json-schema --help
 claude --version
 claude --help
 opencode --version

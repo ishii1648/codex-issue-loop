@@ -47,9 +47,6 @@ watch:
 	if cfg.Worker.Backend != "codex" || cfg.Worker.EffectiveCommand() != "codex" {
 		t.Fatalf("legacy worker defaults changed: %+v", cfg.Worker)
 	}
-	if cfg.Worker.AppServer.Enabled || cfg.Worker.AppServer.GoalTokenBudget != 200000 || cfg.Worker.AppServer.GoalTimeBudget.Duration != 2*time.Hour {
-		t.Fatalf("unexpected opt-in App Server defaults: %+v", cfg.Worker.AppServer)
-	}
 	if cfg.Completion.AutoMerge {
 		t.Fatal("auto merge must be opt-in")
 	}
@@ -116,21 +113,10 @@ func TestLoadBuiltInGoFormatterOptIn(t *testing.T) {
 	}
 }
 
-func TestLoadAppServerGoalOptInAndRejectsUnsafeBudgets(t *testing.T) {
-	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  backend: codex\n  app_server:\n    enabled: true\n    goal_token_budget: 50000\n    goal_time_budget: 45m\n")
-	cfg, err := Load(dir)
-	if err != nil || !cfg.Worker.AppServer.Enabled || cfg.Worker.AppServer.GoalTokenBudget != 50000 || cfg.Worker.AppServer.GoalTimeBudget.Duration != 45*time.Minute {
-		t.Fatalf("app_server=%+v err=%v", cfg.Worker.AppServer, err)
-	}
-	for _, fragment := range []string{
-		"backend: claude-code\n  app_server:\n    enabled: true",
-		"backend: codex\n  app_server:\n    enabled: true\n    goal_token_budget: 0",
-		"backend: codex\n  app_server:\n    enabled: true\n    goal_time_budget: 0s",
-	} {
-		dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  "+fragment+"\n")
-		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "app_server") {
-			t.Fatalf("unsafe App Server config accepted: %s: %v", fragment, err)
-		}
+func TestLoadRejectsRemovedAppServerSection(t *testing.T) {
+	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  app_server:\n    enabled: true\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "field app_server not found") {
+		t.Fatalf("removed worker.app_server section was accepted: %v", err)
 	}
 }
 
@@ -163,7 +149,6 @@ worker:
 	for _, fragment := range []string{
 		"backend: claude-code",
 		"sandbox: read-only",
-		"app_server:\n    enabled: true",
 	} {
 		dir = writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  "+fragment+"\n  command_network:\n    policy: localhost-only\n    proxy: true\n    allowed_hosts: [localhost, 127.0.0.1]\n")
 		if _, err := Load(dir); err == nil {

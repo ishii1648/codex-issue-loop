@@ -123,9 +123,9 @@ sleep 3
 "$agent_loop_bin" retry --repo "$PWD" --issue 123 --json
 ```
 
-workerが外部環境前提を理由にtyped `blocked`を返すと、supervisorはPID/PGID不在を確認し、run・worktree・branch・dirty changes・session/Goal・answers・resource/base provenanceを`resource_park`へ保持したままactive leaseだけを自動parkします。GitHubは`blocked`のままですが、後続queueは同じresourceを予約できます。`status --json`の`resource_admission.resource_parks`で保存claimとpark状態、`claim_waiting_candidates`でresumeを妨げるIssue/resource/slotを確認できます。
+workerが外部環境前提を理由にtyped `blocked`を返すと、supervisorはPID/PGID不在を確認し、run・worktree・branch・dirty changes・session・answers・resource/base provenanceを`resource_park`へ保持したままactive leaseだけを自動parkします。GitHubは`blocked`のままですが、後続queueは同じresourceを予約できます。`status --json`の`resource_admission.resource_parks`で保存claimとpark状態、`claim_waiting_candidates`でresumeを妨げるIssue/resource/slotを確認できます。
 
-通常workerが`needs_input`を返した場合も、pending requestとrequest IDをrun・元lease ownerへ結び付け、PID/PGID消失後に同じtransactionでleaseをparkします。GitHubの`codex-loop:needs-input`は回答まで維持されるため、質問、worktree、dirty changes、branch、session/Goal、base SHAを残したまま無関係なready queueを継続できます。`answer`は保存provenanceを検証し、競合がなければ新generationを1回だけ取得します。競合中は回答を`answer_claim_waiting`として保存し、相手lease解放後に自動再取得します。
+通常workerが`needs_input`を返した場合も、pending requestとrequest IDをrun・元lease ownerへ結び付け、PID/PGID消失後に同じtransactionでleaseをparkします。GitHubの`codex-loop:needs-input`は回答まで維持されるため、質問、worktree、dirty changes、branch、session、base SHAを残したまま無関係なready queueを継続できます。`answer`は保存provenanceを検証し、競合がなければ新generationを1回だけ取得します。競合中は回答を`answer_claim_waiting`として保存し、相手lease解放後に自動再取得します。
 
 前提をoperatorが解消し、active processがないことを確認した後だけ、次の明示操作で同じworktree・branch・sessionから再開します。park済みclaimは他Issueのactive leaseとworker slotを同じtransactionで再検証し、新しいowner generationを1回だけ取得します。競合中は他Issueのleaseを奪わず拒否します。PR conflict、手動exclusion、security block、failed、completed/closed Issueには適用されません。
 
@@ -279,6 +279,6 @@ schema migrationが必要な場合はloopを開始せず、[migration runbook](d
 ## 詳細ドキュメント
 
 - 運用: [Codex Desktop監視task](docs/codex-desktop-monitoring.md)、[Mac mini常駐運用](docs/mac-mini-runbook.md)、[concurrency 2 rollout・rollback](docs/concurrency-rollout.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[worktree](docs/worktree-lifecycle.md)
-- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[App Server Goal adapter](docs/app-server-goal-adapter.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
+- 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
 - 実測: [Mac mini実機E2E](docs/e2e/2026-08-15-mac-mini.md)、[LLM内ループとのtoken消費比較](docs/e2e/2026-08-16-llm-loop-token-comparison.md)
 - 開発: [Build・test](Makefile)、[実装状況](docs/implementation.md)、[脅威モデル](docs/threat-model.md)、[セキュリティ運用](docs/security-runbook.md)、[CLI互換性](docs/compatibility.md)

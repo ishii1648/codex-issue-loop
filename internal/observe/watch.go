@@ -50,7 +50,7 @@ func waitWithSubscription(ctx context.Context, store state.Store, interval time.
 		return wait(ctx, store, interval, jitter, untilIdle, nil, nil)
 	}
 	if subscription.close != nil {
-		defer subscription.close()
+		defer func() { _ = subscription.close() }()
 	}
 	if subscribed != nil {
 		subscribed()
@@ -125,12 +125,9 @@ func wait(ctx context.Context, store state.Store, interval time.Duration, jitter
 			if !ok {
 				wake = nil
 			}
-		case err, ok := <-eventErrors:
+		case _, ok := <-eventErrors:
 			if !ok {
 				eventErrors = nil
-			} else if err != nil {
-				// Event delivery is only an optimization. Continue to the durable
-				// reconciliation path instead of failing the watch.
 			}
 		case <-timer.C:
 		}
