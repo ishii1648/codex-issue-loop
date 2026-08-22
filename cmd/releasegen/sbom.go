@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"debug/buildinfo"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -61,22 +63,30 @@ type relationship struct {
 
 var unsafeID = regexp.MustCompile(`[^A-Za-z0-9.-]+`)
 
-func main() {
-	artifact := flag.String("artifact", "", "built agent-loop binary")
-	version := flag.String("version", "", "release version")
-	output := flag.String("output", "", "SPDX JSON output")
-	flag.Parse()
-	if *artifact == "" || *version == "" || *output == "" {
-		fmt.Fprintln(os.Stderr, "--artifact, --version, and --output are required")
-		os.Exit(2)
+func runSBOM(args []string, stderr io.Writer) int {
+	flags := flag.NewFlagSet("releasegen sbom", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	artifact := flags.String("artifact", "", "built agent-loop binary")
+	version := flags.String("version", "", "release version")
+	output := flags.String("output", "", "SPDX JSON output")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
-	if err := generate(*artifact, *version, *output, sourceTime()); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if flags.NArg() != 0 || *artifact == "" || *version == "" || *output == "" {
+		fmt.Fprintln(stderr, "--artifact, --version, and --output are required")
+		return 2
 	}
+	if err := generateSBOM(*artifact, *version, *output, sourceTime()); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
 }
 
-func generate(artifact, version, output string, created time.Time) error {
+func generateSBOM(artifact, version, output string, created time.Time) error {
 	info, err := buildinfo.ReadFile(artifact)
 	if err != nil {
 		return fmt.Errorf("read Go build information: %w", err)
@@ -107,7 +117,7 @@ func generate(artifact, version, output string, created time.Time) error {
 		SPDXVersion: "SPDX-2.3", DataLicense: "CC0-1.0", SPDXID: "SPDXRef-DOCUMENT",
 		Name:              "agent-loop-" + version,
 		DocumentNamespace: "https://github.com/ishii1648/codex-issue-loop/releases/" + version + "/spdx/" + hash,
-		CreationInfo:      creationInfo{Created: created.UTC().Format("2006-01-02T15:04:05Z"), Creators: []string{"Tool: codex-issue-loop-sbom"}},
+		CreationInfo:      creationInfo{Created: created.UTC().Format("2006-01-02T15:04:05Z"), Creators: []string{"Tool: codex-issue-loop-releasegen"}},
 		Packages:          packages,
 		Files:             []spdxFile{{FileName: "./" + filepath.Base(artifact), SPDXID: "SPDXRef-File-agent-loop", Checksums: []checksum{{Algorithm: "SHA256", ChecksumValue: hash}}, LicenseConcluded: "NOASSERTION"}},
 		Relationships:     relations,

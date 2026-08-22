@@ -36,12 +36,12 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
   -o "$artifact" \
   ./cmd/agent-loop
 
-SOURCE_DATE_EPOCH=$source_epoch go run ./cmd/sbom \
+SOURCE_DATE_EPOCH=$source_epoch go run ./cmd/releasegen sbom \
   --artifact "$artifact" \
   --version "$version" \
   --output "$sbom"
 
-go run ./cmd/releasemanifest \
+go run ./cmd/releasegen manifest \
   --artifact "$artifact" \
   --version "$version" \
   --commit "$commit" \
