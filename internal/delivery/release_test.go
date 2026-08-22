@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,7 +27,7 @@ type releaseRunner struct {
 	replaceReleaseAtView                    int
 	attestationFailure                      bool
 	badChecksum                             bool
-	failFirstDoctor                         bool
+	failDoctorCalls                         map[int]bool
 	rollbackFailure                         bool
 }
 
@@ -47,10 +48,10 @@ func (r *releaseRunner) Run(_ context.Context, name string, args ...string) ([]b
 	}
 	if filepath.Base(name) == "agent-loop" && len(args) > 0 && args[0] == "doctor" {
 		r.doctors++
-		if r.failFirstDoctor && r.doctors == 1 {
-			return nil, errors.New("doctor fixture failure")
+		if r.failDoctorCalls[r.doctors] {
+			return []byte(`{"schema_version":1,"ok":false,"diagnostics":[{"code":"FIXTURE_FAILURE","ok":false,"scope":"host","summary":"fixture failure"}]}`), errors.New("doctor fixture failure")
 		}
-		return []byte(`{"schema_version":1,"ok":true}`), nil
+		return []byte(`{"schema_version":1,"ok":true,"diagnostics":[]}`), nil
 	}
 	if filepath.Base(name) == "agent-loop" && len(args) > 0 && args[0] == "rollback" {
 		r.rollbacks++
@@ -243,13 +244,13 @@ func TestCompatibilityBlocksMajorSchemaDowngradeAndRetag(t *testing.T) {
 func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 	for _, test := range []struct {
 		name            string
-		failDoctor      bool
+		failDoctorCalls map[int]bool
 		wantResult      string
 		wantRollback    int
 		rollbackFailure bool
 		keepFence       bool
 		wantErr         bool
-	}{{"success", false, "succeeded", 0, false, false, false}, {"rollback", true, "rolled_back", 1, false, false, true}, {"rollback failure", true, "rollback_failed", 1, true, true, true}} {
+	}{{"success", nil, "succeeded", 0, false, false, false}, {"rollback", map[int]bool{2: true}, "rolled_back", 1, false, false, true}, {"rollback failure", map[int]bool{2: true}, "rollback_failed", 1, true, true, true}, {"rollback health failure", map[int]bool{2: true, 3: true}, "rollback_health_failed", 1, false, true, true}} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"), BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills"), LaunchAgents: filepath.Join(root, "launch")}
@@ -263,7 +264,7 @@ func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 			if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
 				t.Fatal(err)
 			}
-			runner := &releaseRunner{failFirstDoctor: test.failDoctor, rollbackFailure: test.rollbackFailure}
+			runner := &releaseRunner{failDoctorCalls: test.failDoctorCalls, rollbackFailure: test.rollbackFailure}
 			fixed := time.Date(2026, 8, 19, 1, 2, 3, 0, time.UTC)
 			controller := Controller{Layout: l, ConfigPath: configPath, GH: "gh", Runner: runner, Now: func() time.Time { return fixed }, Soak: -1}
 			report, err := controller.Reconcile(context.Background(), true)
@@ -288,6 +289,111 @@ func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestControllerPreflightDoctorFailureDoesNotCreateFenceOrApply(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"), BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills"), LaunchAgents: filepath.Join(root, "launch")}
+	if err := os.MkdirAll(l.BinDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.WriteJSON(filepath.Join(root, "install.json"), map[string]any{"version": "v1.2.2", "commit": strings.Repeat("a", 40), "schema_version": 4, "semantic_contract_version": 1}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "delivery.yaml")
+	if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
+		t.Fatal(err)
+	}
+	runner := &releaseRunner{failDoctorCalls: map[int]bool{1: true}}
+	report, err := (Controller{Layout: l, ConfigPath: configPath, GH: "gh", Runner: runner, Soak: -1}).Reconcile(context.Background(), true)
+	if err == nil || report.Result != "preflight_failed" || runner.updates != 0 || runner.rollbacks != 0 {
+		t.Fatalf("report=%+v err=%v runner=%+v", report, err, runner)
+	}
+	if report.PreflightDoctor == nil || len(report.PreflightDoctor.Failures) != 1 || report.PreflightDoctor.Failures[0].Code != "FIXTURE_FAILURE" {
+		t.Fatalf("structured preflight diagnostic missing: %+v", report.PreflightDoctor)
+	}
+	transactionData, err := os.ReadFile(RuntimePaths(root).Transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, incompatibleField := range []string{"preflight_doctor", "post_update_doctor", "rollback_doctor", "rollback_recovery"} {
+		if bytes.Contains(transactionData, []byte(incompatibleField)) {
+			t.Fatalf("legacy transaction schema was extended with %q: %s", incompatibleField, transactionData)
+		}
+	}
+	if _, err := os.Lstat(RuntimePaths(root).Evidence); err != nil {
+		t.Fatalf("structured evidence sidecar missing: %v", err)
+	}
+	if _, statErr := os.Lstat(RuntimePaths(root).Maintenance); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("preflight failure created maintenance fence: %v", statErr)
+	}
+}
+
+func TestControllerRecoverRollbackRequiresPreviewAndExactRestoredBaseline(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"), BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills"), LaunchAgents: filepath.Join(root, "launch")}
+	if err := os.MkdirAll(l.BinDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)}
+	desired := VersionRef{Version: "v1.2.3", Commit: testCommit}
+	manifest := map[string]any{"version": previous.Version, "commit": previous.Commit, "schema_version": 4, "semantic_contract_version": 1}
+	if err := fsutil.WriteJSON(filepath.Join(root, "install.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "delivery.yaml")
+	if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
+		t.Fatal(err)
+	}
+	paths := RuntimePaths(root)
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(root, "backups", "delivery-maintenance_fixture-v1.2.2")
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.WriteJSON(filepath.Join(backup, "install.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tx := Transaction{Version: 1, Phase: PhaseValidating, Current: previous, Previous: previous, Desired: desired, MaintenanceGeneration: "maintenance_fixture", BackupPath: backup, LastResult: "rollback_failed", Reason: "post-update doctor failed: fixture; rollback failed: post-update doctor failed: fixture"}
+	if err := SaveTransaction(paths.Transaction, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMaintenance(paths.Maintenance, Maintenance{Generation: tx.MaintenanceGeneration, Desired: desired}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &releaseRunner{}
+	controller := Controller{Layout: l, ConfigPath: configPath, Runner: runner, Now: func() time.Time { return time.Date(2026, 8, 20, 1, 2, 3, 0, time.UTC) }}
+	preview, err := controller.RecoverRollback(context.Background(), false)
+	if err != nil || preview.Result != "recoverable" || preview.RecoveryPlan == nil || preview.RecoveryPlan.Status != "recoverable" {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	stillFailed, err := LoadTransaction(paths.Transaction)
+	if err != nil || stillFailed.LastResult != "rollback_failed" {
+		t.Fatalf("preview mutated transaction: %+v err=%v", stillFailed, err)
+	}
+	if _, err := os.Lstat(paths.Maintenance); err != nil {
+		t.Fatalf("preview cleared maintenance fence: %v", err)
+	}
+	recovered, err := controller.RecoverRollback(context.Background(), true)
+	if err != nil || recovered.Result != "rolled_back" || recovered.RollbackRecovery == nil || recovered.RollbackRecovery.Status != "succeeded" {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	if _, err := os.Lstat(paths.Maintenance); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmed recovery retained maintenance fence: %v", err)
+	}
+	transactionData, err := os.ReadFile(paths.Transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(transactionData, []byte("rollback_recovery")) {
+		t.Fatalf("recovery broke legacy transaction decoding: %s", transactionData)
+	}
+	evidence, err := LoadEvidence(paths.Evidence)
+	if err != nil || evidence.RollbackRecovery == nil || evidence.RollbackRecovery.Status != "succeeded" {
+		t.Fatalf("recovery evidence=%+v err=%v", evidence, err)
 	}
 }
 

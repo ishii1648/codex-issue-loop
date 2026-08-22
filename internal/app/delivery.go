@@ -17,18 +17,43 @@ import (
 
 func (a App) delivery(ctx context.Context, l layout.Layout, args []string) error {
 	if len(args) == 0 {
-		return exitError{2, errors.New("delivery subcommand is required: configure, check, status, reconcile, apply, pause, resume")}
+		return exitError{2, errors.New("delivery subcommand is required: configure, check, status, reconcile, apply, recover-rollback, pause, resume")}
 	}
 	switch args[0] {
 	case "configure":
 		return a.deliveryConfigure(ctx, l, args[1:])
 	case "check", "status", "reconcile", "apply":
 		return a.deliveryOperation(ctx, l, args[0], args[1:])
+	case "recover-rollback":
+		return a.deliveryRecoverRollback(ctx, l, args[1:])
 	case "pause", "resume":
 		return a.deliveryEnabled(l, args[0], args[1:])
 	default:
 		return exitError{2, fmt.Errorf("unknown delivery subcommand %q", args[0])}
 	}
+}
+
+func (a App) deliveryRecoverRollback(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("delivery recover-rollback", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	configFlag := fs.String("config", "", "absolute config path (tests and explicit operations only)")
+	confirm := fs.Bool("confirm-restored-baseline", false, "confirm verified previous installation recovery")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	path, err := delivery.ResolveConfigPath(*configFlag)
+	if err != nil {
+		return exitError{2, err}
+	}
+	report, err := (delivery.Controller{Layout: l, ConfigPath: path}).RecoverRollback(ctx, *confirm)
+	if outputErr := a.output(*jsonOut, report); outputErr != nil {
+		return outputErr
+	}
+	return err
 }
 
 func (a App) deliveryConfigure(ctx context.Context, l layout.Layout, args []string) error {

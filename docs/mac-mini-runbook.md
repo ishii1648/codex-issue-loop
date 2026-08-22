@@ -376,7 +376,9 @@ agent-loop delivery configure --apply --json
 agent-loop delivery status --json
 ```
 
-`$HOME/.agent-loop-delivery.yaml`はownerがLaunchAgent user、mode `0600`、symlinkでないことを確認する。repository別`.agent-loop.yaml`へdelivery設定を追加しない。`status --json`でphase、current/desired/previous、drain進捗、backup、last/next checkを確認する。`rollback_failed`ではmaintenance fenceを手動削除せず、表示されたbackupを保全してdoctorの失敗codeを調査する。
+`$HOME/.agent-loop-delivery.yaml`はownerがLaunchAgent user、mode `0600`、symlinkでないことを確認する。repository別`.agent-loop.yaml`へdelivery設定を追加しない。`status --json`でphase、current/desired/previous、drain進捗、backup、preflight/post-update/rollback doctor、last/next checkを確認する。`preflight_failed`はinstalled versionを変更せずfenceも作らないため、表示されたdoctor codeのprerequisiteを解消して通常reconcileを待つ。`rollback_failed`または`rollback_health_failed`ではmaintenance fenceを手動削除せず、表示されたbackupを保全する。
+
+previous installが既に復元され、外部prerequisiteを解消済みの場合だけ、checksum・attestation・version/commitを検証した修正版artifactから`delivery recover-rollback --json`を実行する。previewのinstalled/previous、maintenance generation、backup、全repository maintenance、doctorが完全一致することをoperatorが確認してから`--confirm-restored-baseline`を付ける。拒否された場合はstate、fence、backup、registry、worktreeを編集して条件を作らない。
 
 初回導入とrelease前の実Mac E2Eでは、test repositoryと検証済みstable releaseを使い、次を記録する。
 

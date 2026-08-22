@@ -14,6 +14,7 @@ import (
 type Paths struct {
 	Root        string
 	Transaction string
+	Evidence    string
 	Maintenance string
 	Cache       string
 	Log         string
@@ -22,7 +23,7 @@ type Paths struct {
 
 func RuntimePaths(managedRoot string) Paths {
 	root := filepath.Join(managedRoot, "delivery")
-	return Paths{Root: root, Transaction: filepath.Join(root, "transaction.json"), Maintenance: filepath.Join(root, "maintenance.json"), Cache: filepath.Join(root, "cache"), Log: filepath.Join(root, "delivery.log"), Lock: filepath.Join(root, "delivery.lock")}
+	return Paths{Root: root, Transaction: filepath.Join(root, "transaction.json"), Evidence: filepath.Join(root, "evidence.json"), Maintenance: filepath.Join(root, "maintenance.json"), Cache: filepath.Join(root, "cache"), Log: filepath.Join(root, "delivery.log"), Lock: filepath.Join(root, "delivery.lock")}
 }
 
 func (p Paths) Ensure() error {
@@ -60,6 +61,45 @@ const (
 type VersionRef struct {
 	Version string `json:"version,omitempty"`
 	Commit  string `json:"commit,omitempty"`
+}
+
+type DoctorDiagnostic struct {
+	Code    string `json:"code"`
+	Scope   string `json:"scope,omitempty"`
+	RepoID  string `json:"repo_id,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+type DoctorSnapshot struct {
+	SchemaVersion int                `json:"schema_version"`
+	OK            bool               `json:"ok"`
+	Failures      []DoctorDiagnostic `json:"failures,omitempty"`
+	CheckedAt     time.Time          `json:"checked_at"`
+}
+
+type RollbackRecovery struct {
+	Status                string         `json:"status"`
+	ConfirmedAt           *time.Time     `json:"confirmed_at,omitempty"`
+	Installed             VersionRef     `json:"installed"`
+	Previous              VersionRef     `json:"previous"`
+	MaintenanceGeneration string         `json:"maintenance_generation"`
+	LoadedRepositories    []string       `json:"loaded_repositories,omitempty"`
+	BackupPath            string         `json:"backup_path"`
+	Doctor                DoctorSnapshot `json:"doctor"`
+	PreviousReason        string         `json:"previous_reason,omitempty"`
+}
+
+type Evidence struct {
+	Version               int               `json:"version"`
+	Desired               VersionRef        `json:"desired"`
+	MaintenanceGeneration string            `json:"maintenance_generation,omitempty"`
+	PreflightDoctor       *DoctorSnapshot   `json:"preflight_doctor,omitempty"`
+	PostUpdateDoctor      *DoctorSnapshot   `json:"post_update_doctor,omitempty"`
+	RollbackDoctor        *DoctorSnapshot   `json:"rollback_doctor,omitempty"`
+	RollbackRestored      bool              `json:"rollback_installation_restored,omitempty"`
+	RollbackRecovery      *RollbackRecovery `json:"rollback_recovery,omitempty"`
+	UpdatedAt             time.Time         `json:"updated_at"`
 }
 
 type Transaction struct {
@@ -132,9 +172,71 @@ func SaveTransaction(path string, tx Transaction) error {
 	return fsutil.WriteJSON(path, tx, 0o600)
 }
 
+func LoadEvidence(path string) (Evidence, error) {
+	var value Evidence
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Evidence{Version: 1}, nil
+	}
+	if err != nil {
+		return value, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return value, fmt.Errorf("delivery evidence is not a regular file: %s", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return value, fmt.Errorf("delivery evidence is not owner-only: %s", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return value, err
+	}
+	if err := decodeStrictJSON(data, &value); err != nil {
+		return value, fmt.Errorf("decode delivery evidence: %w", err)
+	}
+	if value.Version != 1 {
+		return value, fmt.Errorf("unsupported delivery evidence version %d", value.Version)
+	}
+	return value, nil
+}
+
+func SaveEvidence(path string, value Evidence) error {
+	value.Version = 1
+	value.UpdatedAt = time.Now().UTC()
+	if value.Desired.Version == "" || value.Desired.Commit == "" {
+		return errors.New("delivery evidence desired version is incomplete")
+	}
+	return fsutil.WriteJSON(path, value, 0o600)
+}
+
 func WriteMaintenance(path string, value Maintenance) error {
 	value.Version = 1
 	return fsutil.WriteJSON(path, value, 0o600)
+}
+
+func LoadMaintenance(path string) (Maintenance, error) {
+	var value Maintenance
+	info, err := os.Lstat(path)
+	if err != nil {
+		return value, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return value, fmt.Errorf("delivery maintenance fence is not a regular file: %s", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return value, fmt.Errorf("delivery maintenance fence is not owner-only: %s", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return value, err
+	}
+	if err := decodeStrictJSON(data, &value); err != nil {
+		return value, fmt.Errorf("decode delivery maintenance fence: %w", err)
+	}
+	if value.Version != 1 || value.Generation == "" || value.Desired.Version == "" || value.Desired.Commit == "" {
+		return value, errors.New("delivery maintenance fence is incomplete")
+	}
+	return value, nil
 }
 
 func knownPhase(phase Phase) bool {
