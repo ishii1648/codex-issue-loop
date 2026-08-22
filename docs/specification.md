@@ -176,7 +176,7 @@ resources:
   metadata_version: 1
   definitions:
     - name: supervisor
-      paths: [internal/supervisor/**]
+      paths: [internal/application/supervisor/**]
     - name: docs
       paths: [README.md, docs/**]
 

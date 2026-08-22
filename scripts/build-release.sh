@@ -32,7 +32,7 @@ manifest="$output_dir/release-manifest.json"
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
   -trimpath \
   -buildvcs=false \
-  -ldflags "-s -w -X github.com/ishii1648/codex-issue-loop/internal/app.Version=$version -X github.com/ishii1648/codex-issue-loop/internal/app.Commit=$commit" \
+  -ldflags "-s -w -X github.com/ishii1648/codex-issue-loop/internal/application/app.Version=$version -X github.com/ishii1648/codex-issue-loop/internal/application/app.Commit=$commit" \
   -o "$artifact" \
   ./cmd/agent-loop
 

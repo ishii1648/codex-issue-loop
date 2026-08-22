@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/ishii1648/codex-issue-loop/internal/app"
+	"github.com/ishii1648/codex-issue-loop/internal/application/app"
 )
 
 func main() {

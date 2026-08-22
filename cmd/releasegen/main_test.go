@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ishii1648/codex-issue-loop/internal/delivery"
-	"github.com/ishii1648/codex-issue-loop/internal/schema"
-	"github.com/ishii1648/codex-issue-loop/internal/statecontract"
+	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 )
 
 func TestRunDispatchesSubcommands(t *testing.T) {
