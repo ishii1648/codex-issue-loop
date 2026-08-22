@@ -509,17 +509,8 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 	return l.handleResult(ctx, issue, current, result, runErr)
 }
 
-func workerCapabilityRecheckStatus(status issuedomain.Status) bool {
-	switch status {
-	case "claiming", "answer_claim_waiting", "resume_pending", "environment_resume_pending", "retry_wait":
-		return true
-	default:
-		return false
-	}
-}
-
 func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
-	if current.CapabilityRequirements != nil && workerCapabilityRecheckStatus(current.Status) {
+	if current.CapabilityRequirements != nil && current.Status.RequiresCapabilityRecheck() {
 		capabilityEvaluation := capability.EvaluateRequirement(current.CapabilityRequirements, l.Config.WorkerCapabilityProfiles())
 		if !capabilityEvaluation.Compatible {
 			codes := make([]string, 0, len(capabilityEvaluation.Mismatches))
@@ -766,7 +757,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	}
 	_, err := l.Store.Update("worker_preflight_completed", issue.Number, current.RunID, map[string]string{"execution_profile": profile}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
-		if item == nil || item.RunID != current.RunID || terminalWebhookStatus(item.Status) {
+		if item == nil || item.RunID != current.RunID || item.Status.TerminalForWebhook() {
 			return errWorkerResultSuperseded
 		}
 		item.ExecutionProfile = profile
@@ -861,7 +852,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		}
 		checksDecision, decisionErr := issuedomain.AwaitChecks(current.Status)
 		if decisionErr != nil {
-			return failure.Wrap(failure.Supervisor, "decide Pull Request check wait", decisionErr)
+			return failure.Wrap(failure.Issue, "decide Pull Request check wait", decisionErr)
 		}
 		_, err := l.Store.Update("pull_request_checks_pending", issue.Number, current.RunID, result, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
@@ -883,7 +874,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	case "needs_input":
 		inputDecision, decisionErr := issuedomain.RequestInput(current.Status)
 		if decisionErr != nil {
-			return failure.Wrap(failure.Supervisor, "decide input request", decisionErr)
+			return failure.Wrap(failure.Issue, "decide input request", decisionErr)
 		}
 		requestID := state.NewID("req")
 		q := result.Question
@@ -1060,7 +1051,7 @@ func availableSnapshotLeaseSlot(snapshot *state.Snapshot, limit, preferred, issu
 	}
 	used := map[int]bool{}
 	for _, other := range snapshot.Issues {
-		if other == nil || other.Number == issueNumber || other.Lease == nil || !durableWorkerSlotOccupied(other.Status) {
+		if other == nil || other.Number == issueNumber || other.Lease == nil || !other.Status.OccupiesWorkerSlot() {
 			continue
 		}
 		used[other.Lease.Slot] = true
@@ -1074,15 +1065,6 @@ func availableSnapshotLeaseSlot(snapshot *state.Snapshot, limit, preferred, issu
 		}
 	}
 	return -1, false
-}
-
-func durableWorkerSlotOccupied(status issuedomain.Status) bool {
-	switch status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
-		return true
-	default:
-		return false
-	}
 }
 
 func (l *Loop) blockWorkerWorkspace(ctx context.Context, expected state.Issue, validationErr *workerWorkspaceError) error {
@@ -1633,7 +1615,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	case "success":
 		mergeDecision, decisionErr := issuedomain.AwaitMerge(current.Status)
 		if decisionErr != nil {
-			return failure.Wrap(failure.Supervisor, "decide Pull Request merge wait", decisionErr)
+			return failure.Wrap(failure.Issue, "decide Pull Request merge wait", decisionErr)
 		}
 		if selected.IsDraft {
 			if err := l.GitHub.ReadyPullRequest(ctx, l.Config, selected.URL); err != nil {
@@ -1815,7 +1797,7 @@ func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, p
 	}
 	conflictDecision, decisionErr := issuedomain.ResolveConflict(current.Status)
 	if decisionErr != nil {
-		return failure.Wrap(failure.Supervisor, "decide Pull Request conflict recovery", decisionErr)
+		return failure.Wrap(failure.Issue, "decide Pull Request conflict recovery", decisionErr)
 	}
 	_, err = l.Store.Update("conflict_recovery_prepared", current.Number, current.RunID, map[string]any{
 		"pull_request_url": pr.URL, "previous_base_sha": recovery.PreviousBaseSHA,
@@ -2034,7 +2016,7 @@ func (l *Loop) finishConflictPublication(current state.Issue, commit string) err
 	retryAt := l.now().Add(l.Config.Queue.PollInterval.Duration)
 	checksDecision, decisionErr := issuedomain.AwaitChecks(current.Status)
 	if decisionErr != nil {
-		return failure.Wrap(failure.Supervisor, "decide post-conflict check wait", decisionErr)
+		return failure.Wrap(failure.Issue, "decide post-conflict check wait", decisionErr)
 	}
 	_, err := l.Store.Update("conflict_recovery_published", current.Number, current.RunID, map[string]any{
 		"pull_request_url": current.PullRequestURL, "commit": commit,
@@ -2209,7 +2191,7 @@ func (l *Loop) schedulePullRequestPoll(current state.Issue, reason string) error
 func (l *Loop) completeIssue(ctx context.Context, current state.Issue, prURL string, payload any) error {
 	decision, decisionErr := issuedomain.Complete(current.Status, prURL)
 	if decisionErr != nil {
-		return failure.Wrap(failure.Supervisor, "decide Issue completion", decisionErr)
+		return failure.Wrap(failure.Issue, "decide Issue completion", decisionErr)
 	}
 	owner := state.LeaseOwner{}
 	if current.Lease != nil {
@@ -2388,7 +2370,7 @@ func (l *Loop) scheduleRetry(ctx context.Context, issue state.Issue, reason stri
 	retryAt := l.now().Add(delay)
 	decision, decisionErr := issuedomain.ScheduleRetry(issue.Status, reason, retryAt, string(failure.Transient))
 	if decisionErr != nil {
-		return failure.Wrap(failure.Supervisor, "decide Issue retry", decisionErr)
+		return failure.Wrap(failure.Issue, "decide Issue retry", decisionErr)
 	}
 	_, err := l.Store.Update("retry_scheduled", issue.Number, issue.RunID, map[string]any{
 		"failure_kind": failure.Transient, "reason": reason, "retry_at": retryAt, "delay": delay.String(),
@@ -2420,7 +2402,7 @@ func (l *Loop) schedulePublicationRetry(ctx context.Context, issue state.Issue, 
 	retryAt := l.now().Add(delay)
 	decision, decisionErr := issuedomain.ScheduleRetry(issue.Status, reason, retryAt, string(failure.Transient))
 	if decisionErr != nil {
-		return failure.Wrap(failure.Supervisor, "decide publication retry", decisionErr)
+		return failure.Wrap(failure.Issue, "decide publication retry", decisionErr)
 	}
 	_, err := l.Store.Update("publication_retry_scheduled", issue.Number, issue.RunID, map[string]any{
 		"failure_kind": failure.Transient, "reason": reason, "retry_at": retryAt, "delay": delay.String(),

@@ -54,3 +54,53 @@ func (s Status) Validate() error {
 func (s Status) Terminal() bool {
 	return s == StatusCompleted || s == StatusFailed || s == StatusBlocked
 }
+
+// OccupiesWorkerSlot reports whether an Issue owns one of the bounded worker
+// execution slots. Retained leases in waiting and attention states still fence
+// resources, but do not consume a worker slot.
+func (s Status) OccupiesWorkerSlot() bool {
+	switch s {
+	case StatusClaiming, StatusClaimed, StatusRunning, StatusResumePending,
+		StatusEnvironmentResumePending, StatusResolvingConflict:
+		return true
+	default:
+		return false
+	}
+}
+
+// RequiresCapabilityRecheck reports whether persisted capability requirements
+// must be re-evaluated before the Issue can resume execution.
+func (s Status) RequiresCapabilityRecheck() bool {
+	switch s {
+	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending,
+		StatusEnvironmentResumePending, StatusRetryWait:
+		return true
+	default:
+		return false
+	}
+}
+
+// TerminalForWebhook reports whether webhook reconciliation treats the Issue
+// as an attention/terminal record rather than an active lifecycle owner.
+func (s Status) TerminalForWebhook() bool {
+	switch s {
+	case StatusBlocked, StatusFailed, StatusNeedsInput, StatusCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+// WebhookRoutable reports whether a webhook delivery may be routed directly
+// to the persisted Issue lifecycle.
+func (s Status) WebhookRoutable() bool {
+	switch s {
+	case StatusClaiming, StatusClaimed, StatusRunning, StatusAnswerClaimWaiting,
+		StatusResumePending, StatusEnvironmentResumePending, StatusChecksRecovery,
+		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
+		StatusResolvingConflict:
+		return true
+	default:
+		return false
+	}
+}

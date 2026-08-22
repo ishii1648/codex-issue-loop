@@ -75,6 +75,16 @@ func TestScheduleRetryPersistsClassificationReasonAndTime(t *testing.T) {
 	}
 }
 
+func TestInvalidRetryDecisionIsIssueScoped(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	err := loop.scheduleRetry(context.Background(), state.Issue{
+		Number: 1, Status: "completed", RunID: "run_1", Attempts: 1,
+	}, "unexpected lifecycle state")
+	if got := failure.KindOf(err); got != failure.Issue {
+		t.Fatalf("kind=%s err=%v", got, err)
+	}
+}
+
 func TestSupervisorRetryAndSuccessfulCycleResetPersistentCounter(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)

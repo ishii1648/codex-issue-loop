@@ -60,7 +60,7 @@ type RetryDecision struct {
 
 func ScheduleRetry(from Status, reason string, retryAt time.Time, failureKind string) (RetryDecision, error) {
 	transition, err := newAllowedTransition("schedule_retry", from, StatusRetryWait,
-		StatusRunning, StatusAwaitingChecks)
+		StatusRunning, StatusAwaitingChecks, StatusAwaitingMerge)
 	if err != nil {
 		return RetryDecision{}, err
 	}

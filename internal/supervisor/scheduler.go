@@ -12,7 +12,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
-	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
@@ -537,7 +536,7 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 				processed[number] = true
 				continue
 			}
-			if terminalWebhookStatus(local.Status) {
+			if local.Status.TerminalForWebhook() {
 				handled, reconcileErr := s.loop.reconcileTerminalWebhook(ctx, *local, delivery)
 				if reconcileErr != nil {
 					return nil, nil, reconcileErr
@@ -548,7 +547,7 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 				}
 				continue
 			}
-			if !webhookRoutableStatus(local.Status) && local.GitHubSync == "" {
+			if !local.Status.WebhookRoutable() && local.GitHubSync == "" {
 				continue
 			}
 			_, updateErr := s.loop.Store.Update("webhook_scheduler_wake", number, local.RunID, map[string]any{
@@ -591,24 +590,6 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		}
 	}
 	return candidates, acknowledged, nil
-}
-
-func terminalWebhookStatus(status issuedomain.Status) bool {
-	switch status {
-	case "blocked", "failed", "needs_input", "completed":
-		return true
-	default:
-		return false
-	}
-}
-
-func webhookRoutableStatus(status issuedomain.Status) bool {
-	switch status {
-	case "claiming", "claimed", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
-		return true
-	default:
-		return false
-	}
 }
 
 // dispatchTerminalPullRequestReconciliation checks at most one terminal Issue

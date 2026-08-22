@@ -293,10 +293,10 @@ func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue,
 	if err != nil {
 		return false, fmt.Errorf("inspect collection exit for Issue #%d from webhook %s: %w", current.Number, delivery.DeliveryID, err)
 	}
-	if !terminalWebhookStatus(current.Status) && expectedActiveCollectionExit(current, remote.Issue, l.Config.GitHub) {
+	if !current.Status.TerminalForWebhook() && expectedActiveCollectionExit(current, remote.Issue, l.Config.GitHub) {
 		return false, nil
 	}
-	return l.applyWebhookReconciliation(ctx, current, delivery, remote, !terminalWebhookStatus(current.Status))
+	return l.applyWebhookReconciliation(ctx, current, delivery, remote, !current.Status.TerminalForWebhook())
 }
 
 func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Issue, delivery webhook.Delivery, remote gh.RemoteState, forceTerminal bool) (bool, error) {
@@ -309,10 +309,10 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		}
 	}
 	decision := l.decideReconciliation(state.Snapshot{}, current, remote, inspection)
-	if forceTerminal && !terminalWebhookStatus(decision.status) {
+	if forceTerminal && !decision.status.TerminalForWebhook() {
 		decision = blockDecision(decision, "GitHub Issue left the configured ready collection")
 	}
-	if !terminalWebhookStatus(decision.status) {
+	if !decision.status.TerminalForWebhook() {
 		// The event was read successfully, but the remote state does not carry
 		// terminal authority. Preserve manual exclusions and failed/completed
 		// states instead of turning a webhook into an implicit resume.

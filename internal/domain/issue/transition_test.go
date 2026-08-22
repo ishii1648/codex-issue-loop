@@ -55,4 +55,38 @@ func TestLifecycleRecoveryAndIdempotentTransitions(t *testing.T) {
 	if _, err := ScheduleRetry(StatusAwaitingChecks, "checks failed", time.Now().UTC(), "transient"); err != nil {
 		t.Fatalf("checks failure must return to retry: %v", err)
 	}
+	if _, err := ScheduleRetry(StatusAwaitingMerge, "checks regressed", time.Now().UTC(), "transient"); err != nil {
+		t.Fatalf("checks failure observed while awaiting merge must return to retry: %v", err)
+	}
+}
+
+func TestStatusOperationalPredicates(t *testing.T) {
+	tests := []struct {
+		status            Status
+		occupiesSlot      bool
+		capabilityRecheck bool
+		webhookTerminal   bool
+		webhookRoutable   bool
+	}{
+		{status: StatusClaiming, occupiesSlot: true, capabilityRecheck: true, webhookRoutable: true},
+		{status: StatusRunning, occupiesSlot: true, webhookRoutable: true},
+		{status: StatusRetryWait, capabilityRecheck: true, webhookRoutable: true},
+		{status: StatusNeedsInput, webhookTerminal: true, webhookRoutable: true},
+		{status: StatusPublicationRecovery},
+		{status: StatusCompleted, webhookTerminal: true},
+	}
+	for _, test := range tests {
+		if got := test.status.OccupiesWorkerSlot(); got != test.occupiesSlot {
+			t.Errorf("%s OccupiesWorkerSlot=%v want %v", test.status, got, test.occupiesSlot)
+		}
+		if got := test.status.RequiresCapabilityRecheck(); got != test.capabilityRecheck {
+			t.Errorf("%s RequiresCapabilityRecheck=%v want %v", test.status, got, test.capabilityRecheck)
+		}
+		if got := test.status.TerminalForWebhook(); got != test.webhookTerminal {
+			t.Errorf("%s TerminalForWebhook=%v want %v", test.status, got, test.webhookTerminal)
+		}
+		if got := test.status.WebhookRoutable(); got != test.webhookRoutable {
+			t.Errorf("%s WebhookRoutable=%v want %v", test.status, got, test.webhookRoutable)
+		}
+	}
 }

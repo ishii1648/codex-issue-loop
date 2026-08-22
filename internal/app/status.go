@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/capability"
-	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
@@ -90,7 +89,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 	}
 	issues := make([]activeIssueStatus, 0)
 	for _, issue := range snapshot.Issues {
-		if issue == nil || !occupiesWorkerSlot(issue.Status) {
+		if issue == nil || !issue.Status.OccupiesWorkerSlot() {
 			continue
 		}
 		value := activeIssueStatus{
@@ -137,7 +136,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 				if state.ResourcesConflict(claim.Resources, other.Lease.ResolvedResources) {
 					blockers[other.Number] = &resourceBlocker{IssueNumber: other.Number, Resources: append([]string(nil), other.Lease.ResolvedResources...), Reasons: []string{"resource_conflict"}}
 				}
-				if occupiesWorkerSlot(other.Status) {
+				if other.Status.OccupiesWorkerSlot() {
 					occupiedSlots++
 				}
 			}
@@ -146,7 +145,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 			}
 			if occupiedSlots >= limit {
 				for _, other := range snapshot.Issues {
-					if other == nil || other.Number == issue.Number || other.Lease == nil || !occupiesWorkerSlot(other.Status) {
+					if other == nil || other.Number == issue.Number || other.Lease == nil || !other.Status.OccupiesWorkerSlot() {
 						continue
 					}
 					blocker := blockers[other.Number]
@@ -188,14 +187,5 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 		ResourceAdmission: resourceAdmissionStatus{ResourceParks: parked, ClaimWaitingCandidates: waiting},
 		PendingRequests:   requests,
 		State:             snapshot,
-	}
-}
-
-func occupiesWorkerSlot(status issuedomain.Status) bool {
-	switch status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
-		return true
-	default:
-		return false
 	}
 }
