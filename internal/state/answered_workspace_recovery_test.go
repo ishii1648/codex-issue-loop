@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"path/filepath"
 	"testing"
@@ -251,8 +252,8 @@ func appendVerifiedAnsweredWorkspaceEvent(t *testing.T, events []Event, issue *I
 		Branch: issue.Branch, CommonDir: workspace.GitCommonDir, MainCheckout: workspace.MainCheckout, Checks: checks,
 	}
 	recovery := &WorkspaceProvenanceRecovery{
-		ID: "workspace_recovery_verified449", Status: "verified", ConfirmedAt: now, OperatorConfirmed: true,
-		OldProvenanceMissing: true, PreviousStatus: "blocked", RunID: issue.RunID,
+		ID: "workspace_recovery_verified449", Status: issuedomain.WorkspaceProvenanceRecoveryStatusVerified, ConfirmedAt: now, OperatorConfirmed: true,
+		OldProvenanceMissing: true, PreviousStatus: issuedomain.StatusBlocked, RunID: issue.RunID,
 		HeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", WorktreeSHA256: "verified-content-digest",
 		ExpectedWorkspace: workspace, ActualWorkspace: workspace, ValidatorChecks: checks,
 	}

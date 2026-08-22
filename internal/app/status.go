@@ -115,7 +115,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 			continue
 		}
 		claim := parkedClaimStatus{
-			IssueNumber: issue.Number, RunID: issue.RunID, ParkID: issue.ResourcePark.ID, Status: issue.ResourcePark.Status,
+			IssueNumber: issue.Number, RunID: issue.RunID, ParkID: issue.ResourcePark.ID, Status: string(issue.ResourcePark.Status),
 			Kind: issue.ResourcePark.Kind, RequestID: issue.ResourcePark.RequestID, ClaimWaiting: issue.Status == issuedomain.StatusAnswerClaimWaiting,
 			Owner: issue.ResourcePark.OriginalLease.Owner, ResumeOwner: issue.ResourcePark.ResumeOwner, Slot: issue.ResourcePark.OriginalLease.Slot,
 			DeclaredResources: append([]string(nil), issue.ResourcePark.OriginalLease.DeclaredResources...),
@@ -125,9 +125,9 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 			ParkedAt: issue.ResourcePark.ParkedAt, BlockedBy: []resourceBlocker{},
 		}
 		if request := snapshot.PendingRequests[issue.ResourcePark.RequestID]; request != nil {
-			claim.RequestStatus = request.Status
+			claim.RequestStatus = string(request.Status)
 		}
-		if issue.ResourcePark.Status == "parked" {
+		if issue.ResourcePark.Status == issuedomain.ResourceParkStatusParked {
 			blockers := map[int]*resourceBlocker{}
 			occupiedSlots := 0
 			for _, other := range snapshot.Issues {
@@ -170,7 +170,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 	sort.Slice(parked, func(i, j int) bool { return parked[i].IssueNumber < parked[j].IssueNumber })
 	sort.Slice(waiting, func(i, j int) bool { return waiting[i].IssueNumber < waiting[j].IssueNumber })
 	for _, request := range snapshot.PendingRequests {
-		if request == nil || request.Status != "pending" {
+		if request == nil || request.Status != issuedomain.RequestStatusPending {
 			continue
 		}
 		copy := *request

@@ -574,7 +574,7 @@ func (c Controller) repositoriesHealthy(ctx context.Context, expectedLoaded []st
 		if loadErr != nil {
 			return loadErr
 		}
-		if snapshot.Supervisor.State != "maintenance" {
+		if snapshot.Supervisor.State != state.SupervisorStateMaintenance {
 			return fmt.Errorf("repository %s did not reach post-update maintenance state: %s", repoID, snapshot.Supervisor.State)
 		}
 	}
@@ -639,7 +639,7 @@ func (c Controller) waitForDrain(ctx context.Context, cfg Config, entries []regi
 				progress.Waiting = append(progress.Waiting, entry.RepoID+":state_invalid")
 				continue
 			}
-			ready := snapshot.Supervisor.State == "maintenance"
+			ready := snapshot.Supervisor.State == state.SupervisorStateMaintenance
 			for _, issue := range snapshot.Issues {
 				if issue != nil && (issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
 					ready = false

@@ -1,6 +1,7 @@
 package app
 
 import (
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"testing"
 	"time"
 
@@ -17,26 +18,26 @@ func TestStatusSummarizesMultipleWorkersResourcesAndRequests(t *testing.T) {
 		}},
 		Issues: map[string]*state.Issue{
 			"9": {
-				Number: 9, RunID: "run_9", Status: "running", WorkerPID: 109, WorkerPGID: 109,
+				Number: 9, RunID: "run_9", Status: issuedomain.StatusRunning, WorkerPID: 109, WorkerPGID: 109,
 				Lease: &state.ResourceLease{Owner: state.LeaseOwner{RunID: "run_9", Generation: 2}, Slot: 1, ResolvedResources: []string{"cli"}, ReservedAt: now},
 			},
 			"3": {
-				Number: 3, RunID: "run_3", Status: "claiming",
+				Number: 3, RunID: "run_3", Status: issuedomain.StatusClaiming,
 				Lease: &state.ResourceLease{Owner: state.LeaseOwner{RunID: "run_3", Generation: 1}, Slot: 0, ResolvedResources: []string{"reconcile"}, ReservedAt: now},
 			},
-			"4": {Number: 4, RunID: "run_4", Status: "needs_input"},
+			"4": {Number: 4, RunID: "run_4", Status: issuedomain.StatusNeedsInput},
 			"5": {
-				Number: 5, RunID: "run_5", Status: "blocked", LeaseGeneration: 1,
+				Number: 5, RunID: "run_5", Status: issuedomain.StatusBlocked, LeaseGeneration: 1,
 				ResourcePark: &state.ResourceLeasePark{
-					ID: "park_5", Status: "parked", ParkedAt: now,
+					ID: "park_5", Status: issuedomain.ResourceParkStatusParked, ParkedAt: now,
 					OriginalLease: state.ResourceLease{Owner: state.LeaseOwner{RunID: "run_5", Generation: 1}, Slot: 2, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now},
 				},
 			},
 		},
 		PendingRequests: map[string]*state.Request{
-			"req_z": {ID: "req_z", IssueNumber: 9, Status: "answered"},
-			"req_b": {ID: "req_b", IssueNumber: 4, Status: "pending"},
-			"req_a": {ID: "req_a", IssueNumber: 3, Status: "pending"},
+			"req_z": {ID: "req_z", IssueNumber: 9, Status: issuedomain.RequestStatusAnswered},
+			"req_b": {ID: "req_b", IssueNumber: 4, Status: issuedomain.RequestStatusPending},
+			"req_a": {ID: "req_a", IssueNumber: 3, Status: issuedomain.RequestStatusPending},
 		},
 	}
 	result := buildStatus(launchd.Status{Loaded: true}, snapshot, 3)

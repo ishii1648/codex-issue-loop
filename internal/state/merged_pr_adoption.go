@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
 
@@ -69,7 +70,7 @@ func (f *mergedPullRequestAdoptionFinder) finish() error {
 		}
 	}
 	if f.record != nil && f.synced[f.record.Adoption.ID] {
-		f.record.Adoption.Status = "synced"
+		f.record.Adoption.Status = issuedomain.MergedPullRequestAdoptionStatusSynced
 	}
 	return nil
 }
@@ -88,20 +89,20 @@ func (f *mergedPullRequestAdoptionFinder) consume(line []byte) error {
 	switch event.Type {
 	case "merged_pull_request_adopted":
 		var payload struct {
-			AdoptionID        string     `json:"adoption_id"`
-			Generation        int        `json:"generation"`
-			OperatorConfirmed bool       `json:"operator_confirmed"`
-			ConfirmedAt       *time.Time `json:"confirmed_at"`
-			AdoptedAt         time.Time  `json:"adopted_at"`
-			PullRequestURL    string     `json:"pull_request_url"`
-			PullRequestNumber int        `json:"pull_request_number"`
-			HeadSHA           string     `json:"head_sha"`
-			MergeSHA          string     `json:"merge_sha"`
-			BaseBranch        string     `json:"base_branch"`
-			PreviousStatus    string     `json:"previous_status"`
-			PreviousReason    string     `json:"previous_reason"`
-			Branch            string     `json:"branch"`
-			LeaseOwner        LeaseOwner `json:"lease_owner"`
+			AdoptionID        string             `json:"adoption_id"`
+			Generation        int                `json:"generation"`
+			OperatorConfirmed bool               `json:"operator_confirmed"`
+			ConfirmedAt       *time.Time         `json:"confirmed_at"`
+			AdoptedAt         time.Time          `json:"adopted_at"`
+			PullRequestURL    string             `json:"pull_request_url"`
+			PullRequestNumber int                `json:"pull_request_number"`
+			HeadSHA           string             `json:"head_sha"`
+			MergeSHA          string             `json:"merge_sha"`
+			BaseBranch        string             `json:"base_branch"`
+			PreviousStatus    issuedomain.Status `json:"previous_status"`
+			PreviousReason    string             `json:"previous_reason"`
+			Branch            string             `json:"branch"`
+			LeaseOwner        LeaseOwner         `json:"lease_owner"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			return fmt.Errorf("decode merged Pull Request adoption event at sequence %d: %w", event.Sequence, err)
@@ -120,7 +121,7 @@ func (f *mergedPullRequestAdoptionFinder) consume(line []byte) error {
 		}
 		f.record = &MergedPullRequestAdoptionRecord{
 			Adoption: MergedPullRequestAdoption{
-				ID: payload.AdoptionID, Status: "github_sync_pending", Generation: payload.Generation,
+				ID: payload.AdoptionID, Status: issuedomain.MergedPullRequestAdoptionStatusGitHubSyncPending, Generation: payload.Generation,
 				ConfirmedAt: confirmedAt, AdoptedAt: payload.AdoptedAt.UTC(), PullRequestURL: payload.PullRequestURL,
 				PullRequestNumber: payload.PullRequestNumber, PreviousStatus: payload.PreviousStatus, PreviousReason: payload.PreviousReason,
 				Branch: payload.Branch, HeadSHA: payload.HeadSHA, MergeSHA: payload.MergeSHA, BaseBranch: payload.BaseBranch,

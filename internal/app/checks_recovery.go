@@ -55,9 +55,9 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
-	if current.PullRequestChecksRecovery != nil &&
-		(current.Status == issuedomain.StatusChecksRecovery || current.Status == issuedomain.StatusAwaitingChecks || current.Status == issuedomain.StatusAwaitingMerge || current.Status == issuedomain.StatusCompleted) {
-		if current.GitHubSync == "pull_request_checks_recovery" {
+	progress := pullRequestChecksRecoveryProgress(current)
+	if progress == recoveryProgressIdempotent {
+		if current.GitHubSync == issuedomain.GitHubSyncPullRequestChecksRecovery {
 			if err := syncPullRequestChecksRecovery(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
 				return err
 			}
@@ -68,7 +68,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		}
 		return a.output(*jsonOut, pullRequestChecksRecoveryOutput(current, true))
 	}
-	if current.Status != issuedomain.StatusFailed || current.GitHubSync != "" {
+	if progress != recoveryProgressFresh {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and failed before checks recovery (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
 	legacyCompatibility := false
@@ -107,7 +107,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		return exitError{4, fmt.Errorf("Issue #%d still has an active worker process", *issueNumber)}
 	}
 	for _, request := range snapshot.PendingRequests {
-		if request != nil && request.IssueNumber == *issueNumber && request.Status == "pending" {
+		if request != nil && request.IssueNumber == *issueNumber && request.Status == issuedomain.RequestStatusPending {
 			return exitError{4, fmt.Errorf("Issue #%d has a pending manual answer request", *issueNumber)}
 		}
 	}
@@ -118,7 +118,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		return fmt.Errorf("inspect checks recovery worktree: %w", err)
 	}
 	if !pullRequestChecksWorktreeMatches(current, inspection) {
-		return exitError{4, state.RecoveryPredicateError{Code: "RECOVERY_WORKTREE_REMOTE", Err: fmt.Errorf("saved worktree/branch must be clean and aligned with its pushed remote head")}}
+		return exitError{4, state.RecoveryPredicateError{Code: state.RecoveryCodeWorktreeRemote, Err: fmt.Errorf("saved worktree/branch must be clean and aligned with its pushed remote head")}}
 	}
 
 	client := gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}
@@ -136,14 +136,14 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	if pr.ChecksStatus != "pending" && pr.ChecksStatus != "success" && pr.ChecksStatus != "failure" {
 		return exitError{4, fmt.Errorf("Pull Request returned unknown checks status %q", pr.ChecksStatus)}
 	}
-	if legacyCompatibility && pr.ChecksStatus == "failure" {
+	if !pullRequestReplacementChecksAllowed(failureRecord, pr, legacyCompatibility) {
 		return exitError{4, fmt.Errorf("legacy Pull Request checks recovery requires pending or successful replacement checks")}
 	}
 	now := time.Now().UTC()
 	generation := 1
 	if current.PullRequestChecksRecovery != nil {
 		generation = current.PullRequestChecksRecovery.Generation + 1
-		if current.PullRequestChecksRecovery.NewHeadSHA == pr.HeadSHA && current.PullRequestChecksRecovery.ChecksStatus == pr.ChecksStatus && current.PullRequestChecksRecovery.Status == "checks_failed" {
+		if current.PullRequestChecksRecovery.NewHeadSHA == pr.HeadSHA && current.PullRequestChecksRecovery.ChecksStatus == pr.ChecksStatus && current.PullRequestChecksRecovery.Status == issuedomain.PullRequestChecksRecoveryStatusChecksFailed {
 			return a.output(*jsonOut, pullRequestChecksRecoveryOutput(current, true))
 		}
 	}
@@ -152,7 +152,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		PreviousReason: current.LastError, OldHeadSHA: failureRecord.HeadSHA, NewHeadSHA: pr.HeadSHA, ChecksStatus: pr.ChecksStatus,
 	}
 	if pr.ChecksStatus == "failure" {
-		recovery.Status = "checks_failed"
+		recovery.Status = issuedomain.PullRequestChecksRecoveryStatusChecksFailed
 		_, err = store.Update("pull_request_checks_recovery_observed", *issueNumber, current.RunID, map[string]any{
 			"recovery_id": recovery.ID, "generation": generation, "old_head_sha": recovery.OldHeadSHA,
 			"new_head_sha": recovery.NewHeadSHA, "checks_status": recovery.ChecksStatus, "resumed": false,
@@ -171,7 +171,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		return a.output(*jsonOut, pullRequestChecksRecoveryOutputFrom(recovery, current, false))
 	}
 
-	recovery.Status = "requested"
+	recovery.Status = issuedomain.PullRequestChecksRecoveryStatusRequested
 	recoveryTransition, err := issuedomain.RequestChecksRecovery(current.Status)
 	if err != nil {
 		return exitError{4, err}
@@ -188,7 +188,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		if err := state.ApplyIssueTransition(item, recoveryTransition); err != nil {
 			return err
 		}
-		item.GitHubSync = "pull_request_checks_recovery"
+		item.GitHubSync = issuedomain.GitHubSyncPullRequestChecksRecovery
 		item.PullRequestChecksRecovery = recovery
 		if legacyCompatibility {
 			reconstructed := *failureRecord
@@ -218,30 +218,30 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 
 func validatePullRequestChecksRecovery(cfg config.Config, current *state.Issue, remote gh.RemoteState, inspection worktree.Inspection, requireFailedLabel bool) (gh.PullRequest, error) {
 	if !strings.EqualFold(remote.Issue.State, "open") {
-		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d is closed", current.Number)}
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubIdentity, Err: fmt.Errorf("Issue #%d is closed", current.Number)}
 	}
 	labels := lowerLabelSet(remote.Issue.Labels)
 	failed := labels[strings.ToLower(cfg.GitHub.FailedLabel)]
 	running := labels[strings.ToLower(cfg.GitHub.RunningLabel)]
 	if requireFailedLabel && (!failed || running) {
-		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d GitHub labels do not represent a synchronized failed state", current.Number)}
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubIdentity, Err: fmt.Errorf("Issue #%d GitHub labels do not represent a synchronized failed state", current.Number)}
 	}
 	if !requireFailedLabel && failed == running {
-		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d GitHub labels are neither failed nor an idempotent running transition", current.Number)}
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubIdentity, Err: fmt.Errorf("Issue #%d GitHub labels are neither failed nor an idempotent running transition", current.Number)}
 	}
 	for _, label := range append(append([]string{cfg.GitHub.DoneLabel, cfg.GitHub.NeedsInputLabel}, cfg.GitHub.ReadyLabels...), cfg.GitHub.ExcludeLabels...) {
 		if labels[strings.ToLower(label)] {
-			return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d has manual or security exclusion label %q", current.Number, label)}
+			return gh.PullRequest{}, state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubIdentity, Err: fmt.Errorf("Issue #%d has manual or security exclusion label %q", current.Number, label)}
 		}
 	}
 	if len(remote.PullRequests) != 1 {
-		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("Issue #%d must have exactly one saved Pull Request", current.Number)}
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubIdentity, Err: fmt.Errorf("Issue #%d must have exactly one saved Pull Request", current.Number)}
 	}
 	pr := remote.PullRequests[0]
 	if pr.URL != current.PullRequestURL || pr.Number != current.PullRequestNumber || !strings.EqualFold(pr.State, "open") || pr.MergedAt != nil ||
 		pr.HeadRefName != current.Branch || pr.BaseRefName != cfg.Git.BaseBranch || !strings.EqualFold(pr.HeadRepository, cfg.GitHub.Repo) || pr.HeadSHA == "" ||
 		pr.HeadSHA != inspection.Head || pr.HeadSHA != inspection.RemoteHead {
-		return gh.PullRequest{}, state.RecoveryPredicateError{Code: "RECOVERY_GITHUB_IDENTITY", Err: fmt.Errorf("saved Pull Request, branch, worktree, and remote head do not match")}
+		return gh.PullRequest{}, state.RecoveryPredicateError{Code: state.RecoveryCodeGitHubIdentity, Err: fmt.Errorf("saved Pull Request, branch, worktree, and remote head do not match")}
 	}
 	return pr, nil
 }
@@ -292,15 +292,15 @@ func syncPullRequestChecksRecovery(ctx context.Context, store state.Store, cfg c
 		"old_head_sha": current.PullRequestChecksRecovery.OldHeadSHA, "new_head_sha": pr.HeadSHA, "checks_status": pr.ChecksStatus,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if item != nil && item.GitHubSync == "pull_request_checks_recovery" && item.PullRequestChecksRecovery != nil && item.PullRequestChecksRecovery.ID == current.PullRequestChecksRecovery.ID {
+		if item != nil && item.GitHubSync == issuedomain.GitHubSyncPullRequestChecksRecovery && item.PullRequestChecksRecovery != nil && item.PullRequestChecksRecovery.ID == current.PullRequestChecksRecovery.ID {
 			if err := state.ApplyIssueTransition(item, checksDecision.Transition); err != nil {
 				return err
 			}
-			item.GitHubSync = ""
+			item.GitHubSync = issuedomain.GitHubSyncNone
 			item.FailureKind = ""
 			item.LastError = ""
 			item.HeadSHA = pr.HeadSHA
-			item.PullRequestChecksRecovery.Status = "resumed"
+			item.PullRequestChecksRecovery.Status = issuedomain.PullRequestChecksRecoveryStatusResumed
 			item.PullRequestChecksRecovery.ChecksStatus = pr.ChecksStatus
 			item.RetryAfter = &now
 			item.UpdatedAt = now

@@ -1,6 +1,7 @@
 package github
 
 import (
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 	cfg.GitHub.Repo = "owner/repo"
 	mergedAt := time.Now().UTC()
 	expected := MergedPullRequestAdoptionExpectation{
-		IssueNumber: 7, PreviousStatus: "blocked", Branch: "codex/issue-7-test",
+		IssueNumber: 7, PreviousStatus: issuedomain.StatusBlocked, Branch: "codex/issue-7-test",
 		BaseBranch: "main", HeadSHA: "head-7",
 	}
 	baseline := RemoteState{

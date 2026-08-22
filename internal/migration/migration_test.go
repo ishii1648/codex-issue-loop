@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,7 +269,7 @@ func TestV4ActiveLeaseAndParkedContinuationBlockRollback(t *testing.T) {
 	}
 	issue := loaded.Issues["63"]
 	if issue == nil || issue.Lease == nil || issue.Lease.Owner != (state.LeaseOwner{RunID: "run_63", Generation: 1}) ||
-		len(issue.Lease.ResolvedResources) != 1 || issue.Lease.ResolvedResources[0] != state.RepositoryResource || issue.Status != "needs_input" {
+		len(issue.Lease.ResolvedResources) != 1 || issue.Lease.ResolvedResources[0] != state.RepositoryResource || issue.Status != issuedomain.StatusNeedsInput {
 		t.Fatalf("migrated issue=%+v", issue)
 	}
 	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "active resource lease") {
@@ -277,7 +278,7 @@ func TestV4ActiveLeaseAndParkedContinuationBlockRollback(t *testing.T) {
 	store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
 	if _, err := store.Update("issue_blocked", 63, issue.RunID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["63"]
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "test", BlockedAt: time.Now().UTC()}
 		return state.ParkIssueLease(item, item.Lease.Owner, "park_63", time.Now().UTC())
 	}); err != nil {

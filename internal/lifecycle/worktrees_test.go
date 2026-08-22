@@ -60,7 +60,7 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	}
 	snapshot, err := store.Update("fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues = issues
-		snapshot.PendingRequests["req-5"] = &state.Request{ID: "req-5", IssueNumber: 5, Status: "pending"}
+		snapshot.PendingRequests["req-5"] = &state.Request{ID: "req-5", IssueNumber: 5, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -139,7 +139,7 @@ func TestPurgeRequiresExactConfirmationAndCanRemoveDirtyWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := store.Update("fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["9"] = &state.Issue{Number: 9, Status: "blocked", Branch: created.Branch, Worktree: created.Path, UpdatedAt: time.Now().UTC()}
+		snapshot.Issues["9"] = &state.Issue{Number: 9, Status: issuedomain.StatusBlocked, Branch: created.Branch, Worktree: created.Path, UpdatedAt: time.Now().UTC()}
 		return nil
 	})
 	if err != nil {

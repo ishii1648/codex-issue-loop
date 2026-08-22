@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
@@ -136,7 +137,7 @@ func (m Manager) Purge(ctx context.Context, cfg config.Config, repoID string, st
 }
 
 func (m Manager) inspect(ctx context.Context, cfg config.Config, repoID string, snapshot state.Snapshot, issue *state.Issue, now time.Time) (Entry, error) {
-	maxAge, policyReason := maxAgeForStatus(cfg.Worktrees, issue.Status.String())
+	maxAge, policyReason := maxAgeForStatus(cfg.Worktrees, issue.Status)
 	age := time.Duration(0)
 	if !issue.UpdatedAt.IsZero() && now.After(issue.UpdatedAt) {
 		age = now.Sub(issue.UpdatedAt)
@@ -175,7 +176,7 @@ func (m Manager) inspect(ctx context.Context, cfg config.Config, repoID string, 
 	}
 	sort.Strings(entry.Safety.OpenPullRequests)
 	for id, request := range snapshot.PendingRequests {
-		if request != nil && request.IssueNumber == issue.Number && request.Status == "pending" {
+		if request != nil && request.IssueNumber == issue.Number && request.Status == issuedomain.RequestStatusPending {
 			entry.Safety.UnansweredRequests = append(entry.Safety.UnansweredRequests, id)
 		}
 	}
@@ -208,16 +209,16 @@ func (m Manager) inspect(ctx context.Context, cfg config.Config, repoID string, 
 	return entry, nil
 }
 
-func maxAgeForStatus(policy config.Worktrees, status string) (time.Duration, string) {
+func maxAgeForStatus(policy config.Worktrees, status issuedomain.Status) (time.Duration, string) {
 	var age time.Duration
-	switch status {
-	case "completed":
+	switch status.WorktreeRetentionClass() {
+	case issuedomain.WorktreeRetainCompleted:
 		age = policy.CompletedMaxAge.Duration
-	case "failed":
+	case issuedomain.WorktreeRetainFailed:
 		age = policy.FailedMaxAge.Duration
-	case "blocked":
+	case issuedomain.WorktreeRetainBlocked:
 		age = policy.BlockedMaxAge.Duration
-	case "needs_input", "answer_claim_waiting", "resume_pending":
+	case issuedomain.WorktreeRetainAttention:
 		age = policy.NeedsInputMaxAge.Duration
 	default:
 		return 0, "non_terminal_status"

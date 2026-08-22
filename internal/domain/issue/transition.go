@@ -74,7 +74,8 @@ type CompletionDecision struct {
 	Transition        Transition
 	PullRequestURL    string
 	PullRequestMerged bool
-	GitHubSync        string
+	GitHubSync        GitHubSync
+	Lease             LeaseDisposition
 }
 
 func Complete(from Status, pullRequestURL string) (CompletionDecision, error) {
@@ -86,13 +87,13 @@ func Complete(from Status, pullRequestURL string) (CompletionDecision, error) {
 	}
 	return CompletionDecision{
 		Transition: transition, PullRequestURL: pullRequestURL,
-		PullRequestMerged: pullRequestURL != "", GitHubSync: "done",
+		PullRequestMerged: pullRequestURL != "", GitHubSync: GitHubSyncDone, Lease: ReleaseLease,
 	}, nil
 }
 
 type InputDecision struct {
 	Transition Transition
-	GitHubSync string
+	GitHubSync GitHubSync
 }
 
 func RequestInput(from Status) (InputDecision, error) {
@@ -101,7 +102,7 @@ func RequestInput(from Status) (InputDecision, error) {
 	if err != nil {
 		return InputDecision{}, err
 	}
-	return InputDecision{Transition: transition, GitHubSync: "needs_input"}, nil
+	return InputDecision{Transition: transition, GitHubSync: GitHubSyncNeedsInput}, nil
 }
 
 type ChecksDecision struct {
@@ -197,10 +198,10 @@ type OutcomeDecision struct {
 	Transition  Transition
 	LastError   string
 	FailureKind string
-	GitHubSync  string
+	GitHubSync  GitHubSync
 }
 
-func newOutcomeDecision(name string, from, to Status, reason, failureKind, githubSync string, allowed ...Status) (OutcomeDecision, error) {
+func newOutcomeDecision(name string, from, to Status, reason, failureKind string, githubSync GitHubSync, allowed ...Status) (OutcomeDecision, error) {
 	transition, err := newAllowedTransition(name, from, to, allowed...)
 	if err != nil {
 		return OutcomeDecision{}, err
@@ -212,25 +213,25 @@ func newOutcomeDecision(name string, from, to Status, reason, failureKind, githu
 }
 
 func RejectAnsweredResume(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("reject_answered_resume", from, StatusBlocked, reason, failureKind, "", StatusResumePending)
+	return newOutcomeDecision("reject_answered_resume", from, StatusBlocked, reason, failureKind, GitHubSyncNone, StatusResumePending)
 }
 
 func RejectWorkerWorkspace(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("reject_worker_workspace", from, StatusBlocked, reason, failureKind, StatusBlocked.String(),
+	return newOutcomeDecision("reject_worker_workspace", from, StatusBlocked, reason, failureKind, GitHubSyncBlocked,
 		StatusRunning, StatusResolvingConflict)
 }
 
 func RequestResourceCorrection(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("request_resource_correction", from, StatusNeedsInput, reason, failureKind, StatusNeedsInput.String(), StatusRunning)
+	return newOutcomeDecision("request_resource_correction", from, StatusNeedsInput, reason, failureKind, GitHubSyncNeedsInput, StatusRunning)
 }
 
 func ExhaustPullRequestChecks(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("exhaust_pull_request_checks", from, StatusFailed, reason, failureKind, StatusFailed.String(),
+	return newOutcomeDecision("exhaust_pull_request_checks", from, StatusFailed, reason, failureKind, GitHubSyncFailed,
 		StatusAwaitingChecks, StatusAwaitingMerge)
 }
 
 func BlockPullRequestLifecycle(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("block_pull_request_lifecycle", from, StatusBlocked, reason, failureKind, StatusBlocked.String(),
+	return newOutcomeDecision("block_pull_request_lifecycle", from, StatusBlocked, reason, failureKind, GitHubSyncBlocked,
 		StatusAwaitingChecks, StatusAwaitingMerge)
 }
 
@@ -239,13 +240,17 @@ func Fail(from Status, reason, failureKind string, blocked bool) (OutcomeDecisio
 	if blocked {
 		name, target = "block_issue", StatusBlocked
 	}
-	return newOutcomeDecision(name, from, target, reason, failureKind, target.String(),
+	githubSync := GitHubSyncFailed
+	if blocked {
+		githubSync = GitHubSyncBlocked
+	}
+	return newOutcomeDecision(name, from, target, reason, failureKind, githubSync,
 		StatusUnset, StatusClaimed, StatusRunning, StatusAwaitingChecks, StatusAwaitingMerge,
 		StatusResolvingConflict, StatusPublicationRecovery, StatusRetryWait)
 }
 
 func BlockWorkerEnvironment(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("block_worker_environment", from, StatusBlocked, reason, failureKind, StatusBlocked.String(), StatusRunning)
+	return newOutcomeDecision("block_worker_environment", from, StatusBlocked, reason, failureKind, GitHubSyncBlocked, StatusRunning)
 }
 
 func StartConflictAttempt(from Status) (Transition, error) {
@@ -259,13 +264,13 @@ func ScheduleConflictRetry(from Status) (Transition, error) {
 type PublicationRecoveryFailureDecision struct {
 	Outcome        OutcomeDecision
 	RetryAt        *time.Time
-	RecoveryStatus string
+	RecoveryStatus PublicationRecoveryStatus
 }
 
 func RecordPublicationRecoveryFailure(from Status, reason, failureKind string, terminal bool, retryAt time.Time) (PublicationRecoveryFailureDecision, error) {
-	target, githubSync, recoveryStatus := StatusPublicationRecovery, "", "retry_wait"
+	target, githubSync, recoveryStatus := StatusPublicationRecovery, GitHubSyncNone, PublicationRecoveryStatusRetryWait
 	if terminal {
-		target, githubSync, recoveryStatus = StatusFailed, StatusFailed.String(), "failed"
+		target, githubSync, recoveryStatus = StatusFailed, GitHubSyncFailed, PublicationRecoveryStatusFailed
 	} else if retryAt.IsZero() {
 		return PublicationRecoveryFailureDecision{}, fmt.Errorf("non-terminal publication recovery failure requires retry time")
 	}
@@ -282,7 +287,7 @@ func RecordPublicationRecoveryFailure(from Status, reason, failureKind string, t
 }
 
 func RefusePublicationRecovery(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("refuse_publication_recovery", from, StatusFailed, reason, failureKind, StatusFailed.String(), StatusPublicationRecovery)
+	return newOutcomeDecision("refuse_publication_recovery", from, StatusFailed, reason, failureKind, GitHubSyncFailed, StatusPublicationRecovery)
 }
 
 // ReconcileObservation validates lifecycle convergence derived from durable,

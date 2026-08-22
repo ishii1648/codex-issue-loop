@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,7 +31,7 @@ func TestLegacyPullRequestChecksFailureFixture(t *testing.T) {
 	if _, err := store.LegacyPullRequestChecksFailure(issue, "owner/repo", "main"); err != nil {
 		t.Fatalf("store evidence rejected: %v", err)
 	}
-	issue.ConflictRecovery.History[len(issue.ConflictRecovery.History)-1].Status = "running"
+	issue.ConflictRecovery.History[len(issue.ConflictRecovery.History)-1].Status = issuedomain.ConflictAttemptStatusRunning
 	if _, err := store.LegacyPullRequestChecksFailure(issue, "owner/repo", "main"); err == nil {
 		t.Fatal("active conflict recovery was accepted")
 	}
@@ -123,7 +124,7 @@ func legacyChecksFixture(t *testing.T) []Event {
 func legacyChecksIssue() Issue {
 	finished := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
 	return Issue{
-		Number: 91, Status: "failed", RunID: "run_final", Worktree: "/tmp/legacy-checks", Branch: "codex/issue-91-legacy",
+		Number: 91, Status: issuedomain.StatusFailed, RunID: "run_final", Worktree: "/tmp/legacy-checks", Branch: "codex/issue-91-legacy",
 		Attempts: 3, PullRequestURL: "https://example.test/pr/91", PullRequestNumber: 91,
 		HeadSHA: "1111111111111111111111111111111111111111", FailureKind: "issue",
 		LastError:       "worker retry limit reached: final verification failed",
@@ -133,7 +134,7 @@ func legacyChecksIssue() Issue {
 		ConflictRecovery: &ConflictRecovery{
 			PullRequestURL: "https://example.test/pr/91", TargetBaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			LastReason: "published; waiting for CI revalidation",
-			History:    []ConflictAttempt{{Number: 1, BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: "completed", FinishedAt: finished}},
+			History:    []ConflictAttempt{{Number: 1, BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: issuedomain.ConflictAttemptStatusCompleted, FinishedAt: finished}},
 		},
 	}
 }

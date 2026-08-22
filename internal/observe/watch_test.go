@@ -3,6 +3,7 @@ package observe
 import (
 	"context"
 	"errors"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func TestFaultDroppedEventReconcilesAttention(t *testing.T) {
 		errCh <- err
 	}()
 	_, err = store.Update("input_requested", 3, "run", nil, func(s *state.Snapshot) error {
-		s.PendingRequests["req_1"] = &state.Request{ID: "req_1", IssueNumber: 3, Status: "pending"}
+		s.PendingRequests["req_1"] = &state.Request{ID: "req_1", IssueNumber: 3, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -48,9 +49,9 @@ func TestFaultDroppedEventReconcilesAttention(t *testing.T) {
 func TestWatchReturnsEveryPendingRequestInRequestIDOrder(t *testing.T) {
 	store := newWatchStore(t)
 	_, err := store.Update("input_requested", 0, "", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_b"] = &state.Request{ID: "req_b", IssueNumber: 2, Status: "pending"}
-		snapshot.PendingRequests["req_answered"] = &state.Request{ID: "req_answered", IssueNumber: 3, Status: "answered"}
-		snapshot.PendingRequests["req_a"] = &state.Request{ID: "req_a", IssueNumber: 1, Status: "pending"}
+		snapshot.PendingRequests["req_b"] = &state.Request{ID: "req_b", IssueNumber: 2, Status: issuedomain.RequestStatusPending}
+		snapshot.PendingRequests["req_answered"] = &state.Request{ID: "req_answered", IssueNumber: 3, Status: issuedomain.RequestStatusAnswered}
+		snapshot.PendingRequests["req_a"] = &state.Request{ID: "req_a", IssueNumber: 1, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -69,13 +70,13 @@ func TestWatchReportsAnsweredClaimWaitingWithParkSnapshot(t *testing.T) {
 	_, err := store.Update("answer_recorded", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
 		request := &state.Request{
 			ID: "req_1", IssueNumber: 1, Question: "Continue?", RunID: owner.RunID, ResourceParkID: "park_1",
-			ReleasedOwner: &owner, Status: "answered", Answer: "yes", CreatedAt: now, AnsweredAt: &now,
+			ReleasedOwner: &owner, Status: issuedomain.RequestStatusAnswered, Answer: "yes", CreatedAt: now, AnsweredAt: &now,
 		}
 		snapshot.PendingRequests[request.ID] = request
 		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, RunID: owner.RunID, Status: "answer_claim_waiting", LeaseGeneration: 1,
+			Number: 1, RunID: owner.RunID, Status: issuedomain.StatusAnswerClaimWaiting, LeaseGeneration: 1,
 			ResourcePark: &state.ResourceLeasePark{
-				ID: "park_1", Kind: state.ResourceParkKindNeedsInput, RequestID: request.ID, Status: "parked", ParkedAt: now,
+				ID: "park_1", Kind: state.ResourceParkKindNeedsInput, RequestID: request.ID, Status: issuedomain.ResourceParkStatusParked, ParkedAt: now,
 				OriginalLease: state.ResourceLease{Owner: owner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-1", ReservedAt: now},
 			},
 		}
@@ -89,7 +90,7 @@ func TestWatchReportsAnsweredClaimWaitingWithParkSnapshot(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	park := result.Snapshot.Issues["1"].ResourcePark
-	if park == nil || park.RequestID != "req_1" || park.OriginalLease.BaseSHA != "base-1" || result.Snapshot.PendingRequests["req_1"].Status != "answered" {
+	if park == nil || park.RequestID != "req_1" || park.OriginalLease.BaseSHA != "base-1" || result.Snapshot.PendingRequests["req_1"].Status != issuedomain.RequestStatusAnswered {
 		t.Fatalf("watch lost parked answer provenance: %+v", result)
 	}
 }
@@ -100,7 +101,7 @@ func TestFaultReadSubscribeReadRace(t *testing.T) {
 	defer cancel()
 	result, err := waitWithSubscribeHook(ctx, store, time.Hour, 0, false, func() {
 		_, updateErr := store.Update("input_requested", 4, "run", nil, func(snapshot *state.Snapshot) error {
-			snapshot.PendingRequests["req_race"] = &state.Request{ID: "req_race", IssueNumber: 4, Status: "pending"}
+			snapshot.PendingRequests["req_race"] = &state.Request{ID: "req_race", IssueNumber: 4, Status: issuedomain.RequestStatusPending}
 			return nil
 		})
 		if updateErr != nil {
@@ -128,7 +129,7 @@ func TestFaultMultipleWatchConnectionsObserveSameRevision(t *testing.T) {
 		}()
 	}
 	snapshot, err := store.Update("input_requested", 5, "run", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_multiple"] = &state.Request{ID: "req_multiple", IssueNumber: 5, Status: "pending"}
+		snapshot.PendingRequests["req_multiple"] = &state.Request{ID: "req_multiple", IssueNumber: 5, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -156,7 +157,7 @@ func TestFaultDisconnectedEventChannelsFallBackToTimer(t *testing.T) {
 		resultCh <- outcomeForTest{result: result, err: err}
 	}()
 	_, err := store.Update("input_requested", 6, "run", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_disconnect"] = &state.Request{ID: "req_disconnect", IssueNumber: 6, Status: "pending"}
+		snapshot.PendingRequests["req_disconnect"] = &state.Request{ID: "req_disconnect", IssueNumber: 6, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -180,7 +181,7 @@ func TestFaultWatcherSubscriptionFailureFallsBackToReconciliation(t *testing.T) 
 		resultCh <- outcomeForTest{result: result, err: err}
 	}()
 	_, err := store.Update("input_requested", 7, "run", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_no_watcher"] = &state.Request{ID: "req_no_watcher", IssueNumber: 7, Status: "pending"}
+		snapshot.PendingRequests["req_no_watcher"] = &state.Request{ID: "req_no_watcher", IssueNumber: 7, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -214,7 +215,7 @@ func TestFSNotifyMultipleWatchersWakeAndCanReconnect(t *testing.T) {
 			<-subscribed
 		}
 		snapshot, err := store.Update("input_requested", issueNumber, "run", nil, func(snapshot *state.Snapshot) error {
-			snapshot.PendingRequests[requestID] = &state.Request{ID: requestID, IssueNumber: issueNumber, Status: "pending"}
+			snapshot.PendingRequests[requestID] = &state.Request{ID: requestID, IssueNumber: issueNumber, Status: issuedomain.RequestStatusPending}
 			return nil
 		})
 		if err != nil {
@@ -230,7 +231,7 @@ func TestFSNotifyMultipleWatchersWakeAndCanReconnect(t *testing.T) {
 
 	waitForAttention(8, "req_first", 2)
 	if _, err := store.Update("answer_recorded", 8, "run", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_first"].Status = "answered"
+		snapshot.PendingRequests["req_first"].Status = issuedomain.RequestStatusAnswered
 		return nil
 	}); err != nil {
 		t.Fatal(err)

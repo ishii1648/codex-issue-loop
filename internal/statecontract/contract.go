@@ -4,7 +4,8 @@ package statecontract
 
 import (
 	"fmt"
-	"sort"
+
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 )
 
 const (
@@ -29,11 +30,11 @@ type MigrationPolicy struct {
 }
 
 type Field struct {
-	Path             string          `json:"path"`
-	Class            Class           `json:"class"`
-	Introduced       int             `json:"introduced_in_contract"`
-	RequiredStatuses []string        `json:"required_statuses,omitempty"`
-	Migration        MigrationPolicy `json:"migration"`
+	Path             string               `json:"path"`
+	Class            Class                `json:"class"`
+	Introduced       int                  `json:"introduced_in_contract"`
+	RequiredStatuses []issuedomain.Status `json:"required_statuses,omitempty"`
+	Migration        MigrationPolicy      `json:"migration"`
 }
 
 type Contract struct {
@@ -51,11 +52,7 @@ func Current() Contract {
 		Version: CurrentVersion, SchemaVersion: CurrentSchemaVersion, MigrationFromSchema: MigrationFromSchema,
 		Fields: []Field{
 			{Path: "issues[].workspace", Class: ExecutionRequiredProvenance, Introduced: 1,
-				RequiredStatuses: []string{
-					"claimed", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending",
-					"publication_recovery_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input",
-					"awaiting_checks", "awaiting_merge", "resolving_conflict", "blocked", "failed",
-				},
+				RequiredStatuses: workspaceRequiredStatuses(),
 				Migration: MigrationPolicy{
 					Code: "WORKSPACE_PROVENANCE_REQUIRES_VERIFIED_RECOVERY", Kind: "non_migratable",
 					OperatorGuide: "use the supported v4 agent-loop resume-blocked recovery while stopped, then preview v5 migration again",
@@ -111,16 +108,21 @@ func FieldByPath(path string) (Field, bool) {
 	return Field{}, false
 }
 
-func RequiredForStatus(field Field, status string) bool {
-	index := sort.SearchStrings(field.RequiredStatuses, status)
-	if index < len(field.RequiredStatuses) && field.RequiredStatuses[index] == status {
-		return true
-	}
-	// Keep contract declarations readable while remaining independent of order.
+func RequiredForStatus(field Field, status issuedomain.Status) bool {
 	for _, candidate := range field.RequiredStatuses {
 		if candidate == status {
 			return true
 		}
 	}
 	return false
+}
+
+func workspaceRequiredStatuses() []issuedomain.Status {
+	statuses := make([]issuedomain.Status, 0, len(issuedomain.AllStatuses()))
+	for _, status := range issuedomain.AllStatuses() {
+		if status.RequiresWorkspaceProvenance() {
+			statuses = append(statuses, status)
+		}
+	}
+	return statuses
 }

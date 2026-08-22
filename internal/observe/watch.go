@@ -3,6 +3,7 @@ package observe
 import (
 	"context"
 	"fmt"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"math/rand"
 	"path/filepath"
 	"sort"
@@ -158,7 +159,7 @@ func check(store state.Store, untilIdle bool) (state.Snapshot, string, error) {
 func pendingRequests(snapshot state.Snapshot) []*state.Request {
 	requests := make([]*state.Request, 0)
 	for _, request := range snapshot.PendingRequests {
-		if request != nil && request.Status == "pending" {
+		if request != nil && request.Status == issuedomain.RequestStatusPending {
 			copy := *request
 			copy.Options = append([]state.Option(nil), request.Options...)
 			requests = append(requests, &copy)

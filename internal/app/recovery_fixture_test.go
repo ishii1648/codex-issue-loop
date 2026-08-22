@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,7 +85,7 @@ esac
 	}
 	_, err = store.Update("issue_blocked", 166, owner.RunID, map[string]any{"remote_head": nil}, func(snapshot *state.Snapshot) error {
 		issue := snapshot.Issues["166"]
-		issue.Status = "blocked"
+		issue.Status = issuedomain.StatusBlocked
 		issue.Worktree = repo
 		issue.Branch = "main"
 		issue.FailureKind = "issue"

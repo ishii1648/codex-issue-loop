@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"io"
 	"log"
 	"os"
@@ -321,7 +322,7 @@ func TestStartupReconciliationObservesRateLimitWithoutExiting(t *testing.T) {
 	}
 	loop.GitHub = client
 	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "running", RunID: "run_7"}
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusRunning, RunID: "run_7"}
 		return nil
 	})
 	if err != nil {
@@ -370,7 +371,7 @@ func TestStartupReconciliationUsesSharedCooldownBeforeGitHub(t *testing.T) {
 	client := &startupRateLimitGitHub{fakeGitHub: fake}
 	loop.GitHub = client
 	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "blocked", RunID: "run_7"}
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusBlocked, RunID: "run_7"}
 		return nil
 	})
 	if err != nil {
@@ -414,7 +415,7 @@ func TestStartupReconciliationShortensStaleCooldownWhenRESTHasRemaining(t *testi
 	}
 	loop.GitHub = client
 	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: "blocked", RunID: "run_7"}
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusBlocked, RunID: "run_7"}
 		return nil
 	})
 	if err != nil {
@@ -566,7 +567,7 @@ func TestWebhookMailboxClaimsReadyIssueWithoutQueuePolling(t *testing.T) {
 		t.Fatalf("claimed=%v rest_gets=%d list_calls=%d", github.claimed, github.restGets, github.listCalls)
 	}
 	snapshot, err := loop.Store.Load()
-	if err != nil || snapshot.Issues["1"] == nil || snapshot.Issues["1"].Status != "awaiting_checks" {
+	if err != nil || snapshot.Issues["1"] == nil || snapshot.Issues["1"].Status != issuedomain.StatusAwaitingChecks {
 		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -634,7 +635,7 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 	}{
 		{
 			name: "completed observes merged PR",
-			current: state.Issue{Number: 1, Status: "completed", RunID: "run-1", PullRequestNumber: 7,
+			current: state.Issue{Number: 1, Status: issuedomain.StatusCompleted, RunID: "run-1", PullRequestNumber: 7,
 				PullRequestURL: "https://example.test/owner/repo/pull/7"},
 			delivery: webhook.Delivery{DeliveryID: "terminal-merged", Event: "pull_request", Action: "closed", PullRequestNumber: 7},
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open"}, PullRequests: []gh.PullRequest{{
@@ -644,7 +645,7 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 		},
 		{
 			name: "failed observes PR closed without merge",
-			current: state.Issue{Number: 1, Status: "failed", RunID: "run-1", PullRequestNumber: 7,
+			current: state.Issue{Number: 1, Status: issuedomain.StatusFailed, RunID: "run-1", PullRequestNumber: 7,
 				PullRequestURL: "https://example.test/owner/repo/pull/7"},
 			delivery: webhook.Delivery{DeliveryID: "terminal-pr-closed", Event: "pull_request", Action: "closed", PullRequestNumber: 7},
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open"}, PullRequests: []gh.PullRequest{{
@@ -654,21 +655,21 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 		},
 		{
 			name:       "needs input observes Issue close",
-			current:    state.Issue{Number: 1, Status: "needs_input", RunID: "run-1"},
+			current:    state.Issue{Number: 1, Status: issuedomain.StatusNeedsInput, RunID: "run-1"},
 			delivery:   webhook.Delivery{DeliveryID: "terminal-issue-closed", Event: "issues", Action: "closed", IssueNumber: 1},
 			remote:     gh.RemoteState{Issue: gh.Issue{Number: 1, State: "closed"}},
 			wantStatus: "blocked",
 		},
 		{
 			name:       "blocked observes done label",
-			current:    state.Issue{Number: 1, Status: "blocked", RunID: "run-1"},
+			current:    state.Issue{Number: 1, Status: issuedomain.StatusBlocked, RunID: "run-1"},
 			delivery:   webhook.Delivery{DeliveryID: "terminal-done", Event: "issues", Action: "labeled", IssueNumber: 1},
 			remote:     gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open", Labels: []string{"codex-loop:done"}}},
 			wantStatus: "completed",
 		},
 		{
 			name:       "failed label removal does not resume",
-			current:    state.Issue{Number: 1, Status: "failed", RunID: "run-1"},
+			current:    state.Issue{Number: 1, Status: issuedomain.StatusFailed, RunID: "run-1"},
 			delivery:   webhook.Delivery{DeliveryID: "terminal-unlabeled", Event: "issues", Action: "unlabeled", IssueNumber: 1},
 			remote:     gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open", Labels: []string{"codex-loop:ready"}}},
 			wantStatus: "failed",
@@ -738,7 +739,7 @@ func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *tes
 		t.Fatal(err)
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"].Status = "running"
+		snapshot.Issues["1"].Status = issuedomain.StatusRunning
 		return nil
 	})
 	if err != nil {
@@ -761,7 +762,7 @@ func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *tes
 		t.Fatalf("candidates=%v acknowledged=%v rest_gets=%d err=%v", candidates, acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != "blocked" || snapshot.Issues["1"].Lease != nil {
+	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusBlocked || snapshot.Issues["1"].Lease != nil {
 		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -780,7 +781,7 @@ func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testin
 		t.Fatal(err)
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"].Status = "running"
+		snapshot.Issues["1"].Status = issuedomain.StatusRunning
 		return nil
 	})
 	if err != nil {
@@ -800,7 +801,7 @@ func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testin
 		t.Fatalf("acknowledged=%v rest_gets=%d err=%v", acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != "running" || snapshot.Issues["1"].Lease == nil {
+	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusRunning || snapshot.Issues["1"].Lease == nil {
 		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -815,7 +816,7 @@ func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"].Status = "running"
+		snapshot.Issues["1"].Status = issuedomain.StatusRunning
 		return nil
 	})
 	if err != nil {
@@ -831,7 +832,7 @@ func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 		if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
 			return err
 		}
-		item.Status = "blocked"
+		item.Status = issuedomain.StatusBlocked
 		return nil
 	})
 	if err != nil {
@@ -845,7 +846,7 @@ func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != "blocked" || snapshot.Issues["1"].Lease != nil {
+	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusBlocked || snapshot.Issues["1"].Lease != nil {
 		t.Fatalf("late worker result changed authoritative state: issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -921,7 +922,7 @@ func TestSchedulerCancellationStopsAllWorkers(t *testing.T) {
 	_, err := loop.Store.Update("scheduler_fixture", 1, "run_cancel", nil, func(snapshot *state.Snapshot) error {
 		branch := "codex/issue-1-test"
 		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, Title: "Test", Status: "retry_wait", RunID: "run_cancel",
+			Number: 1, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: "run_cancel",
 			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
 			LeaseGeneration: 1, Lease: fixtureLease("run_cancel"),
 			Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
@@ -962,9 +963,9 @@ func TestSchedulerContinuesAfterNeedsInputWhenConfigured(t *testing.T) {
 	pool := &blockingPoolWorker{started: make(chan int, 1), release: make(chan struct{}, 1)}
 	loop.Worker = pool
 	_, err := loop.Store.Update("needs_input_fixture", 1, "run_waiting", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: "needs_input", RunID: "run_waiting", UpdatedAt: loop.now()}
+		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusNeedsInput, RunID: "run_waiting", UpdatedAt: loop.now()}
 		snapshot.PendingRequests["req_1"] = &state.Request{
-			ID: "req_1", IssueNumber: 1, Question: "Choose?", Status: "pending", CreatedAt: loop.now(),
+			ID: "req_1", IssueNumber: 1, Question: "Choose?", Status: issuedomain.RequestStatusPending, CreatedAt: loop.now(),
 		}
 		return nil
 	})
@@ -994,7 +995,7 @@ func TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker(t *te
 	loop.Logger = log.New(io.Discard, "", 0)
 	_, err := loop.Store.Update("terminal_fixture", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, Status: "blocked", RunID: "run_1", Branch: "codex/issue-1-test",
+			Number: 1, Status: issuedomain.StatusBlocked, RunID: "run_1", Branch: "codex/issue-1-test",
 			PullRequestURL: "https://example.test/pull/1", FailureKind: "issue",
 		}
 		return nil
@@ -1030,7 +1031,7 @@ func TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker(t *te
 		t.Fatalf("unrelated worker changed: canceled=%v active=%v", runningCanceled, s.active)
 	}
 	snapshot, err := loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != "completed" {
+	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusCompleted {
 		t.Fatalf("status=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -1053,7 +1054,7 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 			runID := "run_" + resource
 			branch := "codex/issue-1-test"
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
-				Number: number, Title: "Test", Status: "retry_wait", RunID: runID,
+				Number: number, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: runID,
 				LeaseGeneration: 1, Lease: &state.ResourceLease{
 					Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: 0,
 					DeclaredResources: []string{}, ResolvedResources: []string{resource}, ReservedAt: loop.now(),
@@ -1173,7 +1174,7 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 				}
 				_, err = loop.Store.Update("resume_pending", number, runID, nil, func(snapshot *state.Snapshot) error {
 					item := snapshot.Issues[strconv.Itoa(number)]
-					item.Status = "resume_pending"
+					item.Status = issuedomain.StatusResumePending
 					item.Worktree = loop.Config.RepoPath
 					item.Branch = "codex/issue-1-test"
 					item.Workspace = fixtureWorkspace(loop, item.Worktree, item.Branch)

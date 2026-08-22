@@ -41,7 +41,7 @@ type InterruptedWorkspaceResumeEvidence struct {
 func MayHaveInterruptedWorkspaceResumeEvidence(issue *Issue) bool {
 	sessionMissing := issue != nil && issue.SessionID == "" && issue.Session == nil
 	sessionComplete := issue != nil && issue.SessionID != "" && issue.Session != nil && issue.Session.ID == issue.SessionID
-	if issue == nil || issue.Status != issuedomain.StatusBlocked || issue.GitHubSync != "" || issue.Workspace != nil ||
+	if issue == nil || issue.Status != issuedomain.StatusBlocked || issue.GitHubSync != issuedomain.GitHubSyncNone || issue.Workspace != nil ||
 		issue.RunID == "" || issue.Worktree == "" || issue.Branch == "" || (!sessionMissing && !sessionComplete) ||
 		issue.ConflictRecovery != nil || issue.PublicationRecovery != nil || issue.PullRequestChecksRecovery != nil || issue.MergedPullRequestAdoption != nil ||
 		issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease == nil || issue.LeaseGeneration == 0 ||
@@ -52,7 +52,7 @@ func MayHaveInterruptedWorkspaceResumeEvidence(issue *Issue) bool {
 		return false
 	}
 	resume := issue.EnvironmentResume
-	if resume.ID == "" || (resume.Status != "requested" && resume.Status != "github_synced" && resume.Status != "running") || resume.ConfirmedAt.IsZero() ||
+	if resume.ID == "" || (resume.Status != issuedomain.EnvironmentResumeStatusRequested && resume.Status != issuedomain.EnvironmentResumeStatusGitHubSynced && resume.Status != issuedomain.EnvironmentResumeStatusRunning) || resume.ConfirmedAt.IsZero() ||
 		resume.PreviousReason == "" || resume.BaseSHA == "" || resume.CurrentBaseSHA == "" || issue.Lease.BaseSHA != resume.BaseSHA {
 		return false
 	}
@@ -61,12 +61,12 @@ func MayHaveInterruptedWorkspaceResumeEvidence(issue *Issue) bool {
 		return false
 	}
 	if issue.ResourcePark != nil {
-		if resume.Status == "running" {
+		if resume.Status == issuedomain.EnvironmentResumeStatusRunning {
 			return false
 		}
 		park := issue.ResourcePark
 		if park.ID == "" || park.Kind != ResourceParkKindEnvironmentBlock ||
-			(park.Status != "resuming" && park.Status != "resumed") || park.ResumeOwner == nil ||
+			(park.Status != issuedomain.ResourceParkStatusResuming && park.Status != issuedomain.ResourceParkStatusResumed) || park.ResumeOwner == nil ||
 			*park.ResumeOwner != issue.Lease.Owner || park.OriginalLease.Owner.RunID != issue.RunID || park.ResumedAt.IsZero() {
 			return false
 		}
@@ -134,7 +134,7 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 			if legacyRecovered {
 				fullHistoryErr := validateExactV0614Zeitreise442History(events, event.Sequence, issue)
 				fullHistory := fullHistoryErr == nil
-				if resume.Status != "running" || fields["lease_owner"] != nil || fields["lease_slot"] != nil ||
+				if resume.Status != issuedomain.EnvironmentResumeStatusRunning || fields["lease_owner"] != nil || fields["lease_slot"] != nil ||
 					issue.Lease.Slot != 0 || len(issue.Lease.ResolvedResources) != 1 || issue.Lease.ResolvedResources[0] != RepositoryResource {
 					return nil, fmt.Errorf("Issue #%d v0.6.14 recovered-lease resume does not have exact current lease and legacy event provenance", issue.Number)
 				}
@@ -147,7 +147,7 @@ func (s Store) InterruptedWorkspaceResumeEvidence(issue Issue) (*InterruptedWork
 				if fullHistory {
 					evidence.WorktreeHead = exactV0614ReconciliationHead(events, issue)
 				}
-			} else if resume.Status == "running" || payload.LeaseOwner != issue.Lease.Owner || payload.LeaseSlot != issue.Lease.Slot {
+			} else if resume.Status == issuedomain.EnvironmentResumeStatusRunning || payload.LeaseOwner != issue.Lease.Owner || payload.LeaseSlot != issue.Lease.Slot {
 				return nil, fmt.Errorf("Issue #%d interrupted environment resume lease provenance is inconsistent", issue.Number)
 			}
 			if evidence.ResumeID != "" || payload.PreviousReason != resume.PreviousReason || payload.BaseSHA != resume.BaseSHA ||
@@ -353,7 +353,7 @@ func evaluateExactV0614Zeitreise442History(events []Event, requestSequence uint6
 		}
 	}
 	countOK := len(history) == 27
-	report.add("RECOVERY_EVENT_COUNT", recoveryStatus(countOK), "durable.events", "exactly 27 same-Issue events", fmt.Sprintf("%d same-Issue events", len(history)), "operator", "restore the complete ordered event history from a reviewed backup", fmt.Sprintf("event count boundary: got %d events, want 27", len(history)))
+	report.add(RecoveryCodeEventCount, recoveryStatus(countOK), "durable.events", "exactly 27 same-Issue events", fmt.Sprintf("%d same-Issue events", len(history)), "operator", "restore the complete ordered event history from a reviewed backup", fmt.Sprintf("event count boundary: got %d events, want 27", len(history)))
 
 	wantTypes := []string{
 		"lease_reserved", "issue_claimed", "worker_started", "worker_process_started", "worker_preflight_completed", "retry_scheduled",
@@ -374,10 +374,10 @@ func evaluateExactV0614Zeitreise442History(events []Event, requestSequence uint6
 	if orderOK {
 		orderDetail = ""
 	}
-	report.add("RECOVERY_EVENT_ORDER", recoveryStatus(orderOK), "durable.events", "exact production event type/order and one run identity", map[bool]string{true: "order matches", false: "order or run identity differs"}[orderOK], "none", "do not reorder or synthesize durable events; restore reviewed evidence", orderDetail)
+	report.add(RecoveryCodeEventOrder, recoveryStatus(orderOK), "durable.events", "exact production event type/order and one run identity", map[bool]string{true: "order matches", false: "order or run identity differs"}[orderOK], "none", "do not reorder or synthesize durable events; restore reviewed evidence", orderDetail)
 
 	sessionOK := issue.EnvironmentResume != nil && issue.Lease != nil && len(history) > 21 && history[21].Sequence == requestSequence && issue.SessionID == "" && issue.Session == nil
-	report.add("RECOVERY_SESSION_IDENTITY", recoveryStatus(sessionOK), "durable.state+events", "request sequence matches and legacy session fields are null", map[bool]string{true: "legacy null session provenance matches", false: "request sequence or session provenance differs"}[sessionOK], "none", "use only the original legacy snapshot and matching request event", "request marker boundary: sequence or null session provenance differs")
+	report.add(RecoveryCodeSessionIdentity, recoveryStatus(sessionOK), "durable.state+events", "request sequence matches and legacy session fields are null", map[bool]string{true: "legacy null session provenance matches", false: "request sequence or session provenance differs"}[sessionOK], "none", "use only the original legacy snapshot and matching request event", "request marker boundary: sequence or null session provenance differs")
 
 	timestampOK := issue.EnvironmentResume != nil && issue.Lease != nil && len(history) > 21 &&
 		!issue.EnvironmentResume.ConfirmedAt.IsZero() && !issue.Lease.ReservedAt.IsZero() && !history[21].Timestamp.IsZero() &&
@@ -390,7 +390,7 @@ func evaluateExactV0614Zeitreise442History(events []Event, requestSequence uint6
 			timestampDetail = fmt.Sprintf("timestamp boundary: request event delay %s is outside [0s,%s]", delay, maxV0614ResumeRequestEventDelay)
 		}
 	}
-	report.add("RECOVERY_TIMESTAMPS", recoveryStatus(timestampOK), "durable.state+events", "non-zero reservation/confirmation and request delay within one second", map[bool]string{true: "timestamp relation matches", false: "timestamp relation differs"}[timestampOK], "none", "restore the original timestamp-bearing records; do not rewrite timestamps", timestampDetail)
+	report.add(RecoveryCodeTimestamps, recoveryStatus(timestampOK), "durable.state+events", "non-zero reservation/confirmation and request delay within one second", map[bool]string{true: "timestamp relation matches", false: "timestamp relation differs"}[timestampOK], "none", "restore the original timestamp-bearing records; do not rewrite timestamps", timestampDetail)
 
 	leaseOK := issue.Lease != nil && len(issue.Lease.DeclaredResources) == 0
 	if len(history) > 0 {
@@ -398,7 +398,7 @@ func evaluateExactV0614Zeitreise442History(events []Event, requestSequence uint6
 	} else {
 		leaseOK = false
 	}
-	report.add("RECOVERY_LEASE_IDENTITY", recoveryStatus(leaseOK), "durable.state+events", "legacy generation transition and exact repository lease", map[bool]string{true: "lease identity matches", false: "lease generation, resources, or base identity differs"}[leaseOK], "none", "restore the matching state and lease reservation event", "current lease boundary: recovered lease identity differs")
+	report.add(RecoveryCodeLeaseIdentity, recoveryStatus(leaseOK), "durable.state+events", "legacy generation transition and exact repository lease", map[bool]string{true: "lease identity matches", false: "lease generation, resources, or base identity differs"}[leaseOK], "none", "restore the matching state and lease reservation event", "current lease boundary: recovered lease identity differs")
 
 	payloadOK := len(history) >= 27 && issue.EnvironmentResume != nil && issue.Lease != nil && issue.BlockedCause != nil
 	requestPayloadOK := false
@@ -429,7 +429,7 @@ func evaluateExactV0614Zeitreise442History(events []Event, requestSequence uint6
 	if !requestPayloadOK && len(history) >= 27 && issue.EnvironmentResume != nil {
 		payloadDetail = "request payload boundary"
 	}
-	report.add("RECOVERY_PAYLOAD_SHAPE", recoveryStatus(payloadOK), "durable.events", "exact payload keys, types, and bound values", map[bool]string{true: "payload shapes match", false: "one or more payload shapes or values differ"}[payloadOK], "none", "restore unmodified event payloads from the reviewed recovery evidence", payloadDetail)
+	report.add(RecoveryCodePayloadShape, recoveryStatus(payloadOK), "durable.events", "exact payload keys, types, and bound values", map[bool]string{true: "payload shapes match", false: "one or more payload shapes or values differ"}[payloadOK], "none", "restore unmodified event payloads from the reviewed recovery evidence", payloadDetail)
 
 	remoteOK := len(history) >= 27
 	worktreeHead := ""
@@ -446,13 +446,13 @@ func evaluateExactV0614Zeitreise442History(events []Event, requestSequence uint6
 		lastHead, err := exactReconciliationPayload(history[20].Payload, legacyNormalizedReason, issue, true)
 		remoteOK = remoteOK && err == nil && worktreeHead != "" && issue.Lease != nil && worktreeHead != issue.Lease.BaseSHA && lastHead == worktreeHead
 	}
-	report.add("RECOVERY_REMOTE_IDENTITY", recoveryStatus(remoteOK), "durable.events.reconciliation", "stable dirty local-only HEAD and exact remote field evolution", map[bool]string{true: "branch/remote identity matches", false: "branch, HEAD, PR, or remote identity differs"}[remoteOK], "operator", "restore the original local-only branch boundary or abandon this recovery", "reconciliation remote boundary: branch, HEAD, PR, or remote evidence differs")
+	report.add(RecoveryCodeRemoteIdentity, recoveryStatus(remoteOK), "durable.events.reconciliation", "stable dirty local-only HEAD and exact remote field evolution", map[bool]string{true: "branch/remote identity matches", false: "branch, HEAD, PR, or remote identity differs"}[remoteOK], "operator", "restore the original local-only branch boundary or abandon this recovery", "reconciliation remote boundary: branch, HEAD, PR, or remote evidence differs")
 
 	markerOK := len(history) >= 27 && issue.EnvironmentResume != nil &&
 		exactStatePayload(history[22].Payload, "environment_resume", "") &&
 		exactStatePayload(history[23].Payload, "environment_resume", issue.EnvironmentResume.ID) &&
 		exactStatePayload(history[26].Payload, "blocked", "")
-	report.add("RECOVERY_GITHUB_MARKERS", recoveryStatus(markerOK), "durable.events.github_state_synced", "exact resume-ID-less, resume-ID-bearing, and blocked markers", map[bool]string{true: "marker provenance matches", false: "marker sequence or identity differs"}[markerOK], "none", "do not recreate comments manually; restore matching automation evidence", "marker boundary: exact synchronization markers differ")
+	report.add(RecoveryCodeGitHubMarkers, recoveryStatus(markerOK), "durable.events.github_state_synced", "exact resume-ID-less, resume-ID-bearing, and blocked markers", map[bool]string{true: "marker provenance matches", false: "marker sequence or identity differs"}[markerOK], "none", "do not recreate comments manually; restore matching automation evidence", "marker boundary: exact synchronization markers differ")
 	return report
 }
 
