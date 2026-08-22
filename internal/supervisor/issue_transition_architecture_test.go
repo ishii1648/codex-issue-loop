@@ -21,9 +21,10 @@ const statePackagePath = "github.com/ishii1648/codex-issue-loop/internal/state"
 
 // TestIssueStatusAssignmentsStayWithinKnownBoundaries uses type information,
 // rather than receiver variable names, to find every production assignment to
-// state.Issue.Status in app, state, and supervisor. The compatibility paths are
-// counted explicitly so a new raw assignment fails this test. Each listed path
-// is removed when that lifecycle flow gains a named domain decision.
+// state.Issue.Status in app, state, and supervisor. Raw writes are confined to
+// the state commit boundary, so application transaction closures cannot add
+// lifecycle policy without a domain decision or the validated compatibility
+// API.
 func TestIssueStatusAssignmentsStayWithinKnownBoundaries(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -34,13 +35,7 @@ func TestIssueStatusAssignmentsStayWithinKnownBoundaries(t *testing.T) {
 		"./internal/app", "./internal/state", "./internal/supervisor")
 
 	allowed := map[string]int{
-		"internal/supervisor/issue_transition.go":     2, // named decision and compatibility commit boundaries
-		"internal/app/app.go":                         3, // answer, conflict retry, environment resume CLI paths
-		"internal/app/answered_workspace_recovery.go": 1,
-		"internal/app/checks_recovery.go":             2,
-		"internal/app/merged_pr_adoption.go":          1,
-		"internal/app/publication_recovery.go":        1,
-		"internal/state/lease.go":                     1, // atomic claim reservation; decision extraction pending
+		"internal/state/issue_transition.go": 2, // named decision and compatibility commit boundaries
 	}
 	seen := map[string]int{}
 	for _, pkg := range loaded {
@@ -73,7 +68,7 @@ func TestIssueStatusAssignmentsStayWithinKnownBoundaries(t *testing.T) {
 	}
 	for path, want := range allowed {
 		if got := seen[path]; got != want {
-			t.Errorf("%s has %d state.Issue.Status assignments; want %d until its compatibility paths are migrated", path, got, want)
+			t.Errorf("%s has %d state.Issue.Status assignments; want %d at the central commit boundary", path, got, want)
 		}
 	}
 }

@@ -60,6 +60,53 @@ func TestLifecycleRecoveryAndIdempotentTransitions(t *testing.T) {
 	}
 }
 
+func TestRecoveryTransitions(t *testing.T) {
+	tests := []struct {
+		name string
+		make func() (Transition, error)
+		to   Status
+	}{
+		{name: "start fresh claim", make: func() (Transition, error) { return StartClaim(StatusUnset) }, to: StatusClaiming},
+		{name: "resume answer", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusResumePending) }, to: StatusResumePending},
+		{name: "wait for answer resources", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusAnswerClaimWaiting) }, to: StatusAnswerClaimWaiting},
+		{name: "retry conflict", make: func() (Transition, error) { return RetryConflict(StatusBlocked) }, to: StatusResolvingConflict},
+		{name: "resume environment", make: func() (Transition, error) { return RequestEnvironmentResume(StatusBlocked) }, to: StatusEnvironmentResumePending},
+		{name: "recover workspace", make: func() (Transition, error) { return RecoverAnsweredWorkspace(StatusBlocked) }, to: StatusResumePending},
+		{name: "recover checks", make: func() (Transition, error) { return RequestChecksRecovery(StatusFailed) }, to: StatusChecksRecovery},
+		{name: "resume recovered checks", make: func() (Transition, error) {
+			decision, err := AwaitChecks(StatusChecksRecovery)
+			return decision.Transition, err
+		}, to: StatusAwaitingChecks},
+		{name: "recover publication", make: func() (Transition, error) { return RequestPublicationRecovery(StatusFailed) }, to: StatusPublicationRecovery},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transition, err := test.make()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if transition.To != test.to {
+				t.Fatalf("transition=%+v want target %q", transition, test.to)
+			}
+		})
+	}
+}
+
+func TestRecoveryTransitionsRejectUnrelatedStatesAndTargets(t *testing.T) {
+	if _, err := RequestChecksRecovery(StatusRunning); err == nil {
+		t.Fatal("running Issue must not enter checks recovery")
+	}
+	if _, err := RetryConflict(StatusFailed); err == nil {
+		t.Fatal("failed Issue must not enter conflict retry")
+	}
+	if _, err := StartClaim(StatusCompleted); err == nil {
+		t.Fatal("completed Issue must not start another claim")
+	}
+	if _, err := ResumeAfterAnswer(StatusNeedsInput, StatusCompleted); err == nil {
+		t.Fatal("answer must not select an unrelated lifecycle target")
+	}
+}
+
 func TestStatusOperationalPredicates(t *testing.T) {
 	tests := []struct {
 		status            Status

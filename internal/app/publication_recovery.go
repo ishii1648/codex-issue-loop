@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/publication"
@@ -180,6 +181,10 @@ func (a App) recoverPublication(ctx context.Context, l layout.Layout, args []str
 		}
 	}
 	previousReason := current.LastError
+	recoveryTransition, err := issuedomain.RequestPublicationRecovery(current.Status)
+	if err != nil {
+		return exitError{4, err}
+	}
 	recoveryDeclared := append([]string(nil), current.DeclaredResources...)
 	var recoveryResolved, recoveryActual []string
 	if current.Lease != nil {
@@ -227,7 +232,9 @@ func (a App) recoverPublication(ctx context.Context, l layout.Layout, args []str
 			provenance.ActualResources = append([]string(nil), recoveryActual...)
 			item.PublicationFailure = &provenance
 		}
-		item.Status = "publication_recovery_pending"
+		if err := state.ApplyIssueTransition(item, recoveryTransition); err != nil {
+			return err
+		}
 		item.GitHubSync = "publication_recovery"
 		item.RetryAfter = nil
 		item.PublicationRecovery = &state.PublicationRecovery{
