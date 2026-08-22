@@ -1346,6 +1346,10 @@ func (l *Loop) finishPublicationRecoveryFailure(ctx context.Context, current sta
 	discoveredPRURL, discoveredOpenPRs, inspectedPRs := l.discoverOpenPublicationPullRequests(ctx, current)
 	retainLease := current.PullRequestURL != "" || discoveredOpenPRs > 0 || !inspectedPRs
 	retryAt := l.now().Add(l.retryDelay(attempt))
+	decision, decisionErr := issuedomain.RecordPublicationRecoveryFailure(current.Status, "publication recovery: "+cause.Error(), string(failure.Issue), terminal, retryAt)
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide publication recovery failure", decisionErr)
+	}
 	_, err := l.Store.Update("publication_recovery_attempt_failed", current.Number, current.RunID, map[string]any{
 		"recovery_id": recoveryID, "attempt": attempt, "failure": provenance, "terminal": terminal,
 	}, func(s *state.Snapshot) error {
@@ -1355,8 +1359,8 @@ func (l *Loop) finishPublicationRecoveryFailure(ctx context.Context, current sta
 		}
 		finishPublicationRecoveryAttempt(item, attempt, "failed", cause.Error(), l.now())
 		item.PublicationFailure = &provenance
-		item.LastError = "publication recovery: " + cause.Error()
-		item.FailureKind = string(failure.Issue)
+		item.LastError = decision.Outcome.LastError
+		item.FailureKind = decision.Outcome.FailureKind
 		if item.PullRequestURL == "" && discoveredOpenPRs == 1 {
 			item.PullRequestURL = discoveredPRURL
 		}
@@ -1366,18 +1370,19 @@ func (l *Loop) finishPublicationRecoveryFailure(ctx context.Context, current sta
 					return releaseErr
 				}
 			}
-			if err := setIssueStatus(item, issuedomain.StatusFailed); err != nil {
+			if err := applyIssueTransition(item, decision.Outcome.Transition); err != nil {
 				return err
 			}
-			item.GitHubSync = "failed"
-			item.RetryAfter = nil
-			item.PublicationRecovery.Status = "failed"
+			item.GitHubSync = decision.Outcome.GitHubSync
+			item.RetryAfter = decision.RetryAt
+			item.PublicationRecovery.Status = decision.RecoveryStatus
 		} else {
-			if err := setIssueStatus(item, issuedomain.StatusPublicationRecovery); err != nil {
+			if err := applyIssueTransition(item, decision.Outcome.Transition); err != nil {
 				return err
 			}
-			item.RetryAfter = &retryAt
-			item.PublicationRecovery.Status = "retry_wait"
+			item.GitHubSync = decision.Outcome.GitHubSync
+			item.RetryAfter = decision.RetryAt
+			item.PublicationRecovery.Status = decision.RecoveryStatus
 		}
 		item.UpdatedAt = l.now()
 		return nil
@@ -1402,6 +1407,10 @@ func (l *Loop) failPublicationRecovery(ctx context.Context, current state.Issue,
 	}
 	discoveredPRURL, discoveredOpenPRs, inspectedPRs := l.discoverOpenPublicationPullRequests(ctx, current)
 	retainLease := current.PullRequestURL != "" || discoveredOpenPRs > 0 || !inspectedPRs
+	decision, decisionErr := issuedomain.RefusePublicationRecovery(current.Status, "publication recovery refused: "+reason, string(failure.Issue))
+	if decisionErr != nil {
+		return failure.Wrap(failure.Issue, "decide publication recovery refusal", decisionErr)
+	}
 	_, err := l.Store.Update("publication_recovery_refused", current.Number, current.RunID, provenance, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
 		if !retainLease && item.PullRequestURL == "" && item.Lease != nil {
@@ -1412,11 +1421,12 @@ func (l *Loop) failPublicationRecovery(ctx context.Context, current state.Issue,
 		if item.PullRequestURL == "" && discoveredOpenPRs == 1 {
 			item.PullRequestURL = discoveredPRURL
 		}
-		if err := setIssueStatus(item, issuedomain.StatusFailed); err != nil {
+		if err := applyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.LastError = "publication recovery refused: " + reason
-		item.FailureKind = string(failure.Issue)
+		item.LastError = decision.LastError
+		item.FailureKind = decision.FailureKind
+		item.GitHubSync = decision.GitHubSync
 		item.PublicationFailure = &provenance
 		item.GitHubSync = "failed"
 		item.RetryAfter = nil
@@ -2612,6 +2622,14 @@ var errAnsweredWorkspaceSyncConverged = errors.New("answered workspace recovery 
 
 func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 	var err error
+	var checksTransition *issuedomain.Transition
+	if issue.GitHubSync == "pull_request_checks_recovery" {
+		decision, decisionErr := issuedomain.AwaitChecks(issue.Status)
+		if decisionErr != nil {
+			return failure.Wrap(failure.Issue, "decide checks recovery synchronization", decisionErr)
+		}
+		checksTransition = &decision.Transition
+	}
 	switch issue.GitHubSync {
 	case "done":
 		if adoption := issue.MergedPullRequestAdoption; adoption != nil && adoption.Status == "github_sync_pending" {
@@ -2749,7 +2767,10 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			}
 			if issue.GitHubSync == "pull_request_checks_recovery" && item.PullRequestChecksRecovery != nil {
 				now := l.now()
-				if err := setIssueStatus(item, issuedomain.StatusAwaitingChecks); err != nil {
+				if checksTransition == nil {
+					return fmt.Errorf("Issue #%d checks recovery is missing its lifecycle decision", issue.Number)
+				}
+				if err := applyIssueTransition(item, *checksTransition); err != nil {
 					return err
 				}
 				item.FailureKind = ""
