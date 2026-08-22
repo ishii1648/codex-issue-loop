@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
 
@@ -40,7 +41,7 @@ type InterruptedWorkspaceResumeEvidence struct {
 func MayHaveInterruptedWorkspaceResumeEvidence(issue *Issue) bool {
 	sessionMissing := issue != nil && issue.SessionID == "" && issue.Session == nil
 	sessionComplete := issue != nil && issue.SessionID != "" && issue.Session != nil && issue.Session.ID == issue.SessionID
-	if issue == nil || issue.Status != "blocked" || issue.GitHubSync != "" || issue.Workspace != nil ||
+	if issue == nil || issue.Status != issuedomain.StatusBlocked || issue.GitHubSync != "" || issue.Workspace != nil ||
 		issue.RunID == "" || issue.Worktree == "" || issue.Branch == "" || (!sessionMissing && !sessionComplete) ||
 		issue.ConflictRecovery != nil || issue.PublicationRecovery != nil || issue.PullRequestChecksRecovery != nil || issue.MergedPullRequestAdoption != nil ||
 		issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease == nil || issue.LeaseGeneration == 0 ||

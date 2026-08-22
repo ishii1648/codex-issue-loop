@@ -19,13 +19,3 @@ func TestApplyIssueTransitionFencesStaleDecision(t *testing.T) {
 		t.Fatalf("stale transition changed status to %q", item.Status)
 	}
 }
-
-func TestSetIssueStatusValidatesCompatibilityWrite(t *testing.T) {
-	item := &Issue{}
-	if err := SetIssueStatus(item, issuedomain.Status("misspelled")); err == nil {
-		t.Fatal("expected unknown compatibility status to be rejected")
-	}
-	if item.Status != issuedomain.StatusUnset {
-		t.Fatalf("invalid compatibility write changed status to %q", item.Status)
-	}
-}

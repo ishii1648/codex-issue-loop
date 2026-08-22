@@ -666,12 +666,12 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 		return "needs_input", true
 	}
 	for _, issue := range s.Issues {
-		if issue != nil && issue.Status == "blocked" {
+		if issue != nil && issue.Status == issuedomain.StatusBlocked {
 			return "blocked", true
 		}
 	}
 	for _, issue := range s.Issues {
-		if issue != nil && issue.Status == "answer_claim_waiting" {
+		if issue != nil && issue.Status == issuedomain.StatusAnswerClaimWaiting {
 			return "answer_claim_waiting", true
 		}
 	}
@@ -688,7 +688,7 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			if issue.GitHubSync != "" {
 				return "", false
 			}
-			if issue.Status == "claiming" || issue.Status == "running" || issue.Status == "claimed" || issue.Status == "answer_claim_waiting" || issue.Status == "resume_pending" || issue.Status == "environment_resume_pending" || issue.Status == "publication_recovery_pending" || issue.Status == "pull_request_checks_recovery_pending" || issue.Status == "retry_wait" || issue.Status == "awaiting_checks" || issue.Status == "awaiting_merge" || issue.Status == "resolving_conflict" {
+			if issue.Status.PreventsIdle() {
 				return "", false
 			}
 		}
@@ -702,7 +702,7 @@ func RecoverablePullRequestChecksFailure(issue *Issue) bool {
 		return false
 	}
 	value := issue.PullRequestChecksFailure
-	return issue.Status == "failed" && issue.FailureKind == "issue" && !issue.PullRequestMerged && value != nil && value.Recoverable && value.RetryExhausted &&
+	return issue.Status == issuedomain.StatusFailed && issue.FailureKind == "issue" && !issue.PullRequestMerged && value != nil && value.Recoverable && value.RetryExhausted &&
 		value.Origin == ChecksFailureOriginPullRequest && value.Phase == ChecksFailurePhaseRequired &&
 		value.Code == ChecksFailureCodeRetryExhausted && value.ChecksStatus == "failure" &&
 		value.PullRequestURL != "" && value.PullRequestURL == issue.PullRequestURL &&

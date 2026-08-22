@@ -64,9 +64,9 @@ delivery controllerがmaintenance fenceを作ると、全repository schedulerは
 
 `internal/domain/**`はfilesystem、process、clock、network、永続storeを直接参照せず、観測済みの値を入力として副作用のないdecisionを返す。Issue lifecycle statusは永続contractの一部として同packageで型と定数を定義する。`app`または`supervisor`はdecision作成後、`internal/state/issue_transition.go`のcommit境界を通して、永続snapshotのstatusがdecisionの観測したstatusから変化していないことを検証してcommitする。このfenceはstatus一致だけを保証し、Run IDやlease generationなどの所有権fenceは従来どおり各transaction closureが検証する。claim予約だけは、Issue recordの作成とlease競合検査を同じtransactionで線形化するため、`state.ReserveLease`がtransaction内のcurrent statusを`domain.StartClaim`へ渡す。
 
-新しいIssue lifecycle遷移を`Store.Update`のclosureへ直接追加してはならない。まず`internal/domain/**`へ名前付きdecisionとtable-driven testを追加し、`state.ApplyIssueTransition`から適用する。既存経路を段階移行するための`state.SetIssueStatus`は新しいドメイン判断の置き場所として使わず、変更対象になった経路から順に名前付きdecisionへ置き換える。
+新しいIssue lifecycle遷移を`Store.Update`のclosureへ直接追加してはならない。まず`internal/domain/**`へ名前付きdecisionとtable-driven testを追加し、`state.ApplyIssueTransition`から適用する。汎用的にstatusを書き換えるcompatibility APIは設けない。
 
-CLI recoveryとclaim予約を含むproduction codeの`Issue.Status`直接更新は、`internal/state/issue_transition.go`の2つのcommit関数へ集約している。アーキテクチャテストは`go/types`で`state.Issue.Status`への代入を識別し、この2箇所だけを個数付きallowlistとして固定する。これにより、変数名や添字式に依存せず、`app`、`state`、`supervisor`の`Store.Update` closureへ生代入を追加できない。
+CLI recoveryとclaim予約を含むproduction codeの`Issue.Status`直接更新は、`internal/state/issue_transition.go`の`ApplyIssueTransition`へ集約している。アーキテクチャテストは`go/types`で`state.Issue.Status`への代入を識別し、この1箇所だけを個数付きallowlistとして固定する。また、typed statusに対する文字列リテラルの代入、比較、`switch` caseも拒否する。これにより、変数名や添字式に依存せず、`app`、`state`、`supervisor`の`Store.Update` closureへ生代入や未型付けのstatus語彙を追加できない。
 
 未知のstatusはstate validationでfail-closedに拒否する。このため、新しいstatusを永続化した版からそのstatusを知らない旧版へロールバックすると、旧バイナリはstate file全体を読み込めない。status追加時はschema/semantic migrationだけでなく、rollback可能範囲と復旧手順もRelease変更として定義する。
 

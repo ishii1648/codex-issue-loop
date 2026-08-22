@@ -12,6 +12,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
@@ -73,7 +74,7 @@ func (a App) explainRecoverChecks(ctx context.Context, l layout.Layout, repo str
 		}
 		report.AddPredicate(code, status, source, expected, actual, fixability, remediation)
 	}
-	add("RECOVERY_STATUS", current.Status == "failed" && current.GitHubSync == "", "durable.state", "fully synchronized failed state", "status boundary matches", "status or synchronization boundary differs", "operator", "wait for failure synchronization before recovery")
+	add("RECOVERY_STATUS", current.Status == issuedomain.StatusFailed && current.GitHubSync == "", "durable.state", "fully synchronized failed state", "status boundary matches", "status or synchronization boundary differs", "operator", "wait for failure synchronization before recovery")
 	failureRecord := current.PullRequestChecksFailure
 	typedFailure := state.RecoverablePullRequestChecksFailure(current)
 	legacyCompatibility := false
@@ -179,7 +180,7 @@ func (a App) explainResumeBlocked(ctx context.Context, l layout.Layout, repo str
 		}
 		report.AddPredicate(code, status, source, expected, actual, fixability, remediation)
 	}
-	statusOK := current.Status == "blocked" && current.GitHubSync == ""
+	statusOK := current.Status == issuedomain.StatusBlocked && current.GitHubSync == ""
 	add("RECOVERY_STATUS", statusOK, "durable.state", "fully synchronized blocked state", "status boundary matches", "status or GitHub synchronization boundary differs", "operator", "wait for synchronization or inspect the active lifecycle operation")
 	blockedCauseOK := legacyFullHistory || (current.BlockedCause != nil && current.BlockedCause.Origin == "worker" && current.BlockedCause.Kind == "environment" && current.BlockedCause.Resumable)
 	add("RECOVERY_BLOCKED_CAUSE", blockedCauseOK, "durable.state.blocked_cause", "resumable worker environment cause or exact legacy workspace interruption", "blocked cause is eligible", "blocked cause is not resumable by this operation", "none", "use the command named by the durable blocked cause")

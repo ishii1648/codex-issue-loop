@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/worktree"
 )
 
@@ -43,7 +44,7 @@ func (s Store) AnsweredWorkspaceRecoveryEvidence(issue Issue, request Request) (
 }
 
 func validateAnsweredWorkspaceRecoveryState(issue Issue, request Request) error {
-	if issue.Status != "blocked" || issue.GitHubSync != "" || issue.FailureKind != "issue" ||
+	if issue.Status != issuedomain.StatusBlocked || issue.GitHubSync != "" || issue.FailureKind != "issue" ||
 		issue.AnsweredWorkspaceRecovery != nil || issue.EnvironmentResume != nil ||
 		issue.PublicationRecovery != nil || issue.PullRequestChecksRecovery != nil || issue.ConflictRecovery != nil ||
 		issue.PullRequestURL != "" || issue.PullRequestNumber != 0 || issue.PullRequestMerged ||

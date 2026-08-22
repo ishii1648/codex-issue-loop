@@ -52,13 +52,13 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	if current == nil {
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
-	if current.MergedPullRequestAdoption == nil && current.Status == "completed" {
+	if current.MergedPullRequestAdoption == nil && current.Status == issuedomain.StatusCompleted {
 		current, err = recoverMergedPullRequestAdoptionMetadata(ctx, store, cfg, l.Root, entry.Commands["git"], entry.Commands["gh"], current)
 		if err != nil {
 			return exitError{4, err}
 		}
 	}
-	if current.MergedPullRequestAdoption != nil && current.Status == "completed" {
+	if current.MergedPullRequestAdoption != nil && current.Status == issuedomain.StatusCompleted {
 		if current.GitHubSync == "done" {
 			if err := syncMergedPullRequestAdoption(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
 				return err
@@ -70,7 +70,7 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 		}
 		return a.output(*jsonOut, mergedPullRequestAdoptionOutput(current, true))
 	}
-	if (current.Status != "blocked" && current.Status != "failed") || current.GitHubSync != "" || current.PullRequestURL != "" || current.PullRequestNumber != 0 || current.PullRequestMerged {
+	if (current.Status != issuedomain.StatusBlocked && current.Status != issuedomain.StatusFailed) || current.GitHubSync != "" || current.PullRequestURL != "" || current.PullRequestNumber != 0 || current.PullRequestMerged {
 		return exitError{4, fmt.Errorf("Issue #%d must be a fully synchronized terminal record without an adopted Pull Request (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
 	if !state.ValidID(current.RunID, "run_") || current.Worktree == "" || current.Branch == "" {
@@ -84,7 +84,7 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 		len(current.Lease.DeclaredResources) == 0 || len(current.Lease.ResolvedResources) == 0 {
 		return exitError{4, fmt.Errorf("Issue #%d does not retain a consistent fenced resource lease", *issueNumber)}
 	}
-	if current.Status == "blocked" && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
+	if current.Status == issuedomain.StatusBlocked && (current.BlockedCause == nil || current.BlockedCause.Origin != "worker" || current.BlockedCause.Kind != "environment" || !current.BlockedCause.Resumable) {
 		return exitError{4, fmt.Errorf("Issue #%d is not a resumable worker environment block", *issueNumber)}
 	}
 	if current.ConflictRecovery != nil || current.EnvironmentResume != nil || current.PublicationRecovery != nil || current.PullRequestChecksRecovery != nil {
@@ -236,7 +236,7 @@ func recoverMergedPullRequestAdoptionMetadata(ctx context.Context, store state.S
 	if adoption.BaseBranch == "" {
 		adoption.BaseBranch = cfg.Git.BaseBranch
 	}
-	if current.Status != "completed" || current.Lease != nil || !current.PullRequestMerged || (current.GitHubSync != "" && current.GitHubSync != "done") ||
+	if current.Status != issuedomain.StatusCompleted || current.Lease != nil || !current.PullRequestMerged || (current.GitHubSync != "" && current.GitHubSync != "done") ||
 		current.PullRequestURL != adoption.PullRequestURL || current.PullRequestNumber != adoption.PullRequestNumber || current.HeadSHA != adoption.HeadSHA ||
 		record.LeaseOwner.RunID != current.RunID || record.LeaseOwner.Generation != current.LeaseGeneration {
 		return nil, fmt.Errorf("Issue #%d completed snapshot is inconsistent with its durable adoption event", current.Number)
@@ -300,7 +300,7 @@ func recoverMergedPullRequestAdoptionMetadata(ctx context.Context, store state.S
 }
 
 func syncMergedPullRequestAdoption(ctx context.Context, store state.Store, cfg config.Config, ghPath string, current *state.Issue) error {
-	if current == nil || current.MergedPullRequestAdoption == nil || current.Status != "completed" || current.GitHubSync != "done" {
+	if current == nil || current.MergedPullRequestAdoption == nil || current.Status != issuedomain.StatusCompleted || current.GitHubSync != "done" {
 		return fmt.Errorf("merged Pull Request adoption synchronization metadata is inconsistent")
 	}
 	client := gh.CLI{Path: ghPath, Secrets: cfg.RedactionValues()}

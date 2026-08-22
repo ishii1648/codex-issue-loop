@@ -12,6 +12,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
@@ -675,8 +676,8 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 			if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
 				dependencies[number] = admission.DependencyState{
 					Exists: true, Accessible: true,
-					Closed:                   local.Status == "completed",
-					LocalCompleted:           local.Status == "completed",
+					Closed:                   local.Status == issuedomain.StatusCompleted,
+					LocalCompleted:           local.Status == issuedomain.StatusCompleted,
 					PullRequestMergeRecorded: local.PullRequestURL == "" || local.PullRequestMerged,
 					KnownOpenOrUnmergedPR:    local.PullRequestURL != "" && !local.PullRequestMerged,
 				}
@@ -707,8 +708,7 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 			})
 			activeLeaseNumbers[issue.Number] = true
 		}
-		switch issue.Status {
-		case "running", "claimed", "needs_input", "answer_claim_waiting", "resume_pending", "completed", "blocked", "resolving_conflict":
+		if issue.Status.IneligibleForAdmission() {
 			ineligible[issue.Number] = issue.Status.String()
 		}
 	}
@@ -926,7 +926,7 @@ func (s *scheduler) markPollingIfIdle(snapshot state.Snapshot, message string) e
 func pendingIssues(snapshot state.Snapshot, now time.Time, concurrency int) []state.Issue {
 	result := make([]state.Issue, 0, len(snapshot.Issues))
 	for _, issue := range snapshot.Issues {
-		if issue == nil || !pendingIssue(*issue, now) || (issue.Status == "answer_claim_waiting" && !answeredClaimAvailable(snapshot, *issue, concurrency)) {
+		if issue == nil || !pendingIssue(*issue, now) || (issue.Status == issuedomain.StatusAnswerClaimWaiting && !answeredClaimAvailable(snapshot, *issue, concurrency)) {
 			continue
 		}
 		result = append(result, *issue)
@@ -936,7 +936,7 @@ func pendingIssues(snapshot state.Snapshot, now time.Time, concurrency int) []st
 }
 
 func pendingIssue(issue state.Issue, now time.Time) bool {
-	if issue.Status != "claiming" && issue.Status != "answer_claim_waiting" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "pull_request_checks_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+	if !issue.Status.PendingDispatch() && issue.GitHubSync == "" {
 		return false
 	}
 	return issue.RetryAfter == nil || !issue.RetryAfter.After(now)
@@ -965,10 +965,5 @@ func issueUsesWorkerSlot(issue state.Issue) bool {
 	if issue.GitHubSync != "" {
 		return false
 	}
-	switch issue.Status {
-	case "awaiting_checks", "awaiting_merge", "publication_recovery_pending", "pull_request_checks_recovery_pending":
-		return false
-	default:
-		return true
-	}
+	return issue.Status.UsesWorkerSlot()
 }

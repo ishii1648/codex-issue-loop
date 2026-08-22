@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/capability"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
@@ -115,7 +116,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 		}
 		claim := parkedClaimStatus{
 			IssueNumber: issue.Number, RunID: issue.RunID, ParkID: issue.ResourcePark.ID, Status: issue.ResourcePark.Status,
-			Kind: issue.ResourcePark.Kind, RequestID: issue.ResourcePark.RequestID, ClaimWaiting: issue.Status == "answer_claim_waiting",
+			Kind: issue.ResourcePark.Kind, RequestID: issue.ResourcePark.RequestID, ClaimWaiting: issue.Status == issuedomain.StatusAnswerClaimWaiting,
 			Owner: issue.ResourcePark.OriginalLease.Owner, ResumeOwner: issue.ResourcePark.ResumeOwner, Slot: issue.ResourcePark.OriginalLease.Slot,
 			DeclaredResources: append([]string(nil), issue.ResourcePark.OriginalLease.DeclaredResources...),
 			Resources:         append([]string(nil), issue.ResourcePark.OriginalLease.ResolvedResources...),

@@ -323,8 +323,7 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
-		switch issue.Status {
-		case "claiming", "claimed", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending", "publication_recovery_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
+		if issue.Status.RetainsRunLogs() {
 			if issue.RunID != "" {
 				exclude[issue.RunID] = true
 			}
@@ -344,7 +343,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
-		if issue.Status != "claiming" && issue.Status != "answer_claim_waiting" && issue.Status != "resume_pending" && issue.Status != "environment_resume_pending" && issue.Status != "publication_recovery_pending" && issue.Status != "pull_request_checks_recovery_pending" && issue.Status != "retry_wait" && issue.Status != "awaiting_checks" && issue.Status != "awaiting_merge" && issue.Status != "resolving_conflict" && issue.GitHubSync == "" {
+		if !issue.Status.PendingDispatch() && issue.GitHubSync == "" {
 			continue
 		}
 		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
@@ -360,7 +359,7 @@ func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 
 func queueBlockedByPullRequest(snapshot state.Snapshot, autoMerge bool) bool {
 	for _, issue := range snapshot.Issues {
-		if issue.Status == "awaiting_checks" || issue.Status == "resolving_conflict" || (autoMerge && issue.Status == "awaiting_merge") {
+		if issue.Status.BlocksQueueForPullRequest(autoMerge) {
 			return true
 		}
 	}
@@ -458,7 +457,7 @@ func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) er
 		if item == nil {
 			return fmt.Errorf("Issue #%d disappeared while claiming", issue.Number)
 		}
-		if err := applyIssueTransition(item, claimTransition); err != nil {
+		if err := state.ApplyIssueTransition(item, claimTransition); err != nil {
 			return err
 		}
 		item.UpdatedAt = l.now()
@@ -496,7 +495,7 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 		"expected_cwd": launch.CanonicalCWD, "workspace_validation": launch,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
-		if err := applyIssueTransition(item, workerTransition); err != nil {
+		if err := state.ApplyIssueTransition(item, workerTransition); err != nil {
 			return err
 		}
 		item.Worktree, item.Branch, item.UpdatedAt = launch.CanonicalCWD, wt.Branch, l.now()
@@ -532,26 +531,26 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	if current.GitHubSync != "" {
 		return l.syncGitHub(ctx, current)
 	}
-	if current.Status == "awaiting_checks" || current.Status == "awaiting_merge" {
+	if current.Status == issuedomain.StatusAwaitingChecks || current.Status == issuedomain.StatusAwaitingMerge {
 		return l.processPullRequest(ctx, current)
 	}
-	if current.Status == "resolving_conflict" {
+	if current.Status == issuedomain.StatusResolvingConflict {
 		return l.processConflictRecovery(ctx, current)
 	}
-	if current.Status == "publication_recovery_pending" {
+	if current.Status == issuedomain.StatusPublicationRecovery {
 		return l.processPublicationRecovery(ctx, current)
 	}
 	issue, err := l.getIssue(ctx, current.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh existing GitHub Issue", err)
 	}
-	if current.Status == "claiming" {
+	if current.Status == issuedomain.StatusClaiming {
 		return l.claimAndRun(ctx, issue, current.RunID)
 	}
-	if current.Status == "answer_claim_waiting" {
+	if current.Status == issuedomain.StatusAnswerClaimWaiting {
 		return l.reacquireAnsweredClaim(ctx, issue, current)
 	}
-	if current.Status == "resume_pending" {
+	if current.Status == issuedomain.StatusResumePending {
 		resumeTransition, transitionErr := issuedomain.StartAnsweredResume(current.Status)
 		if transitionErr != nil {
 			return transitionErr
@@ -564,16 +563,16 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if err := l.GitHub.MarkRunning(ctx, l.Config, current.Number); err != nil {
 			return failure.Wrap(failure.Transient, "mark resumed Issue running", err)
 		}
-		if err := applyIssueTransition(&current, resumeTransition); err != nil {
+		if err := state.ApplyIssueTransition(&current, resumeTransition); err != nil {
 			return err
 		}
 		current.RetryAfter = nil
 		_, err = l.Store.Update("worker_started", current.Number, current.RunID, map[string]string{"mode": "user_answer_resume"}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			if item == nil || item.Status != "resume_pending" || item.GitHubSync != "" || item.Lease == nil {
+			if item == nil || item.Status != issuedomain.StatusResumePending || item.GitHubSync != "" || item.Lease == nil {
 				return fmt.Errorf("Issue #%d answered continuation is no longer pending", current.Number)
 			}
-			if err := applyIssueTransition(item, resumeTransition); err != nil {
+			if err := state.ApplyIssueTransition(item, resumeTransition); err != nil {
 				return err
 			}
 			item.RetryAfter = nil
@@ -600,21 +599,21 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
-	if current.Status == "environment_resume_pending" {
+	if current.Status == issuedomain.StatusEnvironmentResumePending {
 		resumeTransition, transitionErr := issuedomain.StartEnvironmentResume(current.Status)
 		if transitionErr != nil {
 			return transitionErr
 		}
-		if err := applyIssueTransition(&current, resumeTransition); err != nil {
+		if err := state.ApplyIssueTransition(&current, resumeTransition); err != nil {
 			return err
 		}
 		current.RetryAfter = nil
 		_, err = l.Store.Update("worker_started", current.Number, current.RunID, map[string]string{"mode": "environment_block_resume"}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			if item == nil || item.Status != "environment_resume_pending" || item.GitHubSync != "" {
+			if item == nil || item.Status != issuedomain.StatusEnvironmentResumePending || item.GitHubSync != "" {
 				return fmt.Errorf("Issue #%d environment resume is no longer pending", current.Number)
 			}
-			if err := applyIssueTransition(item, resumeTransition); err != nil {
+			if err := state.ApplyIssueTransition(item, resumeTransition); err != nil {
 				return err
 			}
 			item.RetryAfter = nil
@@ -657,7 +656,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		return transitionErr
 	}
 	current.RetryAfter = nil
-	if err := applyIssueTransition(&current, retryTransition); err != nil {
+	if err := state.ApplyIssueTransition(&current, retryTransition); err != nil {
 		return err
 	}
 	workerCfg := l.Config
@@ -667,7 +666,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		current.Continuations++
 		_, err = l.Store.Update("worker_continuation_started", current.Number, current.RunID, map[string]int{"continuation": current.Continuations}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			if err := applyIssueTransition(item, retryTransition); err != nil {
+			if err := state.ApplyIssueTransition(item, retryTransition); err != nil {
 				return err
 			}
 			item.Continuations = current.Continuations
@@ -701,7 +700,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			if owner != (state.LeaseOwner{}) {
 				payload["lease_owner"] = owner
 			}
-			if err := applyIssueTransition(item, retryTransition); err != nil {
+			if err := state.ApplyIssueTransition(item, retryTransition); err != nil {
 				return err
 			}
 			item.RunID, item.Attempts, item.SessionID = current.RunID, current.Attempts, ""
@@ -741,7 +740,7 @@ func (l *Loop) reconcileTerminalPullRequest(ctx context.Context, scheduled state
 	if !ok {
 		return nil
 	}
-	if decision.status == "completed" && decision.prMerged {
+	if decision.status == issuedomain.StatusCompleted && decision.prMerged {
 		return l.completeIssue(ctx, current, decision.pullRequest, map[string]any{
 			"source": "periodic_terminal_reconciliation", "reason": decision.reason,
 			"pull_requests": remote.PullRequests,
@@ -876,7 +875,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		}
 		_, err := l.Store.Update("pull_request_checks_pending", issue.Number, current.RunID, result, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
-			if err := applyIssueTransition(item, checksDecision.Transition); err != nil {
+			if err := state.ApplyIssueTransition(item, checksDecision.Transition); err != nil {
 				return err
 			}
 			item.PullRequestURL, item.LastError = prURL, ""
@@ -918,7 +917,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			}
 			item.ResourcePark.Kind = state.ResourceParkKindNeedsInput
 			item.ResourcePark.RequestID = requestID
-			if err := applyIssueTransition(item, inputDecision.Transition); err != nil {
+			if err := state.ApplyIssueTransition(item, inputDecision.Transition); err != nil {
 				return err
 			}
 			item.UpdatedAt = l.now()
@@ -981,7 +980,7 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 	}
 	_, err := l.Store.Update("answered_resume_rejected", current.Number, current.RunID, map[string]string{"reason": reason}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Status != "resume_pending" || item.RunID != current.RunID || item.Lease == nil || current.Lease == nil || item.Lease.Owner != current.Lease.Owner {
+		if item == nil || item.Status != issuedomain.StatusResumePending || item.RunID != current.RunID || item.Lease == nil || current.Lease == nil || item.Lease.Owner != current.Lease.Owner {
 			return fmt.Errorf("Issue #%d answered continuation changed before rejection", current.Number)
 		}
 		recoveredPark := item.ResourcePark != nil && item.ResourcePark.Status == "resumed" && item.AnsweredWorkspaceRecovery != nil &&
@@ -994,7 +993,7 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 		if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
 			return err
 		}
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
@@ -1040,7 +1039,7 @@ func (l *Loop) reacquireAnsweredClaim(ctx context.Context, remoteIssue gh.Issue,
 		"request_id": current.ResourcePark.RequestID, "resource_park_id": current.ResourcePark.ID,
 	}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Status != "answer_claim_waiting" || item.RunID != current.RunID || item.WorkerPID != 0 || item.WorkerPGID != 0 || item.Lease != nil {
+		if item == nil || item.Status != issuedomain.StatusAnswerClaimWaiting || item.RunID != current.RunID || item.WorkerPID != 0 || item.WorkerPGID != 0 || item.Lease != nil {
 			return errAnsweredClaimWaiting
 		}
 		request := snapshot.PendingRequests[item.ResourcePark.RequestID]
@@ -1061,7 +1060,7 @@ func (l *Loop) reacquireAnsweredClaim(ctx context.Context, remoteIssue gh.Issue,
 			}
 			return resumeErr
 		}
-		if err := applyIssueTransition(item, claimTransition); err != nil {
+		if err := state.ApplyIssueTransition(item, claimTransition); err != nil {
 			return err
 		}
 		item.RetryAfter = nil
@@ -1113,7 +1112,7 @@ func (l *Loop) blockWorkerWorkspace(ctx context.Context, expected state.Issue, v
 		if item == nil || item.RunID != expected.RunID {
 			return fmt.Errorf("Issue #%d run changed while rejecting worker workspace", expected.Number)
 		}
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
@@ -1223,7 +1222,7 @@ func (l *Loop) processPublicationRecovery(ctx context.Context, current state.Iss
 		"resumed": resumingAttempt, "pull_request_url": savedPRURL,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Status != "publication_recovery_pending" || item.GitHubSync != "" || item.PublicationRecovery == nil || item.PublicationRecovery.ID != recovery.ID || item.PublicationRecovery.Attempts != recovery.Attempts {
+		if item == nil || item.Status != issuedomain.StatusPublicationRecovery || item.GitHubSync != "" || item.PublicationRecovery == nil || item.PublicationRecovery.ID != recovery.ID || item.PublicationRecovery.Attempts != recovery.Attempts {
 			return fmt.Errorf("Issue #%d publication recovery changed before attempt", current.Number)
 		}
 		if !resumingAttempt {
@@ -1294,7 +1293,7 @@ func (l *Loop) processPublicationRecovery(ctx context.Context, current state.Iss
 		if item == nil || item.PublicationRecovery == nil || item.PublicationRecovery.ID != recovery.ID {
 			return fmt.Errorf("Issue #%d publication recovery disappeared", current.Number)
 		}
-		if err := applyIssueTransition(item, successTransition); err != nil {
+		if err := state.ApplyIssueTransition(item, successTransition); err != nil {
 			return err
 		}
 		finishPublicationRecoveryAttempt(item, attemptNumber, "succeeded", "", l.now())
@@ -1370,14 +1369,14 @@ func (l *Loop) finishPublicationRecoveryFailure(ctx context.Context, current sta
 					return releaseErr
 				}
 			}
-			if err := applyIssueTransition(item, decision.Outcome.Transition); err != nil {
+			if err := state.ApplyIssueTransition(item, decision.Outcome.Transition); err != nil {
 				return err
 			}
 			item.GitHubSync = decision.Outcome.GitHubSync
 			item.RetryAfter = decision.RetryAt
 			item.PublicationRecovery.Status = decision.RecoveryStatus
 		} else {
-			if err := applyIssueTransition(item, decision.Outcome.Transition); err != nil {
+			if err := state.ApplyIssueTransition(item, decision.Outcome.Transition); err != nil {
 				return err
 			}
 			item.GitHubSync = decision.Outcome.GitHubSync
@@ -1421,7 +1420,7 @@ func (l *Loop) failPublicationRecovery(ctx context.Context, current state.Issue,
 		if item.PullRequestURL == "" && discoveredOpenPRs == 1 {
 			item.PullRequestURL = discoveredPRURL
 		}
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
@@ -1545,7 +1544,7 @@ func (l *Loop) requestResourceCorrection(ctx context.Context, current state.Issu
 		"reason": publication.ReasonResourceClaimMismatch, "audit": audit,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
@@ -1651,7 +1650,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	if !inspection.Exists || !inspection.Valid || !inspection.LocalBranchExists || !inspection.RemoteBranchExists {
 		return l.blockPullRequestLifecycle(ctx, current, selected.URL, "open Pull Request branch or worktree disappeared")
 	}
-	if current.Status == "awaiting_merge" && !l.Config.Completion.AutoMerge {
+	if current.Status == issuedomain.StatusAwaitingMerge && !l.Config.Completion.AutoMerge {
 		return l.schedulePullRequestPoll(current, "waiting for Pull Request merge")
 	}
 	if l.Config.Completion.AutoMerge {
@@ -1695,7 +1694,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 			"pull_request_url": selected.URL, "auto_merge": l.Config.Completion.AutoMerge,
 		}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			if err := applyIssueTransition(item, mergeDecision); err != nil {
+			if err := state.ApplyIssueTransition(item, mergeDecision); err != nil {
 				return err
 			}
 			item.PullRequestURL = selected.URL
@@ -1745,7 +1744,7 @@ func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, p
 		if item == nil || item.RunID != current.RunID || item.PullRequestURL != pr.URL || item.Branch != pr.HeadRefName {
 			return fmt.Errorf("Issue #%d changed while recording Pull Request checks exhaustion", current.Number)
 		}
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
@@ -1785,7 +1784,7 @@ func (l *Loop) blockPullRequestLifecycle(ctx context.Context, current state.Issu
 		"reason": reason, "pull_request_url": prURL,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.PullRequestURL = prURL
@@ -1877,7 +1876,7 @@ func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, p
 		"attempts": recovery.Attempts, "base_updates": recovery.BaseUpdates,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if err := applyIssueTransition(item, conflictDecision); err != nil {
+		if err := state.ApplyIssueTransition(item, conflictDecision); err != nil {
 			return err
 		}
 		item.ConflictRecovery = recovery
@@ -1963,7 +1962,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		if owner != (state.LeaseOwner{}) {
 			payload["lease_owner"] = owner
 		}
-		if err := applyIssueTransition(item, attemptTransition); err != nil {
+		if err := state.ApplyIssueTransition(item, attemptTransition); err != nil {
 			return err
 		}
 		item.RunID, item.WorkerPID, item.WorkerPGID = runID, 0, 0
@@ -2044,7 +2043,7 @@ func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current
 		requestID := state.NewID("req")
 		_, err := l.Store.Update("input_requested", current.Number, current.RunID, result.Question, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			if err := applyIssueTransition(item, inputDecision.Transition); err != nil {
+			if err := state.ApplyIssueTransition(item, inputDecision.Transition); err != nil {
 				return err
 			}
 			item.GitHubSync, item.UpdatedAt = "needs_input", l.now()
@@ -2103,7 +2102,7 @@ func (l *Loop) finishConflictPublication(current state.Issue, commit string) err
 		"target_base_sha": current.ConflictRecovery.TargetBaseSHA,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if err := applyIssueTransition(item, checksDecision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, checksDecision.Transition); err != nil {
 			return err
 		}
 		item.LastError = ""
@@ -2154,7 +2153,7 @@ func (l *Loop) scheduleConflictRetry(ctx context.Context, current state.Issue, r
 		"attempts": current.ConflictRecovery.Attempts, "retry_at": retryAt,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if err := applyIssueTransition(item, retryTransition); err != nil {
+		if err := state.ApplyIssueTransition(item, retryTransition); err != nil {
 			return err
 		}
 		item.LastError, item.RetryAfter = reason, &retryAt
@@ -2286,7 +2285,7 @@ func (l *Loop) completeIssue(ctx context.Context, current state.Issue, prURL str
 		if err := state.ReleaseIssueLease(item, owner); err != nil {
 			return err
 		}
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.PullRequestURL, item.LastError, item.SessionID = decision.PullRequestURL, "", ""
@@ -2460,7 +2459,7 @@ func (l *Loop) scheduleRetry(ctx context.Context, issue state.Issue, reason stri
 		"failure_kind": failure.Transient, "reason": reason, "retry_at": retryAt, "delay": delay.String(),
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError, item.RetryAfter = decision.Reason, &decision.RetryAt
@@ -2492,7 +2491,7 @@ func (l *Loop) schedulePublicationRetry(ctx context.Context, issue state.Issue, 
 		"failure_kind": failure.Transient, "reason": reason, "retry_at": retryAt, "delay": delay.String(),
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError, item.RetryAfter = decision.Reason, &decision.RetryAt
@@ -2531,7 +2530,7 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 				return err
 			}
 		}
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
@@ -2594,7 +2593,7 @@ func (l *Loop) blockWorkerEnvironment(ctx context.Context, number int, reason st
 			return err
 		}
 		item.ResourcePark.Kind = state.ResourceParkKindEnvironmentBlock
-		if err := applyIssueTransition(item, decision.Transition); err != nil {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
@@ -2689,7 +2688,7 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			err = l.GitHub.MarkRunning(ctx, l.Config, issue.Number)
 		}
 	case "answered_workspace_recovery":
-		if issue.AnsweredWorkspaceRecovery == nil || issue.AnsweredWorkspaceRecovery.ID == "" || issue.Status != "resume_pending" {
+		if issue.AnsweredWorkspaceRecovery == nil || issue.AnsweredWorkspaceRecovery.ID == "" || issue.Status != issuedomain.StatusResumePending {
 			return fmt.Errorf("Issue #%d answered workspace recovery metadata is missing", issue.Number)
 		}
 		remote, inspectErr := l.GitHub.Inspect(ctx, l.Config, issue.Number, issue.Branch)
@@ -2770,7 +2769,7 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 				if checksTransition == nil {
 					return fmt.Errorf("Issue #%d checks recovery is missing its lifecycle decision", issue.Number)
 				}
-				if err := applyIssueTransition(item, *checksTransition); err != nil {
+				if err := state.ApplyIssueTransition(item, *checksTransition); err != nil {
 					return err
 				}
 				item.FailureKind = ""

@@ -259,3 +259,47 @@ func TestStatusOperationalPredicates(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusSchedulingPredicates(t *testing.T) {
+	tests := []struct {
+		status        Status
+		pending       bool
+		retainsLogs   bool
+		preventsIdle  bool
+		ineligible    bool
+		usesSlot      bool
+		blocksPRQueue bool
+	}{
+		{status: StatusUnset, usesSlot: true},
+		{status: StatusClaiming, pending: true, retainsLogs: true, preventsIdle: true, usesSlot: true},
+		{status: StatusRunning, retainsLogs: true, preventsIdle: true, ineligible: true, usesSlot: true},
+		{status: StatusNeedsInput, retainsLogs: true, ineligible: true, usesSlot: true},
+		{status: StatusAwaitingChecks, pending: true, retainsLogs: true, preventsIdle: true, blocksPRQueue: true},
+		{status: StatusAwaitingMerge, pending: true, retainsLogs: true, preventsIdle: true},
+		{status: StatusPublicationRecovery, pending: true, retainsLogs: true, preventsIdle: true},
+		{status: StatusCompleted, ineligible: true, usesSlot: true},
+	}
+	for _, test := range tests {
+		if got := test.status.PendingDispatch(); got != test.pending {
+			t.Errorf("%s PendingDispatch=%v want %v", test.status, got, test.pending)
+		}
+		if got := test.status.RetainsRunLogs(); got != test.retainsLogs {
+			t.Errorf("%s RetainsRunLogs=%v want %v", test.status, got, test.retainsLogs)
+		}
+		if got := test.status.PreventsIdle(); got != test.preventsIdle {
+			t.Errorf("%s PreventsIdle=%v want %v", test.status, got, test.preventsIdle)
+		}
+		if got := test.status.IneligibleForAdmission(); got != test.ineligible {
+			t.Errorf("%s IneligibleForAdmission=%v want %v", test.status, got, test.ineligible)
+		}
+		if got := test.status.UsesWorkerSlot(); got != test.usesSlot {
+			t.Errorf("%s UsesWorkerSlot=%v want %v", test.status, got, test.usesSlot)
+		}
+		if got := test.status.BlocksQueueForPullRequest(false); got != test.blocksPRQueue {
+			t.Errorf("%s BlocksQueueForPullRequest(false)=%v want %v", test.status, got, test.blocksPRQueue)
+		}
+	}
+	if !StatusAwaitingMerge.BlocksQueueForPullRequest(true) {
+		t.Fatal("awaiting merge must block an auto-merge queue")
+	}
+}

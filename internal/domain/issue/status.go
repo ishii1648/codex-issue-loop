@@ -104,3 +104,47 @@ func (s Status) WebhookRoutable() bool {
 		return false
 	}
 }
+
+// PendingDispatch reports whether the scheduler may dispatch lifecycle work
+// for this status once its retry deadline and resource admission allow it.
+func (s Status) PendingDispatch() bool {
+	switch s {
+	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending,
+		StatusEnvironmentResumePending, StatusPublicationRecovery, StatusChecksRecovery,
+		StatusRetryWait, StatusAwaitingChecks, StatusAwaitingMerge, StatusResolvingConflict:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s Status) RetainsRunLogs() bool {
+	return s.PendingDispatch() || s == StatusClaimed || s == StatusRunning || s == StatusNeedsInput
+}
+
+func (s Status) PreventsIdle() bool {
+	return s.PendingDispatch() || s == StatusClaimed || s == StatusRunning
+}
+
+func (s Status) IneligibleForAdmission() bool {
+	switch s {
+	case StatusRunning, StatusClaimed, StatusNeedsInput, StatusAnswerClaimWaiting,
+		StatusResumePending, StatusCompleted, StatusBlocked, StatusResolvingConflict:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s Status) UsesWorkerSlot() bool {
+	switch s {
+	case StatusAwaitingChecks, StatusAwaitingMerge, StatusPublicationRecovery, StatusChecksRecovery:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s Status) BlocksQueueForPullRequest(autoMerge bool) bool {
+	return s == StatusAwaitingChecks || s == StatusResolvingConflict || autoMerge && s == StatusAwaitingMerge
+}

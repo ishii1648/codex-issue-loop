@@ -56,7 +56,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		return exitError{4, fmt.Errorf("Issue #%d is missing from durable state", *issueNumber)}
 	}
 	if current.PullRequestChecksRecovery != nil &&
-		(current.Status == "pull_request_checks_recovery_pending" || current.Status == "awaiting_checks" || current.Status == "awaiting_merge" || current.Status == "completed") {
+		(current.Status == issuedomain.StatusChecksRecovery || current.Status == issuedomain.StatusAwaitingChecks || current.Status == issuedomain.StatusAwaitingMerge || current.Status == issuedomain.StatusCompleted) {
 		if current.GitHubSync == "pull_request_checks_recovery" {
 			if err := syncPullRequestChecksRecovery(ctx, store, cfg, entry.Commands["gh"], current); err != nil {
 				return err
@@ -68,7 +68,7 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		}
 		return a.output(*jsonOut, pullRequestChecksRecoveryOutput(current, true))
 	}
-	if current.Status != "failed" || current.GitHubSync != "" {
+	if current.Status != issuedomain.StatusFailed || current.GitHubSync != "" {
 		return exitError{4, fmt.Errorf("Issue #%d must be fully synchronized and failed before checks recovery (status=%s github_sync=%s)", *issueNumber, current.Status, current.GitHubSync)}
 	}
 	legacyCompatibility := false

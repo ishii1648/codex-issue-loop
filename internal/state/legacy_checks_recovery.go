@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/publication"
 )
 
@@ -15,7 +16,7 @@ const legacyPublisherRepositoryMismatchPrefix = "pull_request_mismatch: Pull Req
 // boundary lost by the v0.6.20 publisher-retry sequence. This compatibility
 // path intentionally recognizes only the complete, ordered legacy chain.
 func (s Store) LegacyPullRequestChecksFailure(issue Issue, repository, baseBranch string) (*PullRequestChecksFailure, error) {
-	if issue.Status != "failed" || issue.GitHubSync != "" || issue.FailureKind != "issue" || issue.PullRequestMerged ||
+	if issue.Status != issuedomain.StatusFailed || issue.GitHubSync != "" || issue.FailureKind != "issue" || issue.PullRequestMerged ||
 		issue.PullRequestChecksFailure != nil || issue.PullRequestChecksRecovery != nil || issue.PublicationFailure != nil ||
 		issue.PublicationRecovery != nil || issue.RunID == "" || issue.Worktree == "" ||
 		issue.Branch == "" || issue.PullRequestURL == "" || issue.PullRequestNumber <= 0 || issue.HeadSHA == "" ||
