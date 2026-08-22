@@ -1236,10 +1236,33 @@ func (l *Loop) processPublicationRecovery(ctx context.Context, current state.Iss
 		return l.finishPublicationRecoveryFailure(ctx, current, recovery.ID, attemptNumber, publishErr)
 	}
 	result.Git = &published
+	successTransition := issuedomain.Transition{}
+	pullRequestURL := published.PullRequestURL
+	pullRequestMerged := false
+	githubSync := ""
+	if published.PullRequestURL == "" {
+		completionDecision, decisionErr := issuedomain.Complete(current.Status, "")
+		if decisionErr != nil {
+			return failure.Wrap(failure.Issue, "decide recovered publication completion", decisionErr)
+		}
+		successTransition = completionDecision.Transition
+		pullRequestURL = completionDecision.PullRequestURL
+		pullRequestMerged = completionDecision.PullRequestMerged
+		githubSync = completionDecision.GitHubSync
+	} else {
+		checksDecision, decisionErr := issuedomain.AwaitChecks(current.Status)
+		if decisionErr != nil {
+			return failure.Wrap(failure.Issue, "decide recovered publication check wait", decisionErr)
+		}
+		successTransition = checksDecision.Transition
+	}
 	_, err = l.Store.Update("publication_recovery_succeeded", current.Number, current.RunID, result, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
 		if item == nil || item.PublicationRecovery == nil || item.PublicationRecovery.ID != recovery.ID {
 			return fmt.Errorf("Issue #%d publication recovery disappeared", current.Number)
+		}
+		if err := applyIssueTransition(item, successTransition); err != nil {
+			return err
 		}
 		finishPublicationRecoveryAttempt(item, attemptNumber, "succeeded", "", l.now())
 		item.PublicationRecovery.Status = "succeeded"
@@ -1252,21 +1275,15 @@ func (l *Loop) processPublicationRecovery(ctx context.Context, current state.Iss
 					return releaseErr
 				}
 			}
-			if err := setIssueStatus(item, issuedomain.StatusCompleted); err != nil {
-				return err
-			}
-			item.PullRequestURL = ""
-			item.PullRequestMerged = false
+			item.PullRequestURL = pullRequestURL
+			item.PullRequestMerged = pullRequestMerged
 			item.SessionID = ""
 			item.Session = nil
-			item.GitHubSync = "done"
+			item.GitHubSync = githubSync
 		} else {
-			if err := setIssueStatus(item, issuedomain.StatusAwaitingChecks); err != nil {
-				return err
-			}
-			item.PullRequestURL = published.PullRequestURL
-			item.PullRequestMerged = false
-			item.GitHubSync = ""
+			item.PullRequestURL = pullRequestURL
+			item.PullRequestMerged = pullRequestMerged
+			item.GitHubSync = githubSync
 		}
 		item.UpdatedAt = l.now()
 		return nil
@@ -1961,10 +1978,14 @@ func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current
 		}
 		return l.publishConflictRecovery(ctx, issue, current, result.Tests)
 	case "needs_input":
+		inputDecision, decisionErr := issuedomain.RequestInput(current.Status)
+		if decisionErr != nil {
+			return failure.Wrap(failure.Issue, "decide conflict recovery input request", decisionErr)
+		}
 		requestID := state.NewID("req")
 		_, err := l.Store.Update("input_requested", current.Number, current.RunID, result.Question, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			if err := setIssueStatus(item, issuedomain.StatusNeedsInput); err != nil {
+			if err := applyIssueTransition(item, inputDecision.Transition); err != nil {
 				return err
 			}
 			item.GitHubSync, item.UpdatedAt = "needs_input", l.now()
@@ -1973,7 +1994,7 @@ func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current
 			s.PendingRequests[requestID] = &state.Request{
 				ID: requestID, IssueNumber: current.Number, Question: q.Text, Reason: q.Reason,
 				Recommended: q.RecommendedOption, Options: q.Options, AllowFreeText: q.AllowFreeText,
-				ResumeStatus: "resolving_conflict", Status: "pending", CreatedAt: l.now(),
+				ResumeStatus: issuedomain.StatusResolvingConflict, Status: "pending", CreatedAt: l.now(),
 			}
 			return nil
 		})
