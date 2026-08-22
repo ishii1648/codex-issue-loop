@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
@@ -31,7 +32,7 @@ func (osProcessInspector) Alive(pid int) bool {
 }
 
 type reconciliationDecision struct {
-	status       string
+	status       issuedomain.Status
 	lastError    string
 	branch       string
 	pullRequest  string
@@ -182,7 +183,9 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 						return err
 					}
 				}
-				item.Status = decision.status
+				if err := setIssueStatus(item, decision.status); err != nil {
+					return err
+				}
 				item.LastError = decision.lastError
 				item.Branch = decision.branch
 				item.PullRequestURL = decision.pullRequest
@@ -339,7 +342,9 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 				return err
 			}
 		}
-		item.Status = decision.status
+		if err := setIssueStatus(item, decision.status); err != nil {
+			return err
+		}
 		item.LastError = decision.lastError
 		item.Branch = decision.branch
 		item.PullRequestURL = decision.pullRequest

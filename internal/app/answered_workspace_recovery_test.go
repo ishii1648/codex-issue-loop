@@ -554,7 +554,7 @@ func persistVerifiedAnsweredWorkspace(t *testing.T, fixture answeredWorkspaceApp
 		current.Workspace = &workspace
 		current.WorkspaceRecovery = &state.WorkspaceProvenanceRecovery{
 			ID: recoveryID, Status: "verified", ConfirmedAt: now, OperatorConfirmed: true, OldProvenanceMissing: true,
-			PreviousStatus: current.Status, RunID: current.RunID, HeadSHA: inspection.Head, WorktreeSHA256: digest,
+			PreviousStatus: current.Status.String(), RunID: current.RunID, HeadSHA: inspection.Head, WorktreeSHA256: digest,
 			ExpectedWorkspace: workspace, ActualWorkspace: workspace, ValidatorChecks: cloneBoolMap(validation.Checks),
 		}
 		current.UpdatedAt = now

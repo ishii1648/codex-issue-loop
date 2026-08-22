@@ -160,7 +160,7 @@ func (a App) recoverWorkspace(ctx context.Context, l layout.Layout, args []strin
 	plan := workspaceRecoveryPlan{
 		Issue: current.Number, Eligible: true, ConfirmationRequired: true,
 		MutationScope: []string{"issues[].workspace", "issues[].workspace_provenance_recovery", "events.jsonl"},
-		RunID:         current.RunID, Status: current.Status, Branch: current.Branch, Worktree: current.Worktree,
+		RunID:         current.RunID, Status: current.Status.String(), Branch: current.Branch, Worktree: current.Worktree,
 		HeadSHA: inspection.Head, WorktreeSHA256: digest, PullRequestURL: current.PullRequestURL,
 		ExpectedWorkspace: expectedWorkspace, ActualWorkspace: workspace, Validation: launch,
 	}
@@ -217,7 +217,7 @@ func (a App) recoverWorkspace(ctx context.Context, l layout.Layout, args []strin
 		item.Workspace = &workspace
 		item.WorkspaceRecovery = &state.WorkspaceProvenanceRecovery{
 			ID: recoveryID, Status: "verified", ConfirmedAt: now, OperatorConfirmed: true,
-			OldProvenanceMissing: true, PreviousStatus: current.Status, RunID: current.RunID,
+			OldProvenanceMissing: true, PreviousStatus: current.Status.String(), RunID: current.RunID,
 			HeadSHA: inspection.Head, WorktreeSHA256: digest,
 			ExpectedWorkspace: plan.ExpectedWorkspace, ActualWorkspace: plan.ActualWorkspace,
 			ValidatorChecks: cloneBoolMap(launch.Checks),
@@ -289,7 +289,7 @@ func validateWorkspaceRecoveryRemote(cfg config.Config, issue *state.Issue, insp
 func validExistingWorkspaceRecovery(issue *state.Issue, digest, head string) bool {
 	recovery := issue.WorkspaceRecovery
 	return recovery != nil && state.ValidID(recovery.ID, "workspace_recovery_") && recovery.Status == "verified" &&
-		recovery.OperatorConfirmed && recovery.OldProvenanceMissing && recovery.PreviousStatus == issue.Status &&
+		recovery.OperatorConfirmed && recovery.OldProvenanceMissing && recovery.PreviousStatus == issue.Status.String() &&
 		recovery.RunID == issue.RunID && recovery.HeadSHA == head && recovery.WorktreeSHA256 == digest &&
 		issue.Workspace != nil && !issue.Workspace.CapturedAt.IsZero() && *issue.Workspace == recovery.ActualWorkspace &&
 		recovery.ExpectedWorkspace.Matches(recovery.ActualWorkspace.Path, recovery.ActualWorkspace.Branch,

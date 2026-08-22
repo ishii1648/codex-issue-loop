@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
 )
@@ -917,12 +918,21 @@ func TestUntilIdleWaitsForPullRequestLifecycle(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			snapshot := Snapshot{
 				Supervisor: Supervisor{State: "polling"},
-				Issues:     map[string]*Issue{"7": {Number: 7, Status: status}},
+				Issues:     map[string]*Issue{"7": {Number: 7, Status: issuedomain.Status(status)}},
 			}
 			if reason, ok := snapshot.Attention(true); ok {
 				t.Fatalf("reason=%q ok=%v", reason, ok)
 			}
 		})
+	}
+}
+
+func TestDurableStateRejectsUnknownIssueStatus(t *testing.T) {
+	snapshot := Snapshot{Issues: map[string]*Issue{
+		"7": {Number: 7, Status: issuedomain.Status("invented_status")},
+	}}
+	if err := validateResourceLeases(snapshot); err == nil {
+		t.Fatal("expected unknown durable Issue status to be rejected")
 	}
 }
 

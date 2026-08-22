@@ -12,6 +12,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/ishii1648/codex-issue-loop/internal/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/failure"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/retention"
@@ -592,7 +593,7 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 	return candidates, acknowledged, nil
 }
 
-func terminalWebhookStatus(status string) bool {
+func terminalWebhookStatus(status issuedomain.Status) bool {
 	switch status {
 	case "blocked", "failed", "needs_input", "completed":
 		return true
@@ -601,7 +602,7 @@ func terminalWebhookStatus(status string) bool {
 	}
 }
 
-func webhookRoutableStatus(status string) bool {
+func webhookRoutableStatus(status issuedomain.Status) bool {
 	switch status {
 	case "claiming", "claimed", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input", "awaiting_checks", "awaiting_merge", "resolving_conflict":
 		return true
@@ -727,7 +728,7 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 		}
 		switch issue.Status {
 		case "running", "claimed", "needs_input", "answer_claim_waiting", "resume_pending", "completed", "blocked", "resolving_conflict":
-			ineligible[issue.Number] = issue.Status
+			ineligible[issue.Number] = issue.Status.String()
 		}
 	}
 	for number := range s.active {

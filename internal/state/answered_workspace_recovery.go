@@ -257,7 +257,7 @@ func verifiedAnsweredWorkspaceEvent(event Event, issue Issue) (*worktree.LaunchV
 	if json.Unmarshal(event.Payload, &payload) != nil || recovery == nil || issue.Workspace == nil ||
 		payload.RecoveryID != recovery.ID || !payload.OperatorConfirmation["confirm_verified_workspace"] || len(payload.OperatorConfirmation) != 1 ||
 		!reflect.DeepEqual(payload.MutationScope, []string{"issues[].workspace", "issues[].workspace_provenance_recovery", "events.jsonl"}) ||
-		payload.PreviousStatus != issue.Status || !payload.OldProvenanceMissing || payload.HeadSHA != recovery.HeadSHA ||
+		payload.PreviousStatus != issue.Status.String() || !payload.OldProvenanceMissing || payload.HeadSHA != recovery.HeadSHA ||
 		payload.WorktreeSHA256 != recovery.WorktreeSHA256 || payload.PullRequestURL != issue.PullRequestURL ||
 		payload.ExpectedWorkspace != recovery.ExpectedWorkspace || payload.ActualWorkspace != recovery.ActualWorkspace ||
 		payload.ActualWorkspace != *issue.Workspace || event.RepoID != issue.Workspace.RepoID ||

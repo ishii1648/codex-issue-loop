@@ -409,6 +409,11 @@ func issueOccupiesWorkerSlot(issue *Issue) bool {
 func validateResourceLeases(snapshot Snapshot) error {
 	active := []*Issue{}
 	for key, issue := range snapshot.Issues {
+		if issue != nil {
+			if err := issue.Status.Validate(); err != nil {
+				return fmt.Errorf("Issue #%d lifecycle: %w", issue.Number, err)
+			}
+		}
 		if issue != nil && issue.ResourcePark != nil {
 			park := issue.ResourcePark
 			original := &park.OriginalLease

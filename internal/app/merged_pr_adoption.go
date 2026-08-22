@@ -124,7 +124,7 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 		return fmt.Errorf("inspect merged Pull Request adoption state: %w", err)
 	}
 	pr, err := gh.ValidateMergedPullRequestAdoption(cfg, remote, gh.MergedPullRequestAdoptionExpectation{
-		IssueNumber: current.Number, PreviousStatus: current.Status, Branch: current.Branch,
+		IssueNumber: current.Number, PreviousStatus: current.Status.String(), Branch: current.Branch,
 		BaseBranch: cfg.Git.BaseBranch, HeadSHA: inspection.Head,
 	})
 	if err != nil {
@@ -137,7 +137,7 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 	adoption := &state.MergedPullRequestAdoption{
 		ID: state.NewID("merged_pr_adoption"), Status: "github_sync_pending", Generation: 1,
 		ConfirmedAt: now, AdoptedAt: now, PullRequestURL: pr.URL, PullRequestNumber: pr.Number,
-		PreviousStatus: current.Status, PreviousReason: current.LastError, Branch: current.Branch,
+		PreviousStatus: current.Status.String(), PreviousReason: current.LastError, Branch: current.Branch,
 		HeadSHA: pr.HeadSHA, MergeSHA: pr.MergeSHA, BaseBranch: pr.BaseRefName,
 	}
 	owner := current.Lease.Owner

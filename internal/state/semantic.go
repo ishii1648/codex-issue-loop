@@ -81,11 +81,11 @@ func SemanticViolations(snapshot Snapshot) []SemanticViolation {
 	})
 	for _, key := range keys {
 		issue := snapshot.Issues[key]
-		if issue == nil || !statecontract.RequiredForStatus(field, issue.Status) || !crossedWorkerExecutionBoundary(issue) {
+		if issue == nil || !statecontract.RequiredForStatus(field, issue.Status.String()) || !crossedWorkerExecutionBoundary(issue) {
 			continue
 		}
 		base := SemanticViolation{
-			IssueNumber: issue.Number, Status: issue.Status, Field: field.Path, Migratable: false,
+			IssueNumber: issue.Number, Status: issue.Status.String(), Field: field.Path, Migratable: false,
 			MigrationRule: field.Migration.Code, OperatorGuide: field.Migration.OperatorGuide,
 		}
 		if issue.Workspace == nil {

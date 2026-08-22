@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/capability"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 	"github.com/ishii1648/codex-issue-loop/internal/webhook"
@@ -93,7 +94,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 			continue
 		}
 		value := activeIssueStatus{
-			IssueNumber: issue.Number, RunID: issue.RunID, Phase: issue.Status,
+			IssueNumber: issue.Number, RunID: issue.RunID, Phase: issue.Status.String(),
 			PID: issue.WorkerPID, PGID: issue.WorkerPGID, Resources: []string{},
 		}
 		if issue.Lease != nil {
@@ -190,7 +191,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, limit int
 	}
 }
 
-func occupiesWorkerSlot(status string) bool {
+func occupiesWorkerSlot(status issuedomain.Status) bool {
 	switch status {
 	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
 		return true

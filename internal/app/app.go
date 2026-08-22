@@ -24,6 +24,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/config"
 	"github.com/ishii1648/codex-issue-loop/internal/conflict"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/launchd"
@@ -2062,7 +2063,7 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 	if err != nil {
 		return err
 	}
-	status := "environment_resume_pending"
+	status := issuedomain.StatusEnvironmentResumePending
 	var leaseOwner *state.LeaseOwner
 	parkID := resourceParkID(current)
 	if item := updated.Issues[strconv.Itoa(*issueNumber)]; item != nil {

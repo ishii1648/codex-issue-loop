@@ -53,6 +53,19 @@ delivery controllerがmaintenance fenceを作ると、全repository schedulerは
 
 単一host並列化でschedulerが評価するresource claim、Issue依存関係、local leaseの契約は[Resource admission契約](resource-admission.md)を正本とする。admissionと待機中の監視はGoコードで完結し、worker起動前の判断にLLMを使わない。
 
+### 3.1 コードのドメイン境界と読解順
+
+人が実装を読むときは、外部I/Oを起点にせず、次の順序を基本とする。
+
+1. `internal/domain/**`で状態名、不変条件、状態遷移の入力と出力を確認する。
+2. `internal/admission/**`と`internal/capability/**`で、Issue選択と実行能力の決定論的な判定を確認する。
+3. `internal/supervisor/**`で、ドメインdecisionを永続transactionと外部effectへ対応づけるapplication orchestrationを確認する。
+4. `internal/state/**`、`internal/github/**`、`internal/worker/**`、`internal/publish/**`で永続化・外部I/Oの実装詳細を確認する。
+
+`internal/domain/**`はfilesystem、process、clock、network、永続storeを直接参照せず、観測済みの値を入力として副作用のないdecisionを返す。Issue lifecycle statusは永続contractの一部として同packageで型と定数を定義する。`supervisor`はdecision作成後、永続snapshotがdecisionの観測した状態から変化していないことを検証してcommitする。
+
+新しいIssue lifecycle遷移を`Store.Update`のclosureへ直接追加してはならない。まず`internal/domain/**`へ名前付きdecisionとtable-driven testを追加し、`supervisor`の単一transition境界から適用する。既存経路を段階移行するためのcompatibility境界は新しいドメイン判断の置き場所として使わず、変更対象になった経路から順に名前付きdecisionへ置き換える。
+
 ## 4. 通常の実行フロー
 
 1. 任意のproducerが着手可能ラベル付きのGitHub Issueを作成する。

@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
 )
 
@@ -156,7 +157,9 @@ func StopWorkers(ctx context.Context, store state.Store, grace time.Duration, re
 			item.WorkerPID, item.WorkerPGID = 0, 0
 			switch item.Status {
 			case "claiming", "claimed", "running":
-				item.Status = "retry_wait"
+				if err := setIssueStatus(item, issuedomain.StatusRetryWait); err != nil {
+					return err
+				}
 				item.RetryAfter = nil
 				item.LastError = reason
 			case "resolving_conflict":

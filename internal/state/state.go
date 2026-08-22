@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/capability"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/redact"
@@ -323,7 +324,7 @@ type MergedPullRequestAdoption struct {
 type Issue struct {
 	Number                    int                          `json:"number"`
 	Title                     string                       `json:"title"`
-	Status                    string                       `json:"status"`
+	Status                    issuedomain.Status           `json:"status"`
 	RunID                     string                       `json:"run_id,omitempty"`
 	LeaseGeneration           uint64                       `json:"lease_generation,omitempty"`
 	Lease                     *ResourceLease               `json:"lease,omitempty"`
@@ -376,21 +377,21 @@ type Option struct {
 }
 
 type Request struct {
-	ID             string      `json:"id"`
-	IssueNumber    int         `json:"issue_number"`
-	Question       string      `json:"question"`
-	Reason         string      `json:"reason,omitempty"`
-	Recommended    string      `json:"recommended_option,omitempty"`
-	Options        []Option    `json:"options,omitempty"`
-	AllowFreeText  bool        `json:"allow_free_text"`
-	ResumeStatus   string      `json:"resume_status,omitempty"`
-	RunID          string      `json:"run_id,omitempty"`
-	ResourceParkID string      `json:"resource_park_id,omitempty"`
-	ReleasedOwner  *LeaseOwner `json:"released_owner,omitempty"`
-	Status         string      `json:"status"`
-	Answer         string      `json:"answer,omitempty"`
-	CreatedAt      time.Time   `json:"created_at"`
-	AnsweredAt     *time.Time  `json:"answered_at,omitempty"`
+	ID             string             `json:"id"`
+	IssueNumber    int                `json:"issue_number"`
+	Question       string             `json:"question"`
+	Reason         string             `json:"reason,omitempty"`
+	Recommended    string             `json:"recommended_option,omitempty"`
+	Options        []Option           `json:"options,omitempty"`
+	AllowFreeText  bool               `json:"allow_free_text"`
+	ResumeStatus   issuedomain.Status `json:"resume_status,omitempty"`
+	RunID          string             `json:"run_id,omitempty"`
+	ResourceParkID string             `json:"resource_park_id,omitempty"`
+	ReleasedOwner  *LeaseOwner        `json:"released_owner,omitempty"`
+	Status         string             `json:"status"`
+	Answer         string             `json:"answer,omitempty"`
+	CreatedAt      time.Time          `json:"created_at"`
+	AnsweredAt     *time.Time         `json:"answered_at,omitempty"`
 }
 
 type Recovery struct {
