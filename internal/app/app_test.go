@@ -192,130 +192,6 @@ func legacyResumeTestApp(out, stderr *bytes.Buffer, controller supervisor.Proces
 	}
 }
 
-func persistInterruptedMissingWorkspaceResume(t *testing.T, store state.Store, number int, runID, worktreePath, branch, baseSHA, currentBaseSHA, resumeID string) state.LeaseOwner {
-	t.Helper()
-	confirmedAt := time.Now().UTC().Add(-time.Minute)
-	_, originalOwner, err := store.ReserveLease(state.LeaseReservation{
-		IssueNumber: number, Title: "Interrupted missing workspace", RunID: runID, Slot: 0,
-		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
-		BaseSHA: baseSHA, ReservedAt: confirmedAt.Add(-time.Hour),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	previousReason := "localhost listen denied"
-	if _, err := store.Update("worker_started", number, runID, map[string]string{"worktree": worktreePath, "branch": branch}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(number)]
-		item.Status = "running"
-		item.Worktree = worktreePath
-		item.Branch = branch
-		item.SessionID = "session_interrupted_workspace"
-		item.Session = &state.WorkerSession{Backend: "codex", ID: item.SessionID}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	blockedAt := confirmedAt.Add(-time.Minute)
-	if _, err := store.Update("issue_blocked", number, runID, map[string]string{"error": "worker blocked: " + previousReason, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(number)]
-		if err := state.ReleaseIssueLease(item, originalOwner); err != nil {
-			return err
-		}
-		item.Status = "blocked"
-		item.FailureKind = "issue"
-		item.LastError = "worker blocked: " + previousReason
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update("github_state_synced", number, runID, map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update("startup_reconciled", number, runID, map[string]string{"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually"}, func(*state.Snapshot) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update("startup_reconciled", number, runID, map[string]string{"previous_status": "blocked", "status": "blocked", "reason": "supervisor-owned worker environment block provenance preserved"}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(number)]
-		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: previousReason, BlockedAt: blockedAt}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	resumePayload := map[string]any{
-		"resume_id": resumeID, "previous_reason": previousReason, "resource_park_id": "",
-		"parked_lease_reacquired": false, "legacy_worker_block": true, "legacy_lease_recovered": true,
-		"interrupted_resume": false, "base_sha": baseSHA, "current_base_sha": currentBaseSHA,
-	}
-	var resumeOwner state.LeaseOwner
-	_, err = store.Update("environment_resume_requested", number, runID, resumePayload, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(number)]
-		item.LeaseGeneration++
-		resumeOwner = state.LeaseOwner{RunID: runID, Generation: item.LeaseGeneration}
-		item.Lease = &state.ResourceLease{
-			Owner: resumeOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource},
-			BaseSHA: baseSHA, ReservedAt: confirmedAt,
-		}
-		item.Status = "environment_resume_pending"
-		item.EnvironmentResume = &state.EnvironmentResume{
-			ID: resumeID, Status: "requested", ConfirmedAt: confirmedAt, PreviousReason: previousReason,
-			BaseSHA: baseSHA, CurrentBaseSHA: currentBaseSHA,
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update("github_state_synced", number, runID, map[string]string{"state": "environment_resume"}, func(*state.Snapshot) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update("github_state_synced", number, runID, map[string]string{"state": "environment_resume", "resume_id": resumeID}, func(snapshot *state.Snapshot) error {
-		snapshot.Issues[strconv.Itoa(number)].EnvironmentResume.Status = "github_synced"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update("worker_started", number, runID, map[string]string{"mode": "environment_block_resume"}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(number)]
-		item.Status = "running"
-		item.EnvironmentResume.Status = "running"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	reason := fmt.Sprintf("worker workspace validation failed for %s: saved workspace provenance is missing", worktreePath)
-	checks := map[string]bool{
-		"run_id": true, "session_id": true, "saved_path": true, "saved_branch_state": true, "lease_owner_generation": true,
-		"managed_root": true, "no_symlink_components": true, "canonical_path": true, "not_main_checkout": true,
-		"git_top_level": true, "repository_identity": true, "saved_branch": true,
-	}
-	rejection := map[string]any{
-		"expected_cwd": worktreePath, "error": reason, "run_id": runID,
-		"validation": worktree.LaunchValidation{
-			Valid: true, ExpectedCWD: worktreePath, CanonicalCWD: worktreePath, TopLevel: worktreePath,
-			Branch: branch, Checks: checks,
-		},
-	}
-	if _, err := store.Update("worker_workspace_rejected", number, runID, rejection, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(number)]
-		item.Status = "blocked"
-		item.FailureKind = "issue"
-		item.LastError = reason
-		item.WorkerPID = 0
-		item.WorkerPGID = 0
-		item.BlockedCause = &state.BlockedCause{
-			Origin: "supervisor", Kind: "worker_workspace", Resumable: false, Reason: reason, BlockedAt: time.Now().UTC(),
-		}
-		// The affected durable record retained the running explicit resume marker.
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update("github_state_synced", number, runID, map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	return resumeOwner
-}
-
 func persistZeitreise442Full27EventResumeFixture(t *testing.T, store state.Store, number int, runID, worktreePath, branch, baseSHA, worktreeHead, currentBaseSHA, resumeID string) state.LeaseOwner {
 	t.Helper()
 	bundle, err := recoveryfixture.Load("../recoveryfixture/testdata/zeitreise-442-full-history-v1.json")
@@ -2273,7 +2149,6 @@ esac
 		item.Worktree = cfg.RepoPath
 		item.SessionID = "session-11"
 		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-11"}
-		item.Goal = &state.WorkerGoal{ThreadID: "thread-11", Objective: "finish Issue #11", Status: "blocked"}
 		item.Answers = []state.AnswerRecord{{RequestID: "req-11", Answer: "approved", AnsweredAt: parkedAt}}
 		item.Attempts = 2
 		item.Continuations = 1
@@ -2391,7 +2266,7 @@ esac
 	if item.Lease == nil || item.Lease.Owner != resumeOwner || item.LeaseGeneration != resumeOwner.Generation || item.EnvironmentResume.ID != resumeID || item.ResourcePark.ResumeOwner == nil || *item.ResourcePark.ResumeOwner != resumeOwner {
 		t.Fatalf("parked resume was not idempotent: %+v", item)
 	}
-	if item.RunID != "run_11" || item.Branch != branch || item.Worktree != cfg.RepoPath || item.SessionID != "session-11" || item.Session == nil || item.Session.ID != "session-11" || item.Goal == nil || item.Goal.ThreadID != "thread-11" || len(item.Answers) != 1 || item.Attempts != 2 || item.Continuations != 1 {
+	if item.RunID != "run_11" || item.Branch != branch || item.Worktree != cfg.RepoPath || item.SessionID != "session-11" || item.Session == nil || item.Session.ID != "session-11" || len(item.Answers) != 1 || item.Attempts != 2 || item.Continuations != 1 {
 		t.Fatalf("continuation metadata changed: %+v", item)
 	}
 	if item.ResourcePark.OriginalLease.Owner != owner || item.ResourcePark.OriginalLease.BaseSHA != baseSHA || !item.ResourcePark.OriginalLease.ReservedAt.Equal(reservedAt) || item.Lease.BaseSHA != baseSHA {

@@ -37,8 +37,7 @@ make test-race
 | attention状態と`state_revision`の永続化 | `TestFaultAttentionRevisionPersistsSnapshotAndEvent`、`TestFaultAttentionRemainsStickyUntilAnswered` |
 | standard workerが追加runなしで完了 | `TestFaultStandardWorkerCompletesWithoutAdditionalRun` |
 | extended workerだけが設定上限内でresume | `TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit` |
-| fake App ServerのGoal・approval・token・time budget・input・steer契約 | `TestCodexAppServerExtendedContract`、`TestCodexAppServerGoalTimeBudgetIsPersistedAsTerminal`、`TestCodexAppServerConvertsRequestUserInput`、`TestCodexAppServerUsesSteerForRejoinedActiveTurn` |
-| App Server切断時のstate保全と非対応fallback | `TestCodexAppServerDisconnectAfterTurnStartDoesNotFallback`、`TestCodexAppServerConnectionFailureFallsBackToExecResume`、`TestBackendFactoryEnablesGoalOnlyWhenConfiguredAndSupported` |
+| 削除済みApp Server設定の拒否と旧Goal state互換 | `TestLoadRejectsRemovedAppServerSection`、`TestLegacyGoalSnapshotIsIgnoredWithoutLosingContinuationState` |
 | event rotation後のsequence復旧 | `TestFaultEventRotationKeepsCheckpointAndRecoverySequence` |
 | disk容量reserveでのblocked化 | `TestFaultDiskSafetyReserveBlocksSupervisor` |
 | localhost-only configの閉じたallowlistと不整合拒否 | `TestLoadLocalhostOnlyCommandNetworkIsClosedAndOptIn` |
@@ -46,7 +45,7 @@ make test-race
 | worker環境blockedのlease park、continuation保持、後続`repo:*` queue継続 | `TestWorkerEnvironmentBlockParksLeaseAndPreservesContinuationState`、`TestWorkerEnvironmentBlockParkAllowsFollowingRepositoryIssue`、`TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration` |
 | 既存typed blockのstartup parkとGitHub block同期crash冪等性 | `TestStartupReconciliationParksExistingTypedEnvironmentBlock`、`TestFaultWorkerEnvironmentParkSurvivesGitHubSyncCrashIdempotently` |
 | needs-input park、回答provenance、競合中のdurable answer、解放後の1回だけの再取得 | `TestRunOncePersistsQuestion`、`TestAnswerDurablyWaitsWithoutStealingConflictingLease`、`TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce` |
-| park済みoperator resumeの競合拒否・新generation・dirty/session/Goal/answer保持・GitHub同期crash冪等性 | `TestFaultResumeBlockedReacquiresParkedLeaseOnceAcrossGitHubSyncFailure`、`TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
+| park済みoperator resumeの競合拒否・新generation・dirty/session/answer保持・GitHub同期crash冪等性 | `TestFaultResumeBlockedReacquiresParkedLeaseOnceAcrossGitHubSyncFailure`、`TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
 | park/legacy resumeのfail-closed・typed legacy lost lease回復 | `TestResourceParkValidationFailsClosed`、`TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestTypedLegacyWorkerBlockRecoveryFromMissingLeaseFixture`、`TestTypedLegacyWorkerBlockRequiresExactDurableCause`、`TestLegacyWorkerBlockRecoveryRequiresSameRunLeaseWorktreeAndBranch`、`TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
 | exact v0.6.14 missing-Workspace interrupted resume（全27 events、running status、owner/slotなしlegacy request、resume IDなし→ありsync）の限定回復・改変拒否・generation 2→3・並行/crash fence・same-worktree spawn | `TestInterruptedWorkspaceResumeEvidenceFromZeitreise442Full27EventFixture`、`TestInterruptedWorkspaceResumeEvidenceRetainsSyntheticShortFixtureCompatibility`、`TestInterruptedWorkspaceResumeCandidateFailsClosedForOtherSupervisorBlocks`、`TestInterruptedWorkspaceResumeEvidenceRejectsTamperedOrReorderedHistory`、`TestInterruptedWorkspaceResumeEvidenceRejectsCurrentStateMismatches`、`TestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree` |
 | 手動merge済みPR adoptionのfail-closed検証・lease解放・冪等性 | `TestValidateMergedPullRequestAdoptionFailsClosed`、`TestAdoptMergedPullRequestReleasesLeaseAndIsIdempotent` |

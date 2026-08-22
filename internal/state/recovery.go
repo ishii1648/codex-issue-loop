@@ -71,7 +71,6 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 			if err := s.appendEventUnlocked(txn.Event); err != nil {
 				return Snapshot{}, err
 			}
-			events = append(events, txn.Event)
 		default:
 			return s.quarantineUnlocked(fmt.Errorf("transaction event sequence %d does not follow event log sequence %d", txn.Event.Sequence, last))
 		}

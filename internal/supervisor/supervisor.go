@@ -309,14 +309,14 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 		return false, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
 	selector := &scheduler{loop: l, active: map[int]activeJob{}}
-	selected, evaluation, ok, err := selector.selectReady(ctx, issues, snapshot)
+	selected, _, ok, err := selector.selectReady(ctx, issues, snapshot)
 	if err != nil {
 		return false, failure.Wrap(failure.Supervisor, "select Issue admission", err)
 	}
 	if !ok {
 		return false, l.markPolling("")
 	}
-	return true, l.startIssueAtSlotWithResources(ctx, selected, state.NewID("run"), 0, evaluation.DeclaredResources, evaluation.Resources)
+	return true, l.startIssueAtSlotWithResources(ctx, selected, state.NewID("run"), 0)
 }
 
 func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
@@ -366,21 +366,7 @@ func queueBlockedByPullRequest(snapshot state.Snapshot, autoMerge bool) bool {
 	return false
 }
 
-func (l *Loop) startIssue(ctx context.Context, issue gh.Issue) error {
-	return l.startIssueAtSlot(ctx, issue, state.NewID("run"), 0)
-}
-
-func (l *Loop) startIssueAtSlot(ctx context.Context, issue gh.Issue, runID string, slot int) error {
-	evaluation, err := admission.EvaluateCandidate(l.Config.AdmissionSettings(), admission.Candidate{
-		Number: issue.Number, CreatedAt: issue.CreatedAt, Labels: issue.Labels, Body: issue.Body,
-	})
-	if err != nil {
-		return failure.Wrap(failure.Supervisor, "evaluate Issue resource claim", err)
-	}
-	return l.startIssueAtSlotWithResources(ctx, issue, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
-}
-
-func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue, runID string, slot int, declared, resolved []string) error {
+func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue, runID string, slot int) error {
 	latest, err := l.getIssue(ctx, issue.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh GitHub Issue before claim", err)
@@ -401,11 +387,10 @@ func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue
 	if !evaluation.Capability.Compatible {
 		return nil
 	}
-	declared, resolved = evaluation.DeclaredResources, evaluation.Resources
 	now := l.now()
 	_, _, err = l.Store.ReserveLease(state.LeaseReservation{
 		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: slot,
-		DeclaredResources: declared, ResolvedResources: resolved, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
+		DeclaredResources: evaluation.DeclaredResources, ResolvedResources: evaluation.Resources, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
 		CapabilityRequirements: evaluation.Capability.Requirements, WorkerCapabilities: evaluation.Capability.Provided,
 	})
 	if err != nil {
@@ -688,7 +673,6 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			}
 			item.Status, item.RunID, item.Attempts, item.SessionID = "running", current.RunID, current.Attempts, ""
 			item.Session = nil
-			item.Goal = nil
 			item.RetryAfter = nil
 			return nil
 		})
@@ -786,9 +770,6 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			identity = l.WorkerIdentity
 		}
 		item.WorkerIdentity = stateIdentity(identity)
-		if result.Goal != nil {
-			item.Goal = stateGoal(result.Goal)
-		}
 		item.UpdatedAt = l.now()
 		return nil
 	})
@@ -1458,19 +1439,6 @@ func validatePublicationRecoveryRemote(cfg config.Config, current state.Issue, r
 }
 
 var errWorkerResultSuperseded = errors.New("worker result superseded by authoritative state")
-
-func stateGoal(goal *worker.Goal) *state.WorkerGoal {
-	if goal == nil {
-		return nil
-	}
-	return &state.WorkerGoal{
-		ThreadID: goal.ThreadID, Objective: goal.Objective, Status: goal.Status,
-		TokenBudget: goal.TokenBudget, TimeBudgetSeconds: goal.TimeBudgetSeconds,
-		TokensUsed: goal.TokensUsed, TimeUsedSeconds: goal.TimeUsedSeconds,
-		InputTokens: goal.InputTokens, CachedInputTokens: goal.CachedInputTokens,
-		OutputTokens: goal.OutputTokens, UpdatedAt: goal.UpdatedAt,
-	}
-}
 
 func (l *Loop) requestResourceCorrection(ctx context.Context, current state.Issue, audit publication.Audit, detail string) error {
 	requestID := state.NewID("req")

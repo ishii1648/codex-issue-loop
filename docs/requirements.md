@@ -373,10 +373,10 @@ GitHub UI、CLI/API、automation、または別ホストのCodexから作成し�
 - [Projects and chats](https://learn.chatgpt.com/docs/projects): 同一ローカルプロジェクトで複数taskを整理し、頻繁に使うtaskをピン留めできる
 - [Notifications](https://learn.chatgpt.com/docs/notifications): Desktopでpermission/question notificationsを設定でき、Activityからunread、running、回答待ちのchatを確認できる
 - [Long-running work](https://learn.chatgpt.com/docs/long-running-work): Goalは明確な成果、制約、完了条件を持つ長時間作業に使う
-- [Codex App Server](https://learn.chatgpt.com/docs/app-server): thread Goal、resume、turn start、token usageのprogrammatic interface
+- [Codex App Server](https://learn.chatgpt.com/docs/app-server): 将来の再評価候補となるthread Goal、resume、turn start、token usageのprogrammatic interface。現行runtimeは使用しない
 - [Integrated terminal](https://learn.chatgpt.com/docs/integrated-terminal): Codex taskから実行中のterminal出力を確認できる
 - [Developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli): `codex exec`、session resume、`--json`、`--output-schema`、sandbox指定
 
 外部製品の未公開APIや、外部プロセスからCodex taskの表示状態を直接変更する機能には依存しない。Codex taskが `watch` を実行し、そのコマンドが入力待ちイベントを返すことで、Codexがユーザーへ質問する。
 
-Goalは外側のIssueキューsupervisorの代替には使わない。App Serverのheadless Goal interfaceは、`extended` continuation限定のoptional adapterとして検証実装する。既定およびcapability非対応時は、supervisor管理のexecution profileと`codex exec resume`を維持する。待機中のtool callに対する製品全体の厳密なゼロトークン保証は公式文書にないため要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。
+Goalは外側のIssueキューsupervisorの代替には使わない。現行のheadless workerはsupervisor管理のexecution profileと`codex exec` / `codex exec resume`だけを使う。App Server方式は中核品質の安定後に別Issueで再評価する。待機中のtool callに対する製品全体の厳密なゼロトークン保証は公式文書にないため要件に含めず、Go側の監視がモデル呼び出しを行わないことを保証範囲とする。

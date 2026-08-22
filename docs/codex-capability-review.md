@@ -10,7 +10,7 @@
 | 項目 | 判定 | `agent-loop`での扱い |
 | --- | --- | --- |
 | 対話surfaceのGoal | 利用可能 | 単一目的の監視・復旧taskで利用できる |
-| headless Goal | App Server経由で利用可能 | optional `extended` worker adapterとして検証実装済み。既定の`codex exec`経路は維持する |
+| headless Goal | App Server経由で利用可能 | 現行製品では利用しない。再導入条件を満たした場合だけ別Issueで評価する |
 | `codex exec --goal`相当 | 利用不可 | 公式non-interactive interfaceにGoal optionはないため推測で呼ばない |
 | App Server所有threadのprogrammatic resume/start | 利用可能 | `thread/resume`と`turn/start`を将来adapterで利用できる |
 | Desktopのquestion notifications | 利用可能 | 接続中の監視taskが質問した際の通常OS通知に使う |
@@ -20,10 +20,12 @@
 | 外部processからモバイルUIを`Needs input`へ遷移 | 利用不可 | App Serverのserver requestはclientが表示・回答する契約であり、ChatGPT mobile通知連携は保証されない |
 | chat内scheduled taskによる定期再開 | 利用可能 | 時刻ベースで同じchatへ戻れるが、event-driven wakeやtoken-free monitorの代替にしない |
 | CLI外部`notify` | 利用可能だがturn完了のみ | 現在のsupported eventは`agent-turn-complete`だけ。入力待ちpushには使わない |
-| turn/Goalのtoken counters | 利用可能 | App Server eventまたはGoal stateから観測できる |
+| turn/Goalのtoken counters | 利用可能 | 将来評価用の観測候補であり、現行runtimeでは収集しない |
 | 保留中tool call・long command待機中の厳密な無課金 | 未保証 | 製品全体のzero-token/zero-costを要件にしない。Go pollingがmodelを呼ばない範囲だけ保証する |
 
 ## Goal
+
+2026-08-22に、検証実装だったApp Server Goal adapterを現行製品から削除した。中核のworker lifecycleとdurable stateを優先し、Codex backendは`codex exec` / `codex exec resume`だけを使う。これは恒久的な不採用ではなく、[#189](https://github.com/ishii1648/codex-issue-loop/issues/189)に記録した再導入条件を満たした場合に別Issueで評価するdeferred decisionである。
 
 OpenAIの[Long-running work](https://learn.chatgpt.com/docs/long-running-work)では、Goal modeはCodex app、対話的CLI、IDE extensionで利用でき、同じchat/session内でpause、resume、edit、clearできる。Goalはsandboxとapproval policyを拡張せず、判断が必要なら停止する。2026-05-21の[公式changelog](https://learn.chatgpt.com/docs/changelog#codex-2026-05-21)ではexperimentalを卒業したと案内されている。
 
@@ -41,14 +43,14 @@ localのCodex CLI 0.136.0で`codex app-server generate-json-schema`を実行し�
 
 一方、[Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)が自動化用に説明する`codex exec`にはGoal optionが記載されていない。したがって現行の`codex exec` workerへ未文書化flagを追加しない。App Serverはrich client integration向けであり、自動jobにはSDKを推奨するという公式の位置づけも踏まえ、adapter化は既存方式とのfailure・security比較を行う。
 
-Goalを利用しても責務境界は変えない。
+将来headless Goalを再評価する場合も責務境界は変えない。
 
 - Goalは1件のIssue、特に`extended` profileの目的・budget・continuationだけを扱う。
 - Issue選択、claim、worktree、GitHub公開、次Issueへのloop、process再起動はGo supervisorが所有する。
 - Goal stateをqueueの正本やLaunchAgentの代替にしない。
-- App Server adapterが失敗しても、現行worktreeと永続stateを失わない。
+- adapter障害時も、現行worktreeと永続stateを失わない設計とreplay testを必須にする。
 
-実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)で行い、責務・failure model・rollbackは[App Server Goal adapter](app-server-goal-adapter.md)へ記録した。
+最初の実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)、削除判断と再導入条件は[#189](https://github.com/ishii1648/codex-issue-loop/issues/189)およびGit履歴から追跡できる。
 
 ## External wakeとNeeds input
 
@@ -90,7 +92,7 @@ App Serverの`thread/status/changed`とserver requestは、そのApp Server clie
 
 - `watch`のfsnotify待機とreconciliation pollingはGo内で完結し、model requestを開始しない。
 - Codex taskへ定期的に`status`を問い合わせさせない。
-- App Server Goal adapterを導入する場合も、token eventとGoal budgetを観測し、無制限continuationを許さない。
+- App Server Goal adapterを再導入する場合は、token eventとGoal budgetを観測し、無制限continuationを許さない。
 
 ## 再確認条件
 

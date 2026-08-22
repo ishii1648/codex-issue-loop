@@ -184,10 +184,6 @@ worker:
   backend: codex
   command: codex
   model: null
-  app_server:
-    enabled: false
-    goal_token_budget: 200000
-    goal_time_budget: 2h
   command_network:
     policy: disabled
     proxy: false
@@ -285,8 +281,8 @@ webhook:
 - `worker.backend`は`codex`、`claude-code`、`opencode`のいずれかとし、省略時は`codex`とする。任意shell templateは許可しない。
 - `worker.command`省略時は順に`codex`、`claude`、`opencode`を使い、登録時に絶対pathへ解決する。
 - `worker.model`はinitial runとresumeの両方へ渡す。OpenCodeでは必須の`provider/model`形式で、最初の`/`だけを分割する。
-- `worker.app_server.enabled`はCodex backendのoptionalな検証機能である。最初のrunと`standard`は常に`codex exec`を使い、初回結果ですでに`extended`と確定した後のcontinuationまたはfresh retryだけApp Server Goalを利用する。`goal_token_budget`と`goal_time_budget`は有効時に正数を必須とする。
-- `worker.command_network.policy`の既定は`disabled`であり、`proxy: false`、空の`allowed_hosts`だけを許可する。opt-inの`localhost-only`はCodex backend、`workspace-write`、`app_server.enabled: false`を必須とし、`proxy: true`と順序を含め完全一致する`allowed_hosts: [localhost, 127.0.0.1]`だけを許可する。空、wildcard、public/private/LAN/link-local host、Unix socket、`dangerously_*`相当の設定は指定できない。
+- `worker.app_server`は削除済みであり、未知keyとして拒否する。旧設定はblock全体を削除してから再登録する。
+- `worker.command_network.policy`の既定は`disabled`であり、`proxy: false`、空の`allowed_hosts`だけを許可する。opt-inの`localhost-only`はCodex backendと`workspace-write`を必須とし、`proxy: true`と順序を含め完全一致する`allowed_hosts: [localhost, 127.0.0.1]`だけを許可する。空、wildcard、public/private/LAN/link-local host、Unix socket、`dangerously_*`相当の設定は指定できない。
 - `localhost-only`では`codex exec --ignore-user-config --strict-config`を使い、`sandbox_workspace_write.network_access=true`と`features.network_proxy.enabled=true`を同時に固定する。upstream proxy、UDP、任意Unix socketを無効化し、Web Search、Browser/Computer Use、apps/plugins、MCP、remote plugin、skill由来MCP/tool suggestionを無効化する。Codex capabilityを確認できない場合やstrict config/proxy初期化に失敗した場合はworker commandを開始せず、network無効へのfallbackも行わない。詳細は[localhost-only command network](localhost-network.md)を参照する。
 - `worker.variant`はClaude Codeの`--effort`またはOpenCode messageのprovider variantとしてinitial runとresumeの両方へ渡す。
 - `worker.sandbox` の既定値は `workspace-write` とする。
@@ -464,7 +460,7 @@ agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --dry-
 
 startup reconciliationは上記chainが成立し、現在のGitHub exclusionがsupervisor-owned `blocked` labelだけである場合に限り正規化する。`do-not-automate`等の別exclusionが併存する場合やGitHub `blocked` labelがない場合はmanual exclusionとして扱い、resumable provenanceを生成しない。`resume-blocked`も同じdurable history検証器を使い、markerだけのlegacy stateを認めない。typed化前のstartupがleaseを失わせた場合は、同一runの単一`lease_reserved`に保存された非空の`base_sha`と、その後の`worker_started`に保存されたworktree/branchが現在値と一致するときだけ、最小の`repo:*`を保守的に再予約する。現在のconfigured baseやHEADから欠損SHAを推測せず、他のleaseと競合すれば拒否する。通常のtyped worker blockは、このlegacy chainとtyped causeの完全一致がなければmissing leaseを補わない。
 
-park済みblockはoperatorの明示確認、active process不在、pending request不在、同じrun/worktree/branch/session、GitHub open Issueとblocked label、保存PR、original base SHAのHEAD祖先性、dirty/unpushed状態を検査する。`environment_resume_requested` transactionは同じstate revisionとpark ID/元owner/claimを再確認し、全active leaseとのresource競合と`queue.concurrency`内の空slotを検査する。競合中は相手Issue番号を返し、相手leaseを解放・移譲しない。成功時は`lease_generation`を単調増加し、新ownerを`resource_park.resume_owner`、active lease、event payloadへ同時保存する。GitHub同期中の`environment_resume_pending`もslotを占有するため、同じslotの別workerを開始しない。dirty changes、session/Goal、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止しても同じresume ID/ownerへ収束し、重複lease、worker、commentを作らない。
+park済みblockはoperatorの明示確認、active process不在、pending request不在、同じrun/worktree/branch/session、GitHub open Issueとblocked label、保存PR、original base SHAのHEAD祖先性、dirty/unpushed状態を検査する。`environment_resume_requested` transactionは同じstate revisionとpark ID/元owner/claimを再確認し、全active leaseとのresource競合と`queue.concurrency`内の空slotを検査する。競合中は相手Issue番号を返し、相手leaseを解放・移譲しない。成功時は`lease_generation`を単調増加し、新ownerを`resource_park.resume_owner`、active lease、event payloadへ同時保存する。GitHub同期中の`environment_resume_pending`もslotを占有するため、同じslotの別workerを開始しない。dirty changes、session、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止しても同じresume ID/ownerへ収束し、重複lease、worker、commentを作らない。
 
 workspace provenance導入前のenvironment blockで`Workspace`だけが欠損している場合は、同じ明示確認付き`resume-blocked`だけが保存worktreeを回復対象にできる。CLIはworker spawnと同じ`ValidateLaunch`を使い、canonical path、managed root、symlink component不在、Git top-level、保存branch、設定repositoryと同じGit common dir、registered main checkoutとの非同一性を再検証する。既存`Workspace`がある場合はpath、branch、repo ID、GitHub repository identity、Git common dir、main checkoutの完全一致を要求し、不一致を補正しない。欠損時は検証から作った`Workspace`と`environment_resume_pending` transition、lease再取得を単一`environment_resume_requested` transactionへ保存する。そのeventの`workspace_recovery`には旧provenance欠損、operator confirmation、expected/actual path・branch・repository identity・Git common dir・main checkout・validator checksを記録する。dirty/staged/untracked内容やHEADには触れず、mainが先行していてもrebase、reset、差分移植を行わない。
 
@@ -691,7 +687,7 @@ codex exec \
 
 実際の引数は起動前に `codex exec --help` とversion capabilityを検査する。構造化された初回実行を安全に行えないversionでは推測で継続せず、supervisorの開始を拒否する。session resumeだけが利用できない場合は、同じIssue worktree、run ID、永続化された回答履歴を使って新規sessionを起動する。session IDはJSONL内の`thread_id`、`session_id`、および既知のnested形式を受け付ける。
 
-初回とすべてのcontinuationはprocess spawn直前に、保存済みworktree pathとbranch、Git common dir、GitHub repository identity、main checkoutではないこと、symlinkを含まないことをlocalに再検証する。同じtransaction境界でrun ID、session ID、active lease owner generationも照合する。初回に保存したworkspace provenanceが欠損または一致しないcontinuationではworkerを起動せず、session、lease、worktree provenanceを保持した非resumableな`blocked`へ移す。backend process開始後はOS spawnへ渡したexpected/actual cwdをPID/PGIDとともに`worker_process_started`へ記録する。この契約はCodex、Codex App Server、Claude Code、OpenCodeとresume非対応fallbackに共通である。
+初回とすべてのcontinuationはprocess spawn直前に、保存済みworktree pathとbranch、Git common dir、GitHub repository identity、main checkoutではないこと、symlinkを含まないことをlocalに再検証する。同じtransaction境界でrun ID、session ID、active lease owner generationも照合する。初回に保存したworkspace provenanceが欠損または一致しないcontinuationではworkerを起動せず、session、lease、worktree provenanceを保持した非resumableな`blocked`へ移す。backend process開始後はOS spawnへ渡したexpected/actual cwdをPID/PGIDとともに`worker_process_started`へ記録する。この契約はCodex、Claude Code、OpenCodeとresume非対応fallbackに共通である。
 
 ### 11.2 preflightとexecution profile
 
@@ -708,7 +704,7 @@ preflightは別プロセスではなく、初回worker promptに含める論理�
 
 初回workerはpreflight結果を実行ログへ構造化eventとして出力するが、preflightだけで終了しない。したがって `extended` の判定だけを理由に2つのworkerが必ず動くわけではない。初回runで完了しなかった場合に限り、supervisorが保存されたsession ID、worktree、検証結果を使って `codex exec resume` を起動する。ユーザー回答後の再開は自動continuation budgetとは別に扱う。
 
-App Server Goal adapterはopt-inの検証実装であり、Goalは監視task内の単一目的または1 Issue内の`extended` continuationだけを管理する。Issueキュー、worktree、lease、GitHub公開、LaunchAgentとprocess lifetimeの正本は引き続きGo supervisorである。capability非対応時とturn開始前の接続失敗は`codex exec resume`へfallbackし、turn開始後の切断は重複workerを起動せず同じworktreeとsession IDを保持して永続retryへ移す。protocol、failure model、rollbackは[App Server Goal adapter](app-server-goal-adapter.md)を正本とする。
+旧stateにApp Server adapterの`goal` snapshotが残っていても読み込みを失敗させず、現行runtimeでは参照・更新しない。次の通常state更新で`goal`は除去し、session、worktree、branch、answers、attempts、continuationsは保持する。移行手順と再導入条件は[互換性](compatibility.md#app-server-goal-adapter削除時の互換性)を正本とする。
 
 ### 11.3 ワーカープロンプト
 
@@ -968,9 +964,9 @@ watch呼び出し後、Codexは独自のtimerや定期status確認を開始し�
 
 監視taskが接続されていない間も質問は永続状態に残るが、新しい項目をActivityへ投入できるとは保証しない。再接続時にはstatusでsnapshotを読み、未回答質問をwatchより先に即時表示する。切断期間のattentionは永続snapshotに保持され、外部serviceへの直接配送は行わない。
 
-App Server所有threadのprogrammatic continuationと、任意のDesktop taskを外部processからwakeしてmobile表示を変更する機能は別契約として扱う。後者の公式APIが提供された場合はoptional adapterとして追加できる。
+App Server所有threadのprogrammatic continuationと、任意のDesktop taskを外部processからwakeしてmobile表示を変更する機能は別契約である。現行runtimeはいずれにも依存せず、再導入は中核品質の安定後に別Issueで評価する。
 
-Codex App Serverは`thread/tokenUsage/updated`とGoalの`tokensUsed`を提供し、`codex exec --json`もturn完了時のusageを返す。一方、Claude Codeのmonitor toolと同じ汎用的なtoken-free契約や、保留中tool call・long commandの厳密なzero-token/zero-costは公式に保証されていない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。[Codex公式仕様確認](codex-capability-review.md)を参照する。
+`codex exec --json`はturn完了時のusageを返す。一方、Claude Codeのmonitor toolと同じ汎用的なtoken-free契約や、保留中tool call・long commandの厳密なzero-token/zero-costは公式に保証されていない。本システムが保証するのは、Goのwatchプロセス内のevent待機とreconciliationがLLMを呼び出さないことである。[Codex公式仕様確認](codex-capability-review.md)を参照する。
 
 ### 13.3 eventとreconciliationの役割
 

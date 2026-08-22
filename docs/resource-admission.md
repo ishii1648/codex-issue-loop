@@ -260,7 +260,7 @@ open PRがある限り、Issue labelがdone/failedへ変わったりreadyが外�
 
 claim途中のGitHub API失敗ではleaseを保持して同じrun IDでreconcileする。local transaction自体がcommitされていなければleaseは存在せず、workerも起動してはならない。過少claimをpublish前監査で検出した場合は、leaseをその場で追加せず、現在のleaseを保持してattention状態へ遷移する。
 
-workerがtypedなenvironment block（`blocked_cause.origin=worker`、`kind=environment`、`resumable=true`）を返した場合、blockのdurable transactionはactive leaseをparkする。`resource_park`はpark ID、元owner generation、slot、declared/resolved/actual resources、original base SHA、reservation時刻を保持するが、admissionのactive lease集合には含めない。run、worktree、branch、dirty changes、session/Goal、answers、attempt/continuation、blocked causeは変更せず、GitHubは`blocked`のままとする。導入前から同期済みの同じtyped blockは、起動時reconciliationがsupervisor-owned `blocked` label、open PR不在、PID/PGID不在を確認できた場合だけ同じ形式へparkする。
+workerがtypedなenvironment block（`blocked_cause.origin=worker`、`kind=environment`、`resumable=true`）を返した場合、blockのdurable transactionはactive leaseをparkする。`resource_park`はpark ID、元owner generation、slot、declared/resolved/actual resources、original base SHA、reservation時刻を保持するが、admissionのactive lease集合には含めない。run、worktree、branch、dirty changes、session、answers、attempt/continuation、blocked causeは変更せず、GitHubは`blocked`のままとする。導入前から同期済みの同じtyped blockは、起動時reconciliationがsupervisor-owned `blocked` label、open PR不在、PID/PGID不在を確認できた場合だけ同じ形式へparkする。
 
 通常workerの`needs_input`は、worker resultでPID/PGIDを消去した後、`input_requested` transaction内でrequest ID、run ID、park ID、元ownerを相互に保存してactive leaseをparkする。GitHubはneeds-inputのままとし、ready/runningを付与しない。`answer`はこのprovenanceと未回答状態を同じtransactionで再検証し、空slotと全active leaseに競合がなければgenerationを1回だけ増やして`resume_pending`にする。競合時は回答とanswer recordを保存して`answer_claim_waiting`にし、他Issueのleaseを変更しない。schedulerは競合解消後だけclaimを再取得し、spawn直前のworkspace provenance検証を通過するまでcontinuationを起動しない。
 

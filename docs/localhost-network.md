@@ -8,8 +8,6 @@
 worker:
   backend: codex
   sandbox: workspace-write
-  app_server:
-    enabled: false
   command_network:
     policy: localhost-only
     proxy: true
@@ -18,7 +16,7 @@ worker:
 
 `allowed_hosts`は設定可能な一般allowlistではなく、レビュー済みpolicyの完全一致確認である。空、順序違い、重複、`*`、public hostname、RFC1918/LAN、link-local、IPv6、Unix socket、`dangerously_*` optionは拒否する。`approval_policy="never"`、`workspace-write`、worktree外書込み禁止、決定論的publisherは変わらない。
 
-Codexの[Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)が明記するように、`sandbox_workspace_write.network_access`だけではdomain policyにならず、`features.network_proxy`が必要である。またproxyはWeb Search、apps、MCPなどhosted toolをfilterしない。このためadapterは`codex exec --ignore-user-config --strict-config`を使い、proxy設定とともにWeb Search、Browser/Computer Use、apps/plugins、MCP、remote plugin、skill由来MCP/tool suggestionを無効化する。App Serverはuser configを同じ強度で隔離する起動契約を持たないため併用を拒否する。
+Codexの[Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)が明記するように、`sandbox_workspace_write.network_access`だけではdomain policyにならず、`features.network_proxy`が必要である。またproxyはWeb Search、apps、MCPなどhosted toolをfilterしない。このためadapterは`codex exec --ignore-user-config --strict-config`を使い、proxy設定とともにWeb Search、Browser/Computer Use、apps/plugins、MCP、remote plugin、skill由来MCP/tool suggestionを無効化する。
 
 ## fail-closed確認
 

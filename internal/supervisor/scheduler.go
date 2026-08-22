@@ -370,7 +370,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 
 	if len(mailboxCandidates) > 0 && s.hasFreeSlot() {
-		selected, evaluation, ok, selectErr := s.selectReady(ctx, mailboxCandidates, snapshot)
+		selected, _, ok, selectErr := s.selectReady(ctx, mailboxCandidates, snapshot)
 		if selectErr != nil {
 			return result, failure.Wrap(failure.Supervisor, "select webhook Issue admission", selectErr)
 		}
@@ -379,7 +379,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 			if slotOK {
 				runID := state.NewID("run")
 				s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
-					return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
+					return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot)
 				})
 				result.dispatched = true
 			}
@@ -413,7 +413,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 	result.githubSucceeded = true
 	s.pollAt = s.loop.now().Add(s.pollDelay())
-	selected, evaluation, ok, selectErr := s.selectReady(ctx, issues, snapshot)
+	selected, _, ok, selectErr := s.selectReady(ctx, issues, snapshot)
 	if selectErr != nil {
 		return result, failure.Wrap(failure.Supervisor, "select Issue admission", selectErr)
 	}
@@ -426,7 +426,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 	runID := state.NewID("run")
 	s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
-		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot, evaluation.DeclaredResources, evaluation.Resources)
+		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot)
 	})
 	result.dispatched = true
 	return result, nil

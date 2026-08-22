@@ -24,7 +24,6 @@
 - dirty PRのimmutable base merge準備、workerによる意味的競合解消、scope検証付き通常push、再起動時の冪等再開
 - draft PRのCI監視、成功後のReady化、manifestで選べるbase branch追随・squash merge、merge後のIssue完了
 - schema付き`codex exec`、session ID保存、`codex exec resume`
-- `extended` continuation限定のoptional App Server Goal adapter、token/time usage永続化、safe fallback
 - `standard` / `extended` preflight policy
 - typed failure分類、±20% jitter付き上限5分のretry/polling backoff、extended continuation
 - 完了、入力待ち、失敗のGitHub反映と未反映状態の再試行

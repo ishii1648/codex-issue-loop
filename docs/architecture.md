@@ -29,7 +29,7 @@
 | launchd | macOS | supervisorの起動と異常終了時の再起動 |
 | delivery controller | Macごとに1つの短命LaunchAgent | production Releaseのpull、検証、host-wide drain、update、health check、rollback |
 | supervisor | Goの常駐プロセス | Issue選択、claim、worker起動、状態遷移、復旧 |
-| Codex worker | `codex exec`、optional App Server | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
+| Codex worker | `codex exec` / `codex exec resume` | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
 | publisher | supervisor内の決定論的処理 | 差分検査、commit、push、draft PR作成・既存PR再利用 |
 | PR lifecycle controller | supervisor内の決定論的処理 | CI監視、Ready化、任意のbranch更新・squash merge、merge確認 |
 | GitHub | 外部共有状態 | Issueキュー、ラベル、コメント、Pull Request |
@@ -97,11 +97,10 @@ Codex Goalは、一つの具体的な目的と検証可能な完了条件を追�
 
 - Goalを外側のIssueループ、プロセス監視、永続状態の正本にはしない。
 - headless workerは `standard` / `extended` profileと`codex exec`を既定経路にする。
-- `extended` の継続はsupervisorが管理し、opt-in時だけApp Server Goal、非対応・無効時は`codex exec resume`を使う。
+- `extended` の継続はsupervisorが管理し、`codex exec resume`を使う。
 - 監視taskで「この障害を復旧する」など単一目的を追う場合は、ユーザーがGoalを利用してよい。
-- App ServerのGoal APIは公式提供済みであり、`extended` profileのoptional adapterとして実装する。Goalは1 Issueの内側だけを管理し、queueやLaunchAgentを所有しない。
 
-したがってGoalは排除せず、適用範囲を単一目的の内側に限定する。
+したがってGoalは対話的な単一目的の内側に限定し、headless workerの製品機能にはしない。App Server方式は中核lifecycleが安定し、`codex exec resume`では満たせない要件と継続的なreplay testを定義できた段階で別Issueとして再評価する。
 
 ## 7. 質問で止まる場合
 
@@ -163,7 +162,7 @@ Codexに「一定時間ごとにstatusを確認する」と推論させる設計
 | supervisorが異常終了 | snapshot、event log、GitHub状態 | launchd再起動後にreconciliation |
 | Macがスリープ | 実行は停止し得る | macOSの「ディスプレイoff時もスリープさせない」を有効化 |
 
-App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できるが、外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。通常はrepositoryごとにpinしたDesktop監視taskがblocking watchから戻った後に質問し、question notificationとActivityの回答待ちへ残す。監視taskが接続されていない期間は永続snapshotにattentionを保持し、再接続時にstatus-firstで回収する。詳細は[Codex Desktop監視task運用](codex-desktop-monitoring.md)と[公式仕様確認](codex-capability-review.md)を参照する。
+外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。通常はrepositoryごとにpinしたDesktop監視taskがblocking watchから戻った後に質問し、question notificationとActivityの回答待ちへ残す。監視taskが接続されていない期間は永続snapshotにattentionを保持し、再接続時にstatus-firstで回収する。詳細は[Codex Desktop監視task運用](codex-desktop-monitoring.md)と[公式仕様確認](codex-capability-review.md)を参照する。
 
 ## 10. 設計上の不変条件
 

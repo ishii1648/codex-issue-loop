@@ -103,6 +103,61 @@ func TestStateAndEventsNeverPersistSecrets(t *testing.T) {
 	}
 }
 
+func TestLegacyGoalSnapshotIsIgnoredWithoutLosingContinuationState(t *testing.T) {
+	store := newStore(t)
+	snapshot := store.emptySnapshot()
+	snapshot.Issues["189"] = &Issue{
+		Number: 189, Title: "legacy App Server run", Status: "needs_input",
+		RunID: "run_189", Branch: "codex/issue-189", Worktree: "/tmp/issue-189",
+		SessionID: "session-189", Session: &WorkerSession{Backend: "codex", ID: "session-189"},
+		Answers:  []AnswerRecord{{RequestID: "req_189", Question: "Continue?", Answer: "yes"}},
+		Attempts: 2, Continuations: 1,
+	}
+	snapshot.PendingRequests["req_189"] = &Request{
+		ID: "req_189", IssueNumber: 189, Question: "Continue?", Status: "answered", Answer: "yes",
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	issues := legacy["issues"].(map[string]any)
+	issue := issues["189"].(map[string]any)
+	issue["goal"] = map[string]any{
+		"thread_id": "session-189", "objective": "finish", "status": "blocked", "tokens_used": 123,
+	}
+	if err := fsutil.WriteJSON(store.StatePath(), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("legacy goal made state unreadable: %v", err)
+	}
+	item := loaded.Issues["189"]
+	request := loaded.PendingRequests["req_189"]
+	if item == nil || item.Worktree != "/tmp/issue-189" || item.SessionID != "session-189" || item.Session == nil || item.Session.ID != "session-189" || len(item.Answers) != 1 || item.Answers[0].Answer != "yes" || item.Attempts != 2 || item.Continuations != 1 || request == nil || request.Answer != "yes" {
+		t.Fatalf("legacy goal load lost continuation state: %+v", item)
+	}
+	updated, err := store.Update("legacy_goal_ignored", 189, "run_189", nil, func(*Snapshot) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Issues["189"].SessionID != "session-189" || len(updated.Issues["189"].Answers) != 1 || updated.PendingRequests["req_189"].Answer != "yes" {
+		t.Fatalf("state rewrite lost continuation state: %+v", updated.Issues["189"])
+	}
+	rewritten, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(rewritten, []byte(`"goal"`)) {
+		t.Fatalf("legacy goal was rewritten into active state: %s", rewritten)
+	}
+}
+
 func TestLeaseReservationSurvivesRestartAndFencesStaleOwners(t *testing.T) {
 	store := newStore(t)
 	reservedAt := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
@@ -1095,7 +1150,6 @@ func TestFaultSecondSupervisorCannotAcquireLock(t *testing.T) {
 		t.Fatal("second supervisor acquired the repository lock")
 	}
 	ReleaseSupervisorLock(first)
-	first = nil
 	third, err := store.AcquireSupervisorLock()
 	if err != nil {
 		t.Fatalf("lock was not reusable after release: %v", err)

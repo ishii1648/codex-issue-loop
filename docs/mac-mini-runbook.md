@@ -219,7 +219,7 @@ agent-loop status --repo /absolute/path/to/repository --json
 
 `retry`は無関係なblocked原因を初期化せず、保存済みbranchとPRが一致する場合だけ`resolving_conflict`へ戻す。新しいbranch/PRやforce pushは作らない。
 
-workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。現行supervisorはPID/PGID不在を確認してactive leaseを自動parkし、GitHub `blocked`、run/worktree/branch/dirty changes/session/Goal/answers/attempt/continuation、元leaseのresource/base/reservation provenanceを保持する。`resource_admission.resource_parks`で`status=parked`と保存claimを確認し、後続queueが同resourceを予約できることを確認する。`claim_waiting_candidates[].blocked_by`がある場合は、列挙されたIssueのresource conflictまたはworker slotが解消するまでresumeしない。
+workerが返した環境起因`blocked`は`status --json`の`blocked_cause`が`origin=worker`、`kind=environment`、`resumable=true`であることを確認する。現行supervisorはPID/PGID不在を確認してactive leaseを自動parkし、GitHub `blocked`、run/worktree/branch/dirty changes/session/answers/attempt/continuation、元leaseのresource/base/reservation provenanceを保持する。`resource_admission.resource_parks`で`status=parked`と保存claimを確認し、後続queueが同resourceを予約できることを確認する。`claim_waiting_candidates[].blocked_by`がある場合は、列挙されたIssueのresource conflictまたはworker slotが解消するまでresumeしない。
 
 `agent-loop watch --repo /absolute/path/to/repository --until-attention --json`はpark後もIssueのsticky `blocked` attentionを返す。監視taskはその通知をoperatorへ提示した後、queue継続のためにstate/labelを変更せず、`status --json`でparkと後続workerを確認する。
 
@@ -231,7 +231,7 @@ agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --conf
 
 保持中leaseの`base_sha`が空の場合はconfigured base branchのremote-tracking commitを検証し、非空の`base_sha`を同じtransactionで保存する。legacy missing leaseでは現在のbaseを推測せず、`lease_reserved` eventに保存されたSHAだけを回復・検証する。保存SHAをGit objectとして検証できない場合はGitHub labelとdurable stateが未変更のまま拒否されるため、正しいrepository historyを取得してから再実行する。既存またはeventから復元した非空`base_sha`は上書きしない。
 
-resumeはpark済みoriginal claimと全active lease/worker slotを再検証し、競合がなければ新しいowner generationを1回だけ取得する。競合中は表示されたIssueのleaseを奪わず待つ。dirty changes、branch、worktree、session/Goal/continuation、回答、resource/base metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`resource_park.resume_owner`と`lease.owner`が一致し、`lease.base_sha`が非空であることを確認する。後続Issueでbaseが進んでいてもrebase/resetせず、publication auditと通常のconflict recoveryへ委ねる。
+resumeはpark済みoriginal claimと全active lease/worker slotを再検証し、競合がなければ新しいowner generationを1回だけ取得する。競合中は表示されたIssueのleaseを奪わず待つ。dirty changes、branch、worktree、session/continuation、回答、resource/base metadataを削除せず、`environment_resume_requested` eventと冪等GitHub markerを残す。成功後は`status --json`で`resource_park.resume_owner`と`lease.owner`が一致し、`lease.base_sha`が非空であることを確認する。後続Issueでbaseが進んでいてもrebase/resetせず、publication auditと通常のconflict recoveryへ委ねる。
 
 旧releaseで作られたenvironment blockの`workspace`だけが欠けている場合も、保存worktreeを移動・編集せず同じコマンドを使う。CLIはspawn前と同じ厳格validatorでcanonical path、managed root、symlink不在、branch、Git common dir、repository identity、registered main checkoutとの非同一性を確認し、成功時だけresume transitionと同じtransactionで`workspace`をbackfillする。`events.jsonl`の`environment_resume_requested.payload.workspace_recovery`で`old_provenance_missing=true`、`operator_confirmation.confirm_prerequisite_resolved=true`、expected/actual path・branch・repository・Git common dir・main checkout・checksを監査できる。startupはこのbackfillを行わない。
 
