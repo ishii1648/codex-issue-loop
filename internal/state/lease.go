@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/capability"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 )
 
 const RepositoryResource = "repo:*"
@@ -106,10 +107,17 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 				return fmt.Errorf("resources conflict with active lease for Issue #%d", other.Number)
 			}
 		}
+		claimTransition, transitionErr := issuedomain.StartClaim(issue.Status)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if transitionErr := ApplyIssueTransition(issue, claimTransition); transitionErr != nil {
+			return transitionErr
+		}
 		issue.LeaseGeneration++
 		owner = LeaseOwner{RunID: reservation.RunID, Generation: issue.LeaseGeneration}
 		payload["owner"] = owner
-		issue.Title, issue.Status, issue.RunID = reservation.Title, "claiming", reservation.RunID
+		issue.Title, issue.RunID = reservation.Title, reservation.RunID
 		issue.DeclaredResources = append([]string(nil), declared...)
 		issue.CapabilityRequirements = reservation.CapabilityRequirements
 		issue.WorkerCapabilities = reservation.WorkerCapabilities

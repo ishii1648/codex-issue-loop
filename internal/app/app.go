@@ -1394,6 +1394,18 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 			return exitError{4, err}
 		}
 	}
+	answerTransitions := map[issuedomain.Status]issuedomain.Transition{}
+	answerTargets := []issuedomain.Status{currentRequest.ResumeStatus}
+	if parkedNeedsInput {
+		answerTargets = []issuedomain.Status{issuedomain.StatusAnswerClaimWaiting, issuedomain.StatusResumePending}
+	}
+	for _, target := range answerTargets {
+		transition, transitionErr := issuedomain.ResumeAfterAnswer(currentIssue.Status, target)
+		if transitionErr != nil {
+			return exitError{4, transitionErr}
+		}
+		answerTransitions[target] = transition
+	}
 	payload := map[string]any{"request_id": *requestID}
 	updated, err := store.Update("answer_recorded", currentRequest.IssueNumber, currentIssue.RunID, payload, func(s *state.Snapshot) error {
 		request := s.PendingRequests[*requestID]
@@ -1452,7 +1464,14 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 				payload["blocked_by_worker_slot"] = true
 			}
 		}
-		issue.Status, issue.RetryAfter, issue.UpdatedAt = resumeStatus, nil, now
+		transition, ok := answerTransitions[resumeStatus]
+		if !ok {
+			return fmt.Errorf("Issue #%d answer selected unsupported resume status %q", issue.Number, resumeStatus)
+		}
+		if err := state.ApplyIssueTransition(issue, transition); err != nil {
+			return err
+		}
+		issue.RetryAfter, issue.UpdatedAt = nil, now
 		if resumeStatus == "resolving_conflict" {
 			issue.GitHubSync = "conflict_retry"
 		}
@@ -1558,6 +1577,10 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 	if !matched {
 		return exitError{4, fmt.Errorf("saved Pull Request is not open on branch %s: %s", current.Branch, current.PullRequestURL)}
 	}
+	retryTransition, err := issuedomain.RetryConflict(current.Status)
+	if err != nil {
+		return exitError{4, err}
+	}
 	retryID := state.NewID("retry")
 	_, err = store.Update("conflict_recovery_retry_requested", *issueNumber, current.RunID, map[string]any{
 		"retry_id": retryID, "pull_request_url": current.PullRequestURL, "previous_reason": current.LastError,
@@ -1571,7 +1594,9 @@ func (a App) retryConflict(ctx context.Context, l layout.Layout, args []string) 
 				PullRequestURL: item.PullRequestURL, StartedAt: time.Now().UTC(),
 			}
 		}
-		item.Status = "resolving_conflict"
+		if err := state.ApplyIssueTransition(item, retryTransition); err != nil {
+			return err
+		}
 		item.GitHubSync = "conflict_retry"
 		item.FailureKind = ""
 		item.LastError = "explicit conflict recovery retry requested"
@@ -1887,6 +1912,10 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 		previousReason = legacyCause.Reason
 	}
 	if !pendingResume {
+		resumeTransition, transitionErr := issuedomain.RequestEnvironmentResume(current.Status)
+		if transitionErr != nil {
+			return exitError{4, transitionErr}
+		}
 		eventType := "environment_resume_requested"
 		if interruptedResume {
 			eventType = "environment_resume_recovered"
@@ -2006,7 +2035,9 @@ func (a App) resumeBlocked(ctx context.Context, l layout.Layout, args []string) 
 				workspace := validatedWorkspace
 				item.Workspace = &workspace
 			}
-			item.Status = "environment_resume_pending"
+			if err := state.ApplyIssueTransition(item, resumeTransition); err != nil {
+				return err
+			}
 			item.GitHubSync = "environment_resume"
 			if interruptedWorkspaceRecovery {
 				blockedAt := item.EnvironmentResume.ConfirmedAt

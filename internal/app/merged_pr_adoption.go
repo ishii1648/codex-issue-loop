@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
@@ -141,6 +142,10 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 		HeadSHA: pr.HeadSHA, MergeSHA: pr.MergeSHA, BaseBranch: pr.BaseRefName,
 	}
 	owner := current.Lease.Owner
+	completion, err := issuedomain.Complete(current.Status, pr.URL)
+	if err != nil {
+		return exitError{4, err}
+	}
 	_, err = store.Update("merged_pull_request_adopted", *issueNumber, current.RunID, map[string]any{
 		"adoption_id": adoption.ID, "generation": adoption.Generation, "operator_confirmed": true,
 		"pull_request_url": pr.URL, "pull_request_number": pr.Number, "head_sha": pr.HeadSHA,
@@ -154,12 +159,14 @@ func (a App) adoptMergedPullRequest(ctx context.Context, l layout.Layout, args [
 		if err := state.ReleaseIssueLease(item, owner); err != nil {
 			return err
 		}
-		item.Status = "completed"
-		item.PullRequestURL = pr.URL
+		if err := state.ApplyIssueTransition(item, completion.Transition); err != nil {
+			return err
+		}
+		item.PullRequestURL = completion.PullRequestURL
 		item.PullRequestNumber = pr.Number
 		item.HeadSHA = pr.HeadSHA
-		item.PullRequestMerged = true
-		item.GitHubSync = "done"
+		item.PullRequestMerged = completion.PullRequestMerged
+		item.GitHubSync = completion.GitHubSync
 		item.FailureKind = ""
 		item.LastError = ""
 		item.RetryAfter = nil

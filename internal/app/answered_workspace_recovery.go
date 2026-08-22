@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
@@ -198,6 +199,10 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 		plan.ExpectedWorkspace.CapturedAt = now
 		plan.ActualWorkspace.CapturedAt = now
 	}
+	resumeTransition, err := issuedomain.RecoverAnsweredWorkspace(current.Status)
+	if err != nil {
+		return exitError{4, err}
+	}
 	payload := map[string]any{
 		"recovery_id": recoveryID, "operator_confirmation": map[string]bool{"confirm_exact_chain": true},
 		"old_provenance_missing": true, "request_id": request.ID, "resource_park_id": current.ResourcePark.ID,
@@ -238,7 +243,9 @@ func (a App) recoverAnsweredWorkspace(ctx context.Context, l layout.Layout, args
 			ActualWorkspace: plan.ActualWorkspace, ValidatorChecks: cloneBoolMap(launch.Checks),
 			OldOwner: plan.OldOwner, NewOwner: newOwner,
 		}
-		item.Status = "resume_pending"
+		if err := state.ApplyIssueTransition(item, resumeTransition); err != nil {
+			return err
+		}
 		item.GitHubSync = "answered_workspace_recovery"
 		item.RetryAfter = nil
 		item.UpdatedAt = now

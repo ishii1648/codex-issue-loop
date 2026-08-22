@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/config"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	gh "github.com/ishii1648/codex-issue-loop/internal/github"
 	"github.com/ishii1648/codex-issue-loop/internal/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/state"
@@ -171,6 +172,10 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 	}
 
 	recovery.Status = "requested"
+	recoveryTransition, err := issuedomain.RequestChecksRecovery(current.Status)
+	if err != nil {
+		return exitError{4, err}
+	}
 	_, err = store.Update("pull_request_checks_recovery_requested", *issueNumber, current.RunID, map[string]any{
 		"recovery_id": recovery.ID, "generation": generation, "old_head_sha": recovery.OldHeadSHA,
 		"new_head_sha": recovery.NewHeadSHA, "checks_status": recovery.ChecksStatus, "operator_confirmed": true,
@@ -180,7 +185,9 @@ func (a App) recoverPullRequestChecks(ctx context.Context, l layout.Layout, args
 		if item == nil || !reflect.DeepEqual(item, current) {
 			return fmt.Errorf("Issue #%d changed while checks recovery was being prepared", *issueNumber)
 		}
-		item.Status = "pull_request_checks_recovery_pending"
+		if err := state.ApplyIssueTransition(item, recoveryTransition); err != nil {
+			return err
+		}
 		item.GitHubSync = "pull_request_checks_recovery"
 		item.PullRequestChecksRecovery = recovery
 		if legacyCompatibility {
@@ -275,6 +282,10 @@ func syncPullRequestChecksRecovery(ctx context.Context, store state.Store, cfg c
 	if err := client.MarkPullRequestChecksRecovery(ctx, cfg, current.Number, current.PullRequestChecksRecovery.ID); err != nil {
 		return fmt.Errorf("sync Pull Request checks recovery to GitHub (durable recovery remains pending): %w", err)
 	}
+	checksDecision, err := issuedomain.AwaitChecks(current.Status)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	_, err = store.Update("pull_request_checks_recovery_resumed", current.Number, current.RunID, map[string]any{
 		"recovery_id": current.PullRequestChecksRecovery.ID, "generation": current.PullRequestChecksRecovery.Generation,
@@ -282,7 +293,9 @@ func syncPullRequestChecksRecovery(ctx context.Context, store state.Store, cfg c
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
 		if item != nil && item.GitHubSync == "pull_request_checks_recovery" && item.PullRequestChecksRecovery != nil && item.PullRequestChecksRecovery.ID == current.PullRequestChecksRecovery.ID {
-			item.Status = "awaiting_checks"
+			if err := state.ApplyIssueTransition(item, checksDecision.Transition); err != nil {
+				return err
+			}
 			item.GitHubSync = ""
 			item.FailureKind = ""
 			item.LastError = ""

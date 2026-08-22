@@ -110,7 +110,7 @@ type ChecksDecision struct {
 
 func AwaitChecks(from Status) (ChecksDecision, error) {
 	transition, err := newAllowedTransition("await_pull_request_checks", from, StatusAwaitingChecks,
-		StatusRunning, StatusResolvingConflict, StatusPublicationRecovery)
+		StatusRunning, StatusResolvingConflict, StatusPublicationRecovery, StatusChecksRecovery)
 	return ChecksDecision{Transition: transition}, err
 }
 
@@ -122,4 +122,44 @@ func AwaitMerge(from Status) (Transition, error) {
 func ResolveConflict(from Status) (Transition, error) {
 	return newAllowedTransition("resolve_pull_request_conflict", from, StatusResolvingConflict,
 		StatusAwaitingChecks, StatusAwaitingMerge)
+}
+
+// StartClaim begins a new fenced run. StatusClaiming is accepted for the
+// idempotent reserve-after-release path; failed records may be explicitly
+// queued again after their GitHub labels have changed.
+func StartClaim(from Status) (Transition, error) {
+	return newAllowedTransition("start_claim", from, StatusClaiming,
+		StatusUnset, StatusClaiming, StatusFailed)
+}
+
+// ResumeAfterAnswer selects the continuation requested by a recorded answer.
+// The target depends on whether resources can be reacquired atomically and on
+// the kind of question that was answered.
+func ResumeAfterAnswer(from, target Status) (Transition, error) {
+	switch target {
+	case StatusAnswerClaimWaiting, StatusResumePending, StatusResolvingConflict:
+		return newAllowedTransition("resume_after_answer", from, target, StatusNeedsInput)
+	default:
+		return Transition{}, fmt.Errorf("resume after answer does not allow target status %q", target)
+	}
+}
+
+func RetryConflict(from Status) (Transition, error) {
+	return newAllowedTransition("retry_conflict", from, StatusResolvingConflict, StatusBlocked)
+}
+
+func RequestEnvironmentResume(from Status) (Transition, error) {
+	return newAllowedTransition("request_environment_resume", from, StatusEnvironmentResumePending, StatusBlocked)
+}
+
+func RecoverAnsweredWorkspace(from Status) (Transition, error) {
+	return newAllowedTransition("recover_answered_workspace", from, StatusResumePending, StatusBlocked)
+}
+
+func RequestChecksRecovery(from Status) (Transition, error) {
+	return newAllowedTransition("request_pull_request_checks_recovery", from, StatusChecksRecovery, StatusFailed)
+}
+
+func RequestPublicationRecovery(from Status) (Transition, error) {
+	return newAllowedTransition("request_publication_recovery", from, StatusPublicationRecovery, StatusFailed)
 }
