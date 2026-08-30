@@ -211,6 +211,10 @@ jobs:
           name: canary-report-${{ github.sha }}
           path: canary-artifacts/canary-report.json
           if-no-files-found: error
+      - name: Attest hosted canary evidence
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: canary-artifacts/canary-report.json
       - name: Publish the candidate prerelease from canonical bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -219,9 +223,66 @@ jobs:
           gh release create "$candidate_tag" dist/candidate/* canary-artifacts/canary-report.json \
             --target "$GITHUB_SHA" --prerelease --title "$candidate_tag" --notes "Release candidate for $GITHUB_REF_NAME from $GITHUB_SHA"
 
+  production-state-isolation:
+    name: production-state-isolation
+    needs: [build-candidate, isolated-canary]
+    runs-on: macos-15
+    environment: production
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/candidate
+      - name: Require production-host state comparison evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_tag="candidate-${GITHUB_REF_NAME}-${GITHUB_RUN_ID}"
+          mkdir -p production-state
+          found=false
+          for attempt in $(seq 1 180); do
+            if gh release download "$candidate_tag" --pattern production-state-report.json --dir production-state --clobber >/dev/null 2>&1; then
+              found=true
+              break
+            fi
+            sleep 30
+          done
+          test "$found" = true
+          candidate_digest=$(shasum -a 256 dist/candidate/agent-loop_Darwin_arm64 | awk '{print $1}')
+          jq -e --arg tag "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" \
+            --arg candidate_tag "$candidate_tag" --arg digest "$candidate_digest" '
+              .schema_version == 1 and .release_tag == $tag and .release_commit == $commit and
+              .candidate_tag == $candidate_tag and .candidate_binary_sha256 == $digest and
+              .production_state_accessed == true and .production_state_changes == 0 and
+              .production_before == .production_after and .production_before.worker_limit == 1 and
+              .production_before.active_workers <= 1 and .production_before.doctor_ok == true and
+              .canary.production_remote_changes == 0 and (.canary.sequences | length) == 2 and
+              .canary.supervisor_restarts >= 2 and .canary.webhook_miss_polling_fallback >= 1 and
+              .canary.webhook_evidence.accepted_deliveries == 0 and
+              .canary.webhook_evidence.safety_sweep_rest_200 >= 1 and
+              .canary.transaction_crash_recovery >= 1 and
+              .canary.final.active_workers == 0 and .canary.final.active_leases == 0 and
+              .canary.final.pending_requests == 0 and .canary.final.orphan_pid_pgid == 0 and
+              .canary.final.duplicate_prs == 0 and .canary.final.duplicate_comment_markers == 0 and
+              .canary.final.broker_processes == 0
+            ' production-state/production-state-report.json >/dev/null
+      - name: Attest production isolation evidence
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: production-state/production-state-report.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: production-state-report-${{ github.sha }}
+          path: production-state/production-state-report.json
+          if-no-files-found: error
+
   soak:
     name: soak
-    needs: isolated-canary
+    needs: production-state-isolation
     runs-on: macos-15
     timeout-minutes: 40
     steps:
@@ -273,11 +334,15 @@ jobs:
         with:
           name: canary-report-${{ github.sha }}
           path: dist/canary
+      - uses: actions/download-artifact@v7
+        with:
+          name: production-state-report-${{ github.sha }}
+          path: dist/production-state
       - name: Publish stable release without rebuilding
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/candidate/* dist/canary/canary-report.json \
+          gh release create "$GITHUB_REF_NAME" dist/candidate/* dist/canary/canary-report.json dist/production-state/production-state-report.json \
             --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
 
   post-release-health:
@@ -297,15 +362,52 @@ jobs:
         run: |
           candidate_tag="candidate-${GITHUB_REF_NAME}-${GITHUB_RUN_ID}"
           gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,isPrerelease,assets \
-            --jq 'select(.tagName == "'"$GITHUB_REF_NAME"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 5)' >/dev/null
+            --jq 'select(.tagName == "'"$GITHUB_REF_NAME"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 6)' >/dev/null
           mkdir -p dist/stable dist/prerelease
           gh release download "$GITHUB_REF_NAME" --dir dist/stable
           gh release download "$candidate_tag" --dir dist/prerelease
-          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt canary-report.json; do
+          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt canary-report.json production-state-report.json; do
             cmp "dist/prerelease/$asset" "dist/stable/$asset"
           done
           for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
             cmp "dist/candidate/$asset" "dist/stable/$asset"
           done
           gh attestation verify dist/stable/agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
+          gh attestation verify dist/stable/canary-report.json --repo "$GITHUB_REPOSITORY"
+          gh attestation verify dist/stable/production-state-report.json --repo "$GITHUB_REPOSITORY"
           dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" '.version == $version and .commit == $commit'
+      - name: Require production delivery health evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=false
+          for attempt in $(seq 1 180); do
+            if gh release download "$GITHUB_REF_NAME" --pattern production-health-report.json --dir dist/stable --clobber >/dev/null 2>&1; then
+              found=true
+              break
+            fi
+            sleep 30
+          done
+          test "$found" = true
+          stable_digest=$(shasum -a 256 dist/stable/agent-loop_Darwin_arm64 | awk '{print $1}')
+          jq -e --arg tag "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" --arg digest "$stable_digest" '
+            .schema_version == 1 and .release_tag == $tag and .release_commit == $commit and
+            .stable_binary_sha256 == $digest and .installed.version == $tag and .installed.commit == $commit and
+            .delivery.current.version == $tag and .delivery.current.commit == $commit and
+            .delivery.phase == "succeeded" and .delivery.result == "succeeded" and
+            .doctor.schema_version == 1 and .doctor.ok == true and (.doctor.failed_diagnostic_codes | length) == 0 and
+            .status.worker_limit == 1 and .status.active_workers <= 1 and
+            .rollback_occurred == false and .healthy == true
+          ' dist/stable/production-health-report.json >/dev/null
+          gh release view "$GITHUB_REF_NAME" --json assets --jq 'select((.assets|length) == 7)' >/dev/null
+      - name: Attest production health evidence
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/stable/production-health-report.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: production-health-report-${{ github.sha }}
+          path: dist/stable/production-health-report.json
+          if-no-files-found: error

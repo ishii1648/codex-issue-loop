@@ -1,0 +1,229 @@
+package delivery
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+const evidenceCommit = "0123456789abcdef0123456789abcdef01234567"
+
+func TestProductionStateCanaryRequiresIdenticalSnapshots(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		mismatch bool
+		wantOK   bool
+	}{{name: "identical", wantOK: true}, {name: "revision changed", mismatch: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			productionRepo := filepath.Join(root, "production")
+			if err := os.MkdirAll(filepath.Join(productionRepo, ".git"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			productionBinary := writeExecutable(t, root, "production-agent-loop", `#!/bin/sh
+if [ "$1" = doctor ]; then
+  printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}'
+  exit
+fi
+count=0
+if [ -f "$COUNT_PATH" ]; then count=$(cat "$COUNT_PATH"); fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$COUNT_PATH"
+revision=7
+if [ "${MISMATCH:-0}" = 1 ] && [ "$count" -gt 1 ]; then revision=8; fi
+printf '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"repo_id":"production-id","state_revision":%s,"supervisor":{"state":"idle"},"issues":{}}}\n' "$revision"
+`)
+			candidate := writeExecutable(t, root, "candidate", "#!/bin/sh\nexit 0\n")
+			fakeCanary := writeExecutable(t, root, "isolated-canary", `#!/bin/sh
+mkdir -p "$CANARY_ARTIFACT_DIR"
+printf '%s\n' '{"schema_version":1,"repository":"ishii1648/codex-issue-loop-canary","sequences":[{"status":"completed"},{"status":"completed"}],"supervisor_restarts":2,"webhook_miss_polling_fallback":1,"webhook_evidence":{"accepted_deliveries":0,"safety_sweep_rest_200":1},"transaction_crash_recovery":1,"production_remote_changes":0,"final":{"active_workers":0,"active_leases":0,"pending_requests":0,"orphan_pid_pgid":0,"duplicate_prs":0,"duplicate_comment_markers":0,"broker_processes":0}}' >"$CANARY_ARTIFACT_DIR/canary-report.json"
+`)
+			artifactDir := filepath.Join(root, "artifacts")
+			cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-state-canary.sh"))
+			cmd.Dir = repositoryRoot(t)
+			cmd.Env = append(os.Environ(),
+				"PRODUCTION_REPOSITORY_PATH="+productionRepo,
+				"PRODUCTION_AGENT_LOOP_BINARY="+productionBinary,
+				"CANDIDATE_BINARY="+candidate,
+				"CANARY_REPOSITORY=ishii1648/codex-issue-loop-canary",
+				"CANARY_ARTIFACT_DIR="+artifactDir,
+				"RELEASE_TAG=v0.8.0",
+				"RELEASE_COMMIT="+evidenceCommit,
+				"CANDIDATE_TAG=candidate-v0.8.0-123",
+				"ISOLATED_CANARY_SCRIPT="+fakeCanary,
+				"COUNT_PATH="+filepath.Join(root, "count"),
+			)
+			if test.mismatch {
+				cmd.Env = append(cmd.Env, "MISMATCH=1")
+			}
+			output, err := cmd.CombinedOutput()
+			if (err == nil) != test.wantOK {
+				t.Fatalf("err=%v output=%s", err, output)
+			}
+			if !test.wantOK {
+				return
+			}
+			data, err := os.ReadFile(filepath.Join(artifactDir, "production-state-report.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var report struct {
+				Commit        string         `json:"release_commit"`
+				Digest        string         `json:"candidate_binary_sha256"`
+				StateAccessed bool           `json:"production_state_accessed"`
+				Before        map[string]any `json:"production_before"`
+				After         map[string]any `json:"production_after"`
+			}
+			if err := json.Unmarshal(data, &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.Commit != evidenceCommit || len(report.Digest) != 64 || !report.StateAccessed || !mapsEqual(report.Before, report.After) {
+				t.Fatalf("report=%s", data)
+			}
+		})
+	}
+}
+
+func TestProductionReleaseHealthFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		bad            bool
+		digestMismatch bool
+		wantOK         bool
+	}{{name: "healthy", wantOK: true}, {name: "rollback failed", bad: true}, {name: "installed bytes differ", digestMismatch: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			productionBinary := writeExecutable(t, root, "production-agent-loop", `#!/bin/sh
+case "$1" in
+  delivery)
+    result=succeeded
+    if [ "${BAD_HEALTH:-0}" = 1 ]; then result=rollback_failed; fi
+    printf '{"phase":"succeeded","result":"%s","current":{"version":"v0.8.0","commit":"`+evidenceCommit+`"}}\n' "$result" ;;
+  doctor) printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}' ;;
+  status) printf '%s\n' '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"state_revision":9,"supervisor":{"state":"idle"},"issues":{}}}' ;;
+  version) printf '%s\n' '{"version":"v0.8.0","commit":"`+evidenceCommit+`"}' ;;
+  *) exit 2 ;;
+esac
+`)
+			stableDigest, err := fileDigest(productionBinary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.digestMismatch {
+				stableDigest = strings.Repeat("a", 64)
+			}
+			artifactDir := filepath.Join(root, "artifacts")
+			cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-release-health.sh"))
+			cmd.Dir = repositoryRoot(t)
+			cmd.Env = append(os.Environ(),
+				"PRODUCTION_REPOSITORY_PATH="+root,
+				"PRODUCTION_AGENT_LOOP_BINARY="+productionBinary,
+				"HEALTH_ARTIFACT_DIR="+artifactDir,
+				"RELEASE_TAG=v0.8.0",
+				"RELEASE_COMMIT="+evidenceCommit,
+				"STABLE_BINARY_SHA256="+stableDigest,
+			)
+			if test.bad {
+				cmd.Env = append(cmd.Env, "BAD_HEALTH=1")
+			}
+			output, err := cmd.CombinedOutput()
+			if (err == nil) != test.wantOK {
+				t.Fatalf("err=%v output=%s", err, output)
+			}
+		})
+	}
+}
+
+func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
+	type job struct {
+		Needs any `yaml:"needs"`
+	}
+	var workflow struct {
+		Jobs map[string]job `yaml:"jobs"`
+	}
+	path := filepath.Join(repositoryRoot(t), ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"build-candidate":                 nil,
+		"verify-reproducibility":          {"build-candidate"},
+		"verify-attestation-and-manifest": {"verify-reproducibility"},
+		"replay-production-fixtures":      {"verify-attestation-and-manifest"},
+		"lifecycle-conformance":           {"replay-production-fixtures"},
+		"github-cli-contract":             {"lifecycle-conformance"},
+		"isolated-canary":                 {"build-candidate", "github-cli-contract"},
+		"production-state-isolation":      {"build-candidate", "isolated-canary"},
+		"soak":                            {"production-state-isolation"},
+		"production-approval":             {"soak"},
+		"promote-stable":                  {"build-candidate", "production-approval"},
+		"post-release-health":             {"promote-stable"},
+	}
+	for name, dependencies := range want {
+		current, ok := workflow.Jobs[name]
+		if !ok {
+			t.Fatalf("required release job %q is missing", name)
+		}
+		if got := normalizedNeeds(current.Needs); !reflect.DeepEqual(got, dependencies) {
+			t.Fatalf("job %s needs=%v want=%v", name, got, dependencies)
+		}
+	}
+	text := string(data)
+	if strings.Contains(text, "continue-on-error: true") {
+		t.Fatal("release gate permits continue-on-error")
+	}
+	if strings.Count(text, "scripts/build-release.sh") != 2 {
+		t.Fatal("release workflow must build the canonical candidate once and one comparison-only rebuild")
+	}
+}
+
+func normalizedNeeds(value any) []string {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		return []string{typed}
+	case []any:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			result = append(result, item.(string))
+		}
+		return result
+	default:
+		return []string{"<invalid>"}
+	}
+}
+
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(root))
+}
+
+func writeExecutable(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func mapsEqual(left, right map[string]any) bool {
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	return string(leftJSON) == string(rightJSON)
+}
