@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,20 +125,26 @@ func TestOpenCodeTimeoutAbortsSessionAndStopsServerGroup(t *testing.T) {
 	requireLoopbackListener(t)
 	dir := t.TempDir()
 	fake := openCodeHelperCommand(t, dir)
-	aborted := filepath.Join(dir, "aborted")
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aborted := filepath.Join(canonicalDir, "aborted")
 	t.Setenv("AGENT_LOOP_OPENCODE_MODE", "timeout")
-	t.Setenv("AGENT_LOOP_OPENCODE_ABORTED", aborted)
 	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/test", "")
-	cfg.Worker.Timeout.Duration = time.Second
+	cfg.Worker.Timeout.Duration = 3 * time.Second
 	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
 	pid := 0
-	_, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_timeout", Attempts: 1}, "", func(start ProcessStart) error { pid = start.PID; return nil })
+	result, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_timeout", Attempts: 1}, "", func(start ProcessStart) error { pid = start.PID; return nil })
 	var termination *TerminationError
 	if !errors.As(err, &termination) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("pid=%d err=%v", pid, err)
 	}
+	if result.SessionID != "ses_fake" {
+		t.Fatalf("timeout occurred before the session became abortable: result=%+v err=%v", result, err)
+	}
 	if _, err := os.Stat(aborted); err != nil {
-		t.Fatalf("session abort was not requested: %v", err)
+		t.Fatalf("session abort was not requested: %v termination=%+v logs=%s", err, termination, openCodeFailureLogs(dir, "run_timeout"))
 	}
 	if processAlive(pid) {
 		t.Fatalf("opencode server process %d survived timeout", pid)
@@ -148,20 +155,25 @@ func TestOpenCodeTimeoutRetriesSessionAbortBeforeStoppingServer(t *testing.T) {
 	requireLoopbackListener(t)
 	dir := t.TempDir()
 	fake := openCodeHelperCommand(t, dir)
-	aborted := filepath.Join(dir, "aborted")
+	canonicalDir, err := config.CanonicalRepoPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aborted := filepath.Join(canonicalDir, "aborted")
 	t.Setenv("AGENT_LOOP_OPENCODE_MODE", "timeout")
-	t.Setenv("AGENT_LOOP_OPENCODE_ABORTED", aborted)
-	t.Setenv("AGENT_LOOP_OPENCODE_ABORT_FAIL_ONCE", "1")
 	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/test", "")
-	cfg.Worker.Timeout.Duration = time.Second
+	cfg.Worker.Timeout.Duration = 3 * time.Second
 	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
-	_, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_abort_retry", Attempts: 1}, "", nil)
+	result, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_abort_retry", Attempts: 1}, "", nil)
 	var termination *TerminationError
 	if !errors.As(err, &termination) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v", err)
 	}
+	if result.SessionID != "ses_fake" {
+		t.Fatalf("timeout occurred before the session became abortable: result=%+v err=%v", result, err)
+	}
 	if _, err := os.Stat(aborted); err != nil {
-		t.Fatalf("session abort was not retried: %v", err)
+		t.Fatalf("session abort was not retried: %v termination=%+v logs=%s", err, termination, openCodeFailureLogs(dir, "run_abort_retry"))
 	}
 }
 
@@ -178,6 +190,28 @@ func TestOpenCodeProviderFailuresAreNormalized(t *testing.T) {
 				t.Fatalf("mode=%s err=%v", mode, err)
 			}
 		})
+	}
+}
+
+func TestOpenCodeListeningWriterRequiresConcreteLoopbackPortAnnouncement(t *testing.T) {
+	writer := newOpenCodeListeningWriter()
+	if _, err := writer.Write([]byte("startup\nopencode server listening on http://127.0.0.1:")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("43210\n")); err != nil {
+		t.Fatal(err)
+	}
+	port, err := writer.Wait(context.Background())
+	if err != nil || port != 43210 {
+		t.Fatalf("port=%d err=%v", port, err)
+	}
+
+	invalid := newOpenCodeListeningWriter()
+	_, _ = invalid.Write([]byte("opencode server listening on http://127.0.0.1:0\n"))
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := invalid.Wait(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("invalid port announcement was accepted: %v", err)
 	}
 }
 
@@ -222,10 +256,17 @@ func TestOpenCodeHelperProcess(t *testing.T) {
 			port = os.Args[index+1]
 		}
 	}
-	if _, err := strconv.Atoi(port); err != nil {
+	if parsed, err := strconv.Atoi(port); err != nil || parsed < 0 || parsed > 65535 {
 		os.Exit(2)
 	}
+	listener, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "helper server failed to listen: %v\n", err)
+		os.Exit(2)
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "opencode server listening on http://127.0.0.1:%d\n", listener.Addr().(*net.TCPAddr).Port)
 	mux := http.NewServeMux()
+	var abortFailOnce atomic.Bool
 	requireAuth := func(w http.ResponseWriter, r *http.Request) bool {
 		username, password, ok := r.BasicAuth()
 		if !ok || username != os.Getenv("OPENCODE_SERVER_USERNAME") || password != os.Getenv("OPENCODE_SERVER_PASSWORD") {
@@ -240,28 +281,39 @@ func TestOpenCodeHelperProcess(t *testing.T) {
 		}
 	})
 	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r) {
-			_, _ = io.WriteString(w, `{"id":"ses_fake"}`)
+		if !requireAuth(w, r) {
+			return
 		}
+		var request struct {
+			Title string `json:"title"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		abortFailOnce.Store(strings.Contains(request.Title, "run_abort_retry"))
+		_, _ = io.WriteString(w, `{"id":"ses_fake"}`)
 	})
 	mux.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
 		if !requireAuth(w, r) {
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/abort") {
-			aborted := os.Getenv("AGENT_LOOP_OPENCODE_ABORTED")
-			if aborted == "" {
-				http.Error(w, "abort marker path is missing", http.StatusInternalServerError)
+			directory := r.URL.Query().Get("directory")
+			aborted := filepath.Join(directory, "aborted")
+			_, _ = fmt.Fprintf(os.Stderr, "abort marker=%q\n", aborted)
+			if directory == "" || !filepath.IsAbs(directory) {
+				http.Error(w, "abort directory is missing or not absolute", http.StatusInternalServerError)
 				return
 			}
 			firstAttempt := aborted + ".attempt"
-			if os.Getenv("AGENT_LOOP_OPENCODE_ABORT_FAIL_ONCE") == "1" {
+			if abortFailOnce.Load() {
 				if _, err := os.Stat(firstAttempt); errors.Is(err, os.ErrNotExist) {
 					if err := os.WriteFile(firstAttempt, []byte("attempted"), 0o600); err != nil {
 						http.Error(w, err.Error(), http.StatusInternalServerError)
 						return
 					}
-					http.Error(w, "retry abort", http.StatusServiceUnavailable)
+					_, _ = io.WriteString(w, "false")
 					return
 				}
 			}
@@ -290,9 +342,19 @@ func TestOpenCodeHelperProcess(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, `{"info":{"providerID":"opencode-go","modelID":"kimi-k2.7-code","structured":{"version":1,"status":"completed","execution_profile":"standard","summary":"done","question":null,"tests":[],"git":null,"retry":null}}}`)
 	})
-	if err := http.ListenAndServe("127.0.0.1:"+port, mux); err != nil {
+	if err := http.Serve(listener, mux); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "helper server stopped: %v\n", err)
 		os.Exit(2)
 	}
+}
+
+func openCodeFailureLogs(dir, runID string) string {
+	var combined strings.Builder
+	for _, name := range []string{"opencode-server.log", "opencode-server.stderr.log"} {
+		data, _ := os.ReadFile(filepath.Join(dir, "runs", runID, name))
+		combined.WriteString(name + ":" + string(data) + "\n")
+	}
+	return combined.String()
 }
 
 func assertOpenCodeRequest(t *testing.T, path, provider, model, variant string) {
