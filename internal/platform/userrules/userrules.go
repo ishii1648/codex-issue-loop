@@ -138,7 +138,6 @@ func ManagedBlock() string {
 	return startMarker + "\n" + ruleBody + "\n" + endMarker
 }
 
-// ParseAgents parses the CLI value accepted by --agents.
 func ParseAgents(value string) ([]Agent, error) {
 	if strings.TrimSpace(value) == "" {
 		return nil, fmt.Errorf("--agents must contain codex, claude, or both")
@@ -382,8 +381,7 @@ func joinDetail(first, second string) string {
 	return first + "; " + second
 }
 
-// Apply applies only create/update actions from a previously generated plan.
-// Every target is revalidated before any backup or atomic write begins.
+// Apply revalidates every target before any backup or atomic write begins.
 func Apply(report Report) (Report, error) {
 	report.Apply = true
 	report.Changed = false
@@ -406,7 +404,8 @@ func Apply(report Report) (Report, error) {
 			return report, fmt.Errorf("%s changed after planning: %w", target.Path, err)
 		}
 	}
-	// Finish every required backup before changing any user-owned setting.
+	// Back up every target first so a later backup failure cannot leave only part
+	// of the multi-agent settings updated.
 	for i := range report.Targets {
 		target := &report.Targets[i]
 		if target.Action == ActionNone || !target.originalExist {

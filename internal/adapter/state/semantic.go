@@ -40,8 +40,7 @@ func (e SemanticCompatibilityError) Error() string {
 	return "durable state does not satisfy semantic contract: " + strings.Join(parts, "; ")
 }
 
-// ValidateSemanticContract derives execution checks from statecontract.Current.
-// It never repairs or normalizes provenance.
+// ValidateSemanticContract never repairs or normalizes provenance.
 func ValidateSemanticContract(snapshot Snapshot) error {
 	violations := SemanticViolations(snapshot)
 	if len(violations) == 0 {

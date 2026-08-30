@@ -7,9 +7,7 @@ package issue
 
 import "fmt"
 
-// Status is the durable lifecycle state of one queued Issue.
-//
-// Values are part of the persisted state contract and therefore must not be
+// Status values are part of the persisted state contract and must not be
 // renamed without a schema/semantic migration.
 type Status string
 
@@ -59,15 +57,14 @@ var knownStatuses = func() map[Status]struct{} {
 	return known
 }()
 
-// AllStatuses returns a copy of every value in the durable lifecycle contract.
-// Callers may derive secondary contracts without maintaining another status list.
+// AllStatuses returns an independent slice so callers can derive secondary
+// contracts without maintaining or mutating the canonical list.
 func AllStatuses() []Status {
 	return append([]Status(nil), allStatuses[:]...)
 }
 
 func (s Status) String() string { return string(s) }
 
-// Validate rejects lifecycle values that are not part of the durable contract.
 func (s Status) Validate() error {
 	if _, ok := knownStatuses[s]; !ok {
 		return fmt.Errorf("unknown Issue status %q", s)
@@ -94,8 +91,6 @@ func (s Status) WorktreeRetentionClass() WorktreeRetentionClass {
 	}
 }
 
-// RequiresWorkspaceProvenance reports whether execution or recovery may need
-// the Issue's immutable worker workspace identity.
 func (s Status) RequiresWorkspaceProvenance() bool {
 	switch s {
 	case StatusClaimed, StatusRunning, StatusAnswerClaimWaiting, StatusResumePending,
@@ -108,9 +103,8 @@ func (s Status) RequiresWorkspaceProvenance() bool {
 	}
 }
 
-// OccupiesWorkerSlot reports whether an Issue owns one of the bounded worker
-// execution slots. Retained leases in waiting and attention states still fence
-// resources, but do not consume a worker slot.
+// Retained leases in waiting and attention states still fence resources, but
+// do not consume a bounded worker slot.
 func (s Status) OccupiesWorkerSlot() bool {
 	switch s {
 	case StatusClaiming, StatusClaimed, StatusRunning, StatusResumePending,
@@ -121,8 +115,6 @@ func (s Status) OccupiesWorkerSlot() bool {
 	}
 }
 
-// RequiresCapabilityRecheck reports whether persisted capability requirements
-// must be re-evaluated before the Issue can resume execution.
 func (s Status) RequiresCapabilityRecheck() bool {
 	switch s {
 	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending,
@@ -133,14 +125,10 @@ func (s Status) RequiresCapabilityRecheck() bool {
 	}
 }
 
-// TerminalForWebhook reports whether webhook reconciliation treats the Issue
-// as an attention/terminal record rather than an active lifecycle owner.
 func (s Status) TerminalForWebhook() bool {
 	return s.Terminal() || s == StatusNeedsInput
 }
 
-// WebhookRoutable reports whether a webhook delivery may be routed directly
-// to the persisted Issue lifecycle.
 func (s Status) WebhookRoutable() bool {
 	switch s {
 	case StatusClaiming, StatusClaimed, StatusRunning, StatusAnswerClaimWaiting,
@@ -153,8 +141,8 @@ func (s Status) WebhookRoutable() bool {
 	}
 }
 
-// PendingDispatch reports whether the scheduler may dispatch lifecycle work
-// for this status once its retry deadline and resource admission allow it.
+// PendingDispatch is only one scheduler gate; retry deadlines and resource
+// admission still apply.
 func (s Status) PendingDispatch() bool {
 	switch s {
 	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending,
@@ -166,8 +154,8 @@ func (s Status) PendingDispatch() bool {
 	}
 }
 
-// DispatchPending models the two durable lifecycle axes together. GitHub
-// synchronization always takes precedence over status-specific dispatch.
+// Status and GitHub synchronization are separate durable lifecycle axes;
+// pending synchronization requires dispatch independently of status policy.
 func (s Status) DispatchPending(sync GitHubSync) bool {
 	return sync.Pending() || s.PendingDispatch()
 }

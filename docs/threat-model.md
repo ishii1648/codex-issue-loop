@@ -6,7 +6,7 @@
 
 次を信頼境界とする。
 
-- **信頼する**: Mac miniのOSとログインユーザー、インストール済みCLIの実体、レビュー済みの`.agent-loop.yaml`と`AGENTS.md`、`agent-loop`本体
+- **信頼する**: Mac miniのOSとログインユーザー、インストール済みCLIの実体、レビュー済みの`.agent-loop.yaml`、`AGENTS.md`、`CLAUDE.md`、`agent-loop`本体
 - **条件付きで信頼する**: GitHub/Codexサービス、対象リポジトリの履歴、依存モジュール
 - **信頼しない**: Issueのタイトル・本文・コメント、workerのstdout/stderrと構造化結果、外部コマンドのエラー出力、質問への回答、Issueから導出する名前
 
