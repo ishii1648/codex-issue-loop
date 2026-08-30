@@ -204,6 +204,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	}
 	for _, required := range []string{
 		`chmod 0755 "$CANDIDATE_BINARY"`,
+		`gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY"`,
 		`for checkpoint in start minute-15 minute-30`,
 		`cmp "dist/prerelease/$asset" "dist/stable/$asset"`,
 		`agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json`,
