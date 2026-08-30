@@ -11,6 +11,16 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 )
 
+const (
+	invalidIssueStatus                       issuedomain.Status                            = "invalid-test-status"
+	invalidGitHubSync                        issuedomain.GitHubSync                        = "invalid-test-github-sync"
+	invalidEnvironmentResumeStatus           issuedomain.EnvironmentResumeStatus           = "invalid-test-environment-resume"
+	invalidPublicationRecoveryStatus         issuedomain.PublicationRecoveryStatus         = "invalid-test-publication-recovery"
+	invalidConflictAttemptStatus             issuedomain.ConflictAttemptStatus             = "invalid-test-conflict-attempt"
+	invalidPullRequestChecksRecoveryStatus   issuedomain.PullRequestChecksRecoveryStatus   = "invalid-test-checks-recovery"
+	invalidWorkspaceProvenanceRecoveryStatus issuedomain.WorkspaceProvenanceRecoveryStatus = "invalid-test-workspace-recovery"
+)
+
 func validSnapshotForInvariantTest() Snapshot {
 	now := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 	return Snapshot{
@@ -51,8 +61,22 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 					Lease: &ResourceLease{Owner: LeaseOwner{RunID: runID, Generation: 1}, Slot: 0, ResolvedResources: []string{key}, ReservedAt: now}}
 			}
 		}},
+		{name: "resource conflict", mutate: func(snapshot *Snapshot) {
+			for number := 1; number <= 2; number++ {
+				key := string(rune('0' + number))
+				runID := "run_" + key
+				snapshot.Issues[key] = &Issue{Number: number, Status: issuedomain.StatusClaiming, RunID: runID, LeaseGeneration: 1,
+					Lease: &ResourceLease{Owner: LeaseOwner{RunID: runID, Generation: 1}, Slot: number - 1, ResolvedResources: []string{"shared"}, ReservedAt: now}}
+			}
+		}},
 		{name: "pending request answer", mutate: func(snapshot *Snapshot) {
 			snapshot.PendingRequests["req_1"] = &Request{ID: "req_1", IssueNumber: 1, Status: issuedomain.RequestStatusPending, Answer: "already answered"}
+		}},
+		{name: "pending request resume status", mutate: func(snapshot *Snapshot) {
+			snapshot.PendingRequests["req_1"] = &Request{ID: "req_1", IssueNumber: 1, Status: issuedomain.RequestStatusPending, ResumeStatus: invalidIssueStatus}
+		}},
+		{name: "pending request park identity", mutate: func(snapshot *Snapshot) {
+			snapshot.PendingRequests["req_1"] = &Request{ID: "req_1", IssueNumber: 1, Status: issuedomain.RequestStatusPending, ResourceParkID: "park_1"}
 		}},
 		{name: "workspace provenance", mutate: func(snapshot *Snapshot) {
 			issue := snapshot.Issues["1"]
@@ -64,6 +88,21 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 			issue := snapshot.Issues["1"]
 			issue.Status, issue.GitHubSync = issuedomain.StatusPublicationRecovery, issuedomain.GitHubSyncPublicationRecovery
 		}},
+		{name: "publication recovery vocabulary", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].PublicationRecovery = &PublicationRecovery{Status: invalidPublicationRecoveryStatus}
+		}},
+		{name: "checks recovery vocabulary", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].PullRequestChecksRecovery = &PullRequestChecksRecovery{Status: invalidPullRequestChecksRecoveryStatus}
+		}},
+		{name: "conflict recovery vocabulary", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].ConflictRecovery = &ConflictRecovery{History: []ConflictAttempt{{Number: 1, Status: invalidConflictAttemptStatus}}}
+		}},
+		{name: "environment recovery vocabulary", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].EnvironmentResume = &EnvironmentResume{Status: invalidEnvironmentResumeStatus}
+		}},
+		{name: "workspace recovery vocabulary", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].WorkspaceRecovery = &WorkspaceProvenanceRecovery{Status: invalidWorkspaceProvenanceRecoveryStatus}
+		}},
 		{name: "worker process lifecycle", mutate: func(snapshot *Snapshot) {
 			issue := snapshot.Issues["1"]
 			issue.Status, issue.RunID, issue.WorkerPID = issuedomain.StatusRunning, "run_1", 42
@@ -71,8 +110,24 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 		{name: "Pull Request merge identity", mutate: func(snapshot *Snapshot) {
 			snapshot.Issues["1"].PullRequestMerged = true
 		}},
+		{name: "Pull Request number and URL", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].PullRequestNumber = 1
+		}},
 		{name: "retry and attempt counters", mutate: func(snapshot *Snapshot) {
 			snapshot.Issues["1"].Attempts = -1
+		}},
+		{name: "retry deadline", mutate: func(snapshot *Snapshot) {
+			zero := time.Time{}
+			snapshot.Issues["1"].RetryAfter = &zero
+		}},
+		{name: "continuation counter", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].Continuations = -1
+		}},
+		{name: "unknown lifecycle vocabulary", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].Status = invalidIssueStatus
+		}},
+		{name: "unknown GitHub synchronization vocabulary", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].GitHubSync = invalidGitHubSync
 		}},
 		{name: "unknown semantic contract", mutate: func(snapshot *Snapshot) {
 			snapshot.SemanticContractVersion++

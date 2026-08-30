@@ -210,14 +210,54 @@ func TestDeterministicModelRuns1000ReplayableSequences(t *testing.T) {
 }
 
 func TestFaultDurableTransactionFiveCrashBoundaries(t *testing.T) {
+	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
 	for _, boundary := range []string{"before_transaction", "after_transaction", "after_event_append", "after_snapshot_replace", "before_transaction_delete"} {
 		t.Run(boundary, func(t *testing.T) {
 			store := state.Store{Dir: t.TempDir(), RepoID: "repo-conformance", RepoPath: "/tmp/conformance"}
 			if err := store.Initialize(); err != nil {
 				t.Fatal(err)
 			}
-			base, err := store.Update("base", 0, "", nil, func(snapshot *state.Snapshot) error {
-				snapshot.Supervisor.State = "running"
+			_, owner, err := store.ReserveLease(state.LeaseReservation{
+				IssueNumber: 1, Title: "conformance", RunID: "run_conformance", Slot: 0,
+				ResolvedResources: []string{state.RepositoryResource}, BaseSHA: strings.Repeat("a", 40), ReservedAt: now,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, err := issuedomain.ConfirmClaim(issuedomain.StatusClaiming)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = store.Update("issue_claimed", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+				item := snapshot.Issues["1"]
+				if err := state.ApplyIssueTransition(item, claim); err != nil {
+					return err
+				}
+				item.Worktree, item.Branch = "/tmp/conformance-worktree", "codex/conformance"
+				item.Workspace = &state.WorkerWorkspace{
+					Path: "/tmp/conformance-worktree", Branch: "codex/conformance", RepoID: store.RepoID,
+					Repository: "owner/repo", RepositoryID: 1, GitCommonDir: "/tmp/conformance/.git",
+					MainCheckout: store.RepoPath, CapturedAt: now,
+				}
+				item.UpdatedAt = now
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			start, err := issuedomain.StartClaimedWorker(issuedomain.StatusClaimed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = store.Update("worker_started", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+				return state.ApplyIssueTransition(snapshot.Issues["1"], start)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			base, err := store.Update("worker_process_started", 1, owner.RunID, map[string]int{"pid": 4242, "pgid": 4242}, func(snapshot *state.Snapshot) error {
+				item := snapshot.Issues["1"]
+				item.WorkerPID, item.WorkerPGID = 4242, 4242
 				return nil
 			})
 			if err != nil {
@@ -225,9 +265,15 @@ func TestFaultDurableTransactionFiveCrashBoundaries(t *testing.T) {
 			}
 			next := base
 			next.StateRevision++
-			next.Supervisor.Message = "recovered"
-			next.Supervisor.UpdatedAt = time.Now().UTC()
-			event := state.Event{Version: state.CurrentVersion, EventID: "evt_conformance", Sequence: next.StateRevision, Timestamp: time.Now().UTC(), RepoID: store.RepoID, Type: "crash_boundary"}
+			next.Supervisor.UpdatedAt = now.Add(time.Second)
+			if err := next.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			event := state.Event{
+				Version: state.CurrentVersion, EventID: "evt_conformance_publication", Sequence: next.StateRevision,
+				Timestamp: now.Add(time.Second), RepoID: store.RepoID, IssueNumber: 1, RunID: owner.RunID,
+				Type: "publication_committed",
+			}
 			txn := struct {
 				Version  int            `json:"version"`
 				Snapshot state.Snapshot `json:"snapshot"`
@@ -250,10 +296,40 @@ func TestFaultDurableTransactionFiveCrashBoundaries(t *testing.T) {
 			if boundary != "before_transaction" {
 				wantRevision = next.StateRevision
 			}
-			if loaded.StateRevision != wantRevision || len(loaded.Issues) != 0 {
+			if loaded.StateRevision != wantRevision {
 				t.Fatalf("boundary=%s snapshot=%+v", boundary, loaded)
 			}
-			assertContiguousEvents(t, store.EventsPath(), wantRevision)
+			item := loaded.Issues["1"]
+			if item == nil || item.Status != issuedomain.StatusRunning || item.Lease == nil || item.Lease.Owner != owner ||
+				item.LeaseGeneration != owner.Generation || item.WorkerPID != 4242 || item.WorkerPGID != 4242 {
+				t.Fatalf("boundary=%s lost worker or lease ownership: issue=%+v owner=%+v", boundary, item, owner)
+			}
+			activeWorkers := 0
+			for _, issue := range loaded.Issues {
+				if issue != nil && issue.Status.OccupiesWorkerSlot() && issue.Lease != nil {
+					activeWorkers++
+				}
+			}
+			if activeWorkers != 1 {
+				t.Fatalf("boundary=%s active workers=%d want=1", boundary, activeWorkers)
+			}
+			events := assertContiguousEvents(t, store.EventsPath(), wantRevision)
+			workerStarts, publications := 0, 0
+			for _, storedEvent := range events {
+				switch storedEvent.Type {
+				case "worker_process_started":
+					workerStarts++
+				case "publication_committed":
+					publications++
+				}
+			}
+			wantPublications := 1
+			if boundary == "before_transaction" {
+				wantPublications = 0
+			}
+			if workerStarts != 1 || publications != wantPublications {
+				t.Fatalf("boundary=%s worker starts=%d publications=%d want=1/%d", boundary, workerStarts, publications, wantPublications)
+			}
 			if _, err := os.Stat(store.TransactionPath()); !os.IsNotExist(err) {
 				t.Fatalf("prepared transaction remains after recovery: %v", err)
 			}
@@ -291,7 +367,7 @@ func appendJSONLine(t *testing.T, path string, value any) {
 	}
 }
 
-func assertContiguousEvents(t *testing.T, path string, revision uint64) {
+func assertContiguousEvents(t *testing.T, path string, revision uint64) []state.Event {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -301,6 +377,8 @@ func assertContiguousEvents(t *testing.T, path string, revision uint64) {
 	if len(lines) != int(revision) {
 		t.Fatalf("event count=%d revision=%d", len(lines), revision)
 	}
+	events := make([]state.Event, 0, len(lines))
+	seenIDs := make(map[string]bool, len(lines))
 	for index, line := range lines {
 		var event state.Event
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
@@ -309,5 +387,11 @@ func assertContiguousEvents(t *testing.T, path string, revision uint64) {
 		if event.Sequence != uint64(index+1) {
 			t.Fatalf("event sequence gap: got=%d want=%d", event.Sequence, index+1)
 		}
+		if event.EventID == "" || seenIDs[event.EventID] {
+			t.Fatalf("missing or duplicate event ID at sequence %d: %q", event.Sequence, event.EventID)
+		}
+		seenIDs[event.EventID] = true
+		events = append(events, event)
 	}
+	return events
 }

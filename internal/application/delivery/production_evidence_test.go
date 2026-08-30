@@ -141,8 +141,13 @@ esac
 }
 
 func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
+	type step struct {
+		Run  string `yaml:"run"`
+		Uses string `yaml:"uses"`
+	}
 	type job struct {
-		Needs any `yaml:"needs"`
+		Needs any    `yaml:"needs"`
+		Steps []step `yaml:"steps"`
 	}
 	var workflow struct {
 		Jobs map[string]job `yaml:"jobs"`
@@ -176,6 +181,14 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		}
 		if got := normalizedNeeds(current.Needs); !reflect.DeepEqual(got, dependencies) {
 			t.Fatalf("job %s needs=%v want=%v", name, got, dependencies)
+		}
+		if len(current.Steps) == 0 {
+			t.Fatalf("job %s has no executable steps", name)
+		}
+		for index, step := range current.Steps {
+			if (step.Run == "") == (step.Uses == "") {
+				t.Fatalf("job %s step %d must contain exactly one of run or uses", name, index+1)
+			}
 		}
 	}
 	text := string(data)
