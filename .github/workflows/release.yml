@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish macOS arm64 release
+  build-candidate:
+    name: build-candidate
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -46,18 +46,13 @@ jobs:
       - name: Run release quality gates
         run: make ci
 
-      - name: Build reproducible release twice
+      - name: Build the canonical candidate once
         shell: bash
         run: |
           set -euo pipefail
           source_epoch=$(git show -s --format=%ct "${GITHUB_SHA}")
-          scripts/build-release.sh "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${source_epoch}" dist/first
-          scripts/build-release.sh "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${source_epoch}" dist/second
-          cmp dist/first/agent-loop_Darwin_arm64 dist/second/agent-loop_Darwin_arm64
-          cmp dist/first/agent-loop_Darwin_arm64.spdx.json dist/second/agent-loop_Darwin_arm64.spdx.json
-          cmp dist/first/release-manifest.json dist/second/release-manifest.json
-          cmp dist/first/checksums.txt dist/second/checksums.txt
-          dist/first/agent-loop_Darwin_arm64 version --json | jq -e \
+          scripts/build-release.sh "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${source_epoch}" dist/candidate
+          dist/candidate/agent-loop_Darwin_arm64 version --json | jq -e \
             --arg version "${GITHUB_REF_NAME}" --arg commit "${GITHUB_SHA}" \
             '.version == $version and .commit == $commit and .target == "darwin/arm64" and .delivery_protocol == 1'
 
@@ -65,20 +60,252 @@ jobs:
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: |
-            dist/first/agent-loop_Darwin_arm64
-            dist/first/agent-loop_Darwin_arm64.spdx.json
-            dist/first/release-manifest.json
-            dist/first/checksums.txt
+            dist/candidate/agent-loop_Darwin_arm64
+            dist/candidate/agent-loop_Darwin_arm64.spdx.json
+            dist/candidate/release-manifest.json
+            dist/candidate/checksums.txt
 
-      - name: Create GitHub Release
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/candidate
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-reproducibility:
+    name: verify-reproducibility
+    needs: build-candidate
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/candidate
+      - name: Compare a verification-only rebuild
+        run: |
+          source_epoch=$(git show -s --format=%ct "${GITHUB_SHA}")
+          scripts/build-release.sh "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "$source_epoch" dist/comparison
+          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
+            cmp "dist/candidate/$asset" "dist/comparison/$asset"
+          done
+
+  verify-attestation-and-manifest:
+    name: verify-attestation-and-manifest
+    needs: verify-reproducibility
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/candidate
+      - name: Verify checksums, manifest, and candidate attestation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            dist/first/agent-loop_Darwin_arm64 \
-            dist/first/agent-loop_Darwin_arm64.spdx.json \
-            dist/first/release-manifest.json \
-            dist/first/checksums.txt \
-            --verify-tag \
-            --generate-notes \
-            --title "${GITHUB_REF_NAME}"
+          cd dist/candidate
+          shasum -a 256 -c checksums.txt
+          jq -e --arg version "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" \
+            '.version == $version and .commit == $commit and .semantic_contract_current == 1 and .state_schema_current == 4' release-manifest.json
+          gh attestation verify agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
+
+  replay-production-fixtures:
+    name: replay-production-fixtures
+    needs: verify-attestation-and-manifest
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+      - name: Replay every byte-locked production fixture
+        run: go test ./internal/application/recoveryfixture ./internal/application/conformance -run '^(TestBlessedReleaseFixturesMatchReviewedByteLock|TestBlessedProductionFixturesReplay100Percent)$' -count=1
+
+  lifecycle-conformance:
+    name: lifecycle-conformance
+    needs: replay-production-fixtures
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+      - run: make conformance-test
+      - run: make fault-test
+
+  github-cli-contract:
+    name: github-cli-contract
+    needs: lifecycle-conformance
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Require actual contract credentials
+        env:
+          CANARY_GITHUB_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: test -n "$CANARY_GITHUB_TOKEN" && test -n "$OPENAI_API_KEY"
+      - run: npm install --global @openai/codex@0.136.0
+      - name: Exercise GitHub, gh, and Codex contracts
+        env:
+          GH_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CANARY_REPOSITORY: ishii1648/codex-issue-loop-canary
+          CONTRACT_ARTIFACT_DIR: contract-artifacts
+        run: |
+          scripts/github-cli-contract.sh
+          scripts/codex-cli-contract.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cli-contract-${{ github.sha }}
+          path: contract-artifacts
+          if-no-files-found: error
+
+  isolated-canary:
+    name: isolated-canary
+    needs: [build-candidate, github-cli-contract]
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/candidate
+      - run: npm install --global @openai/codex@0.136.0
+      - name: Run two isolated lifecycle sequences and fault recovery
+        env:
+          GH_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CANARY_REPOSITORY: ishii1648/codex-issue-loop-canary
+          CANARY_ARTIFACT_DIR: canary-artifacts
+          CANDIDATE_BINARY: dist/candidate/agent-loop_Darwin_arm64
+        run: scripts/isolated-canary.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: canary-report-${{ github.sha }}
+          path: canary-artifacts/canary-report.json
+          if-no-files-found: error
+      - name: Publish the candidate prerelease from canonical bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          candidate_tag="candidate-${GITHUB_REF_NAME}-${GITHUB_RUN_ID}"
+          gh release create "$candidate_tag" dist/candidate/* canary-artifacts/canary-report.json \
+            --target "$GITHUB_SHA" --prerelease --title "$candidate_tag" --notes "Release candidate for $GITHUB_REF_NAME from $GITHUB_SHA"
+
+  soak:
+    name: soak
+    needs: isolated-canary
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Record health at start, 15 minutes, and 30 minutes
+        env:
+          GH_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
+          CANARY_REPOSITORY: ishii1648/codex-issue-loop-canary
+        run: |
+          mkdir soak
+          for checkpoint in start minute-15 minute-30; do
+            gh repo view "$CANARY_REPOSITORY" --json nameWithOwner,visibility >"soak/$checkpoint.json"
+            if [ "$checkpoint" != minute-30 ]; then sleep 900; fi
+          done
+      - uses: actions/upload-artifact@v6
+        with:
+          name: soak-health-${{ github.sha }}
+          path: soak
+          if-no-files-found: error
+
+  production-approval:
+    name: production-approval
+    needs: soak
+    runs-on: macos-15
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - name: Record independent promotion approval
+        run: |
+          printf '{"actor":"%s","commit":"%s","tag":"%s","candidate_tag":"candidate-%s-%s"}\n' \
+            "$GITHUB_ACTOR" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$GITHUB_REF_NAME" "$GITHUB_RUN_ID" > approval.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: production-approval-${{ github.sha }}
+          path: approval.json
+          if-no-files-found: error
+
+  promote-stable:
+    name: promote-stable
+    needs: [build-candidate, production-approval]
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/candidate
+      - uses: actions/download-artifact@v7
+        with:
+          name: canary-report-${{ github.sha }}
+          path: dist/canary
+      - name: Publish stable release without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/candidate/* dist/canary/canary-report.json \
+            --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+
+  post-release-health:
+    name: post-release-health
+    needs: promote-stable
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/candidate
+      - name: Read back stable metadata, attestation, and candidate byte equality
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          candidate_tag="candidate-${GITHUB_REF_NAME}-${GITHUB_RUN_ID}"
+          gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,isPrerelease,assets \
+            --jq 'select(.tagName == "'"$GITHUB_REF_NAME"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 5)' >/dev/null
+          mkdir -p dist/stable dist/prerelease
+          gh release download "$GITHUB_REF_NAME" --dir dist/stable
+          gh release download "$candidate_tag" --dir dist/prerelease
+          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt canary-report.json; do
+            cmp "dist/prerelease/$asset" "dist/stable/$asset"
+          done
+          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
+            cmp "dist/candidate/$asset" "dist/stable/$asset"
+          done
+          gh attestation verify dist/stable/agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
+          dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" '.version == $version and .commit == $commit'

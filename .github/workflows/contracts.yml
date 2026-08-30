@@ -1,0 +1,65 @@
+name: GitHub and CLI contracts
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contracts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  github-cli-contract:
+    name: GitHub CLI contract
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require isolated canary credential
+        env:
+          CANARY_GITHUB_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
+        run: test -n "$CANARY_GITHUB_TOKEN"
+      - name: Exercise actual GitHub and gh contracts
+        env:
+          GH_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
+          CANARY_REPOSITORY: ishii1648/codex-issue-loop-canary
+          CONTRACT_ARTIFACT_DIR: contract-artifacts
+        run: scripts/github-cli-contract.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: github-cli-contract-${{ github.run_id }}
+          path: contract-artifacts/github-cli-contract.json
+          if-no-files-found: error
+
+  codex-cli-contract:
+    name: Codex CLI contract
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Require Codex credential
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: test -n "$OPENAI_API_KEY"
+      - name: Install supported Codex CLI
+        run: npm install --global @openai/codex@0.136.0
+      - name: Exercise actual Codex contracts
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONTRACT_ARTIFACT_DIR: contract-artifacts
+        run: scripts/codex-cli-contract.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: codex-cli-contract-${{ github.run_id }}
+          path: contract-artifacts/codex-cli-contract.json
+          if-no-files-found: error
