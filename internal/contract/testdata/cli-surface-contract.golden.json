@@ -12,6 +12,6 @@
   "codex": {
     "exec": true,
     "resume": true,
-    "guarded_features": 8
+    "guarded_features": 7
   }
 }

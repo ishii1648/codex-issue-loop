@@ -46,7 +46,7 @@ for option in --json --output-schema --output-last-message; do
   printf '%s\n' "$resume_help" | grep -Fq -- "$option"
 done
 features=$(codex features list)
-for feature in network_proxy apps browser_use computer_use plugins remote_plugin skill_search tool_suggest; do
+for feature in network_proxy apps browser_use computer_use plugins remote_plugin tool_suggest; do
   printf '%s\n' "$features" | grep -Fq -- "$feature"
 done
 
@@ -57,7 +57,7 @@ jq -n --arg gh "$gh_version" --arg codex "$codex_version" '
     credentials: {canary_github_token: false, openai_api_key: false},
     inference_requests: 0,
     gh: {version: $gh, command_groups: 16},
-    codex: {version: $codex, exec: true, resume: true, guarded_features: 8}
+    codex: {version: $codex, exec: true, resume: true, guarded_features: 7}
   }
 ' >"$artifact_dir/cli-surface-report.json"
 
