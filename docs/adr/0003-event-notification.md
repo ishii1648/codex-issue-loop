@@ -20,7 +20,7 @@ watch algorithmは次の契約を守る。
 2. state directoryをfsnotifyへ登録する。
 3. subscription後にsnapshotをもう一度読み、read-subscribe間のraceを閉じる。
 4. `state.json`または`events.jsonl`のeventを受けたらpayloadを解釈せずsnapshotを読む。
-5. eventがなくてもjitter付きの`watch.reconcile_interval`でsnapshotを読む。
+5. eventがなくても内部のjitter付きreconciliation間隔でsnapshotを読む。
 6. watcher生成・directory登録が失敗した場合、またはevent/error channelが閉じた場合はwatchを終了せずpolling-onlyへ降格する。
 7. 各watch clientは独立したwatcherを持ち、client間でeventを消費し合わない。
 

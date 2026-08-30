@@ -5,21 +5,11 @@ github:
   repository_id: 1334901081
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
-  running_label: codex-loop:running
-  needs_input_label: codex-loop:needs-input
-  failed_label: codex-loop:failed
-  done_label: codex-loop:done
 
 queue:
-  poll_interval: 60s
   concurrency: 2
-  order: issue_number_asc
-  priority_labels: []
-  max_attempts: 3
-  continue_after_needs_input: true
 
 resources:
-  metadata_version: 1
   definitions:
     - name: config
       paths: [.agent-loop*.yaml, internal/platform/config/**, internal/domain/admission/**, internal/domain/capability/**, docs/resource-admission.md, docs/specification.md]
@@ -38,79 +28,23 @@ resources:
     - name: docs
       paths: [.gitignore, README.md, AGENTS.md, docs/**]
 
-worker:
-  command: codex
-  model: null
-  sandbox: workspace-write
-  session_mode: resumable
-  timeout: 2h
-  timeout_grace: 30s
-  ambiguous_profile: extended
-  profiles:
-    standard:
-      max_continuations: 0
-    extended:
-      max_continuations: 3
-
-watch:
-  reconcile_interval: 60s
-  reconcile_jitter: 10%
-
 git:
-  branch_prefix: codex/issue-
-  worktree_root: null
   base_branch: main
 
 formatters:
   go:
     enabled: true
-    timeout: 30s
 
 completion:
-  create_draft_pr: true
   auto_merge: false
-  close_issue: true
 
-worktrees:
-  completed_max_age: 168h
-  failed_max_age: 720h
-  blocked_max_age: 0s
-  needs_input_max_age: 0s
-
-logs:
-  rotate_bytes: 16777216
-  rotate_interval: 24h
-  generations: 7
-  worker_run_max_age: 720h
-  worker_run_max_count: 100
-
-security:
-  redact_env: []
-
-# Cloudflare Tunnel経由でGitHub webhookを受ける。公開endpointはagent-loopが用意せず、
-# reverse proxyがhook.zeitreises.com/github/webhookからlistener_addressへ転送する。
-# 構成と復旧手順は docs/mac-mini-runbook.md#12-webhook-brokerとreverse-proxy を参照する。
-#
-# secret_sourceはhostに依存しない固定pathを指す。この設定はrepositoryで共有され、
-# secret_source.fileは絶対pathしか受け付けないため、home配下を指定するとhostの
-# user名が公開され、他hostでも解決できなくなる。fileはbrokerを実行するuserの
-# 所有で0600にする。
+# Cloudflare Tunnel構成はdocs/mac-mini-runbook.mdを参照する。
+# secret fileはrepository外の固定pathへowner-onlyで配置する。
 webhook:
   mode: webhook
   listener_address: 127.0.0.1:8787
   public_url_identifier: hook.zeitreises.com/github/webhook
   secret_source:
     file: /usr/local/etc/codex-issue-loop/ishii1648-codex-issue-loop.webhook
-  # installationを持たないclassic repository webhookを使うため、空のallowlistと
-  # 明示的なopt-inを指定する。repository ID/full nameとHMAC検証は緩和されない。
-  installation_ids: []
+  # installationを持たないclassic repository webhookへの明示的なopt-in。
   allow_repository_webhook: true
-  safety_sweep_interval: 15m
-  # watch.reconcile_jitterと違いpercent表記のcustom unmarshalerがないため、
-  # safety_sweep_jitterは小数で書く。
-  safety_sweep_jitter: 0.1
-  max_body_bytes: 2097152
-  read_timeout: 10s
-  read_header_timeout: 5s
-  idle_timeout: 30s
-  max_concurrent: 16

@@ -4,105 +4,35 @@ github:
   repo: owner/repository
   # Required only when webhook.mode is webhook.
   # repository_id: 123456789
+  # Labels that people use to admit or exclude work are repository policy.
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
-  running_label: codex-loop:running
-  needs_input_label: codex-loop:needs-input
-  failed_label: codex-loop:failed
-  done_label: codex-loop:done
 
 queue:
-  poll_interval: 60s
   concurrency: 2
-  order: issue_number_asc
-  # Used from highest to lowest when order is priority_then_created_at.
-  priority_labels: []
-  max_attempts: 3
-  continue_after_needs_input: true
 
+# Required only when concurrency is greater than 1. These definitions are the
+# repository-specific safety boundary for parallel changes.
 resources:
-  metadata_version: 1
   definitions:
     - name: application
       paths: [src/**]
     - name: docs
       paths: [README.md, docs/**]
 
-worker:
-  command: codex
-  model: null
-  # Default is disabled. For local HTTP/CDP verification, set all three values
-  # exactly as shown; arbitrary hosts and proxy bypass are rejected.
-  command_network:
-    policy: disabled
-    proxy: false
-    allowed_hosts: []
-  sandbox: workspace-write
-  session_mode: resumable
-  timeout: 2h
-  timeout_grace: 30s
-  ambiguous_profile: extended
-  profiles:
-    standard:
-      max_continuations: 0
-      capabilities:
-        network: none
-        browser_cdp: false
-        download: false
-        external_time_gate: false
-    extended:
-      max_continuations: 3
-      capabilities:
-        network: none
-        browser_cdp: false
-        download: false
-        external_time_gate: false
-
-watch:
-  reconcile_interval: 60s
-  reconcile_jitter: 10%
-
 git:
-  branch_prefix: codex/issue-
-  worktree_root: null
   base_branch: main
 
-# Fixed built-in adapter; no shell command or extra arguments are accepted.
+# Opt in only when the repository uses Go. This is a fixed built-in adapter;
+# no shell command or extra arguments are accepted.
 formatters:
   go:
     enabled: false
-    timeout: 30s
 
 completion:
-  create_draft_pr: true
   # false: CI成功後にReady for reviewへ移し、人手のmergeを待つ。
   # true: CI成功後にsquash mergeまで実行する。
   auto_merge: false
-  close_issue: true
-
-# A dirty Pull Request is recovered in its existing worktree and branch.
-conflict_recovery:
-  max_attempts_per_base: 3
-  max_base_updates: 3
-
-# 0s means that worktrees in the status are retained indefinitely.
-worktrees:
-  completed_max_age: 168h
-  failed_max_age: 720h
-  blocked_max_age: 0s
-  needs_input_max_age: 0s
-
-logs:
-  rotate_bytes: 16777216
-  rotate_interval: 24h
-  generations: 7
-  worker_run_max_age: 720h
-  worker_run_max_count: 100
-
-# Values are read from these environment variables at runtime. Never put the
-# secret values themselves in this file.
-security:
-  redact_env: []
 
 # Explicit fallback is polling. See docs/mac-mini-runbook.md before opting in.
 # Switch to webhook only after the reverse proxy and the GitHub webhook are both
@@ -110,9 +40,8 @@ security:
 # path is the 15 minute safety sweep, which is slower than 60 second polling.
 webhook:
   mode: polling
-  # The values below are the defaults and are validated only when mode is
-  # webhook. listener_address must be a literal loopback address; the reverse
-  # proxy terminates TLS in front of it.
+  # The connection fields below are required only when mode is webhook.
+  # listener_address must be a literal loopback address.
   # mode: webhook
   # listener_address: 127.0.0.1:8787
   # Non-secret audit identifier for the public endpoint. Never write a URL that
@@ -126,12 +55,3 @@ webhook:
   # has no installation, so it requires an empty list plus the explicit opt-in.
   # installation_ids: [987654]
   # allow_repository_webhook: false
-  # safety_sweep_interval: 15m
-  # Unlike watch.reconcile_jitter, this field has no percent-aware unmarshaler.
-  # Write it as a decimal fraction.
-  # safety_sweep_jitter: 0.1
-  # max_body_bytes: 2097152
-  # read_timeout: 10s
-  # read_header_timeout: 5s
-  # idle_timeout: 30s
-  # max_concurrent: 16

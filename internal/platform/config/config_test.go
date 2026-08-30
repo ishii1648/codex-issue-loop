@@ -18,12 +18,10 @@ func writeConfig(t *testing.T, body string) string {
 	return dir
 }
 
-func TestLoadDefaultsAndPercentJitter(t *testing.T) {
+func TestLoadSparseConfigUsesOperationalDefaults(t *testing.T) {
 	dir := writeConfig(t, `version: 4
 github:
   repo: owner/repo
-watch:
-  reconcile_jitter: 25%
 `)
 	cfg, err := Load(dir)
 	if err != nil {
@@ -35,7 +33,7 @@ watch:
 	if cfg.Watch.ReconcileInterval.Duration != 60*time.Second {
 		t.Fatalf("reconcile interval = %s", cfg.Watch.ReconcileInterval.Duration)
 	}
-	if cfg.Watch.ReconcileJitter != 0.25 {
+	if cfg.Watch.ReconcileJitter != 0.10 {
 		t.Fatalf("jitter = %f", cfg.Watch.ReconcileJitter)
 	}
 	if cfg.Worker.Profiles["extended"].MaxContinuations != 3 {
@@ -65,6 +63,29 @@ watch:
 	if cfg.Worktrees.CompletedMaxAge.Duration != 7*24*time.Hour || cfg.Worktrees.FailedMaxAge.Duration != 30*24*time.Hour ||
 		cfg.Worktrees.BlockedMaxAge.Duration != 0 || cfg.Worktrees.NeedsInputMaxAge.Duration != 0 {
 		t.Fatalf("unexpected worktree retention defaults: %+v", cfg.Worktrees)
+	}
+}
+
+func TestLoadPercentJitterForExpandedConfigCompatibility(t *testing.T) {
+	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nwatch:\n  reconcile_jitter: 25%\n")
+	cfg, err := Load(dir)
+	if err != nil || cfg.Watch.ReconcileJitter != 0.25 {
+		t.Fatalf("jitter=%f err=%v", cfg.Watch.ReconcileJitter, err)
+	}
+}
+
+func TestExampleConfigLoads(t *testing.T) {
+	repositoryRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	dir := t.TempDir()
+	data, err := os.ReadFile(filepath.Join(repositoryRoot, ".agent-loop.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, FileName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err != nil {
+		t.Fatal(err)
 	}
 }
 

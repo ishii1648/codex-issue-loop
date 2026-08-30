@@ -62,7 +62,7 @@ codex login
 
 ### 2.3 対象repositoryの設定とラベル
 
-対象repositoryのrootに`.agent-loop.yaml`を置き、[設定例](../.agent-loop.example.yaml)をもとにrepository名、ラベル、base branch、sandbox、timeoutを確認する。Go publisher整形を使うrepositoryでは`formatters.go.enabled: true`を明示し、`gofmt`を利用できるPATHでregisterする。任意formatter commandや追加引数は指定できない。GitHub Issue本文や設定へtokenを保存しない。
+対象repositoryのrootに`.agent-loop.yaml`を置き、[設定例](../.agent-loop.example.yaml)をもとにrepository名、入口ラベル、並列実行境界、base branch、公開方針を確認する。polling間隔やretry、保持期間などの内部運用値は記載しない。Go publisher整形を使うrepositoryでは`formatters.go.enabled: true`を明示し、`gofmt`を利用できるPATHでregisterする。任意formatter commandや追加引数は指定できない。GitHub Issue本文や設定へtokenを保存しない。
 
 まず不足ラベルのplanだけを表示し、内容を確認してから適用する。
 
@@ -349,7 +349,7 @@ logoutはLaunchAgentとRemoteの両方を停止させる。screen lockやdisplay
 - `~/Library/LaunchAgents/com.codex-issue-loop.*.plist`
 - `~/.codex/skills/agent-loop/SKILL.md`
 - 各対象repositoryの`.agent-loop.yaml`
-- 設定で`git.worktree_root`を変更している場合はそのdirectory
+- agent-loopのユーザー状態領域にあるmanaged worktree directory
 - commitまたはpushされていないIssue worktree
 
 backupは暗号化し、macOSユーザーと同等以上にアクセス制御する。GitHub/Codex tokenを別fileへexportしてbackupしない。通常のgit履歴とremote branch/PRも復旧点なので、保存すべき変更は可能な範囲でcommit・pushする。
@@ -595,7 +595,7 @@ touch /usr/local/etc/codex-issue-loop/owner-repository.webhook
 chmod 600 /usr/local/etc/codex-issue-loop/owner-repository.webhook
 ```
 
-対象repositoryのnumeric repository IDとGitHub App installation IDをGitHubの管理画面または認証済みAPIで確認し、次をdefault branchの`.agent-loop.yaml`へ追加する。`public_url_identifier`は監査用の非secret識別子であり、query tokenを含むURLを書かない。LaunchAgent運用では環境変数がログインlaunchdへ安全に注入されていることを保証しにくいため、通常は0600 file sourceを使う。`safety_sweep_jitter`は`watch.reconcile_jitter`と異なりpercent表記のcustom unmarshalerを持たないため、小数で書く。
+対象repositoryのnumeric repository IDとGitHub App installation IDをGitHubの管理画面または認証済みAPIで確認し、次をdefault branchの`.agent-loop.yaml`へ追加する。`public_url_identifier`は監査用の非secret識別子であり、query tokenを含むURLを書かない。LaunchAgent運用では環境変数がログインlaunchdへ安全に注入されていることを保証しにくいため、通常は0600 file sourceを使う。safety sweepやHTTP limitはbrokerの内部運用値なのでrepository設定には記載しない。
 
 ```yaml
 github:
@@ -610,13 +610,6 @@ webhook:
     file: /usr/local/etc/codex-issue-loop/owner-repository.webhook
   installation_ids: [987654]
   allow_repository_webhook: false
-  safety_sweep_interval: 15m
-  safety_sweep_jitter: 0.1
-  max_body_bytes: 2097152
-  read_timeout: 10s
-  read_header_timeout: 5s
-  idle_timeout: 30s
-  max_concurrent: 16
 ```
 
 GitHub Appまたはrepository webhookのpayload URLは公開HTTPS URLの`/github/webhook`へ合わせ、content typeは`application/json`、SSL verificationは有効、secretは上のcredentialと同一にする。最低限`issues`、`issue_comment`、`pull_request`、`check_run`、`status`を購読し、Actionsの状態だけで必要な場合に`workflow_run`を追加する。登録後の`ping`が202になり、次を確認してからready labelを使う。

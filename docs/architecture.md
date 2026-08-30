@@ -181,7 +181,7 @@ fsnotify/kqueueでstate directoryを監視するが、そのeventだけに依存
 
 snapshotには単調増加する `state_revision` を持たせる。watchは最後に確認したrevisionを記録し、再接続後も状態変化を比較できる。
 
-reconciliation間隔の既定値は60秒とし、複数watchがある場合はjitterを加える。これはIssueキューを取得する `queue.poll_interval` とは別の設定である。
+reconciliation間隔は実装が安全な内部値を所有し、複数watchがある場合はjitterを加える。Issueキューの取得間隔とは別の機構だが、どちらもrepository設定で調整する対象にはしない。
 
 ### 8.3 トークン消費の境界
 

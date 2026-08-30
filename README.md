@@ -93,7 +93,7 @@ gh api \
   > .agent-loop.yaml
 ```
 
-release binaryと同じtagの設定例を使い、`github.repo`、label、base branch、worker、完了条件を対象リポジトリに合わせます。設定項目は[設定例](.agent-loop.example.yaml)と[システム仕様](docs/specification.md)を参照してください。
+release binaryと同じtagの設定例を使い、repository、入口label、並列実行境界、base branch、公開方針を対象リポジトリに合わせます。polling間隔やretry、保持期間などの内部運用値は記載しません。設定項目は[設定例](.agent-loop.example.yaml)と[システム仕様](docs/specification.md)を参照してください。
 
 ### 3. ラベルを作成して起動する
 
