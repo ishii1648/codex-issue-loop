@@ -40,7 +40,7 @@ gh repo clone "$repository" "$temporary_root/repo" -- --quiet
 (
   cd "$temporary_root/repo"
   git switch -c "$branch"
-  git -c user.name=codex-issue-loop-contract -c user.email=contract@example.invalid commit --allow-empty -m "contract $run_key"
+  git -c user.name=codex-issue-loop-contract -c user.email=contract@example.invalid -c commit.gpgsign=false commit --allow-empty -m "contract $run_key"
   git push origin "$branch"
 )
 pr_url=$(gh pr create --repo "$repository" --head "$branch" --base main --title "contract $run_key" --body "Closes #$issue_number")

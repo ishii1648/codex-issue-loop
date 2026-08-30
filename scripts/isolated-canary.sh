@@ -4,6 +4,7 @@ set -eu
 repository=${CANARY_REPOSITORY:?CANARY_REPOSITORY is required}
 binary=${CANDIDATE_BINARY:?CANDIDATE_BINARY is required}
 artifact_dir=${CANARY_ARTIFACT_DIR:?CANARY_ARTIFACT_DIR is required}
+go_toolchain=${GOTOOLCHAIN:-go1.25.13}
 case "$repository" in
   */codex-issue-loop-canary) ;;
   *) printf '%s\n' "refusing non-canary repository: $repository" >&2; exit 1 ;;
@@ -106,7 +107,7 @@ printf '%s\n' yes | $binary answer --repo "$repo_path" --request-id "$request_id
 wait_issue_status "$sequence_two" completed
 stop_idle_supervisor
 
-GOCACHE="$temporary_root/go-cache" go test ./internal/application/conformance -run '^TestFaultDurableTransactionFiveCrashBoundaries$' -count=1
+GOTOOLCHAIN="$go_toolchain" GOCACHE="$temporary_root/go-cache" go test ./internal/application/conformance -run '^TestFaultDurableTransactionFiveCrashBoundaries$' -count=1
 final_status=$($binary status --repo "$repo_path" --json)
 active=$(printf '%s' "$final_status" | jq -r '.worker_pool.active')
 active_leases=$(printf '%s' "$final_status" | jq '[.state.issues[] | select(.lease != null)] | length')
