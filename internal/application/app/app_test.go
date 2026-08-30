@@ -43,6 +43,13 @@ type appProcessGroups struct {
 
 type resumedWorkspaceGitHub struct{ issue gh.Issue }
 
+func testWorkerWorkspace(snapshot *state.Snapshot, path, branch string) *state.WorkerWorkspace {
+	return &state.WorkerWorkspace{
+		Path: path, Branch: branch, RepoID: snapshot.RepoID, Repository: "owner/repo",
+		GitCommonDir: filepath.Join(snapshot.RepoPath, ".git"), MainCheckout: snapshot.RepoPath, CapturedAt: time.Now().UTC(),
+	}
+}
+
 func (f resumedWorkspaceGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, error) {
 	return nil, nil
 }
@@ -132,6 +139,14 @@ func TestDeliveryConfigureDefaultsToPreviewWithoutWritingConfigOrPlist(t *testin
 	}
 	if !strings.Contains(out.String(), `"applied": false`) || !strings.Contains(out.String(), `"runtime_root"`) {
 		t.Fatalf("output=%s", out.String())
+	}
+}
+
+func TestDeliveryRetryRollbackRequiresExplicitConfirmation(t *testing.T) {
+	var output bytes.Buffer
+	err := (App{Out: &output, Err: &output}).delivery(context.Background(), layout.Layout{Root: t.TempDir()}, []string{"retry-rollback", "--backup", "/tmp/not-authorized", "--json"})
+	if err == nil || !strings.Contains(err.Error(), "--confirm-retained-fence") {
+		t.Fatalf("err=%v output=%s", err, output.String())
 	}
 }
 
@@ -662,7 +677,7 @@ esac
 	}
 }
 
-func TestStartRefusesLegacySemanticStateBeforeLaunchdOrStateMutation(t *testing.T) {
+func TestStartQuarantinesLegacySemanticStateBeforeLaunchdMutation(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -678,7 +693,9 @@ func TestStartRefusesLegacySemanticStateBeforeLaunchdOrStateMutation(t *testing.
 		t.Fatal(err)
 	}
 	snapshot, err := store.Update("legacy_retry", 169, "run_169", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["169"] = &state.Issue{Number: 169, Status: issuedomain.StatusRetryWait, RunID: "run_169", Worktree: "/tmp/legacy", Branch: "codex/issue-169", Attempts: 1}
+		issue := &state.Issue{Number: 169, Status: issuedomain.StatusRetryWait, RunID: "run_169", Worktree: "/tmp/legacy", Branch: "codex/issue-169", Attempts: 1}
+		issue.Workspace = testWorkerWorkspace(snapshot, issue.Worktree, issue.Branch)
+		snapshot.Issues["169"] = issue
 		return nil
 	})
 	if err != nil {
@@ -686,16 +703,13 @@ func TestStartRefusesLegacySemanticStateBeforeLaunchdOrStateMutation(t *testing.
 	}
 	snapshot.SemanticContractVersion = 0
 	writeJSONFixture(t, store.StatePath(), snapshot)
-	stateBefore, _ := os.ReadFile(store.StatePath())
-	eventsBefore, _ := os.ReadFile(store.EventsPath())
 	err = (App{Out: io.Discard, Err: io.Discard}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"})
-	if err == nil || !strings.Contains(err.Error(), state.SemanticCodeContractVersionMismatch) {
+	if err == nil || !strings.Contains(err.Error(), "recovery-blocked") || !strings.Contains(err.Error(), "semantic contract version") {
 		t.Fatalf("legacy semantic state was not rejected: %v", err)
 	}
-	stateAfter, _ := os.ReadFile(store.StatePath())
-	eventsAfter, _ := os.ReadFile(store.EventsPath())
-	if !bytes.Equal(stateAfter, stateBefore) || !bytes.Equal(eventsAfter, eventsBefore) {
-		t.Fatal("rejected start modified durable state")
+	blocked, loadErr := store.Load()
+	if loadErr != nil || blocked.Recovery == nil || blocked.Recovery.Status != state.RecoveryStateBlocked || blocked.Recovery.BackupDir == "" {
+		t.Fatalf("semantic quarantine did not preserve a recovery backup: snapshot=%+v err=%v", blocked, loadErr)
 	}
 }
 
@@ -865,10 +879,12 @@ esac
 	}
 	prURL := "https://example.test/pull/9"
 	_, err = store.Update("blocked", 4, "run_4", nil, func(s *state.Snapshot) error {
-		s.Issues["4"] = &state.Issue{
+		item := &state.Issue{
 			Number: 4, Status: issuedomain.StatusBlocked, RunID: "run_4", Branch: branch, Worktree: repo,
 			PullRequestURL: prURL, LastError: "Pull Request lifecycle: Pull Request has merge conflicts",
 		}
+		item.Workspace = testWorkerWorkspace(s, item.Worktree, item.Branch)
+		s.Issues["4"] = item
 		return nil
 	})
 	if err != nil {
@@ -977,6 +993,7 @@ esac
 		item.Worktree = repo
 		item.SessionID = "session-8"
 		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-8"}
+		item.Workspace = testWorkerWorkspace(s, item.Worktree, item.Branch)
 		item.DeclaredResources = []string{state.RepositoryResource}
 		item.ActualResources = []string{state.RepositoryResource}
 		item.Answers = []state.AnswerRecord{{RequestID: "req-8", Question: "Continue?", Answer: "yes", AnsweredAt: time.Now().UTC()}}
@@ -991,6 +1008,7 @@ esac
 		item.Status = issuedomain.StatusBlocked
 		item.FailureKind = "issue"
 		item.LastError = legacyError
+		item.Workspace = nil
 		item.UpdatedAt = time.Now().UTC()
 		return nil
 	})
@@ -1909,6 +1927,7 @@ func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testi
 		item.Branch = branch
 		item.Worktree = cfg.RepoPath
 		item.SessionID = "session-9"
+		item.Workspace = testWorkerWorkspace(snapshot, item.Worktree, item.Branch)
 		return nil
 	})
 	if err != nil {
@@ -1921,6 +1940,7 @@ func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testi
 		item.Status = issuedomain.StatusBlocked
 		item.FailureKind = "issue"
 		item.LastError = legacyError
+		item.Workspace = nil
 		item.UpdatedAt = blockedAt
 		return nil
 	})
@@ -2169,7 +2189,10 @@ esac
 		t.Fatal(err)
 	}
 	if _, err := store.Update("input_requested", 12, competitor.RunID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["12"].Status = issuedomain.StatusNeedsInput
+		item := snapshot.Issues["12"]
+		item.Status = issuedomain.StatusNeedsInput
+		item.Worktree, item.Branch = cfg.RepoPath, branch
+		item.Workspace = testWorkerWorkspace(snapshot, item.Worktree, item.Branch)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -2195,20 +2218,11 @@ esac
 		snapshot.Issues["11"].WorkerPID = 4311
 		snapshot.Issues["11"].WorkerPGID = 4311
 		return nil
-	}); err != nil {
-		t.Fatal(err)
+	}); err == nil {
+		t.Fatal("aggregate validator accepted an active worker on a parked blocked record")
 	}
-	controller.alive[4311] = true
-	out.Reset()
-	stderr.Reset()
-	if code := legacyResumeTestApp(&out, &stderr, controller).Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "active worker") {
-		t.Fatalf("active worker was accepted: code=%d stderr=%s", code, stderr.String())
-	}
-	controller.alive[4311] = false
 	if _, err := store.Update("test_pending_request", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["11"].WorkerPID = 0
-		snapshot.Issues["11"].WorkerPGID = 0
-		snapshot.PendingRequests["req-pending-11"] = &state.Request{ID: "req-pending-11", IssueNumber: 11, Status: issuedomain.RequestStatusPending}
+		snapshot.PendingRequests["req_pending_11"] = &state.Request{ID: "req_pending_11", IssueNumber: 11, Status: issuedomain.RequestStatusPending}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -2219,7 +2233,8 @@ esac
 		t.Fatalf("pending request was accepted: code=%d stderr=%s", code, stderr.String())
 	}
 	if _, err := store.Update("test_request_answered", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req-pending-11"].Status = issuedomain.RequestStatusAnswered
+		snapshot.PendingRequests["req_pending_11"].Status = issuedomain.RequestStatusAnswered
+		snapshot.PendingRequests["req_pending_11"].Answer = "acknowledged"
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -2416,7 +2431,7 @@ esac
 	}
 	now := time.Now().UTC()
 	_, err = store.Update("issue_failed", 102, runID, nil, func(s *state.Snapshot) error {
-		s.Issues["102"] = &state.Issue{
+		item := &state.Issue{
 			Number: 102, Title: "Legacy publication", Status: issuedomain.StatusFailed, RunID: runID,
 			Branch: branch, Worktree: cfg.RepoPath, Attempts: cfg.Queue.MaxAttempts,
 			SessionID: "session-102", Session: &state.WorkerSession{Backend: "codex", ID: "session-102"},
@@ -2428,6 +2443,8 @@ esac
 			FailureKind:       "issue", LastError: "issue: worker retry limit reached: publish completed work: inspect publish changes: durable base SHA is missing",
 			UpdatedAt: now,
 		}
+		item.Workspace = testWorkerWorkspace(s, item.Worktree, item.Branch)
+		s.Issues["102"] = item
 		return nil
 	})
 	if err != nil {
@@ -2448,13 +2465,12 @@ esac
 		s.Issues["102"].WorkerPGID = 4242
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("aggregate validator accepted an active worker on a failed recovery record")
 	}
-	assertRefused("active worker", App{ProcessController: &appProcessGroups{alive: map[int]bool{4242: true}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-prerequisite-resolved"))
 	_, err = store.Update("fault_pending_request", 102, runID, nil, func(s *state.Snapshot) error {
 		s.Issues["102"].WorkerPID, s.Issues["102"].WorkerPGID = 0, 0
-		s.PendingRequests["req-pending-102"] = &state.Request{ID: "req-pending-102", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
+		s.PendingRequests["req_pending_102"] = &state.Request{ID: "req_pending_102", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -2462,7 +2478,7 @@ esac
 	}
 	assertRefused("pending request", App{ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-prerequisite-resolved"))
 	_, err = store.Update("faults_repaired", 102, runID, nil, func(s *state.Snapshot) error {
-		delete(s.PendingRequests, "req-pending-102")
+		delete(s.PendingRequests, "req_pending_102")
 		return nil
 	})
 	if err != nil {
@@ -2673,6 +2689,7 @@ esac
 		item.Status = issuedomain.StatusFailed
 		item.Worktree = managedWorktree
 		item.Branch = branch
+		item.Workspace = testWorkerWorkspace(snapshot, item.Worktree, item.Branch)
 		item.PullRequestURL = "https://example.test/pr/447"
 		item.PullRequestNumber = 447
 		item.HeadSHA = oldHead
@@ -2706,14 +2723,13 @@ esac
 		snapshot.Issues["102"].WorkerPGID = 4242
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("aggregate validator accepted an active worker on a failed recovery record")
 	}
-	assertRefused("active worker", App{ProcessController: &appProcessGroups{alive: map[int]bool{4242: true}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-external-fix"))
 	_, err = store.Update("fault_pending_request", 102, runID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["102"].WorkerPID = 0
 		snapshot.Issues["102"].WorkerPGID = 0
-		snapshot.PendingRequests["req-102"] = &state.Request{ID: "req-102", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
+		snapshot.PendingRequests["req_102"] = &state.Request{ID: "req_102", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -2721,7 +2737,7 @@ esac
 	}
 	assertRefused("pending request", App{ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}}, append(baseArgs, "--confirm-external-fix"))
 	_, err = store.Update("faults_repaired", 102, runID, nil, func(snapshot *state.Snapshot) error {
-		delete(snapshot.PendingRequests, "req-102")
+		delete(snapshot.PendingRequests, "req_102")
 		return nil
 	})
 	if err != nil {
@@ -2955,6 +2971,7 @@ esac
 		item.Status = issuedomain.StatusBlocked
 		item.Worktree = managedWorktree
 		item.Branch = branch
+		item.Workspace = testWorkerWorkspace(snapshot, item.Worktree, item.Branch)
 		item.Attempts = 3
 		item.Continuations = 2
 		item.SessionID = "session-102"
@@ -2982,19 +2999,15 @@ esac
 	}
 	_, err = store.Update("test_worker_alive", 102, runID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["102"].WorkerPID = 4321
+		snapshot.Issues["102"].WorkerPGID = 4321
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("aggregate validator accepted an active worker on a blocked adoption record")
 	}
-	controller.alive[4321] = true
-	if code, _, _ := run(baseArgs); code == 0 {
-		t.Fatal("active worker was accepted")
-	}
-	controller.alive[4321] = false
 	_, err = store.Update("test_pending_request", 102, runID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["102"].WorkerPID = 0
-		snapshot.PendingRequests["req-pending"] = &state.Request{ID: "req-pending", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
+		snapshot.PendingRequests["req_pending"] = &state.Request{ID: "req_pending", IssueNumber: 102, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -3004,7 +3017,8 @@ esac
 		t.Fatal("pending manual answer was accepted")
 	}
 	_, err = store.Update("test_request_answered", 102, runID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req-pending"].Status = issuedomain.RequestStatusAnswered
+		snapshot.PendingRequests["req_pending"].Status = issuedomain.RequestStatusAnswered
+		snapshot.PendingRequests["req_pending"].Answer = "acknowledged"
 		return nil
 	})
 	if err != nil {

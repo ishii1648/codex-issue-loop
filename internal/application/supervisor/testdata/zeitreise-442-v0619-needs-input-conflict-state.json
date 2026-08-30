@@ -1,5 +1,6 @@
 {
   "version": 4,
+  "semantic_contract_version": 1,
   "repo_id": "repo_zeitreise",
   "repo_path": "/sanitized/zeitreise",
   "state_revision": 6,

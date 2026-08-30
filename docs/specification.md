@@ -161,7 +161,7 @@ github:
   exclude_labels: [blocked, do-not-automate]
 
 queue:
-  concurrency: 2
+  concurrency: 1
 
 resources:
   definitions:
@@ -200,7 +200,7 @@ webhook:
 - Webhook listenerはliteralな`127.0.0.1`または`::1`だけを許可する。共有brokerを使う全repositoryはlistenerを一致させる。public/LAN addressやhostnameへのbindは拒否する。
 - `secret_source`は環境変数名またはrepository外の絶対file pathのどちらか一方だけを指定する。fileはruntimeでregular fileかつowner-only permissionであることを検証する。rotation中だけ`previous_secret_source`を併記できる。secret値をconfig、registry、snapshot、event、status、logへ保存しない。
 - 内部のsafety sweep間隔は15分で、managed-root brokerだけがpage別のETag/Last-Modifiedとcache bodyを`webhook-sweep.json`へ永続化し、ready labelを含む安定したREST collection URLを最大10 page（1000件）まで条件付きrequestする。304 pageはdurable cacheと合成し、正しく認証された304は成功として記録する。broker起動直後にもoutage recovery sweepを行う。Webhook modeのrepository schedulerはqueue timerとsweep state writerを持たず、repository mailbox、Issue retry deadline、worker event、shared cooldownだけでwakeする。通常経路は対象Issue/PR/SHAだけをREST再検証し、queueまたは変化のないPRをGraphQL pollingしない。
-- `queue.concurrency` は1以上とする。`resources.definitions`未設定時は安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。2以上はresource definition、valid metadata、既知の`area:` claimを使う単一host worker poolであり、distributed modeは有効化しない。
+- production/self-hostingの`queue.concurrency`は安定化期間中`1`に固定する。実装とresource taxonomyは将来の再評価用に保持するが、`2`以上への変更はconformance、isolated canary、resource budgetを満たす独立したrolloutとして扱う。`resources.definitions`未設定時も安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。
 - resource metadata versionは実装が`1`に固定する。各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
 - `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
 - `priority_then_created_at`では`queue.priority_labels`を高い順に1件以上指定する。labelなしは最低順位、複数該当は最上位一致とする。

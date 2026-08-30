@@ -291,6 +291,87 @@ func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 	}
 }
 
+func TestRetryRollbackFinalizesAlreadyRestoredPreviousVersion(t *testing.T) {
+	controller, paths, tx, runner := rollbackRetryFixture(t, VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)})
+	report, err := controller.RetryRollback(context.Background(), tx.BackupPath)
+	if err != nil || report.Result != "rolled_back" || runner.rollbacks != 0 || runner.doctors != 1 {
+		t.Fatalf("report=%+v err=%v runner=%+v", report, err, runner)
+	}
+	if _, err := os.Stat(paths.Maintenance); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful retry retained fence: %v", err)
+	}
+	stored, err := LoadTransaction(paths.Transaction)
+	if err != nil || stored.Current != tx.Previous || stored.Phase != PhaseVerified || stored.LastResult != "rolled_back" {
+		t.Fatalf("transaction=%+v err=%v", stored, err)
+	}
+}
+
+func TestRetryRollbackRestoresDesiredVersionAndRetainsFenceOnFailure(t *testing.T) {
+	controller, paths, tx, runner := rollbackRetryFixture(t, txDesiredVersion())
+	runner.rollbackFailure = true
+	report, err := controller.RetryRollback(context.Background(), tx.BackupPath)
+	if err == nil || report.Result != "rollback_failed" || runner.rollbacks != 1 {
+		t.Fatalf("report=%+v err=%v runner=%+v", report, err, runner)
+	}
+	if _, err := os.Stat(paths.Maintenance); err != nil {
+		t.Fatalf("failed retry removed fence: %v", err)
+	}
+}
+
+func TestRetryRollbackRejectsMismatchedAuthorityWithoutRunningCommands(t *testing.T) {
+	controller, paths, tx, runner := rollbackRetryFixture(t, txDesiredVersion())
+	if _, err := controller.RetryRollback(context.Background(), tx.BackupPath+"-other"); err == nil {
+		t.Fatal("mismatched backup was accepted")
+	}
+	if runner.binaryRuns != 0 {
+		t.Fatalf("commands ran before backup validation: %+v", runner)
+	}
+	if err := WriteMaintenance(paths.Maintenance, Maintenance{Generation: "different", Desired: tx.Desired}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.RetryRollback(context.Background(), tx.BackupPath); err == nil {
+		t.Fatal("mismatched maintenance fence was accepted")
+	}
+	if runner.binaryRuns != 0 {
+		t.Fatalf("commands ran before fence validation: %+v", runner)
+	}
+}
+
+func rollbackRetryFixture(t *testing.T, installed VersionRef) (Controller, Paths, Transaction, *releaseRunner) {
+	t.Helper()
+	root := t.TempDir()
+	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"), BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills"), LaunchAgents: filepath.Join(root, "launch")}
+	if err := os.MkdirAll(l.BinDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.WriteJSON(filepath.Join(root, "install.json"), map[string]any{"version": installed.Version, "commit": installed.Commit, "schema_version": 4, "semantic_contract_version": 1}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "delivery.yaml")
+	if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
+		t.Fatal(err)
+	}
+	paths := RuntimePaths(root)
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	previous := VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)}
+	tx := Transaction{Version: 1, Phase: PhaseValidating, Current: txDesiredVersion(), Previous: previous, Desired: txDesiredVersion(), MaintenanceGeneration: "maintenance_retry", BackupPath: filepath.Join(root, "backups", "delivery-maintenance_retry-v1.2.2"), LastResult: "rollback_failed", Reason: "post-update doctor failed"}
+	if err := SaveTransaction(paths.Transaction, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMaintenance(paths.Maintenance, Maintenance{Generation: tx.MaintenanceGeneration, Desired: tx.Desired}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &releaseRunner{}
+	controller := Controller{Layout: l, ConfigPath: configPath, GH: "gh", Runner: runner, Soak: -1}
+	return controller, paths, tx, runner
+}
+
+func txDesiredVersion() VersionRef {
+	return VersionRef{Version: "v1.2.3", Commit: testCommit}
+}
+
 func TestFaultControllerResumesPostApplyValidationWithoutReapplying(t *testing.T) {
 	root := t.TempDir()
 	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"), BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills"), LaunchAgents: filepath.Join(root, "launch")}

@@ -639,7 +639,7 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 				PullRequestURL: "https://example.test/owner/repo/pull/7"},
 			delivery: webhook.Delivery{DeliveryID: "terminal-merged", Event: "pull_request", Action: "closed", PullRequestNumber: 7},
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open"}, PullRequests: []gh.PullRequest{{
-				Number: 7, URL: "https://example.test/owner/repo/pull/7", State: "closed", MergedAt: &mergedAt,
+				Number: 7, URL: "https://example.test/owner/repo/pull/7", State: "closed", MergedAt: &mergedAt, HeadSHA: "head-7",
 			}}},
 			wantStatus: "completed", wantMerged: true,
 		},
@@ -740,6 +740,7 @@ func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *tes
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].Status = issuedomain.StatusRunning
+		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -782,6 +783,7 @@ func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testin
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].Status = issuedomain.StatusRunning
+		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -817,6 +819,7 @@ func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].Status = issuedomain.StatusRunning
+		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -1005,7 +1008,7 @@ func TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker(t *te
 	}
 	github.remote = &gh.RemoteState{
 		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}, Comments: []string{"<!-- codex-issue-loop:failed:1 -->"}},
-		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pull/1", State: "MERGED", MergedAt: timePointer(), HeadRefName: "codex/issue-1-test"}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pull/1", State: "MERGED", MergedAt: timePointer(), HeadRefName: "codex/issue-1-test", HeadSHA: "head-1"}},
 	}
 	runningCanceled := false
 	s := &scheduler{

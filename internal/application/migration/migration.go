@@ -734,7 +734,54 @@ func migrateState(path string, migration journal) error {
 	}
 	object["supervisor"] = encodedSupervisor
 	delete(object, "notifications")
+	if err := normalizeMigratedSessions(object); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return err
+	}
+	var snapshot state.Snapshot
+	if err := json.Unmarshal(encoded, &snapshot); err != nil {
+		return fmt.Errorf("decode migrated state for invariant validation: %w", err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		return fmt.Errorf("validate migrated state before commit: %w", err)
+	}
 	return writeRawObject(path, object)
+}
+
+func normalizeMigratedSessions(object map[string]json.RawMessage) error {
+	var issues map[string]json.RawMessage
+	if err := json.Unmarshal(object["issues"], &issues); err != nil {
+		return fmt.Errorf("decode migrated state Issues: %w", err)
+	}
+	for key, raw := range issues {
+		var issue map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &issue); err != nil {
+			return fmt.Errorf("decode migrated Issue %s: %w", key, err)
+		}
+		var sessionID string
+		_ = json.Unmarshal(issue["session_id"], &sessionID)
+		if sessionID == "" || len(issue["session"]) > 0 && string(issue["session"]) != "null" {
+			continue
+		}
+		session, err := json.Marshal(state.WorkerSession{Backend: "codex", ID: sessionID})
+		if err != nil {
+			return err
+		}
+		issue["session"] = session
+		issues[key], err = json.Marshal(issue)
+		if err != nil {
+			return err
+		}
+	}
+	encoded, err := json.Marshal(issues)
+	if err != nil {
+		return err
+	}
+	object["issues"] = encoded
+	return nil
 }
 
 func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {

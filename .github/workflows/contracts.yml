@@ -1,0 +1,41 @@
+name: Credentialless CLI contracts
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contracts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cli-surface-contract:
+    name: CLI surface contract (no auth)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Install the pinned Codex CLI without authenticating
+        run: npm install --global @openai/codex@0.136.0
+      - name: Verify installed CLI surfaces without API calls
+        env:
+          CONTRACT_ARTIFACT_DIR: contract-artifacts
+        run: scripts/cli-surface-contract.sh
+      - name: Replay GitHub and worker boundary fixtures
+        run: go test ./internal/adapter/github ./internal/adapter/worker ./internal/platform/compat -count=1
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cli-surface-contract-${{ github.run_id }}
+          path: contract-artifacts/cli-surface-report.json
+          if-no-files-found: error

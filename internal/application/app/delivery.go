@@ -17,18 +17,54 @@ import (
 
 func (a App) delivery(ctx context.Context, l layout.Layout, args []string) error {
 	if len(args) == 0 {
-		return exitError{2, errors.New("delivery subcommand is required: configure, check, status, reconcile, apply, pause, resume")}
+		return exitError{2, errors.New("delivery subcommand is required: configure, check, status, reconcile, apply, retry-rollback, pause, resume")}
 	}
 	switch args[0] {
 	case "configure":
 		return a.deliveryConfigure(ctx, l, args[1:])
 	case "check", "status", "reconcile", "apply":
 		return a.deliveryOperation(ctx, l, args[0], args[1:])
+	case "retry-rollback":
+		return a.deliveryRetryRollback(ctx, l, args[1:])
 	case "pause", "resume":
 		return a.deliveryEnabled(l, args[0], args[1:])
 	default:
 		return exitError{2, fmt.Errorf("unknown delivery subcommand %q", args[0])}
 	}
+}
+
+func (a App) deliveryRetryRollback(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("delivery retry-rollback", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	configFlag := fs.String("config", "", "absolute config path (tests and explicit operations only)")
+	backup := fs.String("backup", "", "exact retained delivery backup path")
+	confirm := fs.Bool("confirm-retained-fence", false, "confirm the retained rollback_failed transaction and retry")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	if !*confirm {
+		return exitError{2, errors.New("delivery retry-rollback requires --confirm-retained-fence")}
+	}
+	resolvedBackup, err := validateDeliveryBackupPath(l, *backup)
+	if err != nil {
+		return exitError{2, err}
+	}
+	if err := validateInstallationBackup(resolvedBackup); err != nil {
+		return exitError{2, fmt.Errorf("validate retained delivery backup: %w", err)}
+	}
+	path, err := delivery.ResolveConfigPath(*configFlag)
+	if err != nil {
+		return exitError{2, err}
+	}
+	report, retryErr := (delivery.Controller{Layout: l, ConfigPath: path}).RetryRollback(ctx, resolvedBackup)
+	if outputErr := a.output(*jsonOut, report); outputErr != nil {
+		return outputErr
+	}
+	return retryErr
 }
 
 func (a App) deliveryConfigure(ctx context.Context, l layout.Layout, args []string) error {

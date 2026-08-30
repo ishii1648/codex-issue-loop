@@ -47,6 +47,7 @@ func TestStopWorkersTerminatesAndRecordsEveryIssueIndependently(t *testing.T) {
 		_, err = loop.Store.Update("running", number, run, nil, func(snapshot *state.Snapshot) error {
 			item := snapshot.Issues[strconv.Itoa(number)]
 			item.Status, item.WorkerPID, item.WorkerPGID = issuedomain.StatusRunning, 100+number, 100+number
+			setSupervisorTestWorkspace(snapshot, item)
 			return nil
 		})
 		if err != nil {
@@ -80,6 +81,7 @@ func TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue(t *testing.T)
 	loop, _ := testLoop(t, worker.Result{})
 	_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"] = &state.Issue{Number: 1, RunID: "run_1", Status: issuedomain.StatusRunning, WorkerPID: 101, WorkerPGID: 101}
+		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -149,8 +151,10 @@ func TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases(t *testing.T)
 		_, err = loop.Store.Update("worker_process_started", number, runID, nil, func(snapshot *state.Snapshot) error {
 			item := snapshot.Issues[strconv.Itoa(number)]
 			item.Status = issuedomain.StatusRunning
+			item.Branch = "codex/issue-1-test"
 			item.WorkerPID = command.Process.Pid
 			item.WorkerPGID = command.Process.Pid
+			setSupervisorTestWorkspace(snapshot, item)
 			return nil
 		})
 		if err != nil {

@@ -7,7 +7,7 @@ github:
   exclude_labels: [blocked, do-not-automate]
 
 queue:
-  concurrency: 2
+  concurrency: 1
 
 resources:
   definitions:

@@ -36,6 +36,8 @@ type reconciliationDecision struct {
 	lastError    string
 	branch       string
 	pullRequest  string
+	prNumber     int
+	headSHA      string
 	githubSync   issuedomain.GitHubSync
 	retryAt      *time.Time
 	workerPID    int
@@ -185,7 +187,13 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				item.LastError = decision.lastError
 				item.Branch = decision.branch
 				item.PullRequestURL = decision.pullRequest
-				item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
+				item.PullRequestNumber = decision.prNumber
+				if item.PullRequestNumber == 0 {
+					item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
+				}
+				if decision.headSHA != "" {
+					item.HeadSHA = decision.headSHA
+				}
 				item.PullRequestMerged = decision.prMerged
 				item.GitHubSync = decision.githubSync
 				item.RetryAfter = decision.retryAt
@@ -343,7 +351,13 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		item.LastError = decision.lastError
 		item.Branch = decision.branch
 		item.PullRequestURL = decision.pullRequest
-		item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
+		item.PullRequestNumber = decision.prNumber
+		if item.PullRequestNumber == 0 {
+			item.PullRequestNumber = pullRequestNumber(decision.pullRequest)
+		}
+		if decision.headSHA != "" {
+			item.HeadSHA = decision.headSHA
+		}
 		item.PullRequestMerged = decision.prMerged
 		item.GitHubSync = decision.githubSync
 		item.RetryAfter = decision.retryAt
@@ -390,12 +404,22 @@ func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg confi
 func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) reconciliationDecision {
 	currentState, observation := l.reconciliationInputs(snapshot, current, remote, inspection)
 	decision := issuedomain.DecideReconciliation(currentState, observation)
+	prNumber, headSHA := reconciledPullRequestIdentity(remote.PullRequests, decision.PullRequest)
 	return reconciliationDecision{
 		status: decision.Status, lastError: decision.LastError, branch: decision.Branch,
-		pullRequest: decision.PullRequest, githubSync: decision.GitHubSync, retryAt: decision.RetryAt,
+		pullRequest: decision.PullRequest, prNumber: prNumber, headSHA: headSHA, githubSync: decision.GitHubSync, retryAt: decision.RetryAt,
 		workerPID: decision.WorkerPID, workerPGID: decision.WorkerPGID, prMerged: decision.PullRequestMerged,
 		markRunning: decision.MarkRunning, reason: decision.Reason, blockedCause: current.BlockedCause,
 	}
+}
+
+func reconciledPullRequestIdentity(pullRequests []gh.PullRequest, url string) (int, string) {
+	for _, pullRequest := range pullRequests {
+		if pullRequest.URL == url {
+			return pullRequest.Number, pullRequest.HeadSHA
+		}
+	}
+	return 0, ""
 }
 
 func (l *Loop) reconciliationInputs(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) (issuedomain.ReconciliationState, issuedomain.ReconciliationObservation) {
@@ -469,9 +493,10 @@ func (l *Loop) hasOnlyBlockedExclusion(labels map[string]bool) bool {
 func (l *Loop) decideTerminalPullRequestReconciliation(current state.Issue, remote gh.RemoteState) (reconciliationDecision, bool) {
 	currentState, observation := l.reconciliationInputs(state.Snapshot{}, current, remote, worktree.Inspection{})
 	decision, ok := issuedomain.DecideTerminalPullRequestReconciliation(currentState, observation)
+	prNumber, headSHA := reconciledPullRequestIdentity(remote.PullRequests, decision.PullRequest)
 	return reconciliationDecision{
 		status: decision.Status, lastError: decision.LastError, branch: decision.Branch,
-		pullRequest: decision.PullRequest, githubSync: decision.GitHubSync, retryAt: decision.RetryAt,
+		pullRequest: decision.PullRequest, prNumber: prNumber, headSHA: headSHA, githubSync: decision.GitHubSync, retryAt: decision.RetryAt,
 		workerPID: decision.WorkerPID, workerPGID: decision.WorkerPGID, prMerged: decision.PullRequestMerged,
 		markRunning: decision.MarkRunning, reason: decision.Reason, blockedCause: current.BlockedCause,
 	}, ok

@@ -271,6 +271,9 @@ func (s Store) validateTransaction(txn transaction) error {
 	if txn.Snapshot.StateRevision != txn.Event.Sequence {
 		return fmt.Errorf("transaction snapshot revision %d does not match event sequence %d", txn.Snapshot.StateRevision, txn.Event.Sequence)
 	}
+	if err := txn.Snapshot.Validate(); err != nil {
+		return fmt.Errorf("prepared transaction snapshot: %w", err)
+	}
 	return nil
 }
 
@@ -293,7 +296,7 @@ func (s Store) validateConsistency(snapshot Snapshot, events []Event) error {
 	if snapshot.StateRevision != last {
 		return fmt.Errorf("state revision %d does not match last event sequence %d", snapshot.StateRevision, last)
 	}
-	return validateResourceLeases(snapshot)
+	return snapshot.Validate()
 }
 
 func sameEvent(left, right Event) bool {
@@ -336,6 +339,9 @@ func (s Store) recordRepairUnlocked(snapshot Snapshot, eventType string, payload
 	snapshot.StateRevision++
 	now := time.Now().UTC()
 	snapshot.Supervisor.UpdatedAt = now
+	if err := snapshot.Validate(); err != nil {
+		return Snapshot{}, fmt.Errorf("validate repaired snapshot: %w", err)
+	}
 	payloadJSON, err := redact.Marshal(payload, s.Secrets)
 	if err != nil {
 		return Snapshot{}, err

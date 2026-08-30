@@ -93,17 +93,8 @@ func TestRecoverWorkspaceRejectsMissingConfirmationActiveWorkerAndPendingRequest
 		snapshot.Issues["449"].WorkerPID = 44901
 		snapshot.Issues["449"].WorkerPGID = 44901
 		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	out.Reset()
-	stderr.Reset()
-	if code := a.Run(context.Background(), []string{"recover-workspace", "--repo", fixture.repo, "--issue", "449", "--dry-run", "--json"}); code != 4 {
-		t.Fatalf("active worker code=%d stderr=%s", code, stderr.String())
-	}
-	active, _ := fixture.store.Load()
-	if active.Issues["449"].Workspace != nil {
-		t.Fatal("active worker rejection changed workspace")
+	}); err == nil {
+		t.Fatal("aggregate validator accepted a worker process on a dormant terminal recovery record")
 	}
 
 	if _, err := fixture.store.Update("fixture_pending_request", 449, "run_0c0123ac8570c0a8", nil, func(snapshot *state.Snapshot) error {

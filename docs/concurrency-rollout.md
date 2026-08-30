@@ -1,8 +1,8 @@
-# concurrency 2 rollout・rollback runbook
+# concurrency 1安定化・将来のconcurrency 2 rollout runbook
 
-最終更新日: 2026-08-17
+最終更新日: 2026-08-30
 
-このrunbookは、単一host・単一repositoryのworker poolを`queue.concurrency: 1`から`2`へ段階的に切り替え、self-hosting repositoryでcanaryし、異常時にschemaやleaseを壊さず`1`へ戻す手順を定める。複数hostの排他は対象外である。
+production/self-hostingは安定化期間中`queue.concurrency: 1`に固定する。複数workerのコードとtestは削除せず、再有効化は本runbookの全gateを満たす別変更として扱う。このrunbookは、単一host・単一repositoryのworker poolを将来`2`へ段階的に切り替え、isolated canaryで検証し、異常時にschemaやleaseを壊さず`1`へ戻す手順を定める。複数hostの排他は対象外である。
 
 ## 1. 自動検証gate
 
@@ -79,9 +79,9 @@ canary開始前にhost固有の上限を決め、baseline、peak、canary終了�
 
 memory pressure、swap、disk safety reserve、Codex rate/quotaのいずれかが上限へ達した場合は新規Issueを追加せず、[rollback](#6-concurrency-1へのrollback)へ進む。資格情報や利用枠の詳細値は公開artifactへ残さない。
 
-## 4. 段階切替
+## 4. 段階切替（現在は実施禁止）
 
-本repositoryの`.agent-loop.yaml`はself-hosting canaryの上限を`2`とし、resource taxonomyを明示する。`2`を超える値へ直接上げない。
+本repositoryの`.agent-loop.yaml`はproduction上限を`1`とし、resource taxonomyだけを明示する。conformance、isolated canary、resource budget、high-risk review finding 0件、promotion evidenceが揃うまで`2`へ変更しない。再開時も`2`を超える値へ直接上げない。
 
 1. loopを停止し、`status`でworker PID/PGIDが0になったことを確認する。stopはleaseとworktreeを保持する。
 2. 新artifactと`.agent-loop.yaml`を配置し、`doctor`を実行する。
