@@ -44,6 +44,10 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 			Number: number, Status: issuedomain.Status(status), Branch: result.Branch, Worktree: result.Path,
 			UpdatedAt: now.Add(-48 * time.Hour),
 		}
+		issues[fmt.Sprint(number)].Workspace = &state.WorkerWorkspace{
+			Path: result.Path, Branch: result.Branch, RepoID: "repo-id", Repository: cfg.GitHub.Repo,
+			GitCommonDir: filepath.Join(cfg.RepoPath, ".git"), MainCheckout: cfg.RepoPath, CapturedAt: now,
+		}
 	}
 	if err := os.WriteFile(filepath.Join(issues["2"].Worktree, "dirty.txt"), []byte("dirty\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -60,7 +64,7 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	}
 	snapshot, err := store.Update("fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues = issues
-		snapshot.PendingRequests["req-5"] = &state.Request{ID: "req-5", IssueNumber: 5, Status: issuedomain.RequestStatusPending}
+		snapshot.PendingRequests["req_5"] = &state.Request{ID: "req_5", IssueNumber: 5, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {

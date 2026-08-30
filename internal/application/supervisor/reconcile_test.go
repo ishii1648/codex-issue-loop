@@ -52,7 +52,7 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 	}{
 		{
 			name: "merged PR completes local state", current: base, inspection: worktree.Inspection{},
-			remote: gh.RemoteState{Issue: runningIssue, PullRequests: []gh.PullRequest{{Number: 11, URL: "https://example.test/pull/11", State: "CLOSED", MergedAt: timePointer()}}},
+			remote: gh.RemoteState{Issue: runningIssue, PullRequests: []gh.PullRequest{{Number: 11, URL: "https://example.test/pull/11", State: "CLOSED", MergedAt: timePointer(), HeadSHA: "head-11"}}},
 			status: issuedomain.StatusCompleted, prURL: "https://example.test/pull/11", githubSync: issuedomain.GitHubSyncDone, prMerged: true, reason: "merged Pull Request",
 		},
 		{
@@ -152,7 +152,7 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 				Issue: runningIssue,
 				PullRequests: []gh.PullRequest{
 					{Number: 12, URL: "https://example.test/pull/12", State: "OPEN", HeadRefName: base.Branch},
-					{Number: 11, URL: "https://example.test/pull/11", State: "CLOSED", MergedAt: timePointer(), HeadRefName: base.Branch},
+					{Number: 11, URL: "https://example.test/pull/11", State: "CLOSED", MergedAt: timePointer(), HeadRefName: base.Branch, HeadSHA: "head-11"},
 				},
 			},
 			inspection: valid, status: issuedomain.StatusBlocked, prURL: "https://example.test/pull/11", reason: "multiple Pull Requests",
@@ -183,7 +183,7 @@ func TestTerminalPullRequestReconciliationRequiresAuthoritativeSavedMerge(t *tes
 		Comments: []string{"<!-- codex-issue-loop:failed:7 -->\nAutomation stopped."},
 	}
 	matching := gh.PullRequest{
-		Number: 7, URL: base.PullRequestURL, State: "MERGED", MergedAt: merged,
+		Number: 7, URL: base.PullRequestURL, State: "MERGED", MergedAt: merged, HeadSHA: "head-7",
 		HeadRefName: base.Branch,
 	}
 	tests := []struct {
@@ -238,7 +238,7 @@ func TestPeriodicTerminalReconciliationCompletesAndIsIdempotent(t *testing.T) {
 	}
 	github.remote = &gh.RemoteState{
 		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}, Comments: []string{"<!-- codex-issue-loop:failed:1 -->"}},
-		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pull/1", State: "MERGED", MergedAt: timePointer(), HeadRefName: "codex/issue-1-test"}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pull/1", State: "MERGED", MergedAt: timePointer(), HeadRefName: "codex/issue-1-test", HeadSHA: "head-1"}},
 	}
 	current, err := loop.issueState(1)
 	if err != nil {
@@ -267,7 +267,7 @@ func TestStartupReconciliationSkipsMergeConfirmedHistory(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	_, err := loop.Store.Update("completed", 1, "run_1", nil, func(s *state.Snapshot) error {
 		s.Issues["1"] = &state.Issue{
-			Number: 1, Status: issuedomain.StatusCompleted, PullRequestURL: "https://example.test/pull/1", PullRequestMerged: true,
+			Number: 1, Status: issuedomain.StatusCompleted, PullRequestURL: "https://example.test/pull/1", PullRequestNumber: 1, HeadSHA: "head-1", PullRequestMerged: true,
 		}
 		return nil
 	})
@@ -293,8 +293,10 @@ func TestStartupReconciliationStopsAllOrphanGroupsBeforeInspectingIssues(t *test
 		for _, number := range []int{1, 2} {
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
 				Number: number, RunID: fmt.Sprintf("run_%d", number), Status: issuedomain.StatusRunning,
+				Branch:    "codex/issue-1-test",
 				WorkerPID: 100 + number, WorkerPGID: 100 + number,
 			}
+			setSupervisorTestWorkspace(snapshot, snapshot.Issues[strconv.Itoa(number)])
 		}
 		return nil
 	})
@@ -334,8 +336,9 @@ func TestFaultStartupReconciliationPersistsDiscoveredPullRequest(t *testing.T) {
 	_, err := loop.Store.Update("worker_started", 1, "run_1", nil, func(s *state.Snapshot) error {
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: issuedomain.StatusRunning, RunID: "run_1", Branch: "codex/issue-1-test",
-			Worktree: loop.Config.RepoPath, WorkerPID: 987, UpdatedAt: now,
+			Worktree: loop.Config.RepoPath, WorkerPID: 987, WorkerPGID: 987, UpdatedAt: now,
 		}
+		setSupervisorTestWorkspace(s, s.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -459,6 +462,7 @@ func TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t
 		item.Worktree = loop.Config.RepoPath
 		item.GitHubSync = issuedomain.GitHubSyncBlocked
 		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: time.Now().UTC()}
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -620,6 +624,7 @@ func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing
 		item.Status = issuedomain.StatusRunning
 		item.Branch = branch
 		item.Worktree = loop.Config.RepoPath
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -634,6 +639,7 @@ func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing
 		item.FailureKind = "issue"
 		item.LastError = legacyError
 		item.GitHubSync = issuedomain.GitHubSyncBlocked
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -743,6 +749,7 @@ func TestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t
 		item.Branch = branch
 		item.Worktree = loop.Config.RepoPath
 		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: time.Now().UTC()}
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -803,6 +810,7 @@ func TestStartupReconciliationRetainsPRLeaseUntilMergeThenReleasesIt(t *testing.
 		item.PullRequestURL = prURL
 		item.ActualResources = []string{"git"}
 		item.Lease.ActualResources = []string{"git"}
+		setSupervisorTestWorkspace(s, item)
 		return nil
 	})
 	if err != nil {
@@ -826,6 +834,7 @@ func TestStartupReconciliationRetainsPRLeaseUntilMergeThenReleasesIt(t *testing.
 	now := time.Now().UTC()
 	github.remote.PullRequests[0].State = "MERGED"
 	github.remote.PullRequests[0].MergedAt = &now
+	github.remote.PullRequests[0].HeadSHA = "head-1"
 	if err := loop.reconcileStartup(context.Background(), retained); err != nil {
 		t.Fatal(err)
 	}

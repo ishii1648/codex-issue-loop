@@ -1,0 +1,27 @@
+{
+  "incidents": {
+    "134": "claim-worker-completion",
+    "139": "worker-retry-continuation",
+    "142": "needs-input-resume",
+    "143": "needs-input-resume",
+    "146": "environment-block-resume",
+    "148": "publication-recovery",
+    "150": "checks-recovery",
+    "152": "conflict-publication",
+    "154": "reconciliation",
+    "156": "reconciliation",
+    "158": "environment-block-resume",
+    "160": "checks-recovery",
+    "164": "reconciliation"
+  },
+  "sequences": [
+    "claim-worker-completion",
+    "worker-retry-continuation",
+    "needs-input-resume",
+    "environment-block-resume",
+    "publication-recovery",
+    "checks-recovery",
+    "conflict-publication",
+    "reconciliation"
+  ]
+}

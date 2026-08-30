@@ -33,6 +33,19 @@ type workspaceMutationWorker struct {
 	paths    []string
 }
 
+func setSupervisorTestWorkspace(snapshot *state.Snapshot, issue *state.Issue) {
+	if issue.Worktree == "" {
+		issue.Worktree = fmt.Sprintf("/tmp/issue-%d", issue.Number)
+	}
+	if issue.Branch == "" {
+		issue.Branch = fmt.Sprintf("codex/issue-%d", issue.Number)
+	}
+	issue.Workspace = &state.WorkerWorkspace{
+		Path: issue.Worktree, Branch: issue.Branch, RepoID: snapshot.RepoID, Repository: "owner/repo",
+		GitCommonDir: filepath.Join(snapshot.RepoPath, ".git"), MainCheckout: snapshot.RepoPath, CapturedAt: time.Now().UTC(),
+	}
+}
+
 func (w *workspaceMutationWorker) result(cfg config.Config) (worker.Result, error) {
 	if cfg.RepoPath == w.mainPath {
 		return worker.Result{}, fmt.Errorf("worker received dirty main checkout as cwd")
@@ -935,6 +948,7 @@ func TestEnvironmentResumeGitHubSyncConvergesBeforeWorkerStarts(t *testing.T) {
 			Number: 1, Status: issuedomain.StatusEnvironmentResumePending, RunID: "run_1", GitHubSync: issuedomain.GitHubSyncEnvironmentResume,
 			EnvironmentResume: &state.EnvironmentResume{ID: "resume_1", Status: issuedomain.EnvironmentResumeStatusRequested, ConfirmedAt: time.Now().UTC()},
 		}
+		setSupervisorTestWorkspace(s, s.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -1255,6 +1269,7 @@ func TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge(t 
 		item.PullRequestNumber = 1
 		item.Attempts = 1
 		item.ExecutionProfile = "standard"
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -1448,6 +1463,7 @@ func TestNonDirtyPendingChecksAndUnstableMergeStateKeepPolling(t *testing.T) {
 					Number: 1, Status: issuedomain.StatusAwaitingChecks, RunID: "run_1", Branch: "codex/issue-1-test",
 					Worktree: loop.Config.RepoPath, PullRequestURL: prURL, UpdatedAt: time.Now().UTC(),
 				}
+				setSupervisorTestWorkspace(s, s.Issues["1"])
 				return nil
 			})
 			if err != nil {
@@ -1629,6 +1645,7 @@ func TestConflictRecoveryRestartRecognizesPublishedCommitWithoutDuplicateWorkerO
 				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 1, BaseUpdates: 1,
 			},
 		}
+		setSupervisorTestWorkspace(s, s.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -1659,6 +1676,7 @@ func TestConflictRecoveryBlocksOnlyAfterPerBaseBudgetIsExhausted(t *testing.T) {
 				History: []state.ConflictAttempt{{Number: 1, BaseSHA: "base-new", Status: issuedomain.ConflictAttemptStatusRetryableFailure}},
 			},
 		}
+		setSupervisorTestWorkspace(s, s.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -1722,7 +1740,7 @@ func TestMergedPullRequestCompletesAndClosesIssue(t *testing.T) {
 	now := time.Now().UTC()
 	github.remote = &gh.RemoteState{
 		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
-		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "CLOSED", MergedAt: &now, HeadRefName: "codex/issue-1-test", ChecksStatus: "success"}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "CLOSED", MergedAt: &now, HeadRefName: "codex/issue-1-test", HeadSHA: "head-1", ChecksStatus: "success"}},
 	}
 	if _, err := loop.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -2203,6 +2221,7 @@ func TestPublicationRecoveryPublishesSavedCompletedResultWithoutWorker(t *testin
 			},
 			UpdatedAt: now,
 		}
+		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
 		return nil
 	})
 	if err != nil {
@@ -2230,7 +2249,7 @@ func TestPublicationRecoveryPublishesSavedCompletedResultWithoutWorker(t *testin
 		t.Fatalf("publication recovery audit/history missing: %+v", issue)
 	}
 	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{
-		URL: issue.PullRequestURL, State: "OPEN", HeadRefName: issue.Branch, ChecksStatus: "success",
+		Number: 1, URL: issue.PullRequestURL, State: "OPEN", HeadRefName: issue.Branch, HeadSHA: "published-head", ChecksStatus: "success",
 	}}}
 	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
 		t.Fatalf("checks worked=%v err=%v", worked, err)

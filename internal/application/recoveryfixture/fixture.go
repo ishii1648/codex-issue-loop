@@ -23,6 +23,7 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
 
@@ -274,6 +275,9 @@ func Validate(bundle Bundle) error {
 		}
 		requestIDs[request.ID] = true
 	}
+	if err := validateReconstructedSnapshot(bundle, issue); err != nil {
+		return err
+	}
 	if bundle.Capture.Remote.Issue.Number != issue.Number {
 		return errors.New("remote Issue identity does not match durable state")
 	}
@@ -290,6 +294,33 @@ func Validate(bundle Bundle) error {
 	}
 	if !strings.EqualFold(bundle.Manifest.ContentSHA256, hash) {
 		return errors.New("recovery fixture content hash mismatch")
+	}
+	return nil
+}
+
+func validateReconstructedSnapshot(bundle Bundle, issue state.Issue) error {
+	snapshot := state.Snapshot{
+		Version: state.CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion,
+		RepoID: bundle.Capture.Durable.RepoID, RepoPath: bundle.Capture.Durable.RepoPath,
+		StateRevision: bundle.Capture.Durable.StateRevision,
+		Supervisor:    state.Supervisor{State: state.SupervisorStateStopped, UpdatedAt: bundle.Manifest.CapturedAt},
+		Issues:        map[string]*state.Issue{strconv.Itoa(issue.Number): &issue}, PendingRequests: map[string]*state.Request{},
+	}
+	for _, raw := range bundle.Capture.Durable.PendingRequests {
+		var request state.Request
+		if err := strictDecode(raw, &request); err != nil {
+			return err
+		}
+		snapshot.PendingRequests[request.ID] = &request
+	}
+	err := snapshot.Validate()
+	if err == nil {
+		return nil
+	}
+	var compatibility state.SemanticCompatibilityError
+	if !errors.As(err, &compatibility) || len(compatibility.Violations) != 1 ||
+		compatibility.Violations[0].Code != state.SemanticCodeWorkspaceProvenanceMissing {
+		return fmt.Errorf("reconstructed production snapshot violates aggregate invariants: %w", err)
 	}
 	return nil
 }

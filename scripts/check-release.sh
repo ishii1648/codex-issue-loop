@@ -35,6 +35,13 @@ go test ./internal/domain/statecontract ./internal/adapter/state \
   -run '^Test(CurrentContractHasMigrationRulesForEveryExecutionRequirement|EveryExecutionRequiredFieldHasRuntimeValidator)$' \
   -count=1
 
+conformance_json="$temporary_root/conformance.jsonl"
+go test ./internal/application/conformance -count=1 -json >"$conformance_json"
+if grep -Eq '"Action":"(skip|fail)"' "$conformance_json"; then
+  cat "$conformance_json"
+  exit 1
+fi
+
 # Recovery fixtures are production-derived release evidence. Refuse a release
 # if a reviewed byte changes, or if its internal completeness/hash manifest no
 # longer verifies. Updating both files requires an explicit fixture review.

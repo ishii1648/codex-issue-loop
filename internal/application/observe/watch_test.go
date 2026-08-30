@@ -3,12 +3,22 @@ package observe
 import (
 	"context"
 	"errors"
+	"fmt"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"testing"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 )
+
+func addWatchRequest(snapshot *state.Snapshot, id string, issueNumber int, status issuedomain.RequestStatus) {
+	snapshot.Issues[fmt.Sprint(issueNumber)] = &state.Issue{Number: issueNumber, Status: issuedomain.StatusNeedsInput}
+	request := &state.Request{ID: id, IssueNumber: issueNumber, Status: status}
+	if status == issuedomain.RequestStatusAnswered {
+		request.Answer = "answered"
+	}
+	snapshot.PendingRequests[id] = request
+}
 
 func TestFaultDroppedEventReconcilesAttention(t *testing.T) {
 	store := state.Store{Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo"}
@@ -31,7 +41,7 @@ func TestFaultDroppedEventReconcilesAttention(t *testing.T) {
 		errCh <- err
 	}()
 	_, err = store.Update("input_requested", 3, "run", nil, func(s *state.Snapshot) error {
-		s.PendingRequests["req_1"] = &state.Request{ID: "req_1", IssueNumber: 3, Status: issuedomain.RequestStatusPending}
+		addWatchRequest(s, "req_1", 3, issuedomain.RequestStatusPending)
 		return nil
 	})
 	if err != nil {
@@ -49,9 +59,9 @@ func TestFaultDroppedEventReconcilesAttention(t *testing.T) {
 func TestWatchReturnsEveryPendingRequestInRequestIDOrder(t *testing.T) {
 	store := newWatchStore(t)
 	_, err := store.Update("input_requested", 0, "", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_b"] = &state.Request{ID: "req_b", IssueNumber: 2, Status: issuedomain.RequestStatusPending}
-		snapshot.PendingRequests["req_answered"] = &state.Request{ID: "req_answered", IssueNumber: 3, Status: issuedomain.RequestStatusAnswered}
-		snapshot.PendingRequests["req_a"] = &state.Request{ID: "req_a", IssueNumber: 1, Status: issuedomain.RequestStatusPending}
+		addWatchRequest(snapshot, "req_b", 2, issuedomain.RequestStatusPending)
+		addWatchRequest(snapshot, "req_answered", 3, issuedomain.RequestStatusAnswered)
+		addWatchRequest(snapshot, "req_a", 1, issuedomain.RequestStatusPending)
 		return nil
 	})
 	if err != nil {
@@ -101,7 +111,7 @@ func TestFaultReadSubscribeReadRace(t *testing.T) {
 	defer cancel()
 	result, err := waitWithSubscribeHook(ctx, store, time.Hour, 0, false, func() {
 		_, updateErr := store.Update("input_requested", 4, "run", nil, func(snapshot *state.Snapshot) error {
-			snapshot.PendingRequests["req_race"] = &state.Request{ID: "req_race", IssueNumber: 4, Status: issuedomain.RequestStatusPending}
+			addWatchRequest(snapshot, "req_race", 4, issuedomain.RequestStatusPending)
 			return nil
 		})
 		if updateErr != nil {
@@ -129,7 +139,7 @@ func TestFaultMultipleWatchConnectionsObserveSameRevision(t *testing.T) {
 		}()
 	}
 	snapshot, err := store.Update("input_requested", 5, "run", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_multiple"] = &state.Request{ID: "req_multiple", IssueNumber: 5, Status: issuedomain.RequestStatusPending}
+		addWatchRequest(snapshot, "req_multiple", 5, issuedomain.RequestStatusPending)
 		return nil
 	})
 	if err != nil {
@@ -157,7 +167,7 @@ func TestFaultDisconnectedEventChannelsFallBackToTimer(t *testing.T) {
 		resultCh <- outcomeForTest{result: result, err: err}
 	}()
 	_, err := store.Update("input_requested", 6, "run", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_disconnect"] = &state.Request{ID: "req_disconnect", IssueNumber: 6, Status: issuedomain.RequestStatusPending}
+		addWatchRequest(snapshot, "req_disconnect", 6, issuedomain.RequestStatusPending)
 		return nil
 	})
 	if err != nil {
@@ -181,7 +191,7 @@ func TestFaultWatcherSubscriptionFailureFallsBackToReconciliation(t *testing.T) 
 		resultCh <- outcomeForTest{result: result, err: err}
 	}()
 	_, err := store.Update("input_requested", 7, "run", nil, func(snapshot *state.Snapshot) error {
-		snapshot.PendingRequests["req_no_watcher"] = &state.Request{ID: "req_no_watcher", IssueNumber: 7, Status: issuedomain.RequestStatusPending}
+		addWatchRequest(snapshot, "req_no_watcher", 7, issuedomain.RequestStatusPending)
 		return nil
 	})
 	if err != nil {
@@ -215,7 +225,7 @@ func TestFSNotifyMultipleWatchersWakeAndCanReconnect(t *testing.T) {
 			<-subscribed
 		}
 		snapshot, err := store.Update("input_requested", issueNumber, "run", nil, func(snapshot *state.Snapshot) error {
-			snapshot.PendingRequests[requestID] = &state.Request{ID: requestID, IssueNumber: issueNumber, Status: issuedomain.RequestStatusPending}
+			addWatchRequest(snapshot, requestID, issueNumber, issuedomain.RequestStatusPending)
 			return nil
 		})
 		if err != nil {
@@ -232,6 +242,7 @@ func TestFSNotifyMultipleWatchersWakeAndCanReconnect(t *testing.T) {
 	waitForAttention(8, "req_first", 2)
 	if _, err := store.Update("answer_recorded", 8, "run", nil, func(snapshot *state.Snapshot) error {
 		snapshot.PendingRequests["req_first"].Status = issuedomain.RequestStatusAnswered
+		snapshot.PendingRequests["req_first"].Answer = "answered"
 		return nil
 	}); err != nil {
 		t.Fatal(err)

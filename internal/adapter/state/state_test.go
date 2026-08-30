@@ -110,6 +110,7 @@ func TestLegacyGoalSnapshotIsIgnoredWithoutLosingContinuationState(t *testing.T)
 	snapshot.Issues["189"] = &Issue{
 		Number: 189, Title: "legacy App Server run", Status: issuedomain.StatusNeedsInput,
 		RunID: "run_189", Branch: "codex/issue-189", Worktree: "/tmp/issue-189",
+		Workspace: &WorkerWorkspace{Path: "/tmp/issue-189", Branch: "codex/issue-189", RepoID: store.RepoID, Repository: "owner/repo", GitCommonDir: "/tmp/repo/.git", MainCheckout: "/tmp/repo", CapturedAt: time.Now().UTC()},
 		SessionID: "session-189", Session: &WorkerSession{Backend: "codex", ID: "session-189"},
 		Answers:  []AnswerRecord{{RequestID: "req_189", Question: "Continue?", Answer: "yes"}},
 		Attempts: 2, Continuations: 1,
@@ -292,7 +293,9 @@ func TestRetainedLeaseReleasesWorkerSlotButKeepsResourceConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = store.Update("input_requested", 1, owner.RunID, nil, func(snapshot *Snapshot) error {
-		snapshot.Issues["1"].Status = issuedomain.StatusNeedsInput
+		issue := snapshot.Issues["1"]
+		issue.Status = issuedomain.StatusNeedsInput
+		setTestWorkspace(snapshot, issue)
 		return nil
 	})
 	if err != nil {
@@ -329,6 +332,7 @@ func TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration(t *testing.T) {
 		issue.Status = issuedomain.StatusBlocked
 		issue.Branch = "codex/issue-314"
 		issue.Worktree = "/tmp/issue-314"
+		setTestWorkspace(snapshot, issue)
 		issue.SessionID = "session-314"
 		issue.Answers = []AnswerRecord{{RequestID: "req-314", Answer: "continue"}}
 		issue.BlockedCause = &BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "public network unavailable", BlockedAt: parkedAt}
@@ -394,6 +398,7 @@ func TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner(t *testing.T) {
 	if _, err := store.Update("issue_blocked", 1, owner.RunID, nil, func(snapshot *Snapshot) error {
 		issue := snapshot.Issues["1"]
 		issue.Status = issuedomain.StatusBlocked
+		setTestWorkspace(snapshot, issue)
 		return ParkIssueLease(issue, owner, "park_1", now.Add(time.Minute))
 	}); err != nil {
 		t.Fatal(err)
@@ -461,6 +466,7 @@ func TestResumedResourceParkAllowsRetryLeaseTransferAndRelease(t *testing.T) {
 	if _, err := store.Update("issue_blocked", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
 		issue := snapshot.Issues["146"]
 		issue.Status = issuedomain.StatusBlocked
+		setTestWorkspace(snapshot, issue)
 		return ParkIssueLease(issue, originalOwner, "park_146", now.Add(time.Minute))
 	}); err != nil {
 		t.Fatal(err)
@@ -531,6 +537,7 @@ func TestFaultConcurrentResumedParkRetryTransferCreatesOneFencedOwner(t *testing
 	if _, err := store.Update("issue_blocked", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
 		issue := snapshot.Issues["146"]
 		issue.Status = issuedomain.StatusBlocked
+		setTestWorkspace(snapshot, issue)
 		return ParkIssueLease(issue, originalOwner, "park_146", now.Add(time.Minute))
 	}); err != nil {
 		t.Fatal(err)
@@ -842,6 +849,19 @@ func newStore(t *testing.T) Store {
 	return store
 }
 
+func setTestWorkspace(snapshot *Snapshot, issue *Issue) {
+	if issue.Worktree == "" {
+		issue.Worktree = fmt.Sprintf("/tmp/issue-%d", issue.Number)
+	}
+	if issue.Branch == "" {
+		issue.Branch = fmt.Sprintf("codex/issue-%d", issue.Number)
+	}
+	issue.Workspace = &WorkerWorkspace{
+		Path: issue.Worktree, Branch: issue.Branch, RepoID: snapshot.RepoID, Repository: "owner/repo",
+		GitCommonDir: "/tmp/repo/.git", MainCheckout: "/tmp/repo", CapturedAt: time.Now().UTC(),
+	}
+}
+
 func TestFaultAttentionRevisionPersistsSnapshotAndEvent(t *testing.T) {
 	store := newStore(t)
 	snapshot, err := store.Update("supervisor_started", 0, "", map[string]string{"ok": "yes"}, func(s *Snapshot) error {
@@ -893,6 +913,7 @@ func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 	store := newStore(t)
 	_, err := store.Update("input_requested", 7, "run", nil, func(s *Snapshot) error {
 		s.Supervisor.State = "running"
+		s.Issues["7"] = &Issue{Number: 7, RunID: "run", Status: issuedomain.StatusNeedsInput}
 		s.PendingRequests["req_1"] = &Request{ID: "req_1", IssueNumber: 7, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
@@ -1181,6 +1202,9 @@ func TestFaultEventRotationKeepsCheckpointAndRecoverySequence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := store.rotateEventsUnlocked(snapshotForRotation(t, store)); err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -1196,4 +1220,13 @@ func TestFaultEventRotationKeepsCheckpointAndRecoverySequence(t *testing.T) {
 	if err != nil || len(archives) == 0 || len(archives) > 2 {
 		t.Fatalf("archives=%v err=%v", archives, err)
 	}
+}
+
+func snapshotForRotation(t *testing.T, store Store) Snapshot {
+	t.Helper()
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }

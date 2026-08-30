@@ -1,4 +1,4 @@
-.PHONY: build test fault-test test-race vet vuln-check fmt-check schema-check tidy-check release-check ci clean
+.PHONY: build test fault-test conformance-test test-race vet vuln-check fmt-check schema-check tidy-check release-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -14,6 +14,9 @@ test:
 
 fault-test:
 	$(GO) test ./... -run '^TestFault' -count=1
+
+conformance-test:
+	$(GO) test ./internal/application/conformance -count=1
 
 test-race:
 	$(GO) test -race ./...
@@ -41,7 +44,7 @@ tidy-check:
 release-check:
 	scripts/check-release.sh
 
-ci: fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build release-check
+ci: fmt-check schema-check tidy-check test fault-test conformance-test test-race vet vuln-check build release-check
 
 clean:
 	$(GO) clean

@@ -476,14 +476,12 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == RecoveryStateBlocked {
 		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
 	}
-	if err := s.rotateEventsUnlocked(snapshot); err != nil {
-		return Snapshot{}, fmt.Errorf("rotate event log: %w", err)
-	}
 	if err := mutate(&snapshot); err != nil {
 		return Snapshot{}, err
 	}
-	if err := validateResourceLeases(snapshot); err != nil {
-		return Snapshot{}, err
+	normalizeSnapshot(&snapshot)
+	if err := snapshot.Validate(); err != nil {
+		return Snapshot{}, fmt.Errorf("validate snapshot before event %q: %w", eventType, err)
 	}
 	snapshot.StateRevision++
 	now := time.Now().UTC()

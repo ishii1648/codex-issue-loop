@@ -448,28 +448,6 @@ func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) er
 	if err := l.GitHub.Claim(ctx, l.Config, issue, runID); err != nil {
 		return failure.Wrap(failure.Transient, "claim GitHub Issue", err)
 	}
-	claimTransition, err := issuedomain.ConfirmClaim(issuedomain.StatusClaiming)
-	if err != nil {
-		return failure.Wrap(failure.Supervisor, "decide claimed Issue", err)
-	}
-	_, err = l.Store.Update("issue_claimed", issue.Number, runID, map[string]any{"title": issue.Title}, func(s *state.Snapshot) error {
-		item := s.Issues[strconv.Itoa(issue.Number)]
-		if item == nil {
-			return fmt.Errorf("Issue #%d disappeared while claiming", issue.Number)
-		}
-		if err := state.ApplyIssueTransition(item, claimTransition); err != nil {
-			return err
-		}
-		item.UpdatedAt = l.now()
-		return nil
-	})
-	if err != nil {
-		return failure.Wrap(failure.Supervisor, "persist claimed Issue", err)
-	}
-	return l.prepareAndRun(ctx, issue, runID)
-}
-
-func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) error {
 	wt, err := l.Worktrees.Ensure(ctx, l.Config, l.Store.RepoID, issue.Number, issue.Title)
 	if err != nil {
 		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "prepare Issue worktree", err), false)
@@ -486,6 +464,29 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 		RepoID: l.Store.RepoID, Repository: l.Config.GitHub.Repo, RepositoryID: l.Config.GitHub.RepositoryID,
 		GitCommonDir: launch.CommonDir, MainCheckout: launch.MainCheckout, CapturedAt: l.now(),
 	}
+	claimTransition, err := issuedomain.ConfirmClaim(issuedomain.StatusClaiming)
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "decide claimed Issue", err)
+	}
+	_, err = l.Store.Update("issue_claimed", issue.Number, runID, map[string]any{"title": issue.Title}, func(s *state.Snapshot) error {
+		item := s.Issues[strconv.Itoa(issue.Number)]
+		if item == nil {
+			return fmt.Errorf("Issue #%d disappeared while claiming", issue.Number)
+		}
+		if err := state.ApplyIssueTransition(item, claimTransition); err != nil {
+			return err
+		}
+		item.Worktree, item.Branch, item.Workspace = launch.CanonicalCWD, wt.Branch, &workspace
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist claimed Issue", err)
+	}
+	return l.runClaimed(ctx, issue, runID, wt, launch, workspace)
+}
+
+func (l *Loop) runClaimed(ctx context.Context, issue gh.Issue, runID string, wt worktree.Result, launch worktree.LaunchValidation, workspace state.WorkerWorkspace) error {
 	workerTransition, err := issuedomain.StartClaimedWorker(issuedomain.StatusClaimed)
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "decide initial worker start", err)
@@ -498,8 +499,10 @@ func (l *Loop) prepareAndRun(ctx context.Context, issue gh.Issue, runID string) 
 		if err := state.ApplyIssueTransition(item, workerTransition); err != nil {
 			return err
 		}
-		item.Worktree, item.Branch, item.UpdatedAt = launch.CanonicalCWD, wt.Branch, l.now()
-		item.Workspace = &workspace
+		if item.Workspace == nil || !item.Workspace.Matches(workspace.Path, workspace.Branch, workspace.RepoID, workspace.Repository, workspace.RepositoryID, workspace.GitCommonDir, workspace.MainCheckout) {
+			return fmt.Errorf("Issue #%d claimed workspace provenance changed before worker start", issue.Number)
+		}
+		item.UpdatedAt = l.now()
 		item.WorkerIdentity = stateIdentity(l.WorkerIdentity)
 		return nil
 	})
@@ -744,7 +747,14 @@ func (l *Loop) reconcileTerminalPullRequest(ctx context.Context, scheduled state
 		return nil
 	}
 	if decision.status == issuedomain.StatusCompleted && decision.prMerged {
-		return l.completeIssue(ctx, current, decision.pullRequest, map[string]any{
+		var merged gh.PullRequest
+		for _, candidate := range remote.PullRequests {
+			if candidate.URL == decision.pullRequest {
+				merged = candidate
+				break
+			}
+		}
+		return l.completeIssue(ctx, current, merged, map[string]any{
 			"source": "periodic_terminal_reconciliation", "reason": decision.reason,
 			"pull_requests": remote.PullRequests,
 		})
@@ -870,7 +880,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			prURL = result.Git.PullRequestURL
 		}
 		if prURL == "" {
-			return l.completeIssue(ctx, current, prURL, result)
+			return l.completeIssue(ctx, current, gh.PullRequest{}, result)
 		}
 		checksDecision, decisionErr := issuedomain.AwaitChecks(current.Status)
 		if decisionErr != nil {
@@ -1604,7 +1614,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	for index := range remote.PullRequests {
 		candidate := &remote.PullRequests[index]
 		if candidate.MergedAt != nil && (candidate.URL == current.PullRequestURL || current.PullRequestURL == "") {
-			return l.completeIssue(ctx, current, candidate.URL, nil)
+			return l.completeIssue(ctx, current, *candidate, nil)
 		}
 	}
 	if len(remote.PullRequests) > 1 {
@@ -1628,7 +1638,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 		return l.schedulePullRequestPoll(current, "Pull Request is not visible yet")
 	}
 	if selected.MergedAt != nil {
-		return l.completeIssue(ctx, current, selected.URL, nil)
+		return l.completeIssue(ctx, current, *selected, nil)
 	}
 	if selected.HeadSHA != "" && current.HeadSHA != selected.HeadSHA {
 		_, err := l.Store.Update("pull_request_head_observed", current.Number, current.RunID, map[string]string{"head_sha": selected.HeadSHA}, func(s *state.Snapshot) error {
@@ -2293,8 +2303,8 @@ func (l *Loop) schedulePullRequestPoll(current state.Issue, reason string) error
 	return failure.Wrap(failure.Supervisor, "persist Pull Request poll", err)
 }
 
-func (l *Loop) completeIssue(ctx context.Context, current state.Issue, prURL string, payload any) error {
-	decision, decisionErr := issuedomain.Complete(current.Status, prURL)
+func (l *Loop) completeIssue(ctx context.Context, current state.Issue, pullRequest gh.PullRequest, payload any) error {
+	decision, decisionErr := issuedomain.Complete(current.Status, pullRequest.URL)
 	if decisionErr != nil {
 		return failure.Wrap(failure.Issue, "decide Issue completion", decisionErr)
 	}
@@ -2313,6 +2323,12 @@ func (l *Loop) completeIssue(ctx context.Context, current state.Issue, prURL str
 			return err
 		}
 		item.PullRequestURL, item.LastError, item.SessionID = decision.PullRequestURL, "", ""
+		if pullRequest.Number > 0 {
+			item.PullRequestNumber = pullRequest.Number
+		}
+		if pullRequest.HeadSHA != "" {
+			item.HeadSHA = pullRequest.HeadSHA
+		}
 		item.Session = nil
 		item.PullRequestMerged = decision.PullRequestMerged
 		item.FailureKind = ""

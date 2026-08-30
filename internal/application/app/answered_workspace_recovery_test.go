@@ -261,16 +261,8 @@ func TestRecoverAnsweredWorkspaceRejectsWithoutConfirmationOrOnActiveWorker(t *t
 		snapshot.Issues["449"].WorkerPID = 44901
 		snapshot.Issues["449"].WorkerPGID = 44901
 		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	activeBefore, _ := fixture.store.Load()
-	if code := a.Run(context.Background(), []string{"recover-answered-workspace", "--repo", fixture.repo, "--issue", "449", "--confirm-exact-chain", "--json"}); code != 4 {
-		t.Fatalf("active worker code=%d stderr=%s", code, stderr.String())
-	}
-	afterActive, _ := fixture.store.Load()
-	if afterActive.StateRevision != activeBefore.StateRevision || afterActive.Issues["449"].Workspace != nil {
-		t.Fatal("active worker rejection changed state")
+	}); err == nil {
+		t.Fatal("aggregate validator accepted a worker process on a dormant terminal recovery record")
 	}
 }
 
@@ -415,7 +407,9 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 		t.Fatal(err)
 	}
 	if _, err := store.Update("issue_claimed", 449, runID, map[string]string{"title": "Sanitized 449"}, func(s *state.Snapshot) error {
-		s.Issues["449"].Status = issuedomain.StatusClaimed
+		item := s.Issues["449"]
+		item.Status, item.Worktree, item.Branch = issuedomain.StatusClaimed, worktreePath, branch
+		item.Workspace = testWorkerWorkspace(s, item.Worktree, item.Branch)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -424,6 +418,7 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 		item := s.Issues["449"]
 		item.Status, item.Worktree, item.Branch = issuedomain.StatusRunning, worktreePath, branch
 		item.Attempts = 1
+		item.Workspace = testWorkerWorkspace(s, item.Worktree, item.Branch)
 		return nil
 	})
 	if err != nil {
@@ -503,6 +498,7 @@ func persistAnsweredWorkspaceChain(t *testing.T, store state.Store, worktreePath
 		item := s.Issues["449"]
 		item.Status, item.FailureKind, item.LastError, item.GitHubSync = issuedomain.StatusBlocked, "issue", reason, issuedomain.GitHubSyncBlocked
 		item.BlockedCause = &state.BlockedCause{Origin: "supervisor", Kind: "worker_workspace", Resumable: false, Reason: reason, BlockedAt: times[8]}
+		item.Workspace = nil
 		return nil
 	}); err != nil {
 		t.Fatal(err)
