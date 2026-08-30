@@ -378,6 +378,17 @@ agent-loop delivery status --json
 
 `$HOME/.agent-loop-delivery.yaml`はownerがLaunchAgent user、mode `0600`、symlinkでないことを確認する。repository別`.agent-loop.yaml`へdelivery設定を追加しない。`status --json`でphase、current/desired/previous、drain進捗、backup、last/next checkを確認する。`rollback_failed`ではmaintenance fenceを手動削除せず、表示されたbackupを保全してdoctorの失敗codeを調査する。
 
+外部原因を解消し、`doctor --json`が成功し、retained transactionのexact backupを検証できた場合だけ、operator確認後に検証済みの現行candidateから次を実行する。
+
+```sh
+/absolute/verified/agent-loop_Darwin_arm64 delivery retry-rollback \
+  --backup '/absolute/managed/delivery-backup' \
+  --confirm-retained-fence \
+  --json
+```
+
+commandはdelivery lock、`rollback_failed` transaction、maintenance generation、desired identity、exact backup manifest、installed current/previous identityを再検証する。installed binaryが既にpreviousと一致する場合はbackupを再適用せず、maintenance下で全repositoryの再開とdoctorだけを再検証する。成功時だけtyped transactionを`rolled_back`へ進めてfenceを解除する。不一致やhealth failureではfenceとbackupを保持する。
+
 初回導入とrelease前の実Mac E2Eでは、test repositoryと検証済みstable releaseを使い、次を記録する。
 
 1. login後にdelivery LaunchAgentがstable releaseを検出する。

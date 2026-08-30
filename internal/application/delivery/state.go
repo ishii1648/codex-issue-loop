@@ -137,6 +137,31 @@ func WriteMaintenance(path string, value Maintenance) error {
 	return fsutil.WriteJSON(path, value, 0o600)
 }
 
+func LoadMaintenance(path string) (Maintenance, error) {
+	var value Maintenance
+	info, err := os.Lstat(path)
+	if err != nil {
+		return value, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return value, fmt.Errorf("delivery maintenance fence is not a regular file: %s", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return value, fmt.Errorf("delivery maintenance fence is not owner-only: %s", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return value, err
+	}
+	if err := decodeStrictJSON(data, &value); err != nil {
+		return value, fmt.Errorf("decode delivery maintenance fence: %w", err)
+	}
+	if value.Version != 1 || value.Generation == "" || value.Desired.Version == "" || value.Desired.Commit == "" {
+		return value, errors.New("delivery maintenance fence is incomplete or unsupported")
+	}
+	return value, nil
+}
+
 func knownPhase(phase Phase) bool {
 	switch phase {
 	case PhaseIdle, PhaseDiscovered, PhaseDownloaded, PhaseVerified, PhaseDraining, PhaseApplying, PhaseValidating, PhaseSucceeded:
