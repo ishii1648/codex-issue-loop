@@ -144,6 +144,27 @@ func TestOpenCodeTimeoutAbortsSessionAndStopsServerGroup(t *testing.T) {
 	}
 }
 
+func TestOpenCodeTimeoutRetriesSessionAbortBeforeStoppingServer(t *testing.T) {
+	requireLoopbackListener(t)
+	dir := t.TempDir()
+	fake := openCodeHelperCommand(t, dir)
+	aborted := filepath.Join(dir, "aborted")
+	t.Setenv("AGENT_LOOP_OPENCODE_MODE", "timeout")
+	t.Setenv("AGENT_LOOP_OPENCODE_ABORTED", aborted)
+	t.Setenv("AGENT_LOOP_OPENCODE_ABORT_FAIL_ONCE", "1")
+	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/test", "")
+	cfg.Worker.Timeout.Duration = time.Second
+	cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
+	_, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_abort_retry", Attempts: 1}, "", nil)
+	var termination *TerminationError
+	if !errors.As(err, &termination) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := os.Stat(aborted); err != nil {
+		t.Fatalf("session abort was not retried: %v", err)
+	}
+}
+
 func TestOpenCodeProviderFailuresAreNormalized(t *testing.T) {
 	for _, mode := range []string{"auth", "model"} {
 		t.Run(mode, func(t *testing.T) {
@@ -209,7 +230,16 @@ func TestOpenCodeHelperProcess(t *testing.T) {
 	mux.HandleFunc("/session", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"id":"ses_fake"}`) })
 	mux.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/abort") {
-			_ = os.WriteFile(os.Getenv("AGENT_LOOP_OPENCODE_ABORTED"), []byte("aborted"), 0o600)
+			aborted := os.Getenv("AGENT_LOOP_OPENCODE_ABORTED")
+			firstAttempt := aborted + ".attempt"
+			if os.Getenv("AGENT_LOOP_OPENCODE_ABORT_FAIL_ONCE") == "1" {
+				if _, err := os.Stat(firstAttempt); errors.Is(err, os.ErrNotExist) {
+					_ = os.WriteFile(firstAttempt, []byte("attempted"), 0o600)
+					http.Error(w, "retry abort", http.StatusServiceUnavailable)
+					return
+				}
+			}
+			_ = os.WriteFile(aborted, []byte("aborted"), 0o600)
 			_, _ = io.WriteString(w, "true")
 			return
 		}

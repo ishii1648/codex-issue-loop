@@ -177,7 +177,7 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 	messageErr := openCodeJSON(ctx, client, http.MethodPost, baseURL+"/session/"+url.PathEscape(sessionID)+"/message?directory="+url.QueryEscape(cfg.RepoPath), body, &response)
 	if ctx.Err() != nil {
 		abortCtx, abortCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = openCodeJSON(abortCtx, client, http.MethodPost, baseURL+"/session/"+url.PathEscape(sessionID)+"/abort?directory="+url.QueryEscape(cfg.RepoPath), nil, nil)
+		_ = abortOpenCodeSession(abortCtx, baseURL, sessionID, cfg.RepoPath)
 		abortCancel()
 	}
 	stopErr := stop()
@@ -217,6 +217,28 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 		return result, err
 	}
 	return result, nil
+}
+
+func abortOpenCodeSession(ctx context.Context, baseURL, sessionID, repoPath string) error {
+	transport := &http.Transport{Proxy: nil}
+	client := &http.Client{Transport: transport}
+	defer transport.CloseIdleConnections()
+	endpoint := baseURL + "/session/" + url.PathEscape(sessionID) + "/abort?directory=" + url.QueryEscape(repoPath)
+	var lastErr error
+	for {
+		if err := openCodeJSON(ctx, client, http.MethodPost, endpoint, nil, nil); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(lastErr, ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func reserveLoopbackPort() (int, error) {
