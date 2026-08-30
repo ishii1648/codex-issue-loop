@@ -9,10 +9,10 @@ github:
   exclude_labels: [blocked, do-not-automate]
 
 queue:
-  concurrency: 2
+  concurrency: 1
 
-# Required only when concurrency is greater than 1. These definitions are the
-# repository-specific safety boundary for parallel changes.
+# Keep definitions while production concurrency is limited to 1 so a future,
+# explicitly gated rollout does not need to infer the resource taxonomy.
 resources:
   definitions:
     - name: application

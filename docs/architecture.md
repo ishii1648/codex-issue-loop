@@ -49,7 +49,7 @@ Release deliveryではGitHub Actionsの責務をbuild、test、SBOM/checksum、p
 
 delivery controllerがmaintenance fenceを作ると、全repository schedulerは新規claim、retry/resume、conflict worker、PR maintenanceをdispatchしない。実行中workerへsignalを送らず、PID/PGIDが消えてsnapshotがflushされ、supervisorが`maintenance`へ到達するまで待つ。適用後のdoctorとbounded soakが完了するまでfenceを解除せず、失敗時はprevious installへrollbackする。LLM、Issue worker、GitHub Actionsはいずれもこのtransactionを所有しない。
 
-現行のownership境界は1 host・1 supervisor・1 workerである。将来の単一host並列化は同じsupervisor内のworker slotとして実装し、複数host冗長化は外部の線形化可能なcoordinatorとfenced publication gatewayを必須とする。GitHub labelを分散lockとして使わない。詳細は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
+現行production/self-hostingのownership境界は1 host・1 supervisor・同時worker 1件である。複数workerの実装とresource taxonomyは保持するが、安定化期間中の設定上限は`queue.concurrency: 1`とする。将来の再有効化は同じsupervisor内のworker slotとしてisolated canaryを通し、複数host冗長化は外部の線形化可能なcoordinatorとfenced publication gatewayを必須とする。GitHub labelを分散lockとして使わない。詳細は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
 
 単一host並列化でschedulerが評価するresource claim、Issue依存関係、local leaseの契約は[Resource admission契約](resource-admission.md)を正本とする。admissionと待機中の監視はGoコードで完結し、worker起動前の判断にLLMを使わない。
 

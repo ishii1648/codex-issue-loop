@@ -87,7 +87,7 @@ Codex Desktopのquestion notification、macOS通知権限、Activityの回答待
 
 Codex network proxy、macOS sandbox、Deno listen/connect、spawnしたChrome CDP、親/子processのpublic/LAN/link-local拒否は認証済みrelease hostだけで[localhost-only command network](localhost-network.md)の実機受け入れを行う。通常suiteはmodel呼び出しや外部networkを使わない。
 
-concurrency 2のfault matrix、self-hosting canary、resource計測、concurrency 1 rollbackは[concurrency 2 rollout・rollback runbook](concurrency-rollout.md)を正本とする。
+production/self-hostingのconcurrency 1固定、concurrency 2のfault matrix、isolated canary、resource計測、rollbackは[concurrency runbook](concurrency-rollout.md)を正本とする。
 
 ## セキュリティ負テスト
 

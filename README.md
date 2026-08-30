@@ -200,7 +200,7 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 "$agent_loop_bin" doctor --repo /absolute/path/to/repo-b --json
 ```
 
-リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。同一リポジトリでは`resources.definitions`とIssueの`area:` claimを設定した場合に`queue.concurrency`まで並列実行できます。resource設定がない既存configは`queue.concurrency: 1`と`repo:*`で安全に直列実行されます。
+リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。同一リポジトリのproduction/self-hostingは安定化期間中`queue.concurrency: 1`で直列実行します。複数workerの実装とresource taxonomyは保持しますが、再有効化にはconformanceとisolated canaryが必要です。resource設定がない既存configも`repo:*`で安全に直列実行されます。
 
 - 同じGitHubリポジトリを複数のcloneやhostから同時に動かさないでください。
 - `status`、`watch`、`stop`などでは常に`--repo`で対象を明示してください。

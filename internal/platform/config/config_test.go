@@ -30,6 +30,9 @@ github:
 	if cfg.Queue.PollInterval.Duration != 60*time.Second {
 		t.Fatalf("poll interval = %s", cfg.Queue.PollInterval.Duration)
 	}
+	if cfg.Queue.Concurrency != 1 {
+		t.Fatalf("production default concurrency = %d, want 1", cfg.Queue.Concurrency)
+	}
 	if cfg.Watch.ReconcileInterval.Duration != 60*time.Second {
 		t.Fatalf("reconcile interval = %s", cfg.Watch.ReconcileInterval.Duration)
 	}
@@ -326,19 +329,15 @@ resources:
 	}
 }
 
-func TestSelfHostingCanaryAndConcurrencyOneFallbackConfigurations(t *testing.T) {
+func TestSelfHostingAndExampleConfigurationsLimitProductionConcurrencyToOne(t *testing.T) {
 	repositoryRoot := filepath.Clean(filepath.Join("..", "..", ".."))
-	data, err := os.ReadFile(filepath.Join(repositoryRoot, FileName))
-	if err != nil {
-		t.Fatal(err)
-	}
 	cfg, err := Load(repositoryRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantResources := []string{"config", "scheduler", "github", "worker", "host", "operations", "release", "docs"}
-	if cfg.Queue.Concurrency != 2 || cfg.Resources.MetadataVersion != 1 || len(cfg.Resources.Definitions) != len(wantResources) {
-		t.Fatalf("self-hosting canary config=%+v", cfg)
+	if cfg.Queue.Concurrency != 1 || cfg.Resources.MetadataVersion != 1 || len(cfg.Resources.Definitions) != len(wantResources) {
+		t.Fatalf("self-hosting production config=%+v", cfg)
 	}
 	for index, name := range wantResources {
 		if cfg.Resources.Definitions[index].Name != name {
@@ -346,17 +345,17 @@ func TestSelfHostingCanaryAndConcurrencyOneFallbackConfigurations(t *testing.T) 
 		}
 	}
 
-	fallback := strings.Replace(string(data), "  concurrency: 2\n", "  concurrency: 1\n", 1)
-	if fallback == string(data) {
-		t.Fatal("self-hosting concurrency setting was not found")
-	}
-	fallbackDir := writeConfig(t, fallback)
-	fallbackConfig, err := Load(fallbackDir)
+	exampleData, err := os.ReadFile(filepath.Join(repositoryRoot, ".agent-loop.example.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fallbackConfig.Queue.Concurrency != 1 || len(fallbackConfig.Resources.Definitions) != len(wantResources) {
-		t.Fatalf("concurrency 1 fallback changed taxonomy: %+v", fallbackConfig)
+	exampleDir := writeConfig(t, string(exampleData))
+	exampleConfig, err := Load(exampleDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exampleConfig.Queue.Concurrency != 1 {
+		t.Fatalf("example production concurrency = %d, want 1", exampleConfig.Queue.Concurrency)
 	}
 }
 
