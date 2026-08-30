@@ -17,7 +17,7 @@ GitHub Releaseには次を公開する。
 
 release jobは同じtag、commit、`SOURCE_DATE_EPOCH`から2回buildし、binary、SBOM、checksumのbyte一致を確認してから公開する。repository固有の長期secretは使わず、GitHub Actionsの短命OIDC tokenと`GITHUB_TOKEN`だけを使う。
 
-GitHub Actionsのartifact downloadでは実行modeが保持されないため、isolated canaryはdownload後にcandidateを`0755`へ戻してから実行する。これはfile bytesを変更しない。mode復元後もmanifestのSHA-256とattestationを正本とし、不一致時はcandidate公開とproduction昇格を停止する。
+GitHub Actionsのartifact downloadとGitHub Release downloadでは実行modeが保持されないため、isolated canaryとpost-release readbackはdownload後にbinaryを`0755`へ戻してから実行する。これはfile bytesを変更しない。mode復元後もmanifestのSHA-256とattestationを正本とし、不一致時はcandidate公開、production昇格、またはrelease health確定を停止する。
 
 soak jobはcheckoutを前提にせず、`GITHUB_REPOSITORY`を明示してcandidate prereleaseからbinaryを取得する。開始時・15分後・30分後の各checkpointでcanonical artifactとのbyte一致とGitHub attestationを検証し、途中の取得失敗も昇格失敗として扱う。
 

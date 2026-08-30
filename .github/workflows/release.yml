@@ -445,6 +445,7 @@ jobs:
           gh attestation verify dist/stable/cli-surface-report.json --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/offline-contract-report.json --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/production-state-report.json --repo "$GITHUB_REPOSITORY"
+          chmod 0755 dist/stable/agent-loop_Darwin_arm64
           dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" '.version == $version and .commit == $commit'
       - name: Require production delivery health evidence
         env:
