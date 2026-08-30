@@ -1,1 +1,0 @@
-{"schema_version":1,"repository":"ishii1648/codex-issue-loop-canary","repository_id_present":true,"issue":{"list":true,"get":true,"edit":true,"label_add_remove":true},"pull_request":{"create":true,"view":true,"list":true,"checks_status":true},"release_metadata":true}

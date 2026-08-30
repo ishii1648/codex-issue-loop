@@ -34,7 +34,7 @@ grep -Fq '"semantic_contract_minimum": 0' "$temporary_root/first/release-manifes
 go test ./internal/domain/statecontract ./internal/adapter/state \
   -run '^Test(CurrentContractHasMigrationRulesForEveryExecutionRequirement|EveryExecutionRequiredFieldHasRuntimeValidator)$' \
   -count=1
-go test ./internal/application/delivery -run '^Test(ProductionStateCanaryRequiresIdenticalSnapshots|ProductionReleaseHealthFailsClosed|ReleaseWorkflowPreservesRequiredGateChain|LiveContractScriptsUseSupportedRepositoryIDAPI)$' -count=1
+go test ./internal/application/delivery -run '^Test(ProductionStateIsolationRunsCredentiallessContractBetweenSnapshots|ProductionReleaseHealthFailsClosed|ReleaseWorkflowPreservesRequiredGateChain|ContractWorkflowsRequireNoLongLivedSecrets|HighRiskReviewScopesIndependentApprovalToHighRiskChanges)$' -count=1
 
 conformance_json="$temporary_root/conformance.jsonl"
 go test ./internal/application/conformance -count=1 -json >"$conformance_json"
@@ -53,3 +53,10 @@ while read -r expected fixture; do
   [ "$actual" = "$expected" ]
   "$temporary_root/first/agent-loop_Darwin_arm64" verify-recovery-fixture --fixture "$fixture_path" --json >/dev/null
 done < internal/application/recoveryfixture/testdata/blessed-fixtures.sha256
+
+while read -r expected fixture; do
+  [ -n "$expected" ] || continue
+  fixture_path="internal/contract/testdata/$fixture"
+  actual=$(shasum -a 256 "$fixture_path" | awk '{print $1}')
+  [ "$actual" = "$expected" ]
+done < internal/contract/testdata/contract-fixtures.sha256

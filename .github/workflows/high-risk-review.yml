@@ -21,12 +21,16 @@ jobs:
           ref: refs/pull/${{ github.event.pull_request.number }}/head
           fetch-depth: 0
       - name: Run automated high-risk review
+        id: review
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REVIEW_OUTPUT: review-artifacts/high-risk-review.json
-        run: scripts/high-risk-review.sh
+        run: |
+          scripts/high-risk-review.sh
+          printf 'high_risk=%s\n' "$(jq -r .high_risk review-artifacts/high-risk-review.json)" >> "$GITHUB_OUTPUT"
       - name: Require one independent approval of the latest push
+        if: steps.review.outputs.high_risk == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

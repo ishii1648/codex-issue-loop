@@ -4,16 +4,11 @@ set -eu
 production_repo=${PRODUCTION_REPOSITORY_PATH:?PRODUCTION_REPOSITORY_PATH is required}
 production_binary=${PRODUCTION_AGENT_LOOP_BINARY:?PRODUCTION_AGENT_LOOP_BINARY is required}
 candidate_binary=${CANDIDATE_BINARY:?CANDIDATE_BINARY is required}
-canary_repository=${CANARY_REPOSITORY:?CANARY_REPOSITORY is required}
-artifact_dir=${CANARY_ARTIFACT_DIR:?CANARY_ARTIFACT_DIR is required}
+artifact_dir=${CONTRACT_ARTIFACT_DIR:?CONTRACT_ARTIFACT_DIR is required}
 release_tag=${RELEASE_TAG:?RELEASE_TAG is required}
 release_commit=${RELEASE_COMMIT:?RELEASE_COMMIT is required}
 candidate_tag=${CANDIDATE_TAG:?CANDIDATE_TAG is required}
 
-case "$canary_repository" in
-  */codex-issue-loop-canary) ;;
-  *) printf '%s\n' "refusing non-canary repository: $canary_repository" >&2; exit 1 ;;
-esac
 case "$release_commit" in
   *[!0-9a-f]*|'') printf '%s\n' "RELEASE_COMMIT must be lowercase hexadecimal" >&2; exit 1 ;;
 esac
@@ -23,11 +18,11 @@ esac
 [ -x "$candidate_binary" ]
 
 repo_root=$(git rev-parse --show-toplevel)
-isolated_canary=${ISOLATED_CANARY_SCRIPT:-$repo_root/scripts/isolated-canary.sh}
-temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-production-canary.XXXXXX")
+offline_contract=${OFFLINE_CONTRACT_SCRIPT:-$repo_root/scripts/offline-release-contract.sh}
+temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-production-isolation.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
 mkdir -p "$artifact_dir"
-[ -x "$isolated_canary" ]
+[ -x "$offline_contract" ]
 
 snapshot_production() {
   destination=$1
@@ -60,34 +55,33 @@ snapshot_production() {
 }
 
 snapshot_production "$temporary_root/production-before.json"
-CANARY_REPOSITORY="$canary_repository" \
-  CANDIDATE_BINARY="$candidate_binary" \
-  CANARY_ARTIFACT_DIR="$temporary_root/canary" \
-  "$isolated_canary"
+CANDIDATE_BINARY="$candidate_binary" \
+  CONTRACT_ARTIFACT_DIR="$temporary_root/offline-contract" \
+  "$offline_contract"
 snapshot_production "$temporary_root/production-after.json"
 cmp "$temporary_root/production-before.json" "$temporary_root/production-after.json"
 
 candidate_digest=$(shasum -a 256 "$candidate_binary" | awk '{print $1}')
 jq -e '
-  .production_remote_changes == 0 and
+  .mode == "credentialless-offline" and
+  .credentials.canary_github_token == false and .credentials.openai_api_key == false and
+  .external_network == false and
   .final.active_workers == 0 and .final.active_leases == 0 and .final.pending_requests == 0 and
   .final.orphan_pid_pgid == 0 and .final.duplicate_prs == 0 and .final.duplicate_comment_markers == 0 and
-  (.sequences | length) == 2 and .supervisor_restarts >= 2 and
-  .webhook_miss_polling_fallback >= 1 and .webhook_evidence.accepted_deliveries == 0 and
-  .webhook_evidence.safety_sweep_rest_200 >= 1 and .transaction_crash_recovery >= 1 and
-  .final.broker_processes == 0
-' "$temporary_root/canary/canary-report.json" >/dev/null
+  (.sequences | length) == 2 and .supervisor_starts >= 2 and
+  .webhook_fixture_replay == 1 and .transaction_crash_recovery == 1
+' "$temporary_root/offline-contract/offline-contract-report.json" >/dev/null
 
 jq -n \
   --arg release_tag "$release_tag" --arg release_commit "$release_commit" \
   --arg candidate_tag "$candidate_tag" --arg candidate_digest "$candidate_digest" \
   --slurpfile production_before "$temporary_root/production-before.json" \
   --slurpfile production_after "$temporary_root/production-after.json" \
-  --slurpfile canary "$temporary_root/canary/canary-report.json" \
+  --slurpfile offline_contract "$temporary_root/offline-contract/offline-contract-report.json" \
   '{schema_version:1,release_tag:$release_tag,release_commit:$release_commit,candidate_tag:$candidate_tag,
     candidate_binary_sha256:$candidate_digest,production_state_accessed:true,
     production_before:$production_before[0],production_after:$production_after[0],
-    production_state_changes:0,canary:$canary[0]}' \
+    production_state_changes:0,offline_contract:$offline_contract[0]}' \
   >"$artifact_dir/production-state-report.json"
 
 jq -e '

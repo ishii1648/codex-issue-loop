@@ -14,7 +14,7 @@ import (
 
 const evidenceCommit = "0123456789abcdef0123456789abcdef01234567"
 
-func TestProductionStateCanaryRequiresIdenticalSnapshots(t *testing.T) {
+func TestProductionStateIsolationRunsCredentiallessContractBetweenSnapshots(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		mismatch bool
@@ -40,23 +40,22 @@ if [ "${MISMATCH:-0}" = 1 ] && [ "$count" -gt 1 ]; then revision=8; fi
 printf '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"repo_id":"production-id","state_revision":%s,"supervisor":{"state":"idle"},"issues":{}}}\n' "$revision"
 `)
 			candidate := writeExecutable(t, root, "candidate", "#!/bin/sh\nexit 0\n")
-			fakeCanary := writeExecutable(t, root, "isolated-canary", `#!/bin/sh
-mkdir -p "$CANARY_ARTIFACT_DIR"
-printf '%s\n' '{"schema_version":1,"repository":"ishii1648/codex-issue-loop-canary","sequences":[{"status":"completed"},{"status":"completed"}],"supervisor_restarts":2,"webhook_miss_polling_fallback":1,"webhook_evidence":{"accepted_deliveries":0,"safety_sweep_rest_200":1},"transaction_crash_recovery":1,"production_remote_changes":0,"final":{"active_workers":0,"active_leases":0,"pending_requests":0,"orphan_pid_pgid":0,"duplicate_prs":0,"duplicate_comment_markers":0,"broker_processes":0}}' >"$CANARY_ARTIFACT_DIR/canary-report.json"
+			fakeContract := writeExecutable(t, root, "offline-contract", `#!/bin/sh
+mkdir -p "$CONTRACT_ARTIFACT_DIR"
+printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","credentials":{"canary_github_token":false,"openai_api_key":false},"external_network":false,"sequences":[{"status":"completed"},{"status":"completed"}],"supervisor_starts":2,"webhook_fixture_replay":1,"transaction_crash_recovery":1,"final":{"active_workers":0,"active_leases":0,"pending_requests":0,"orphan_pid_pgid":0,"duplicate_prs":0,"duplicate_comment_markers":0}}' >"$CONTRACT_ARTIFACT_DIR/offline-contract-report.json"
 `)
 			artifactDir := filepath.Join(root, "artifacts")
-			cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-state-canary.sh"))
+			cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-state-isolation.sh"))
 			cmd.Dir = repositoryRoot(t)
 			cmd.Env = append(os.Environ(),
 				"PRODUCTION_REPOSITORY_PATH="+productionRepo,
 				"PRODUCTION_AGENT_LOOP_BINARY="+productionBinary,
 				"CANDIDATE_BINARY="+candidate,
-				"CANARY_REPOSITORY=ishii1648/codex-issue-loop-canary",
-				"CANARY_ARTIFACT_DIR="+artifactDir,
+				"CONTRACT_ARTIFACT_DIR="+artifactDir,
 				"RELEASE_TAG=v0.8.0",
 				"RELEASE_COMMIT="+evidenceCommit,
 				"CANDIDATE_TAG=candidate-v0.8.0-123",
-				"ISOLATED_CANARY_SCRIPT="+fakeCanary,
+				"OFFLINE_CONTRACT_SCRIPT="+fakeContract,
 				"COUNT_PATH="+filepath.Join(root, "count"),
 			)
 			if test.mismatch {
@@ -79,11 +78,12 @@ printf '%s\n' '{"schema_version":1,"repository":"ishii1648/codex-issue-loop-cana
 				StateAccessed bool           `json:"production_state_accessed"`
 				Before        map[string]any `json:"production_before"`
 				After         map[string]any `json:"production_after"`
+				Contract      map[string]any `json:"offline_contract"`
 			}
 			if err := json.Unmarshal(data, &report); err != nil {
 				t.Fatal(err)
 			}
-			if report.Commit != evidenceCommit || len(report.Digest) != 64 || !report.StateAccessed || !mapsEqual(report.Before, report.After) {
+			if report.Commit != evidenceCommit || len(report.Digest) != 64 || !report.StateAccessed || !mapsEqual(report.Before, report.After) || report.Contract["mode"] != "credentialless-offline" {
 				t.Fatalf("report=%s", data)
 			}
 		})
@@ -161,8 +161,8 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		"verify-attestation-and-manifest": {"verify-reproducibility"},
 		"replay-production-fixtures":      {"verify-attestation-and-manifest"},
 		"lifecycle-conformance":           {"replay-production-fixtures"},
-		"github-cli-contract":             {"lifecycle-conformance"},
-		"isolated-canary":                 {"build-candidate", "github-cli-contract"},
+		"cli-surface-contract":            {"lifecycle-conformance"},
+		"isolated-canary":                 {"build-candidate", "cli-surface-contract"},
 		"production-state-isolation":      {"build-candidate", "isolated-canary"},
 		"soak":                            {"production-state-isolation"},
 		"production-approval":             {"soak"},
@@ -187,16 +187,114 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	}
 }
 
-func TestLiveContractScriptsUseSupportedRepositoryIDAPI(t *testing.T) {
-	for _, path := range []string{"scripts/github-cli-contract.sh", "scripts/isolated-canary.sh"} {
+func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
+	for _, path := range []string{
+		".github/workflows/contracts.yml",
+		".github/workflows/release.yml",
+		"scripts/cli-surface-contract.sh",
+		"scripts/offline-release-contract.sh",
+	} {
 		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
 		if err != nil {
 			t.Fatal(err)
 		}
 		text := string(data)
-		if strings.Contains(text, "databaseId") || !strings.Contains(text, `gh api "repos/$repository" --jq .id`) {
-			t.Fatalf("%s does not use the supported REST repository ID contract", path)
+		for _, forbidden := range []string{"secrets.CANARY_GITHUB_TOKEN", "secrets.OPENAI_API_KEY", "codex login"} {
+			if strings.Contains(text, forbidden) {
+				t.Fatalf("%s depends on forbidden credential flow %q", path, forbidden)
+			}
 		}
+	}
+	for _, path := range []string{"scripts/cli-surface-contract.sh", "scripts/offline-release-contract.sh"} {
+		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, `[ -z "${CANARY_GITHUB_TOKEN:-}" ]`) || !strings.Contains(text, `[ -z "${OPENAI_API_KEY:-}" ]`) {
+			t.Fatalf("%s does not fail closed when a forbidden credential is present", path)
+		}
+	}
+}
+
+func TestHighRiskReviewScopesIndependentApprovalToHighRiskChanges(t *testing.T) {
+	root := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	write := func(path, content string) {
+		t.Helper()
+		fullPath := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit := func(message string) string {
+		t.Helper()
+		runGit("add", ".")
+		runGit("-c", "commit.gpgsign=false", "commit", "-m", message)
+		return runGit("rev-parse", "HEAD")
+	}
+	runReview := func(base, head, name string) struct {
+		HighRisk     bool `json:"high_risk"`
+		FindingCount int  `json:"finding_count"`
+	} {
+		t.Helper()
+		outputPath := filepath.Join(root, name+".json")
+		cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "high-risk-review.sh"))
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "BASE_SHA="+base, "HEAD_SHA="+head, "REVIEW_OUTPUT="+outputPath)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("review %s: %v: %s", name, err, output)
+		}
+		var report struct {
+			HighRisk     bool `json:"high_risk"`
+			FindingCount int  `json:"finding_count"`
+		}
+		data, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &report); err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+
+	runGit("init", "-q")
+	runGit("config", "user.name", "review-test")
+	runGit("config", "user.email", "review-test@example.invalid")
+	write("README.md", "base\n")
+	base := commit("base")
+	write("docs/note.md", "ordinary documentation\n")
+	lowRisk := commit("ordinary docs")
+	if report := runReview(base, lowRisk, "low-risk"); report.HighRisk || report.FindingCount != 0 {
+		t.Fatalf("low-risk report=%+v", report)
+	}
+	write(".github/workflows/test.yml", "name: test\n")
+	write("docs/rollback.md", "rollback evidence\n")
+	highRisk := commit("release workflow")
+	if report := runReview(lowRisk, highRisk, "high-risk"); !report.HighRisk || report.FindingCount != 0 {
+		t.Fatalf("high-risk report=%+v", report)
+	}
+
+	workflow, err := os.ReadFile(filepath.Join(repositoryRoot(t), ".github", "workflows", "high-risk-review.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	if !strings.Contains(text, "if: steps.review.outputs.high_risk == 'true'") || !strings.Contains(text, `>> "$GITHUB_OUTPUT"`) {
+		t.Fatal("independent approval is not conditionally bound to machine-readable high-risk classification")
 	}
 }
 

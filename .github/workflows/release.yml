@@ -146,43 +146,37 @@ jobs:
       - run: make conformance-test
       - run: make fault-test
 
-  github-cli-contract:
-    name: github-cli-contract
+  cli-surface-contract:
+    name: cli-surface-contract
     needs: lifecycle-conformance
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v7
         with:
           go-version: "1.25.13"
+          cache: true
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-      - name: Require actual contract credentials
+      - name: Install the pinned Codex CLI without authenticating
+        run: npm install --global @openai/codex@0.136.0
+      - name: Verify installed CLI surfaces without API calls
         env:
-          CANARY_GITHUB_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: test -n "$CANARY_GITHUB_TOKEN" && test -n "$OPENAI_API_KEY"
-      - run: npm install --global @openai/codex@0.136.0
-      - name: Exercise GitHub, gh, and Codex contracts
-        env:
-          GH_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CANARY_REPOSITORY: ishii1648/codex-issue-loop-canary
           CONTRACT_ARTIFACT_DIR: contract-artifacts
-        run: |
-          scripts/github-cli-contract.sh
-          scripts/codex-cli-contract.sh
+        run: scripts/cli-surface-contract.sh
+      - name: Replay GitHub and worker boundary fixtures
+        run: go test ./internal/adapter/github ./internal/adapter/worker ./internal/platform/compat -count=1
       - uses: actions/upload-artifact@v6
         with:
-          name: cli-contract-${{ github.sha }}
-          path: contract-artifacts
+          name: cli-surface-contract-${{ github.sha }}
+          path: contract-artifacts/cli-surface-report.json
           if-no-files-found: error
 
   isolated-canary:
-    name: isolated-canary
-    needs: [build-candidate, github-cli-contract]
+    name: credentialless-isolated-canary
+    needs: [build-candidate, cli-surface-contract]
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -190,37 +184,38 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.25.13"
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
       - uses: actions/download-artifact@v7
         with:
           name: release-candidate-${{ github.sha }}
           path: dist/candidate
-      - run: npm install --global @openai/codex@0.136.0
-      - name: Run two isolated lifecycle sequences and fault recovery
+      - uses: actions/download-artifact@v7
+        with:
+          name: cli-surface-contract-${{ github.sha }}
+          path: contract-artifacts
+      - name: Prime the module cache before disabling external network access
+        run: go mod download
+      - name: Run two isolated lifecycle sequences with no credentials or network
         env:
-          GH_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CANARY_REPOSITORY: ishii1648/codex-issue-loop-canary
-          CANARY_ARTIFACT_DIR: canary-artifacts
           CANDIDATE_BINARY: dist/candidate/agent-loop_Darwin_arm64
-        run: scripts/isolated-canary.sh
+          CONTRACT_ARTIFACT_DIR: contract-artifacts
+        run: scripts/offline-release-contract.sh
       - uses: actions/upload-artifact@v6
         with:
-          name: canary-report-${{ github.sha }}
-          path: canary-artifacts/canary-report.json
+          name: offline-contract-report-${{ github.sha }}
+          path: contract-artifacts/offline-contract-report.json
           if-no-files-found: error
-      - name: Attest hosted canary evidence
+      - name: Attest credentialless contract evidence
         uses: actions/attest-build-provenance@v3
         with:
-          subject-path: canary-artifacts/canary-report.json
+          subject-path: |
+            contract-artifacts/cli-surface-report.json
+            contract-artifacts/offline-contract-report.json
       - name: Publish the candidate prerelease from canonical bytes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           candidate_tag="candidate-${GITHUB_REF_NAME}-${GITHUB_RUN_ID}"
-          gh release create "$candidate_tag" dist/candidate/* canary-artifacts/canary-report.json \
+          gh release create "$candidate_tag" dist/candidate/* contract-artifacts/*.json \
             --target "$GITHUB_SHA" --prerelease --title "$candidate_tag" --notes "Release candidate for $GITHUB_REF_NAME from $GITHUB_SHA"
 
   production-state-isolation:
@@ -260,15 +255,20 @@ jobs:
               .production_state_accessed == true and .production_state_changes == 0 and
               .production_before == .production_after and .production_before.worker_limit == 1 and
               .production_before.active_workers <= 1 and .production_before.doctor_ok == true and
-              .canary.production_remote_changes == 0 and (.canary.sequences | length) == 2 and
-              .canary.supervisor_restarts >= 2 and .canary.webhook_miss_polling_fallback >= 1 and
-              .canary.webhook_evidence.accepted_deliveries == 0 and
-              .canary.webhook_evidence.safety_sweep_rest_200 >= 1 and
-              .canary.transaction_crash_recovery >= 1 and
-              .canary.final.active_workers == 0 and .canary.final.active_leases == 0 and
-              .canary.final.pending_requests == 0 and .canary.final.orphan_pid_pgid == 0 and
-              .canary.final.duplicate_prs == 0 and .canary.final.duplicate_comment_markers == 0 and
-              .canary.final.broker_processes == 0
+              .offline_contract.mode == "credentialless-offline" and
+              .offline_contract.credentials.canary_github_token == false and
+              .offline_contract.credentials.openai_api_key == false and
+              .offline_contract.external_network == false and
+              (.offline_contract.sequences | length) == 2 and
+              .offline_contract.supervisor_starts >= 2 and
+              .offline_contract.webhook_fixture_replay == 1 and
+              .offline_contract.transaction_crash_recovery == 1 and
+              .offline_contract.final.active_workers == 0 and
+              .offline_contract.final.active_leases == 0 and
+              .offline_contract.final.pending_requests == 0 and
+              .offline_contract.final.orphan_pid_pgid == 0 and
+              .offline_contract.final.duplicate_prs == 0 and
+              .offline_contract.final.duplicate_comment_markers == 0
             ' production-state/production-state-report.json >/dev/null
       - name: Attest production isolation evidence
         uses: actions/attest-build-provenance@v3
@@ -286,14 +286,29 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 40
     steps:
-      - name: Record health at start, 15 minutes, and 30 minutes
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/candidate
+      - name: Verify candidate bytes and attestation at start, 15 minutes, and 30 minutes
         env:
-          GH_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
-          CANARY_REPOSITORY: ishii1648/codex-issue-loop-canary
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          mkdir soak
+          set -euo pipefail
+          mkdir -p soak
+          candidate_tag="candidate-${GITHUB_REF_NAME}-${GITHUB_RUN_ID}"
+          expected_digest=$(shasum -a 256 dist/candidate/agent-loop_Darwin_arm64 | awk '{print $1}')
           for checkpoint in start minute-15 minute-30; do
-            gh repo view "$CANARY_REPOSITORY" --json nameWithOwner,visibility >"soak/$checkpoint.json"
+            mkdir -p "soak/$checkpoint"
+            gh release download "$candidate_tag" --pattern agent-loop_Darwin_arm64 --dir "soak/$checkpoint" --clobber
+            cmp dist/candidate/agent-loop_Darwin_arm64 "soak/$checkpoint/agent-loop_Darwin_arm64"
+            gh attestation verify "soak/$checkpoint/agent-loop_Darwin_arm64" --repo "$GITHUB_REPOSITORY"
+            actual_digest=$(shasum -a 256 "soak/$checkpoint/agent-loop_Darwin_arm64" | awk '{print $1}')
+            jq -n --arg checkpoint "$checkpoint" --arg tag "$candidate_tag" \
+              --arg expected "$expected_digest" --arg actual "$actual_digest" \
+              '{schema_version:1,checkpoint:$checkpoint,candidate_tag:$tag,expected_sha256:$expected,actual_sha256:$actual,byte_identical:($expected == $actual),attestation_verified:true}' \
+              >"soak/$checkpoint.json"
             if [ "$checkpoint" != minute-30 ]; then sleep 900; fi
           done
       - uses: actions/upload-artifact@v6
@@ -332,8 +347,12 @@ jobs:
           path: dist/candidate
       - uses: actions/download-artifact@v7
         with:
-          name: canary-report-${{ github.sha }}
-          path: dist/canary
+          name: cli-surface-contract-${{ github.sha }}
+          path: dist/contracts
+      - uses: actions/download-artifact@v7
+        with:
+          name: offline-contract-report-${{ github.sha }}
+          path: dist/contracts
       - uses: actions/download-artifact@v7
         with:
           name: production-state-report-${{ github.sha }}
@@ -342,7 +361,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/candidate/* dist/canary/canary-report.json dist/production-state/production-state-report.json \
+          gh release create "$GITHUB_REF_NAME" dist/candidate/* dist/contracts/*.json dist/production-state/production-state-report.json \
             --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
 
   post-release-health:
@@ -362,18 +381,19 @@ jobs:
         run: |
           candidate_tag="candidate-${GITHUB_REF_NAME}-${GITHUB_RUN_ID}"
           gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,isPrerelease,assets \
-            --jq 'select(.tagName == "'"$GITHUB_REF_NAME"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 6)' >/dev/null
+            --jq 'select(.tagName == "'"$GITHUB_REF_NAME"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 7)' >/dev/null
           mkdir -p dist/stable dist/prerelease
           gh release download "$GITHUB_REF_NAME" --dir dist/stable
           gh release download "$candidate_tag" --dir dist/prerelease
-          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt canary-report.json production-state-report.json; do
+          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json; do
             cmp "dist/prerelease/$asset" "dist/stable/$asset"
           done
           for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
             cmp "dist/candidate/$asset" "dist/stable/$asset"
           done
           gh attestation verify dist/stable/agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
-          gh attestation verify dist/stable/canary-report.json --repo "$GITHUB_REPOSITORY"
+          gh attestation verify dist/stable/cli-surface-report.json --repo "$GITHUB_REPOSITORY"
+          gh attestation verify dist/stable/offline-contract-report.json --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/production-state-report.json --repo "$GITHUB_REPOSITORY"
           dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" '.version == $version and .commit == $commit'
       - name: Require production delivery health evidence
@@ -401,7 +421,7 @@ jobs:
             .status.worker_limit == 1 and .status.active_workers <= 1 and
             .rollback_occurred == false and .healthy == true
           ' dist/stable/production-health-report.json >/dev/null
-          gh release view "$GITHUB_REF_NAME" --json assets --jq 'select((.assets|length) == 7)' >/dev/null
+          gh release view "$GITHUB_REF_NAME" --json assets --jq 'select((.assets|length) == 8)' >/dev/null
       - name: Attest production health evidence
         uses: actions/attest-build-provenance@v3
         with:

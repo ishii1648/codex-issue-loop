@@ -181,7 +181,11 @@ func validateRequestAggregate(snapshot Snapshot, id string, request *Request) er
 	}
 	if request.ResourceParkID != "" {
 		if issue.ResourcePark == nil || issue.ResourcePark.ID != request.ResourceParkID || issue.ResourcePark.RequestID != request.ID {
-			return fmt.Errorf("request %s resource park identity is inconsistent", id)
+			issueParkID, parkRequestID := "", ""
+			if issue.ResourcePark != nil {
+				issueParkID, parkRequestID = issue.ResourcePark.ID, issue.ResourcePark.RequestID
+			}
+			return fmt.Errorf("request %s resource park identity is inconsistent: issue park=%q request park=%q park request=%q", id, issueParkID, request.ResourceParkID, parkRequestID)
 		}
 	}
 	return nil

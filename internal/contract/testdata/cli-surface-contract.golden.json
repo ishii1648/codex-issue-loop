@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mode": "no-auth-surface",
+  "credentials": {
+    "canary_github_token": false,
+    "openai_api_key": false
+  },
+  "inference_requests": 0,
+  "gh": {
+    "command_groups": 16
+  },
+  "codex": {
+    "exec": true,
+    "resume": true,
+    "guarded_features": 8
+  }
+}

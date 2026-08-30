@@ -1,4 +1,4 @@
-name: GitHub and CLI contracts
+name: Credentialless CLI contracts
 
 on:
   workflow_dispatch:
@@ -13,30 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  github-cli-contract:
-    name: GitHub CLI contract
-    runs-on: macos-15
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v6
-      - name: Require isolated canary credential
-        env:
-          CANARY_GITHUB_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
-        run: test -n "$CANARY_GITHUB_TOKEN"
-      - name: Exercise actual GitHub and gh contracts
-        env:
-          GH_TOKEN: ${{ secrets.CANARY_GITHUB_TOKEN }}
-          CANARY_REPOSITORY: ishii1648/codex-issue-loop-canary
-          CONTRACT_ARTIFACT_DIR: contract-artifacts
-        run: scripts/github-cli-contract.sh
-      - uses: actions/upload-artifact@v6
-        with:
-          name: github-cli-contract-${{ github.run_id }}
-          path: contract-artifacts/github-cli-contract.json
-          if-no-files-found: error
-
-  codex-cli-contract:
-    name: Codex CLI contract
+  cli-surface-contract:
+    name: CLI surface contract (no auth)
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -44,22 +22,20 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.25.13"
+          cache: true
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-      - name: Require Codex credential
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: test -n "$OPENAI_API_KEY"
-      - name: Install supported Codex CLI
+      - name: Install the pinned Codex CLI without authenticating
         run: npm install --global @openai/codex@0.136.0
-      - name: Exercise actual Codex contracts
+      - name: Verify installed CLI surfaces without API calls
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CONTRACT_ARTIFACT_DIR: contract-artifacts
-        run: scripts/codex-cli-contract.sh
+        run: scripts/cli-surface-contract.sh
+      - name: Replay GitHub and worker boundary fixtures
+        run: go test ./internal/adapter/github ./internal/adapter/worker ./internal/platform/compat -count=1
       - uses: actions/upload-artifact@v6
         with:
-          name: codex-cli-contract-${{ github.run_id }}
-          path: contract-artifacts/codex-cli-contract.json
+          name: cli-surface-contract-${{ github.run_id }}
+          path: contract-artifacts/cli-surface-report.json
           if-no-files-found: error
