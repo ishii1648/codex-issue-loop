@@ -187,6 +187,19 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	}
 }
 
+func TestLiveContractScriptsUseSupportedRepositoryIDAPI(t *testing.T) {
+	for _, path := range []string{"scripts/github-cli-contract.sh", "scripts/isolated-canary.sh"} {
+		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if strings.Contains(text, "databaseId") || !strings.Contains(text, `gh api "repos/$repository" --jq .id`) {
+			t.Fatalf("%s does not use the supported REST repository ID contract", path)
+		}
+	}
+}
+
 func normalizedNeeds(value any) []string {
 	switch typed := value.(type) {
 	case nil:

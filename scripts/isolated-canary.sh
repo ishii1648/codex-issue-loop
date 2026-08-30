@@ -46,7 +46,7 @@ production_prs_before=$(gh pr list --repo ishii1648/codex-issue-loop --state all
 production_branches_before=$(gh api --paginate repos/ishii1648/codex-issue-loop/branches --jq '.[].name' | wc -l | tr -d ' ')
 
 gh repo clone "$repository" "$repo_path" -- --quiet
-repo_id=$(gh repo view "$repository" --json databaseId --jq .databaseId)
+repo_id=$(gh api "repos/$repository" --jq .id)
 repository_escaped=$(printf '%s' "$repository" | sed 's/[&/]/\\&/g')
 repo_id_escaped=$(printf '%s' "$repo_id" | sed 's/[&/]/\\&/g')
 webhook_secret="$temporary_root/canary-webhook-secret"
