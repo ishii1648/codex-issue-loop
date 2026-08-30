@@ -185,6 +185,22 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	if strings.Count(text, "scripts/build-release.sh") != 2 {
 		t.Fatal("release workflow must build the canonical candidate once and one comparison-only rebuild")
 	}
+	if !strings.Contains(text, `[[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]`) ||
+		strings.Contains(text, `([.-][0-9A-Za-z.-]+)?`) {
+		t.Fatal("stable workflow accepts a prerelease tag suffix")
+	}
+	for _, required := range []string{
+		`for checkpoint in start minute-15 minute-30`,
+		`cmp "dist/prerelease/$asset" "dist/stable/$asset"`,
+		`agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("release workflow is missing byte-promotion evidence %q", required)
+		}
+	}
+	if strings.Count(text, "environment: production") != 2 {
+		t.Fatal("production evidence and promotion approval must both use the protected environment")
+	}
 }
 
 func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
