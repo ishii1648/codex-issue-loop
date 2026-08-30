@@ -37,9 +37,9 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          approvals=$(gh api graphql -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(last:100){nodes{author{login}state commit{oid}}}}}}' \
+          approvals=$(gh api graphql -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){latestOpinionatedReviews(first:100){nodes{author{login}authorAssociation state commit{oid}}}}}}' \
             -F owner="${GITHUB_REPOSITORY_OWNER}" -F repo="${GITHUB_REPOSITORY#*/}" -F pr="$PR_NUMBER" \
-            --jq '[.data.repository.pullRequest.reviews.nodes[] | select(.state == "APPROVED" and .author.login != env.PR_AUTHOR and .commit.oid == env.HEAD_SHA)] | length')
+            --jq '[.data.repository.pullRequest.latestOpinionatedReviews.nodes[] | select(.state == "APPROVED" and .author.login != env.PR_AUTHOR and (.authorAssociation == "OWNER" or .authorAssociation == "MEMBER" or .authorAssociation == "COLLABORATOR") and .commit.oid == env.HEAD_SHA)] | length')
           test "$approvals" -ge 1
       - uses: actions/upload-artifact@v6
         if: always()

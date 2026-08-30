@@ -293,7 +293,10 @@ func TestHighRiskReviewScopesIndependentApprovalToHighRiskChanges(t *testing.T) 
 		t.Fatal(err)
 	}
 	text := string(workflow)
-	if !strings.Contains(text, "if: steps.review.outputs.high_risk == 'true'") || !strings.Contains(text, `>> "$GITHUB_OUTPUT"`) {
+	if !strings.Contains(text, "if: steps.review.outputs.high_risk == 'true'") ||
+		!strings.Contains(text, `>> "$GITHUB_OUTPUT"`) ||
+		!strings.Contains(text, "latestOpinionatedReviews") ||
+		!strings.Contains(text, `.authorAssociation == "COLLABORATOR"`) {
 		t.Fatal("independent approval is not conditionally bound to machine-readable high-risk classification")
 	}
 }
