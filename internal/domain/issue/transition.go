@@ -133,9 +133,6 @@ func StartClaim(from Status) (Transition, error) {
 		StatusUnset, StatusClaiming, StatusFailed)
 }
 
-// ResumeAfterAnswer selects the continuation requested by a recorded answer.
-// The target depends on whether resources can be reacquired atomically and on
-// the kind of question that was answered.
 func ResumeAfterAnswer(from, target Status) (Transition, error) {
 	switch target {
 	case StatusAnswerClaimWaiting, StatusResumePending, StatusResolvingConflict:
@@ -290,9 +287,8 @@ func RefusePublicationRecovery(from Status, reason, failureKind string) (Outcome
 	return newOutcomeDecision("refuse_publication_recovery", from, StatusFailed, reason, failureKind, GitHubSyncFailed, StatusPublicationRecovery)
 }
 
-// ReconcileObservation validates lifecycle convergence derived from durable,
-// GitHub, process, and worktree observations. Same-state convergence is
-// explicit so reconciliation remains idempotent.
+// ReconcileObservation accepts same-state transitions so repeated
+// reconciliation remains idempotent.
 func ReconcileObservation(from, to Status) (Transition, error) {
 	if from == to {
 		return NewTransition("reconcile_observation", from, to)

@@ -651,8 +651,6 @@ func (c Config) WorkerCapabilityProfiles() map[string]capability.Provider {
 	return result
 }
 
-// WorkerLaunchCapabilities describes what the actual adapter argv and sandbox
-// route can provide before any Issue metadata is considered.
 func (c Config) WorkerLaunchCapabilities(profile string) capability.Provider {
 	network := capability.NetworkNone
 	if c.Worker.CommandNetwork.LocalhostOnly() {
@@ -672,8 +670,7 @@ func networkWithin(requested, launched string) bool {
 	return requested == capability.NetworkLocalhost && launched == capability.NetworkPublic
 }
 
-// EffectiveCommand returns the fixed executable selected by the built-in
-// backend. The manifest never expands this value through a shell.
+// EffectiveCommand never expands the configured value through a shell.
 func (w Worker) EffectiveCommand() string {
 	if w.Command != "" {
 		return w.Command

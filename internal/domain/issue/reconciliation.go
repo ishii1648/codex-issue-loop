@@ -322,8 +322,6 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		decision.GitHubSync = GitHubSyncNone
 	}
 
-	// With external identity validated, choose the restart target for the saved
-	// lifecycle state.
 	switch current.Status {
 	case StatusClaiming:
 		if observed.Running && !observed.Ready {

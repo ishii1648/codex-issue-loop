@@ -15,8 +15,8 @@ func MailboxDir(repoStateDir string) string {
 	return filepath.Join(repoStateDir, "webhook-mailbox")
 }
 
-// ReadMailbox returns every durable delivery. The scheduler coalesces targets
-// before remote reads; AckMailbox then removes the complete acted-on batch.
+// ReadMailbox leaves deliveries durable until AckMailbox removes the complete
+// acted-on batch after the scheduler coalesces targets and performs remote reads.
 func ReadMailbox(repoStateDir string) ([]Delivery, error) {
 	dir := MailboxDir(repoStateDir)
 	entries, err := os.ReadDir(dir)

@@ -337,7 +337,6 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		return result, failure.Wrap(failure.Supervisor, "read webhook mailbox", err)
 	}
 	if len(mailboxBatch) > 0 {
-		// Reload RetryAfter changes made while routing active lifecycle events.
 		snapshot, err = s.loop.Store.Load()
 		if err != nil {
 			return result, failure.Wrap(failure.Supervisor, "reload webhook-routed state", err)
