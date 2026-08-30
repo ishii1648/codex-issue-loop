@@ -1,0 +1,10 @@
+# High-risk lifecycle and release surfaces require an explicit owner review.
+/internal/adapter/state/ @ishii1648
+/internal/application/supervisor/ @ishii1648
+/internal/domain/issue/ @ishii1648
+/internal/domain/statecontract/ @ishii1648
+/internal/application/migration/ @ishii1648
+/internal/application/delivery/ @ishii1648
+/.github/workflows/ @ishii1648
+/scripts/check-release.sh @ishii1648
+/.agent-loop*.yaml @ishii1648

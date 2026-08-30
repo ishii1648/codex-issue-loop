@@ -1,0 +1,45 @@
+name: High-risk review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  high-risk-review-gate:
+    name: High-risk review gate
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          fetch-depth: 0
+      - name: Run automated high-risk review
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_OUTPUT: review-artifacts/high-risk-review.json
+        run: scripts/high-risk-review.sh
+      - name: Require one independent approval of the latest push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          approvals=$(gh api graphql -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(last:100){nodes{author{login}state commit{oid}}}}}}' \
+            -F owner="${GITHUB_REPOSITORY_OWNER}" -F repo="${GITHUB_REPOSITORY#*/}" -F pr="$PR_NUMBER" \
+            --jq '[.data.repository.pullRequest.reviews.nodes[] | select(.state == "APPROVED" and .author.login != env.PR_AUTHOR and .commit.oid == env.HEAD_SHA)] | length')
+          test "$approvals" -ge 1
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: high-risk-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: review-artifacts/high-risk-review.json
+          if-no-files-found: error
