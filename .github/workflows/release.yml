@@ -303,7 +303,8 @@ jobs:
           expected_digest=$(shasum -a 256 dist/candidate/agent-loop_Darwin_arm64 | awk '{print $1}')
           for checkpoint in start minute-15 minute-30; do
             mkdir -p "soak/$checkpoint"
-            gh release download "$candidate_tag" --pattern agent-loop_Darwin_arm64 --dir "soak/$checkpoint" --clobber
+            gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern agent-loop_Darwin_arm64 --dir "soak/$checkpoint" --clobber
             cmp dist/candidate/agent-loop_Darwin_arm64 "soak/$checkpoint/agent-loop_Darwin_arm64"
             gh attestation verify "soak/$checkpoint/agent-loop_Darwin_arm64" --repo "$GITHUB_REPOSITORY"
             actual_digest=$(shasum -a 256 "soak/$checkpoint/agent-loop_Darwin_arm64" | awk '{print $1}')

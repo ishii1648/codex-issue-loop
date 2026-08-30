@@ -19,6 +19,8 @@ release jobは同じtag、commit、`SOURCE_DATE_EPOCH`から2回buildし、binar
 
 GitHub Actionsのartifact downloadでは実行modeが保持されないため、isolated canaryはdownload後にcandidateを`0755`へ戻してから実行する。これはfile bytesを変更しない。mode復元後もmanifestのSHA-256とattestationを正本とし、不一致時はcandidate公開とproduction昇格を停止する。
 
+soak jobはcheckoutを前提にせず、`GITHUB_REPOSITORY`を明示してcandidate prereleaseからbinaryを取得する。開始時・15分後・30分後の各checkpointでcanonical artifactとのbyte一致とGitHub attestationを検証し、途中の取得失敗も昇格失敗として扱う。
+
 Pull Requestとmainの通常CIでも`scripts/check-release.sh`を実行し、固定test versionから2回作成したartifactのbyte一致と埋め込みversion/commitを確認する。
 
 release artifactの`version --json`とinstall manifestはstorage schemaのcurrent/migration-from、およびsemantic contractのcurrent/minimumを明示する。release checkはこの範囲とversioned state contractを検査し、execution-required provenance追加にmigration/compatibility ruleがないbuildを拒否する。release前にはsupported旧versionのactive、blocked、needs-input、retry、publication recovery fixtureへcurrent validatorを適用する。
