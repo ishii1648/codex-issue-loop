@@ -18,7 +18,7 @@ resources:
     - name: application
       paths: [src/**]
     - name: docs
-      paths: [README.md, docs/**]
+      paths: [README.md, AGENTS.md, CLAUDE.md, docs/**]
 
 git:
   base_branch: main

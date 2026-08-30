@@ -292,9 +292,8 @@ type WorkspaceProvenanceRecovery struct {
 	ValidatorChecks      map[string]bool                               `json:"validator_checks"`
 }
 
-// Matches reports whether immutable saved provenance identifies the validated
-// launch target. CapturedAt is audit metadata and is deliberately not part of
-// the identity comparison.
+// CapturedAt is audit metadata and is deliberately not part of workspace
+// identity comparison.
 func (w WorkerWorkspace) Matches(path, branch, repoID, repository string, repositoryID int64, gitCommonDir, mainCheckout string) bool {
 	return w.Path == path && w.Branch == branch && w.RepoID == repoID &&
 		w.Repository == repository && w.RepositoryID == repositoryID &&

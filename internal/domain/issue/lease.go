@@ -7,7 +7,6 @@ const (
 	ReleaseLease
 )
 
-// DecideLease centralizes the lifecycle rule for terminal resource release.
 // A merge/completion is authoritative. Failed and blocked records release only
 // when no Pull Request can still own the branch and no worker boundary must be
 // preserved for an operator continuation.

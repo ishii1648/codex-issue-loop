@@ -378,9 +378,7 @@ type typedProductionPackage struct {
 	info   *types.Info
 }
 
-// loadTypedProductionPackages asks the active Go toolchain for module-aware
-// package metadata and export files, then performs the source type check with
-// the standard library. This avoids coupling the architecture guard to a
+// Using the active Go toolchain avoids coupling this architecture guard to a
 // golang.org/x/tools version tied to one Go release.
 func loadTypedPackages(t *testing.T, repoRoot string, includeTests bool) []typedProductionPackage {
 	t.Helper()

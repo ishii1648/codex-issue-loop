@@ -302,6 +302,6 @@ v2からv3へ移行する際、既存のactive Issueは宣言resourceを推測�
 | `host` | `cmd/**`、`internal/application/app/**`、`internal/platform/launchd/**`、`internal/platform/registry/**`、`internal/platform/layout/**`、`internal/application/lifecycle/**`、`internal/adapter/worktree/**` | CLI、LaunchAgent、host-local lifecycle |
 | `operations` | `internal/application/observe/**`、`internal/platform/retention/**`、`internal/platform/redact/**`、`docs/*runbook.md` | 監視、保持、運用 |
 | `release` | `.github/**`、`scripts/**`、`Makefile`、`go.mod`、`go.sum`、`assets.go`、`internal/platform/compat/**`、`internal/application/migration/**`、`docs/release.md`、`docs/compatibility.md`、`docs/migration.md` | build、配布、互換性、migration |
-| `docs` | `.gitignore`、`README.md`、`AGENTS.md`、`docs/**` | 上記に含まれない横断文書 |
+| `docs` | `.gitignore`、`README.md`、`AGENTS.md`、`CLAUDE.md`、`docs/**` | 上記に含まれない横断文書 |
 
 globは重なり得るため、たとえば`docs/resource-admission.md`を変更するIssueは`area:config`と`area:docs`の両方をclaimする。複数領域を横断するrefactorは必要な全resourceをclaimし、taxonomy外の大規模変更や範囲が確定できないIssueはmetadataを省略して意図的に`repo:*`へ縮退させる。

@@ -26,7 +26,7 @@ resources:
     - name: release
       paths: [.github/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/platform/compat/**, internal/application/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
     - name: docs
-      paths: [.gitignore, README.md, AGENTS.md, docs/**]
+      paths: [.gitignore, README.md, AGENTS.md, CLAUDE.md, docs/**]
 
 git:
   base_branch: main
