@@ -88,13 +88,18 @@ func TestDurableLifecycleAssignmentsStayWithinRegisteredBoundaries(t *testing.T)
 			"internal/application/app/answered_workspace_recovery.go", "internal/application/app/app.go",
 			"internal/application/app/checks_recovery.go", "internal/application/app/merged_pr_adoption.go",
 			"internal/application/app/publication_recovery.go", "internal/application/app/recovery_policy.go",
-			"internal/application/supervisor/reconcile.go", "internal/application/supervisor/supervisor.go"),
+			"internal/application/app/operator_attention.go", "internal/application/app/operator_recovery.go",
+			"internal/application/supervisor/reconcile.go", "internal/application/supervisor/supervisor.go",
+			"internal/application/supervisor/checks_lifecycle.go", "internal/application/supervisor/conflict_lifecycle.go",
+			"internal/application/supervisor/github_sync_lifecycle.go", "internal/application/supervisor/publication_lifecycle.go",
+			"internal/application/supervisor/worker_execution.go"),
 		"Lease": paths(
 			"internal/adapter/state/answered_workspace_recovery.go", "internal/adapter/state/lease.go",
 			"internal/adapter/state/legacy_checks_recovery.go", "internal/adapter/state/resume.go",
 			"internal/application/app/answered_workspace_recovery.go", "internal/application/app/app.go",
 			"internal/application/app/checks_recovery.go", "internal/application/app/merged_pr_adoption.go",
 			"internal/application/app/publication_recovery.go", "internal/application/app/status.go",
+			"internal/application/app/operator_recovery.go",
 			"internal/application/supervisor/scheduler.go", "internal/application/supervisor/supervisor.go"),
 		"ResourcePark": paths(
 			"internal/adapter/state/lease.go", "internal/application/app/answered_workspace_recovery.go",
@@ -103,7 +108,8 @@ func TestDurableLifecycleAssignmentsStayWithinRegisteredBoundaries(t *testing.T)
 			"internal/application/supervisor/supervisor.go"),
 		"Request.Status": paths(
 			"internal/adapter/state/lease.go", "internal/application/app/app.go",
-			"internal/application/app/status.go", "internal/application/supervisor/supervisor.go"),
+			"internal/application/app/status.go", "internal/application/app/operator_attention.go",
+			"internal/application/supervisor/supervisor.go"),
 	}
 	for _, pkg := range loaded {
 		for _, file := range pkg.syntax {
@@ -224,13 +230,13 @@ func TestIssueStatusStringConversionsStayAtSerializationBoundaries(t *testing.T)
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", "..", ".."))
 	loaded := loadTypedPackages(t, repoRoot, false)
 	allowed := map[string]int{
-		"internal/application/app/status.go":             1,
-		"internal/application/app/workspace_recovery.go": 1,
-		"internal/application/lifecycle/worktrees.go":    1,
-		"internal/application/migration/migration.go":    2,
-		"internal/adapter/state/semantic.go":             1,
-		"internal/application/supervisor/scheduler.go":   1,
-		"internal/application/supervisor/supervisor.go":  1,
+		"internal/application/app/status.go":                  1,
+		"internal/application/app/workspace_recovery.go":      1,
+		"internal/application/lifecycle/worktrees.go":         1,
+		"internal/application/migration/migration.go":         2,
+		"internal/adapter/state/semantic.go":                  1,
+		"internal/application/supervisor/scheduler.go":        1,
+		"internal/application/supervisor/worker_execution.go": 1,
 	}
 	seen := map[string]int{}
 	for _, pkg := range loaded {
