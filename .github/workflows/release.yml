@@ -198,7 +198,9 @@ jobs:
         env:
           CANDIDATE_BINARY: dist/candidate/agent-loop_Darwin_arm64
           CONTRACT_ARTIFACT_DIR: contract-artifacts
-        run: scripts/offline-release-contract.sh
+        run: |
+          chmod 0755 "$CANDIDATE_BINARY"
+          scripts/offline-release-contract.sh
       - uses: actions/upload-artifact@v6
         with:
           name: offline-contract-report-${{ github.sha }}
