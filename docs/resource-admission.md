@@ -60,7 +60,6 @@ queue:
   concurrency: 3
 
 resources:
-  metadata_version: 1
   definitions:
     - name: config
       paths:
@@ -76,7 +75,7 @@ resources:
 
 configのvalidation規則は次のとおりである。
 
-- `metadata_version`はIssue本文metadataの対応versionであり、初期値は`1`だけを許可する。
+- Issue本文metadataの対応versionは実装が`1`に固定する。
 - `definitions`は1件以上必要である。
 - `name`はlabel suffixと同じ正規化・文字規則を適用し、正規化後の重複を拒否する。予約名`repo`は使用できない。
 - 各definitionの`paths`は1件以上必要で、空文字と正規化後の重複を拒否する。
@@ -282,7 +281,7 @@ manual/security block、PR conflict、failed、closed Issue、active worker、�
 | --- | --- | --- | --- |
 | `.agent-loop.yaml` | v2 | v3 | `resources`と`queue.concurrency > 1`を追加。v2を暗黙変換しない |
 | local state/event | v2 | v3 | Issueごとのeffective claim、dependency、config digest、leaseを追加 |
-| Issue metadata block | なし | v1 | `resources.metadata_version: 1`と一致させる |
+| Issue metadata block | なし | v1 | 実装が固定するmetadata version `1`と一致させる |
 
 migrationは全loop停止、checksum付きbackup、read-only preview、明示`--apply`、doctor、1 repositoryずつの再開を必須とする。既存v2 config/stateはconcurrency 1のまま動作し、v3への自動migration、並列化の自動有効化、既存Issue本文/labelの自動書換えを行わない。
 

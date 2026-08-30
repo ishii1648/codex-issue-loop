@@ -159,151 +159,74 @@ github:
   repository_id: 123456789
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
-  running_label: codex-loop:running
-  needs_input_label: codex-loop:needs-input
-  failed_label: codex-loop:failed
-  done_label: codex-loop:done
 
 queue:
-  poll_interval: 60s
   concurrency: 2
-  order: issue_number_asc
-  priority_labels: []
-  max_attempts: 3
-  continue_after_needs_input: true
 
 resources:
-  metadata_version: 1
   definitions:
     - name: supervisor
       paths: [internal/application/supervisor/**]
     - name: docs
       paths: [README.md, docs/**]
 
-worker:
-  backend: codex
-  command: codex
-  model: null
-  command_network:
-    policy: disabled
-    proxy: false
-    allowed_hosts: []
-  sandbox: workspace-write
-  session_mode: resumable
-  timeout: 2h
-  timeout_grace: 30s
-  ambiguous_profile: extended
-  profiles:
-    standard:
-      max_continuations: 0
-      capabilities:
-        network: none
-        browser_cdp: false
-        download: false
-        external_time_gate: false
-    extended:
-      max_continuations: 3
-      capabilities:
-        network: none
-        browser_cdp: false
-        download: false
-        external_time_gate: false
-
-watch:
-  reconcile_interval: 60s
-  reconcile_jitter: 10%
-
 git:
-  branch_prefix: codex/issue-
-  worktree_root: null
   base_branch: main
 
 formatters:
   go:
     enabled: false
-    timeout: 30s
 
 completion:
-  create_draft_pr: true
   auto_merge: false
-  close_issue: true
-
-conflict_recovery:
-  max_attempts_per_base: 3
-  max_base_updates: 3
-
-worktrees:
-  completed_max_age: 168h
-  failed_max_age: 720h
-  blocked_max_age: 0s
-  needs_input_max_age: 0s
-
-logs:
-  rotate_bytes: 16777216
-  rotate_interval: 24h
-  generations: 7
-  worker_run_max_age: 720h
-  worker_run_max_count: 100
-
-security:
-  redact_env: []
 
 webhook:
-  mode: polling
+  mode: webhook
   listener_address: 127.0.0.1:8787
-  public_url_identifier: ""
-  secret_source: {}
-  previous_secret_source: {}
-  installation_ids: []
+  public_url_identifier: hooks.example.invalid/agent-loop/ishii1648-example
+  secret_source:
+    file: /usr/local/etc/codex-issue-loop/ishii1648-example.webhook
+  installation_ids: [987654]
   allow_repository_webhook: false
-  safety_sweep_interval: 15m
-  safety_sweep_jitter: 10%
-  max_body_bytes: 2097152
-  read_timeout: 10s
-  read_header_timeout: 5s
-  idle_timeout: 30s
-  max_concurrent: 16
 ```
+
+`.agent-loop.yaml`はeffective configのダンプではなく、repositoryごとの意思決定だけを記述する。polling、reconciliation、retry、worker lifecycle、保持期間、log rotation、HTTP limitなどの運用値は実装が安全な既定値を所有し、通常の設定例には公開しない。既定値を省略しても、`Load`は同じeffective configを構築する。`doctor --json`と`status --json`は、そのうち診断や運用判断に必要なeffective behaviorを構造化して返す。
 
 ### 5.1 設定規則
 
 - `version` は必須。現行は`4`とし、v3は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
 - `webhook.mode`の既定は`polling`であり、設定を追加しただけでWebhookをsilentに有効化しない。`webhook`では`github.repository_id`、GitHub App用の1件以上の`installation_ids`、公開URLを秘密値なしで識別する`public_url_identifier`を必須とする。classic repository webhookだけは`allow_repository_webhook: true`を明示してinstallation欠落を許可でき、HMACとrepository ID/full nameは引き続き必須とする。
-- Webhook listenerはliteralな`127.0.0.1`または`::1`だけを許可する。共有brokerを使う全repositoryはlistenerとHTTP上限を一致させる。public/LAN addressやhostnameへのbindは拒否する。
+- Webhook listenerはliteralな`127.0.0.1`または`::1`だけを許可する。共有brokerを使う全repositoryはlistenerを一致させる。public/LAN addressやhostnameへのbindは拒否する。
 - `secret_source`は環境変数名またはrepository外の絶対file pathのどちらか一方だけを指定する。fileはruntimeでregular fileかつowner-only permissionであることを検証する。rotation中だけ`previous_secret_source`を併記できる。secret値をconfig、registry、snapshot、event、status、logへ保存しない。
-- `safety_sweep_interval`の既定は15分で、managed-root brokerだけがpage別のETag/Last-Modifiedとcache bodyを`webhook-sweep.json`へ永続化し、ready labelを含む安定したREST collection URLを最大10 page（1000件）まで条件付きrequestする。304 pageはdurable cacheと合成し、正しく認証された304は成功として記録する。broker起動直後にもoutage recovery sweepを行う。Webhook modeのrepository schedulerはqueue timerとsweep state writerを持たず、repository mailbox、Issue retry deadline、worker event、shared cooldownだけでwakeする。通常経路は対象Issue/PR/SHAだけをREST再検証し、queueまたは変化のないPRをGraphQL pollingしない。
+- 内部のsafety sweep間隔は15分で、managed-root brokerだけがpage別のETag/Last-Modifiedとcache bodyを`webhook-sweep.json`へ永続化し、ready labelを含む安定したREST collection URLを最大10 page（1000件）まで条件付きrequestする。304 pageはdurable cacheと合成し、正しく認証された304は成功として記録する。broker起動直後にもoutage recovery sweepを行う。Webhook modeのrepository schedulerはqueue timerとsweep state writerを持たず、repository mailbox、Issue retry deadline、worker event、shared cooldownだけでwakeする。通常経路は対象Issue/PR/SHAだけをREST再検証し、queueまたは変化のないPRをGraphQL pollingしない。
 - `queue.concurrency` は1以上とする。`resources.definitions`未設定時は安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。2以上はresource definition、valid metadata、既知の`area:` claimを使う単一host worker poolであり、distributed modeは有効化しない。
-- `resources.metadata_version`は`1`、各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
+- resource metadata versionは実装が`1`に固定する。各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
 - `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
 - `priority_then_created_at`では`queue.priority_labels`を高い順に1件以上指定する。labelなしは最低順位、複数該当は最上位一致とする。
 - `worker.model: null` はユーザーのCodex既定値を使う。
 - `worker.backend`は`codex`、`claude-code`、`opencode`のいずれかとし、省略時は`codex`とする。任意shell templateは許可しない。
-- `worker.command`省略時は順に`codex`、`claude`、`opencode`を使い、登録時に絶対pathへ解決する。
+- worker commandはbackendに対応する`codex`、`claude`、`opencode`を使い、登録時に絶対pathへ解決する。
 - `worker.model`はinitial runとresumeの両方へ渡す。OpenCodeでは必須の`provider/model`形式で、最初の`/`だけを分割する。
 - `worker.app_server`は削除済みであり、未知keyとして拒否する。旧設定はblock全体を削除してから再登録する。
 - `worker.command_network.policy`の既定は`disabled`であり、`proxy: false`、空の`allowed_hosts`だけを許可する。opt-inの`localhost-only`はCodex backendと`workspace-write`を必須とし、`proxy: true`と順序を含め完全一致する`allowed_hosts: [localhost, 127.0.0.1]`だけを許可する。空、wildcard、public/private/LAN/link-local host、Unix socket、`dangerously_*`相当の設定は指定できない。
 - `localhost-only`では`codex exec --ignore-user-config --strict-config`を使い、`sandbox_workspace_write.network_access=true`と`features.network_proxy.enabled=true`を同時に固定する。upstream proxy、UDP、任意Unix socketを無効化し、Web Search、Browser/Computer Use、apps/plugins、MCP、remote plugin、skill由来MCP/tool suggestionを無効化する。Codex capabilityを確認できない場合やstrict config/proxy初期化に失敗した場合はworker commandを開始せず、network無効へのfallbackも行わない。詳細は[localhost-only command network](localhost-network.md)を参照する。
 - `worker.variant`はClaude Codeの`--effort`またはOpenCode messageのprovider variantとしてinitial runとresumeの両方へ渡す。
 - `worker.sandbox` の既定値は `workspace-write` とする。
-- `worker.session_mode` は初回run後に `extended` と判定された場合に継続できるよう `resumable` とする。completedと通常のfailedではsession IDをactive stateから外すが、worker起因の環境`blocked`とtyped recoverableなpre-publication failedでは正式な再開・監査に備えて保持する。
+- worker session modeは実装が`resumable`に固定する。completedと通常のfailedではsession IDをactive stateから外すが、worker起因の環境`blocked`とtyped recoverableなpre-publication failedでは正式な再開・監査に備えて保持する。
 - sessionは`{"backend":"<backend>","id":"<session-id>"}`としてnamespace付きで保存する。v3以前に作成された`session_id`もv3 migration時にCodex sessionとして正規化済みであり、v4 migrationは両fieldを保持する。backend変更時はsessionを渡さず、同じworktreeとdurable stateを使うfresh sessionへfallbackする。
-- `worker.ambiguous_profile` は `extended` 固定とし、MVPではユーザー確認へ切り替える設定を設けない。
-- `queue.poll_interval` はGitHub Issueキューの再取得間隔、`watch.reconcile_interval` はattention監視の取りこぼし修復間隔であり、別の設定として扱う。
-- `watch.reconcile_jitter` は複数watchの同時起床を避けるため、各待機期限へ加える。
-- worktree root未指定時はユーザー状態領域配下を使う。
+- 曖昧なpreflightは実装が`extended`へ固定し、ユーザー確認やrepository設定へ委ねない。
+- queue polling、attention reconciliation、jitterは実装上の運用値であり、repository設定の意思決定として扱わない。
+- worktree rootはユーザー状態領域配下へ固定する。
 - durationはGo duration形式とする。
 - 未知キーは設定ミスを検出するため既定でエラーとする。
 - secretsを設定ファイルに記述しない。
 - `security.redact_env`には追加でマスクする値そのものではなく、値を保持する環境変数名だけを記述する。
-- `git.worktree_root`を指定する場合は絶対pathとし、branch prefix、base branch、GitHub repository名はargv/refとして安全な形式だけを許可する。
-- `formatters.go.enabled`は既定で`false`とし、後方互換なpublisher動作を維持する。有効時はregisterが`gofmt`を絶対pathへ固定し、固定sourceのstdin整形probeを通過したcapabilityだけを正数の`timeout`内でbuilt-in adapterとして実行する。doctorも同じread-only probeを再実行する。repository設定からcommand、追加引数、shell hookは指定できない。
-- `completion.create_draft_pr`の既定は`true`とする。`completion.auto_merge`の既定は`false`であり、`true`はdraft PR作成を前提とする。
+- base branchとGitHub repository名はargv/refとして安全な形式だけを許可する。branch prefixとworktree rootは実装が所有する。
+- `formatters.go.enabled`は既定で`false`とし、後方互換なpublisher動作を維持する。有効時はregisterが`gofmt`を絶対pathへ固定し、固定sourceのstdin整形probeを通過したcapabilityだけを内部timeout内でbuilt-in adapterとして実行する。doctorも同じread-only probeを再実行する。repository設定からcommand、追加引数、shell hookは指定できない。
+- draft PR作成とmerge後のIssue closeは実装が有効に固定する。`completion.auto_merge`の既定は`false`とし、高影響なrepository方針として明示できる。
 - `completion.auto_merge: false`ではCI成功後にPRをReady for reviewへ移し、人手のmergeを待つ。`true`ではbase branchへの追随とCI再確認後にsquash mergeする。
-- `conflict_recovery.max_attempts_per_base`は同じimmutable base SHAに対するworker試行上限、`max_base_updates`は1つのPRが自律追随するbase SHA世代数の上限とし、既定はいずれも3とする。
-- `completion.close_issue`はPRのmerge確認後にだけ適用し、既定は`true`とする。
-- worktree保持期間の`0s`は無期限を表す。既定はcompleted 7日、failed 30日、blockedとneeds-inputは無期限とする。`resume_pending`はneeds-inputのポリシーへ含め、`environment_resume_pending`を含むその他の非terminal状態は期間にかかわらず保持する。
-- event、supervisor、launchd、worker logは16 MiBまたは24時間でrotationし、gzip世代を7件保持する。worker run directoryは30日かつterminal run 100件を上限とし、active、retry、`needs_input`は削除しない。
+- conflict recovery budget、worktree保持期間、log rotation、worker run保持数は安全な内部既定値とし、repositoryの通常設定から調整する対象にしない。
 
 同一repository内並列化で追加するresource definition、`area:` label、Issue本文の`depends_on`、決定論的admission、lease lifecycleは[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。schema v3ではdurable leaseとmigrationを導入済みで、resource definitionと複数worker admissionは後続段階で有効化する。
 
@@ -382,7 +305,7 @@ agent-loop start --repo /path/to/repo [--json]
 
 `start` 自身は常駐しない。
 
-`stop`と`restart`はLaunchAgentをunloadした後、snapshotに保存された全Issueのworker PID/PGIDを照合する。所有権を確認できたprocess groupすべてへ先に`SIGTERM`を送り、pool共通の`worker.timeout_grace`だけ待機する。残存groupだけを`SIGKILL`し、全groupの終了を確認してからIssueごとに`worker_process_stopped`を記録する。worktree、session、branch、leaseは保持し、通常workerは`retry_wait`、conflict workerは`resolving_conflict`から次回起動時に再開する。PID再利用などで所有権を確認できないgroupはsignalせず停止処理を失敗させる。
+`stop`と`restart`はLaunchAgentをunloadした後、snapshotに保存された全Issueのworker PID/PGIDを照合する。所有権を確認できたprocess groupすべてへ先に`SIGTERM`を送り、内部のgrace periodだけ待機する。残存groupだけを`SIGKILL`し、全groupの終了を確認してからIssueごとに`worker_process_stopped`を記録する。worktree、session、branch、leaseは保持し、通常workerは`retry_wait`、conflict workerは`resolving_conflict`から次回起動時に再開する。PID再利用などで所有権を確認できないgroupはsignalせず停止処理を失敗させる。
 
 `status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、`limit`、`available`、Issue番号順の`issues`を返す。各active Issueは`issue_number`、`run_id`、`phase`、PID/PGID、slot、resolved resources、`(run_id, generation)` resource ownerを持つ。未回答requestは`pending_requests`へrequest ID順で返す。
 
@@ -1009,7 +932,7 @@ Issue retryのsnapshotには `failure_kind`、`last_error`、`retry_after` を�
 
 ### 14.3 worker timeoutとprocess終了
 
-`worker.timeout`に達した場合、workerのPIDをprocess group IDとしてgroup全体へ`SIGTERM`を送る。親processが先に終了しても子processが残っている間は終了完了とみなさない。`worker.timeout_grace`の間にprocess group全体が終了しなければ、同じgroupへ`SIGKILL`を送り、親processを必ずwaitして回収する。既定値はtimeout 2時間、grace period 30秒とし、grace periodは正数かつtimeout以下でなければならない。
+内部のworker timeoutに達した場合、workerのPIDをprocess group IDとしてgroup全体へ`SIGTERM`を送る。親processが先に終了しても子processが残っている間は終了完了とみなさない。内部のgrace period内にprocess group全体が終了しなければ、同じgroupへ`SIGKILL`を送り、親processを必ずwaitして回収する。timeoutは2時間、grace periodは30秒を安全な運用値として実装が所有する。
 
 timeout理由には、設定timeout、grace period内に終了したか、強制終了まで進んだかを含める。supervisorはworker PIDを0へ戻し、`retry_wait`と一時障害理由を永続化する。Issue worktree、dirty file、commit、session IDは削除しない。次回試行またはLaunchAgent再起動時は通常のstartup reconciliationを実行し、既存branch、worktree、push済みbranch、open/merged/closed PRを調べてから継続する。
 
