@@ -81,7 +81,7 @@ memory pressure、swap、disk safety reserve、Codex rate/quotaのいずれか�
 
 ## 4. 段階切替（現在は実施禁止）
 
-本repositoryの`.agent-loop.yaml`はproduction上限を`1`とし、resource taxonomyだけを明示する。conformance、isolated canary、resource budget、独立承認の証跡が揃うまで`2`へ変更しない。再開時も`2`を超える値へ直接上げない。
+本repositoryの`.agent-loop.yaml`はproduction上限を`1`とし、resource taxonomyだけを明示する。conformance、isolated canary、resource budget、high-risk review finding 0件、promotion evidenceが揃うまで`2`へ変更しない。再開時も`2`を超える値へ直接上げない。
 
 1. loopを停止し、`status`でworker PID/PGIDが0になったことを確認する。stopはleaseとworktreeを保持する。
 2. 新artifactと`.agent-loop.yaml`を配置し、`doctor`を実行する。

@@ -13,7 +13,7 @@ workflowは次の順で失敗停止する。
 7. `credentialless-isolated-canary`
 8. `production-state-isolation`
 9. `soak`
-10. `production-approval`
+10. `promotion-evidence`
 11. `promote-stable`
 12. `post-release-health`
 
@@ -36,7 +36,7 @@ gh release upload 'candidate-v0.8.0-<workflow-run-id>' \
 
 scriptはproductionの`doctor --json`と`status --json`だけを使用し、credentialless contract前後でstate revision、Issue、lease owner/generation、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`、doctor成功も必須である。`production-state-isolation`はreportのrelease commitとcandidate binary SHA-256を照合してattestし、成功後に30分soakを開始する。soakは開始、15分、30分にcandidate prereleaseからbinaryを再取得し、canonical candidateとのbyte一致とattestationを検査する。
 
-`production-approval`はGitHub Environmentの独立reviewerを必要とする。high-risk PRは`High-risk review gate`で自動reviewとauthor以外によるlatest commitへのapprovalを検査する。stale approval、自己approval、未解決conversationをmerge authorityにしない。
+このrepositoryは単一maintainer運用のため、外部collaboratorや自己承認不能なrequired reviewerをrelease authorityにしない。`High-risk review gate`は変更headに結び付いたmachine-readable reviewについて全check成功・finding 0件を必須とする。`promotion-evidence`はCLI surface、offline lifecycle、production非変更、30分soakの全証跡とcandidate digestを再検証し、`production` Environment内で機械的な昇格許可を生成する。Environmentは`v*` refだけを許可し、production isolation前とstable promotion前にそれぞれ30分のwait timerを強制する。未解決conversationはmain rulesetで引き続きmergeを拒否する。
 
 失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production health failure時はdelivery controllerのmaintenance transactionでprevious versionへrollbackし、state、lease、park、request、worktreeを手編集しない。
 

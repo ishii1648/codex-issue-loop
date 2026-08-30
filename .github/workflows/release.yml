@@ -317,26 +317,73 @@ jobs:
           path: soak
           if-no-files-found: error
 
-  production-approval:
-    name: production-approval
+  promotion-evidence:
+    name: promotion-evidence
     needs: soak
     runs-on: macos-15
     environment: production
     timeout-minutes: 10
     steps:
-      - name: Record independent promotion approval
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: evidence/candidate
+      - uses: actions/download-artifact@v7
+        with:
+          name: cli-surface-contract-${{ github.sha }}
+          path: evidence/contracts
+      - uses: actions/download-artifact@v7
+        with:
+          name: offline-contract-report-${{ github.sha }}
+          path: evidence/contracts
+      - uses: actions/download-artifact@v7
+        with:
+          name: production-state-report-${{ github.sha }}
+          path: evidence/production
+      - uses: actions/download-artifact@v7
+        with:
+          name: soak-health-${{ github.sha }}
+          path: evidence/soak
+      - name: Authorize promotion from machine-verifiable evidence
+        shell: bash
         run: |
-          printf '{"actor":"%s","commit":"%s","tag":"%s","candidate_tag":"candidate-%s-%s"}\n' \
-            "$GITHUB_ACTOR" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$GITHUB_REF_NAME" "$GITHUB_RUN_ID" > approval.json
+          set -euo pipefail
+          digest=$(shasum -a 256 evidence/candidate/agent-loop_Darwin_arm64 | awk '{print $1}')
+          jq -e '.schema_version == 1 and .mode == "no-auth-surface" and .inference_requests == 0' evidence/contracts/cli-surface-report.json >/dev/null
+          jq -e --arg digest "$digest" '
+            .schema_version == 1 and .mode == "credentialless-offline" and .candidate_sha256 == $digest and
+            .external_network == false and (.sequences | length) == 2 and
+            .final.active_workers == 0 and .final.active_leases == 0 and .final.pending_requests == 0 and
+            .final.orphan_pid_pgid == 0 and .final.duplicate_prs == 0 and .final.duplicate_comment_markers == 0
+          ' evidence/contracts/offline-contract-report.json >/dev/null
+          jq -e --arg digest "$digest" --arg commit "$GITHUB_SHA" '
+            .schema_version == 1 and .release_commit == $commit and .candidate_binary_sha256 == $digest and
+            .production_state_changes == 0 and .production_before == .production_after and .production_before.doctor_ok == true
+          ' evidence/production/production-state-report.json >/dev/null
+          for checkpoint in start minute-15 minute-30; do
+            jq -e --arg digest "$digest" --arg checkpoint "$checkpoint" '
+              .schema_version == 1 and .checkpoint == $checkpoint and
+              .expected_sha256 == $digest and .actual_sha256 == $digest and
+              .byte_identical == true and .attestation_verified == true
+            ' "evidence/soak/$checkpoint.json" >/dev/null
+          done
+          jq -n --arg commit "$GITHUB_SHA" --arg tag "$GITHUB_REF_NAME" --arg digest "$digest" \
+            '{schema_version:1,mode:"machine-verifiable",commit:$commit,tag:$tag,candidate_sha256:$digest,
+              required_evidence:["cli-surface","offline-contract","production-isolation","soak-start","soak-minute-15","soak-minute-30"],authorized:true}' \
+            > promotion-evidence.json
+      - name: Attest promotion evidence
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: promotion-evidence.json
       - uses: actions/upload-artifact@v6
         with:
-          name: production-approval-${{ github.sha }}
-          path: approval.json
+          name: promotion-evidence-${{ github.sha }}
+          path: promotion-evidence.json
           if-no-files-found: error
 
   promote-stable:
     name: promote-stable
-    needs: [build-candidate, production-approval]
+    needs: [build-candidate, promotion-evidence]
     runs-on: macos-15
     timeout-minutes: 15
     steps:

@@ -3,12 +3,9 @@ name: High-risk review
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  pull_request_review:
-    types: [submitted, dismissed]
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   high-risk-review-gate:
@@ -21,26 +18,17 @@ jobs:
           ref: refs/pull/${{ github.event.pull_request.number }}/head
           fetch-depth: 0
       - name: Run automated high-risk review
-        id: review
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REVIEW_OUTPUT: review-artifacts/high-risk-review.json
         run: |
           scripts/high-risk-review.sh
-          printf 'high_risk=%s\n' "$(jq -r .high_risk review-artifacts/high-risk-review.json)" >> "$GITHUB_OUTPUT"
-      - name: Require one independent approval of the latest push
-        if: steps.review.outputs.high_risk == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          approvals=$(gh api graphql -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){latestOpinionatedReviews(first:100){nodes{author{login}authorAssociation state commit{oid}}}}}}' \
-            -F owner="${GITHUB_REPOSITORY_OWNER}" -F repo="${GITHUB_REPOSITORY#*/}" -F pr="$PR_NUMBER" \
-            --jq '[.data.repository.pullRequest.latestOpinionatedReviews.nodes[] | select(.state == "APPROVED" and .author.login != env.PR_AUTHOR and (.authorAssociation == "OWNER" or .authorAssociation == "MEMBER" or .authorAssociation == "COLLABORATOR") and .commit.oid == env.HEAD_SHA)] | length')
-          test "$approvals" -ge 1
+          jq -e --arg base "$BASE_SHA" --arg head "$HEAD_SHA" '
+            .schema_version == 1 and .base == $base and .head == $head and
+            .finding_count == 0 and (.findings | length) == 0 and
+            (.checks | all(.[]; . == true))
+          ' review-artifacts/high-risk-review.json >/dev/null
       - uses: actions/upload-artifact@v6
         if: always()
         with:

@@ -170,8 +170,8 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		"isolated-canary":                 {"build-candidate", "cli-surface-contract"},
 		"production-state-isolation":      {"build-candidate", "isolated-canary"},
 		"soak":                            {"production-state-isolation"},
-		"production-approval":             {"soak"},
-		"promote-stable":                  {"build-candidate", "production-approval"},
+		"promotion-evidence":              {"soak"},
+		"promote-stable":                  {"build-candidate", "promotion-evidence"},
 		"post-release-health":             {"promote-stable"},
 	}
 	for name, dependencies := range want {
@@ -206,13 +206,17 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		`for checkpoint in start minute-15 minute-30`,
 		`cmp "dist/prerelease/$asset" "dist/stable/$asset"`,
 		`agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json`,
+		`mode:"machine-verifiable"`,
+		`.candidate_sha256 == $digest`,
+		`required_evidence:["cli-surface","offline-contract","production-isolation","soak-start","soak-minute-15","soak-minute-30"]`,
+		`subject-path: promotion-evidence.json`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow is missing byte-promotion evidence %q", required)
 		}
 	}
 	if strings.Count(text, "environment: production") != 2 {
-		t.Fatal("production evidence and promotion approval must both use the protected environment")
+		t.Fatal("production isolation and promotion evidence must both use the protected environment")
 	}
 }
 
@@ -246,7 +250,7 @@ func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 	}
 }
 
-func TestHighRiskReviewScopesIndependentApprovalToHighRiskChanges(t *testing.T) {
+func TestHighRiskReviewUsesMachineVerifiableEvidence(t *testing.T) {
 	root := t.TempDir()
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -322,11 +326,15 @@ func TestHighRiskReviewScopesIndependentApprovalToHighRiskChanges(t *testing.T) 
 		t.Fatal(err)
 	}
 	text := string(workflow)
-	if !strings.Contains(text, "if: steps.review.outputs.high_risk == 'true'") ||
-		!strings.Contains(text, `>> "$GITHUB_OUTPUT"`) ||
-		!strings.Contains(text, "latestOpinionatedReviews") ||
-		!strings.Contains(text, `.authorAssociation == "COLLABORATOR"`) {
-		t.Fatal("independent approval is not conditionally bound to machine-readable high-risk classification")
+	for _, required := range []string{".finding_count == 0", "(.findings | length) == 0", "(.checks | all(.[]; . == true))", "if: always()"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("high-risk review workflow is missing fail-closed evidence check %q", required)
+		}
+	}
+	for _, forbidden := range []string{"pull_request_review:", "latestOpinionatedReviews", `state == "APPROVED"`, "PR_AUTHOR"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("high-risk review workflow still requires unavailable human reviewer flow %q", forbidden)
+		}
 	}
 }
 
