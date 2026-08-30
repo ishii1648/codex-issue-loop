@@ -3,6 +3,8 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,9 +99,16 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 		"bash": map[string]string{"*": "allow", "*git commit*": "deny", "*git push*": "deny", "*gh pr create*": "deny", "*gh pr merge*": "deny"},
 	}
 	policyJSON, _ := json.Marshal(inlineConfig)
+	serverUsername := "agent-loop"
+	serverPassword, err := randomOpenCodeCredential()
+	if err != nil {
+		return Result{Identity: identity}, err
+	}
 	cmd := exec.Command(cfg.Worker.EffectiveCommand(), "--pure", "serve", "--hostname", "127.0.0.1", "--port", strconv.Itoa(port))
 	cmd.Dir = workspace
 	cmd.Env = replaceEnvironment(os.Environ(), "OPENCODE_CONFIG_CONTENT", string(policyJSON))
+	cmd.Env = replaceEnvironment(cmd.Env, "OPENCODE_SERVER_USERNAME", serverUsername)
+	cmd.Env = replaceEnvironment(cmd.Env, "OPENCODE_SERVER_PASSWORD", serverPassword)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout, cmd.Stderr = safeOut, safeErr
 	if err := cmd.Start(); err != nil {
@@ -123,7 +132,8 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 	ctx, cancel := context.WithTimeout(parent, cfg.Worker.Timeout.Duration)
 	defer cancel()
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	client := &http.Client{Timeout: 30 * time.Second}
+	client, transport := newOpenCodeClient(30*time.Second, serverUsername, serverPassword)
+	defer transport.CloseIdleConnections()
 	startupCtx, startupCancel := context.WithTimeout(ctx, 10*time.Second)
 	err = waitForOpenCode(startupCtx, client, baseURL)
 	startupCancel()
@@ -175,9 +185,10 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 		} `json:"info"`
 	}
 	messageErr := openCodeJSON(ctx, client, http.MethodPost, baseURL+"/session/"+url.PathEscape(sessionID)+"/message?directory="+url.QueryEscape(cfg.RepoPath), body, &response)
+	var abortErr error
 	if ctx.Err() != nil {
 		abortCtx, abortCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = abortOpenCodeSession(abortCtx, baseURL, sessionID, cfg.RepoPath)
+		abortErr = abortOpenCodeSession(abortCtx, baseURL, sessionID, cfg.RepoPath, serverUsername, serverPassword)
 		abortCancel()
 	}
 	stopErr := stop()
@@ -192,7 +203,7 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 	partial := Result{SessionID: sessionID, Identity: identity}
 	if messageErr != nil {
 		if ctx.Err() != nil {
-			termination := &TerminationError{Timeout: cfg.Worker.Timeout.Duration, GracePeriod: cfg.Worker.TimeoutGrace.Duration, Cause: ctx.Err()}
+			termination := &TerminationError{Timeout: cfg.Worker.Timeout.Duration, GracePeriod: cfg.Worker.TimeoutGrace.Duration, CleanupError: abortErr, Cause: ctx.Err()}
 			var stopped *TerminationError
 			if errors.As(stopErr, &stopped) {
 				termination.Forced = stopped.Forced
@@ -219,9 +230,8 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 	return result, nil
 }
 
-func abortOpenCodeSession(ctx context.Context, baseURL, sessionID, repoPath string) error {
-	transport := &http.Transport{Proxy: nil}
-	client := &http.Client{Transport: transport}
+func abortOpenCodeSession(ctx context.Context, baseURL, sessionID, repoPath, username, password string) error {
+	client, transport := newOpenCodeClient(0, username, password)
 	defer transport.CloseIdleConnections()
 	endpoint := baseURL + "/session/" + url.PathEscape(sessionID) + "/abort?directory=" + url.QueryEscape(repoPath)
 	var lastErr error
@@ -253,12 +263,36 @@ func reserveLoopbackPort() (int, error) {
 	return port, nil
 }
 
+func randomOpenCodeCredential() (string, error) {
+	value := make([]byte, 32)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
+}
+
+type openCodeAuthTransport struct {
+	base               http.RoundTripper
+	username, password string
+}
+
+func (t openCodeAuthTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	copy := request.Clone(request.Context())
+	copy.Header = request.Header.Clone()
+	copy.SetBasicAuth(t.username, t.password)
+	return t.base.RoundTrip(copy)
+}
+
+func newOpenCodeClient(timeout time.Duration, username, password string) (*http.Client, *http.Transport) {
+	transport := &http.Transport{Proxy: nil}
+	return &http.Client{Timeout: timeout, Transport: openCodeAuthTransport{base: transport, username: username, password: password}}, transport
+}
+
 func waitForOpenCode(ctx context.Context, client *http.Client, baseURL string) error {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/global/health", nil)
-		setOpenCodeAuth(req)
 		if response, err := client.Do(req); err == nil {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusOK {
@@ -287,7 +321,6 @@ func openCodeJSON(ctx context.Context, client *http.Client, method, endpoint str
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	setOpenCodeAuth(req)
 	response, err := client.Do(req)
 	if err != nil {
 		return err
@@ -306,16 +339,6 @@ func openCodeJSON(ctx context.Context, client *http.Client, method, endpoint str
 		}
 	}
 	return nil
-}
-
-func setOpenCodeAuth(request *http.Request) {
-	if password := os.Getenv("OPENCODE_SERVER_PASSWORD"); password != "" {
-		username := os.Getenv("OPENCODE_SERVER_USERNAME")
-		if username == "" {
-			username = "opencode"
-		}
-		request.SetBasicAuth(username, password)
-	}
 }
 
 func truncateProviderDetail(value string) string {

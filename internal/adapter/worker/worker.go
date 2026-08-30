@@ -103,10 +103,11 @@ type ProcessStart struct {
 type Started func(ProcessStart) error
 
 type TerminationError struct {
-	Timeout     time.Duration
-	GracePeriod time.Duration
-	Forced      bool
-	Cause       error
+	Timeout      time.Duration
+	GracePeriod  time.Duration
+	Forced       bool
+	CleanupError error
+	Cause        error
 }
 
 func (e *TerminationError) Error() string {
@@ -115,9 +116,14 @@ func (e *TerminationError) Error() string {
 		reason = fmt.Sprintf("worker timeout after %s", e.Timeout)
 	}
 	if e.Forced {
-		return fmt.Sprintf("%s; SIGTERM grace period %s exhausted; sent SIGKILL to process group", reason, e.GracePeriod)
+		reason = fmt.Sprintf("%s; SIGTERM grace period %s exhausted; sent SIGKILL to process group", reason, e.GracePeriod)
+	} else {
+		reason = fmt.Sprintf("%s; process group exited during SIGTERM grace period %s", reason, e.GracePeriod)
 	}
-	return fmt.Sprintf("%s; process group exited during SIGTERM grace period %s", reason, e.GracePeriod)
+	if e.CleanupError != nil {
+		return fmt.Sprintf("%s; cleanup failed: %v", reason, e.CleanupError)
+	}
+	return reason
 }
 
 func (e *TerminationError) Unwrap() error { return e.Cause }

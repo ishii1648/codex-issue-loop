@@ -226,20 +226,49 @@ func TestOpenCodeHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/global/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"healthy":true}`) })
-	mux.HandleFunc("/session", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"id":"ses_fake"}`) })
+	requireAuth := func(w http.ResponseWriter, r *http.Request) bool {
+		username, password, ok := r.BasicAuth()
+		if !ok || username != os.Getenv("OPENCODE_SERVER_USERNAME") || password != os.Getenv("OPENCODE_SERVER_PASSWORD") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return false
+		}
+		return true
+	}
+	mux.HandleFunc("/global/health", func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r) {
+			_, _ = io.WriteString(w, `{"healthy":true}`)
+		}
+	})
+	mux.HandleFunc("/session", func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r) {
+			_, _ = io.WriteString(w, `{"id":"ses_fake"}`)
+		}
+	})
 	mux.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAuth(w, r) {
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/abort") {
 			aborted := os.Getenv("AGENT_LOOP_OPENCODE_ABORTED")
+			if aborted == "" {
+				http.Error(w, "abort marker path is missing", http.StatusInternalServerError)
+				return
+			}
 			firstAttempt := aborted + ".attempt"
 			if os.Getenv("AGENT_LOOP_OPENCODE_ABORT_FAIL_ONCE") == "1" {
 				if _, err := os.Stat(firstAttempt); errors.Is(err, os.ErrNotExist) {
-					_ = os.WriteFile(firstAttempt, []byte("attempted"), 0o600)
+					if err := os.WriteFile(firstAttempt, []byte("attempted"), 0o600); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
 					http.Error(w, "retry abort", http.StatusServiceUnavailable)
 					return
 				}
 			}
-			_ = os.WriteFile(aborted, []byte("aborted"), 0o600)
+			if err := os.WriteFile(aborted, []byte("aborted"), 0o600); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			_, _ = io.WriteString(w, "true")
 			return
 		}
