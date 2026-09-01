@@ -71,7 +71,7 @@ jobs:
           scripts/build-release.sh "${RELEASE_TAG}" "${RELEASE_COMMIT}" "${source_epoch}" dist/candidate
           dist/candidate/agent-loop_Darwin_arm64 version --json | jq -e \
             --arg version "${RELEASE_TAG}" --arg commit "${RELEASE_COMMIT}" \
-            '.version == $version and .commit == $commit and .target == "darwin/arm64" and .delivery_protocol == 1'
+            '.version == $version and .commit == $commit and .target == "darwin/arm64" and .delivery_protocol == 1 and .assignment_protocol == 1'
 
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@v3
@@ -135,7 +135,7 @@ jobs:
           cd dist/candidate
           shasum -a 256 -c checksums.txt
           jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
-            '.version == $version and .commit == $commit and .semantic_contract_current == 1 and .state_schema_current == 4' release-manifest.json
+            '.version == $version and .commit == $commit and .assignment_protocol == 1 and .semantic_contract_current == 1 and .state_schema_current == 4' release-manifest.json
           gh attestation verify agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
 
   replay-production-fixtures:
@@ -229,6 +229,12 @@ jobs:
         run: |
           chmod 0755 "$CANDIDATE_BINARY"
           scripts/offline-release-contract.sh
+      - name: Verify repository assignment isolation and crash recovery offline
+        env:
+          CANARY_GITHUB_TOKEN: ""
+          OPENAI_API_KEY: ""
+        run: |
+          go test ./internal/application/delivery -run '^(TestPerRepositoryApplyAndRollbackLeaveOtherRepositoryBytesUnchanged|TestRunningRepositorySwitchPreservesOtherPIDAndSnapshot|TestLegacyRuntimeSwitchUsesTargetStateLockWithoutGlobalFence|TestAssignmentResumesCrashAfterConfigCommit|TestAssignmentResumesInterruptedRollback|TestAssignmentRollbackFailureRetainsRepositoryFence|TestAssignmentDrainTimeoutDoesNotStopActiveWorker)$' -count=1
       - uses: actions/upload-artifact@v6
         with:
           name: offline-contract-report-${{ github.sha }}
@@ -472,7 +478,7 @@ jobs:
           gh attestation verify dist/stable/offline-contract-report.json --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/production-state-report.json --repo "$GITHUB_REPOSITORY"
           chmod 0755 dist/stable/agent-loop_Darwin_arm64
-          dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" '.version == $version and .commit == $commit'
+          dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" '.version == $version and .commit == $commit and .assignment_protocol == 1'
       - name: Require production delivery health evidence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -490,15 +496,26 @@ jobs:
           test "$found" = true
           stable_digest=$(shasum -a 256 dist/stable/agent-loop_Darwin_arm64 | awk '{print $1}')
           jq -e --arg tag "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" --arg digest "$stable_digest" '
-            .schema_version == 1 and .release_tag == $tag and .release_commit == $commit and
-            .stable_binary_sha256 == $digest and .installed.version == $tag and .installed.commit == $commit and
-            .delivery.current.version == $tag and .delivery.current.commit == $commit and
-            .delivery.phase == "succeeded" and .delivery.result == "succeeded" and
-            .doctor.schema_version == 1 and .doctor.ok == true and (.doctor.failed_diagnostic_codes | length) == 0 and
-            .status.worker_limit == 1 and .status.active_workers <= 1 and
+            .schema_version == 2 and .release_tag == $tag and .release_commit == $commit and
+            .stable_binary_sha256 == $digest and .rollout_mode == "per-repository-stable-assignment" and
+            .rollback_drill.typed_rollback == true and .rollback_drill.same_artifact_reapplied == true and
+            .rollback_drill.preserved.state == true and .rollback_drill.preserved.issues == true and
+            .rollback_drill.preserved.leases == true and .rollback_drill.preserved.worktrees == true and
+            .rollback_drill.other_repository_unchanged.assignment == true and
+            .rollback_drill.other_repository_unchanged.pid == true and
+            .rollback_drill.other_repository_unchanged.binary == true and
+            .rollback_drill.other_repository_unchanged.state_revision == true and
+            (.repositories | length) >= 2 and all(.repositories[];
+              .assignment.version == $tag and .assignment.commit == $commit and
+              .assignment.artifact_sha256 == $digest and .runtime.digest == $digest and
+              .runtime.matches == true and .runtime.loaded == true and .runtime.running == true and
+              .transaction_phase == "succeeded" and .fence_active == false and .verified == true and
+              .doctor.schema_version == 1 and .doctor.ok == true and
+              (.doctor.failed_diagnostic_codes | length) == 0 and
+              .status.worker_limit == 1 and .status.active_workers <= 1 and .healthy == true) and
             .soak.duration_seconds == 300 and .soak.sample_offsets_seconds == [0,60,300] and
             (.soak.samples | length) == 3 and all(.soak.samples[]; .healthy == true) and
-            .rollback_occurred == false and .healthy == true
+            .healthy == true
           ' dist/stable/production-health-report.json >/dev/null
           gh release view "$RELEASE_TAG" --json assets --jq 'select((.assets|length) == 8)' >/dev/null
       - name: Attest production health evidence

@@ -14,8 +14,10 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
+	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
@@ -52,15 +54,34 @@ func (a App) register(l layout.Layout, args []string) error {
 	if _, err := os.Stat(installed); err != nil {
 		return fmt.Errorf("agent-loop is not installed at %s; run agent-loop install first", installed)
 	}
-	entry, err := (registry.Store{Path: l.RegistryPath}).Add(cfg)
+	registryStore := registry.Store{Path: l.RegistryPath}
+	registryBefore, err := registryStore.Load()
 	if err != nil {
+		return err
+	}
+	entry, err := registryStore.Add(cfg)
+	if err != nil {
+		return err
+	}
+	assignmentPath, err := delivery.DefaultConfigPath()
+	if err != nil {
+		_ = fsutil.WriteJSON(l.RegistryPath, registryBefore, 0o600)
+		return err
+	}
+	assignment, assignmentManaged, err := (delivery.AssignmentController{Layout: l, ConfigPath: assignmentPath}).EnsureRepositoryAssignment(entry)
+	if err != nil {
+		_ = fsutil.WriteJSON(l.RegistryPath, registryBefore, 0o600)
 		return err
 	}
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 	if err := store.Initialize(); err != nil {
 		return err
 	}
-	if err := (launchd.Manager{Layout: l}).WritePlist(entry, installed); err != nil {
+	runtimeBinary := installed
+	if assignmentManaged {
+		runtimeBinary = assignment.Slot
+	}
+	if err := (launchd.Manager{Layout: l}).WritePlist(entry, runtimeBinary); err != nil {
 		return err
 	}
 	if cfg.Webhook.Enabled() {
@@ -77,13 +98,27 @@ func (a App) unregister(ctx context.Context, l layout.Layout, args []string) err
 		return err
 	}
 	lm := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+	registryStore := registry.Store{Path: l.RegistryPath}
+	registryBefore, err := registryStore.Load()
+	if err != nil {
+		return err
+	}
 	if err := lm.Stop(ctx, entry); err != nil {
 		return err
 	}
 	if _, err := stopEntryWorkers(ctx, l, entry, "worker canceled by unregister", a.ProcessController); err != nil {
 		return err
 	}
-	if err := (registry.Store{Path: l.RegistryPath}).Remove(entry.RepoID); err != nil {
+	if err := registryStore.Remove(entry.RepoID); err != nil {
+		return err
+	}
+	assignmentPath, err := delivery.DefaultConfigPath()
+	if err != nil {
+		_ = fsutil.WriteJSON(l.RegistryPath, registryBefore, 0o600)
+		return err
+	}
+	if _, err := (delivery.AssignmentController{Layout: l, ConfigPath: assignmentPath}).RemoveRepositoryAssignment(entry.RepoID); err != nil {
+		_ = fsutil.WriteJSON(l.RegistryPath, registryBefore, 0o600)
 		return err
 	}
 	if err := os.Remove(l.PlistPath(entry.RepoID)); err != nil && !errors.Is(err, os.ErrNotExist) {

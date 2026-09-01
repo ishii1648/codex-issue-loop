@@ -66,13 +66,15 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 
 更新・rollbackを含む詳細は[Release・install・update](docs/release.md)を参照してください。
 
-schema-compatibleなproduction ReleaseをMac側から安全に自動反映する場合は、host単位の設定と専用LaunchAgentをpreviewしてから作成します。設定は各repositoryではなく`$HOME/.agent-loop-delivery.yaml`へ置かれます。
+production Releaseはstableだけを配布し、公開だけではrepositoryを更新しません。hostの設定を明示migrationした後、exact stable versionをrepository単位でpreview/applyします。設定は`$HOME/.agent-loop-delivery.yaml`、artifactはimmutable slotへ置かれます。
 
 ```sh
-"$agent_loop_bin" delivery configure --json
-"$agent_loop_bin" delivery configure --apply --json
-"$agent_loop_bin" delivery status --json
+"$agent_loop_bin" delivery assignment migrate --json
+"$agent_loop_bin" delivery assignment migrate --apply --json
+"$agent_loop_bin" delivery assignment status --json
 ```
+
+詳細は[Repository別stable delivery](docs/per-repository-delivery.md)を参照してください。
 
 ### 2. 対象リポジトリを準備する
 
@@ -267,18 +269,19 @@ printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
 
 ### 5. 更新する
 
-新しいrelease artifactをインストール時と同じ手順で検証してから更新します。
+新しいstable release artifactをrepository単位で検証してから更新します。previewが返したgenerationをapplyへ渡します。
 
 ```sh
-./agent-loop_Darwin_arm64 update --json
-"$agent_loop_bin" doctor --json
+"$agent_loop_bin" delivery assignment preview --repo "$PWD" --version v0.9.0 --json
+"$agent_loop_bin" delivery assignment apply --repo "$PWD" --version v0.9.0 --expected-generation 1 --json
+"$agent_loop_bin" delivery assignment verify --repo "$PWD" --json
 ```
 
 schema migrationが必要な場合はloopを開始せず、[migration runbook](docs/migration.md)に従ってください。
 
 ## 詳細ドキュメント
 
-- 運用: [Codex Desktop監視task](docs/codex-desktop-monitoring.md)、[Mac mini常駐運用](docs/mac-mini-runbook.md)、[concurrency 2 rollout・rollback](docs/concurrency-rollout.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[worktree](docs/worktree-lifecycle.md)
+- 運用: [Codex Desktop監視task](docs/codex-desktop-monitoring.md)、[Mac mini常駐運用](docs/mac-mini-runbook.md)、[Repository別stable delivery](docs/per-repository-delivery.md)、[break-glass repair](docs/break-glass-repair.md)、[concurrency 2 rollout・rollback](docs/concurrency-rollout.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[worktree](docs/worktree-lifecycle.md)
 - 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
 - 実測: [Mac mini実機E2E](docs/e2e/2026-08-15-mac-mini.md)、[LLM内ループとのtoken消費比較](docs/e2e/2026-08-16-llm-loop-token-comparison.md)
 - 開発: [Build・test](Makefile)、[実装状況](docs/implementation.md)、[脅威モデル](docs/threat-model.md)、[セキュリティ運用](docs/security-runbook.md)、[CLI互換性](docs/compatibility.md)

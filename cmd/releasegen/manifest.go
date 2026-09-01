@@ -51,7 +51,7 @@ func generateManifest(artifact, version, commit, output string) error {
 	}
 	sum := sha256.Sum256(data)
 	manifest := delivery.ReleaseManifest{
-		ManifestVersion: 1, DeliveryProtocol: delivery.ProtocolVersion, Version: version, Commit: commit,
+		ManifestVersion: 1, DeliveryProtocol: delivery.ProtocolVersion, AssignmentProtocol: delivery.AssignmentProtocolVersion, Version: version, Commit: commit,
 		Target: "darwin/arm64", Artifact: filepath.Base(artifact), ArtifactSHA256: hex.EncodeToString(sum[:]),
 		StateSchemaCurrent: schema.Current, StateSchemaMigrationFrom: schema.Previous,
 		SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,

@@ -39,6 +39,7 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 type ReleaseManifest struct {
 	ManifestVersion          int    `json:"manifest_version"`
 	DeliveryProtocol         int    `json:"delivery_protocol"`
+	AssignmentProtocol       int    `json:"assignment_protocol"`
 	Version                  string `json:"version"`
 	Commit                   string `json:"commit"`
 	Target                   string `json:"target"`
@@ -55,6 +56,7 @@ type BinaryInfo struct {
 	Commit                   string `json:"commit"`
 	Target                   string `json:"target"`
 	DeliveryProtocol         int    `json:"delivery_protocol"`
+	AssignmentProtocol       int    `json:"assignment_protocol"`
 	StateSchemaCurrent       int    `json:"state_schema_current"`
 	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
 	SemanticContractCurrent  int    `json:"semantic_contract_current"`
@@ -94,10 +96,11 @@ type VerificationProgress struct {
 }
 
 type Verifier struct {
-	GH       string
-	Runner   Runner
-	CacheDir string
-	Progress func(VerificationProgress) error
+	GH              string
+	Runner          Runner
+	CacheDir        string
+	ExpectedVersion string
+	Progress        func(VerificationProgress) error
 }
 
 func (v Verifier) Discover(ctx context.Context, cfg Config) (VersionRef, error) {
@@ -222,7 +225,15 @@ func (v Verifier) reportProgress(progress VerificationProgress) error {
 }
 
 func (v Verifier) resolveProduction(ctx context.Context, repository string) (Release, string, error) {
-	out, err := v.Runner.Run(ctx, v.GH, "release", "view", "--repo", repository, "--json", "tagName,isDraft,isPrerelease")
+	args := []string{"release", "view"}
+	if v.ExpectedVersion != "" {
+		if _, err := ParseSemVer(v.ExpectedVersion); err != nil {
+			return Release{}, "", err
+		}
+		args = append(args, v.ExpectedVersion)
+	}
+	args = append(args, "--repo", repository, "--json", "tagName,isDraft,isPrerelease")
+	out, err := v.Runner.Run(ctx, v.GH, args...)
 	if err != nil {
 		return Release{}, "", fmt.Errorf("discover latest production release: %w", err)
 	}
@@ -232,6 +243,9 @@ func (v Verifier) resolveProduction(ctx context.Context, repository string) (Rel
 	}
 	if release.Draft || release.Prerelease {
 		return Release{}, "", errors.New("latest release is not a production release")
+	}
+	if v.ExpectedVersion != "" && release.Tag != v.ExpectedVersion {
+		return Release{}, "", errors.New("resolved production release does not match the exact requested version")
 	}
 	if _, err := ParseSemVer(release.Tag); err != nil {
 		return Release{}, "", fmt.Errorf("release tag: %w", err)
@@ -270,7 +284,7 @@ func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error
 	if err := decodeStrictJSON(data, &manifest); err != nil {
 		return manifest, "", fmt.Errorf("decode release manifest: %w", err)
 	}
-	if manifest.ManifestVersion != 1 || manifest.DeliveryProtocol != ProtocolVersion {
+	if manifest.ManifestVersion != 1 || manifest.DeliveryProtocol != ProtocolVersion || manifest.AssignmentProtocol != AssignmentProtocolVersion {
 		return manifest, "", errors.New("unknown release manifest version or delivery protocol")
 	}
 	if manifest.Version != tag || manifest.Commit != commit {
@@ -310,7 +324,7 @@ func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error
 }
 
 func compareBinaryManifest(binary BinaryInfo, manifest ReleaseManifest) error {
-	if binary.Version != manifest.Version || binary.Commit != manifest.Commit || binary.Target != manifest.Target || binary.DeliveryProtocol != manifest.DeliveryProtocol ||
+	if binary.Version != manifest.Version || binary.Commit != manifest.Commit || binary.Target != manifest.Target || binary.DeliveryProtocol != manifest.DeliveryProtocol || binary.AssignmentProtocol != manifest.AssignmentProtocol ||
 		binary.StateSchemaCurrent != manifest.StateSchemaCurrent || binary.StateSchemaMigrationFrom != manifest.StateSchemaMigrationFrom ||
 		binary.SemanticContractCurrent != manifest.SemanticContractCurrent || binary.SemanticContractMinimum != manifest.SemanticContractMinimum {
 		return errors.New("binary embedded metadata does not match release manifest")

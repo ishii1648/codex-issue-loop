@@ -62,12 +62,26 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
 	repoPath := fs.String("repo", "", "repository path; omit to diagnose all registered repositories")
+	assignmentHealth := fs.Bool("assignment-health", false, "diagnose an immutable repository runtime without requiring the global operator install to match")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
 	}
+	if *assignmentHealth && *repoPath == "" {
+		return exitError{2, errors.New("doctor --assignment-health requires --repo")}
+	}
 
 	diagnostics := diagnoseHost(ctx, l)
+	if *assignmentHealth {
+		filtered := diagnostics[:0]
+		for _, item := range diagnostics {
+			if strings.HasPrefix(item.Code, "INSTALL_") {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		diagnostics = append(filtered, passedDiagnostic("ASSIGNMENT_RUNTIME_ISOLATED", "host", "", "repository assignment runtimeをglobal operator installと分離して検査します", "global install diagnostics omitted for this scoped health check"))
+	}
 	schemaDiagnostics, schemaReady := diagnoseSchemas(l)
 	diagnostics = append(diagnostics, schemaDiagnostics...)
 	if !schemaReady {
@@ -641,6 +655,14 @@ func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Conf
 		diagnostics = append(diagnostics, failedDiagnostic("LOG_UNREADABLE", "repository", entry.RepoID, "supervisor logを読み取れません", logErr.Error(), instruction("log fileの所有者とpermissionを確認してください")))
 	}
 	switch snapshot.Supervisor.State {
+	case "starting":
+		if snapshot.Supervisor.UpdatedAt.IsZero() || time.Since(snapshot.Supervisor.UpdatedAt) > time.Minute {
+			diagnostics = append(diagnostics, failedDiagnostic("SUPERVISOR_STARTING_STALE", "repository", entry.RepoID, "supervisorの起動状態が60秒以上更新されていません", contextDetail,
+				command("現在状態を確認します", fmt.Sprintf("agent-loop status --repo %q --json", entry.RepoPath)),
+				instruction("LaunchAgentと起動時reconciliationを確認し、break-glass手順で停止して修復してください")))
+		} else {
+			diagnostics = append(diagnostics, passedDiagnostic("SUPERVISOR_STARTING_WITHIN_DEADLINE", "repository", entry.RepoID, "supervisorは起動猶予時間内です", contextDetail))
+		}
 	case "blocked":
 		diagnostics = append(diagnostics, failedDiagnostic("SUPERVISOR_BLOCKED", "repository", entry.RepoID, "supervisorがblockedです", contextDetail,
 			command("現在状態を確認します", fmt.Sprintf("agent-loop status --repo %q --json", entry.RepoPath)),

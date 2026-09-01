@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -100,6 +101,55 @@ func (m Manager) WritePlist(entry registry.Entry, binary string) error {
 		plist = strings.ReplaceAll(plist, "{{"+key+"}}", escape(value))
 	}
 	return fsutil.WriteFile(m.Layout.PlistPath(entry.RepoID), []byte(plist), 0o600)
+}
+
+func (m Manager) Program(entry registry.Entry) (string, error) {
+	return programFromPlist(m.Layout.PlistPath(entry.RepoID))
+}
+
+func (m Manager) DeliveryProgram() (string, error) {
+	return programFromPlist(m.Layout.DeliveryPlistPath())
+}
+
+func programFromPlist(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	wantArray := false
+	inArguments := false
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return "", errors.New("LaunchAgent plist does not contain ProgramArguments")
+		}
+		if err != nil {
+			return "", fmt.Errorf("decode LaunchAgent plist: %w", err)
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if value.Name.Local == "key" {
+				var key string
+				if err := decoder.DecodeElement(&key, &value); err != nil {
+					return "", err
+				}
+				wantArray = key == "ProgramArguments"
+			} else if value.Name.Local == "array" && wantArray {
+				inArguments = true
+				wantArray = false
+			} else if value.Name.Local == "string" && inArguments {
+				var program string
+				if err := decoder.DecodeElement(&program, &value); err != nil {
+					return "", err
+				}
+				if !filepath.IsAbs(program) {
+					return "", errors.New("LaunchAgent program is not absolute")
+				}
+				return filepath.Clean(program), nil
+			}
+		}
+	}
 }
 
 func (m Manager) WriteBrokerPlist(binary, pathEnv string) error {
@@ -257,12 +307,23 @@ func (m Manager) Start(ctx context.Context, entry registry.Entry) error {
 }
 
 func (m Manager) Stop(ctx context.Context, entry registry.Entry) error {
-	status, err := m.Status(ctx, entry)
-	if err != nil {
+	requested, err := m.RequestStop(ctx, entry)
+	if err != nil || !requested {
 		return err
 	}
+	return m.WaitStopped(ctx, entry, 5*time.Second)
+}
+
+// RequestStop asks launchd to unload exactly entry and returns before waiting
+// for process exit. Callers may use this bounded phase while holding an
+// admission lock, then release the lock before WaitStopped.
+func (m Manager) RequestStop(ctx context.Context, entry registry.Entry) (bool, error) {
+	status, err := m.Status(ctx, entry)
+	if err != nil {
+		return false, err
+	}
 	if !status.Loaded {
-		return nil
+		return false, nil
 	}
 	path := m.Launchctl
 	if path == "" {
@@ -270,20 +331,31 @@ func (m Manager) Stop(ctx context.Context, entry registry.Entry) error {
 	}
 	target, err := guiTarget()
 	if err != nil {
-		return err
+		return false, err
 	}
 	service := target + "/" + m.Layout.Label(entry.RepoID)
 	out, err := exec.CommandContext(ctx, path, "bootout", service).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("launchctl bootout: %w: %s", err, strings.TrimSpace(string(out)))
+		return false, fmt.Errorf("launchctl bootout: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	return true, nil
+}
+
+func (m Manager) WaitStopped(ctx context.Context, entry registry.Entry, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		status, _ = m.Status(ctx, entry)
+		status, err := m.Status(ctx, entry)
+		if err != nil {
+			return err
+		}
 		if !status.Loaded {
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("LaunchAgent did not become unloaded")
 }

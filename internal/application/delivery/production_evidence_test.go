@@ -90,6 +90,53 @@ printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","credentials"
 	}
 }
 
+func TestBreakGlassStopTargetsOnlyDeliveryAndExactRepositoryLaunchAgents(t *testing.T) {
+	root := t.TempDir()
+	managed := filepath.Join(root, "managed")
+	launchAgents := filepath.Join(root, "launch")
+	if err := os.MkdirAll(launchAgents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	repoID := "repo-a-deadbeef"
+	registryData := `{"version":4,"repos":{"` + repoID + `":{"repo_id":"` + repoID + `","repo_path":"/private/repo-a","github_repo":"owner/a","registered_at":"2026-01-01T00:00:00Z"},"repo-b-deadbeef":{"repo_id":"repo-b-deadbeef","repo_path":"/private/repo-b","github_repo":"owner/b","registered_at":"2026-01-01T00:00:00Z"}}}`
+	if err := os.MkdirAll(managed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(managed, "registry.json"), []byte(registryData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{"com.codex-issue-loop.delivery", "com.codex-issue-loop." + repoID, "com.codex-issue-loop.repo-b-deadbeef"} {
+		plist := `<?xml version="1.0"?><plist><dict><key>Label</key><string>` + label + `</string></dict></plist>`
+		if err := os.WriteFile(filepath.Join(launchAgents, label+".plist"), []byte(plist), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(root, "launchctl.log")
+	launchctl := writeExecutable(t, root, "launchctl", "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$BREAK_GLASS_LOG\"\nexit 0\n")
+	cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "break-glass-stop.sh"), "--repo-id", repoID, "--managed-root", managed, "--launch-agents-dir", launchAgents)
+	cmd.Env = append(os.Environ(), "AGENT_LOOP_LAUNCHCTL="+launchctl, "BREAK_GLASS_LOG="+logPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("err=%v output=%s", err, output)
+	}
+	var report struct {
+		RepositoryID  string   `json:"repo_id"`
+		Stopped       []string `json:"stopped"`
+		StateModified bool     `json:"state_modified"`
+	}
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.RepositoryID != repoID || report.StateModified || len(report.Stopped) != 2 {
+		t.Fatalf("report=%+v", report)
+	}
+	logData, _ := os.ReadFile(logPath)
+	logText := string(logData)
+	if strings.Contains(logText, "repo-b-deadbeef") || strings.Count(logText, "bootout ") != 2 {
+		t.Fatalf("unexpected launchctl targets: %s", logText)
+	}
+}
+
 func TestProductionReleaseHealthFailsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name           string
@@ -138,6 +185,67 @@ esac
 				t.Fatalf("err=%v output=%s", err, output)
 			}
 		})
+	}
+}
+
+func TestProductionAssignmentHealthRequiresExactStableAssignmentsAndRollbackDrill(t *testing.T) {
+	root := t.TempDir()
+	operator := writeExecutable(t, root, "assignment-agent-loop", `#!/bin/sh
+case "$1 $2 $3" in
+  "delivery assignment status")
+    printf '{"version":1,"assignments":[{"repository_id":"repo-a","assignment":{"repository_id":"repo-a","version":"v0.9.0","commit":"%s","artifact_sha256":"%s","slot":"/private/slot","generation":4,"previous":{"version":"v0.8.5"}},"runtime":{"digest":"%s","matches":true,"launchd":{"loaded":true,"running":true,"pid":1001}},"transaction":{"phase":"succeeded"},"fence_active":false}]}\n' "$RELEASE_COMMIT" "$STABLE_BINARY_SHA256" "$STABLE_BINARY_SHA256" ;;
+  "delivery assignment verify")
+    printf '%s\n' '{"version":1,"verified":true,"assignment":{"result":"verified"}}' ;;
+  *)
+    if [ "$1" = doctor ]; then
+      printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}'
+    elif [ "$1" = status ]; then
+      printf '%s\n' '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"state_revision":19,"supervisor":{"state":"polling"},"issues":{}}}'
+    else
+      exit 2
+    fi ;;
+esac
+`)
+	digest, err := fileDigest(operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositories := filepath.Join(root, "repositories.json")
+	if err := os.WriteFile(repositories, []byte(`[{"repo_id":"repo-a","path":"/private/repo-a"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rollback := filepath.Join(root, "rollback.json")
+	rollbackJSON := `{"schema_version":1,"typed_rollback":true,"same_artifact_reapplied":true,"before":{"version":"v0.9.0"},"rollback":{"result":"succeeded"},"reapplied":{"version":"v0.9.0"},"preserved":{"state":true,"issues":true,"leases":true,"worktrees":true},"other_repository_unchanged":{"assignment":true,"pid":true,"binary":true,"state_revision":true}}`
+	if err := os.WriteFile(rollback, []byte(rollbackJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifactDir := filepath.Join(root, "artifacts")
+	cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-assignment-health.sh"))
+	cmd.Dir = repositoryRoot(t)
+	cmd.Env = append(os.Environ(),
+		"PRODUCTION_AGENT_LOOP_BINARY="+operator,
+		"PRODUCTION_REPOSITORIES_FILE="+repositories,
+		"ROLLBACK_DRILL_FILE="+rollback,
+		"HEALTH_ARTIFACT_DIR="+artifactDir,
+		"RELEASE_TAG=v0.9.0",
+		"RELEASE_COMMIT="+evidenceCommit,
+		"STABLE_BINARY_SHA256="+digest,
+		"HEALTH_SOAK_SECONDS=0",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("assignment health failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(filepath.Join(artifactDir, "production-health-report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		SchemaVersion int  `json:"schema_version"`
+		Healthy       bool `json:"healthy"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil || report.SchemaVersion != 2 || !report.Healthy {
+		t.Fatalf("report=%+v err=%v", report, err)
 	}
 }
 
@@ -217,6 +325,9 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		`.candidate_sha256 == $digest`,
 		`required_evidence:["cli-surface","offline-contract","production-isolation","candidate-integrity"]`,
 		`subject-path: promotion-evidence.json`,
+		`.assignment_protocol == 1`,
+		`.rollout_mode == "per-repository-stable-assignment"`,
+		`.rollback_drill.typed_rollback == true`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow is missing byte-promotion evidence %q", required)
@@ -239,6 +350,7 @@ func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 		".github/workflows/release.yml",
 		"scripts/cli-surface-contract.sh",
 		"scripts/offline-release-contract.sh",
+		"scripts/production-assignment-health.sh",
 	} {
 		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
 		if err != nil {

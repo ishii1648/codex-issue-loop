@@ -19,7 +19,11 @@ conformance-test:
 	$(GO) test ./internal/application/conformance -count=1
 
 test-race:
-	$(GO) test -race ./...
+	@if [ "$$($(GO) env GOHOSTOS)" = darwin ]; then \
+		CGO_ENABLED=1 $(GO) test -race -ldflags=-linkmode=external ./...; \
+	else \
+		$(GO) test -race ./...; \
+	fi
 
 vet:
 	$(GO) vet ./...

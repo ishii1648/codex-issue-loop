@@ -19,7 +19,7 @@ release jobは同じtag、commit、`SOURCE_DATE_EPOCH`から2回buildし、binar
 
 GitHub Actionsのartifact downloadとGitHub Release downloadでは実行modeが保持されないため、isolated canaryとpost-release readbackはdownload後にbinaryを`0755`へ戻してから実行する。これはfile bytesを変更しない。mode復元後もmanifestのSHA-256とattestationを正本とし、不一致時はcandidate公開、production昇格、またはrelease health確定を停止する。
 
-soak jobはcheckoutを前提にせず、`GITHUB_REPOSITORY`を明示してcandidate prereleaseからbinaryを取得する。開始時・15分後・30分後の各checkpointでcanonical artifactとのbyte一致とGitHub attestationを検証し、途中の取得失敗も昇格失敗として扱う。
+candidate integrityは待機を挟まず、candidate prereleaseから取得したbinaryとcanonical artifactのbyte一致およびGitHub attestationを即時検証する。stable公開後のproduction healthだけを5分間soakし、開始時・1分後・5分後に全repositoryのassignment、doctor、statusを採取する。
 
 Pull Requestとmainの通常CIでも`scripts/check-release.sh`を実行し、固定test versionから2回作成したartifactのbyte一致と埋め込みversion/commitを確認する。
 
@@ -53,6 +53,20 @@ chmod 0755 agent-loop_Darwin_arm64
 checksum、attestation、version/commitのいずれかが一致しなければ実行・installしない。
 
 ## Mac側pull型delivery
+
+v0.9.0以降の通常経路はrepository別assignmentである。stable公開は全repositoryを更新せず、operatorがexact versionとpreview generationを指定して1 repositoryずつ適用する。設定、CLI、初回v1→v2 migration、rollback、隔離evidenceは[Repository別stable delivery](per-repository-delivery.md)を正本とする。設計判断は[ADR-0004](adr/0004-per-repository-stable-assignment.md)に記録する。
+
+```sh
+agent-loop delivery assignment migrate --json
+agent-loop delivery assignment migrate --apply --json
+agent-loop delivery assignment preview --repo /absolute/path/to/repository --version v1.2.3 --json
+agent-loop delivery assignment apply --repo /absolute/path/to/repository --version v1.2.3 --expected-generation 1 --json
+agent-loop delivery assignment verify --repo /absolute/path/to/repository --json
+```
+
+v2 configでは`auto_apply: never`とstable channelだけを許可し、host-wide `delivery apply`を拒否する。以下のhost-wide transaction説明はv0.8.5以前のbinaryによるv1 configのrollback/recovery互換境界に限る。v0.9.0以降のbinaryへv1 configを直接渡してhost-wide操作してはならない。
+
+### v1 host-wide controller（legacy recoveryのみ）
 
 初回installとdoctor完了後、Macごとに1つのcontrollerをpreviewしてから有効化する。
 

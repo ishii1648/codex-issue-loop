@@ -34,6 +34,7 @@ type installedManifest struct {
 	Commit                  string `json:"commit"`
 	SchemaVersion           int    `json:"schema_version"`
 	SemanticContractVersion int    `json:"semantic_contract_version"`
+	BinarySHA256            string `json:"binary_sha256"`
 }
 type updateResult struct {
 	Changed                 bool   `json:"changed"`
