@@ -137,10 +137,25 @@ func TestLoadBuiltInGoFormatterOptIn(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsRemovedAppServerSection(t *testing.T) {
+func TestLoadAcceptsDisabledLegacyAppServerSection(t *testing.T) {
+	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  app_server:\n    enabled: false\n")
+	cfg, err := Load(dir)
+	if err != nil || cfg.Worker.LegacyAppServer == nil || cfg.Worker.LegacyAppServer.Enabled {
+		t.Fatalf("disabled legacy worker.app_server was not accepted as inert: cfg=%+v err=%v", cfg.Worker.LegacyAppServer, err)
+	}
+}
+
+func TestLoadRejectsEnabledLegacyAppServerSection(t *testing.T) {
 	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  app_server:\n    enabled: true\n")
-	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "field app_server not found") {
-		t.Fatalf("removed worker.app_server section was accepted: %v", err)
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "worker.app_server.enabled=true is unsupported") {
+		t.Fatalf("enabled legacy worker.app_server was accepted: %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownLegacyAppServerField(t *testing.T) {
+	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nworker:\n  app_server:\n    enabled: false\n    endpoint: localhost\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "field endpoint not found") {
+		t.Fatalf("unknown legacy worker.app_server field was accepted: %v", err)
 	}
 }
 
