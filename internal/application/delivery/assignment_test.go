@@ -373,14 +373,52 @@ type assignmentFaultRunner struct {
 
 type legacyAssignmentRunner struct {
 	releaseRunner
-	legacyPath string
+	legacyPath        string
+	legacyDoctorCalls int
 }
 
 func (r *legacyAssignmentRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	if filepath.Clean(name) == filepath.Clean(r.legacyPath) && len(args) > 0 && args[0] == "version" {
 		return json.Marshal(BinaryInfo{Version: "v1.2.2", Commit: strings.Repeat("a", 40), Target: "darwin/arm64", DeliveryProtocol: 1, StateSchemaCurrent: 4, StateSchemaMigrationFrom: 3, SemanticContractCurrent: 1})
 	}
+	if filepath.Clean(name) == filepath.Clean(r.legacyPath) && len(args) > 0 && args[0] == "doctor" {
+		r.legacyDoctorCalls++
+		for _, arg := range args {
+			if arg == "--assignment-health" {
+				return nil, errors.New("legacy doctor does not support --assignment-health")
+			}
+		}
+		return []byte(`{"schema_version":1,"ok":true}`), nil
+	}
 	return r.releaseRunner.Run(ctx, name, args...)
+}
+
+func TestAssignmentRollbackUsesLegacyCompatibleDoctor(t *testing.T) {
+	l, configPath, entries, _ := assignmentFixture(t)
+	controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: &releaseRunner{}}
+	if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Apply(context.Background(), entries[0].RepoPath, "v1.2.3", 1); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := cfg.Assignments[entries[0].RepoID].Previous
+	if previous == nil {
+		t.Fatal("applied assignment has no previous version")
+	}
+	runner := &legacyAssignmentRunner{legacyPath: previous.Slot}
+	controller.Runner = runner
+	report, err := controller.Rollback(context.Background(), entries[0].RepoPath, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Assignment.Version != "v1.2.2" || report.Assignment.Generation != 3 || runner.legacyDoctorCalls != 1 {
+		t.Fatalf("report=%+v legacy_doctor_calls=%d", report, runner.legacyDoctorCalls)
+	}
 }
 
 func (r *assignmentFaultRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {

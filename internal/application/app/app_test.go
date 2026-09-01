@@ -288,6 +288,7 @@ func testEnvironment(t *testing.T) (string, layout.Layout) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", filepath.Join(root, "user"))
 	t.Setenv("AGENT_LOOP_HOME", filepath.Join(root, "home"))
 	t.Setenv("AGENT_LOOP_SKILLS_DIR", filepath.Join(root, "skills"))
 	t.Setenv("AGENT_LOOP_LAUNCH_AGENTS_DIR", filepath.Join(root, "launchagents"))
