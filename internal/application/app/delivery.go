@@ -17,11 +17,13 @@ import (
 
 func (a App) delivery(ctx context.Context, l layout.Layout, args []string) error {
 	if len(args) == 0 {
-		return exitError{2, errors.New("delivery subcommand is required: configure, check, status, reconcile, apply, retry-rollback, pause, resume")}
+		return exitError{2, errors.New("delivery subcommand is required: configure, assignment, check, status, reconcile, apply, retry-rollback, pause, resume")}
 	}
 	switch args[0] {
 	case "configure":
 		return a.deliveryConfigure(ctx, l, args[1:])
+	case "assignment":
+		return a.deliveryAssignment(ctx, l, args[1:])
 	case "check", "status", "reconcile", "apply":
 		return a.deliveryOperation(ctx, l, args[0], args[1:])
 	case "retry-rollback":
@@ -30,6 +32,95 @@ func (a App) delivery(ctx context.Context, l layout.Layout, args []string) error
 		return a.deliveryEnabled(l, args[0], args[1:])
 	default:
 		return exitError{2, fmt.Errorf("unknown delivery subcommand %q", args[0])}
+	}
+}
+
+func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []string) error {
+	if len(args) == 0 {
+		return exitError{2, errors.New("delivery assignment subcommand is required: migrate, status, preview, apply, rollback, verify")}
+	}
+	operation := args[0]
+	fs := flag.NewFlagSet("delivery assignment "+operation, flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	configFlag := fs.String("config", "", "absolute config path")
+	repoPath := fs.String("repo", "", "exact registered repository path")
+	version := fs.String("version", "", "exact stable version")
+	expectedGeneration := fs.Uint64("expected-generation", 0, "generation returned by preview or status")
+	applyMigration := fs.Bool("apply", false, "apply the reviewed v1 to v2 config migration")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args[1:]); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	path, err := delivery.ResolveConfigPath(*configFlag)
+	if err != nil {
+		return exitError{2, err}
+	}
+	ghPath := "gh"
+	if resolved, lookErr := exec.LookPath("gh"); lookErr == nil {
+		ghPath = resolved
+	}
+	controller := delivery.AssignmentController{Layout: l, ConfigPath: path, GH: ghPath}
+	switch operation {
+	case "migrate":
+		if *repoPath != "" || *version != "" || *expectedGeneration != 0 {
+			return exitError{2, errors.New("assignment migrate does not accept --repo, --version, or --expected-generation")}
+		}
+		report, operationErr := controller.MigrateConfig(ctx, *applyMigration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "status":
+		if *version != "" || *expectedGeneration != 0 || *applyMigration {
+			return exitError{2, errors.New("assignment status accepts only --repo")}
+		}
+		reports, operationErr := controller.Status(ctx, *repoPath)
+		if outputErr := a.output(*jsonOut, map[string]any{"version": 1, "assignments": reports}); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "preview":
+		if *repoPath == "" || *version == "" || *expectedGeneration != 0 || *applyMigration {
+			return exitError{2, errors.New("assignment preview requires --repo and --version")}
+		}
+		plan, operationErr := controller.Preview(ctx, *repoPath, *version)
+		if outputErr := a.output(*jsonOut, plan); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "apply":
+		if *repoPath == "" || *version == "" || *expectedGeneration == 0 || *applyMigration {
+			return exitError{2, errors.New("assignment apply requires --repo, --version, and --expected-generation")}
+		}
+		report, operationErr := controller.Apply(ctx, *repoPath, *version, *expectedGeneration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "rollback":
+		if *repoPath == "" || *version != "" || *expectedGeneration == 0 || *applyMigration {
+			return exitError{2, errors.New("assignment rollback requires --repo and --expected-generation")}
+		}
+		report, operationErr := controller.Rollback(ctx, *repoPath, *expectedGeneration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "verify":
+		if *repoPath == "" || *version != "" || *expectedGeneration != 0 || *applyMigration {
+			return exitError{2, errors.New("assignment verify requires --repo")}
+		}
+		report, operationErr := controller.Verify(ctx, *repoPath)
+		result := map[string]any{"version": 1, "verified": operationErr == nil, "assignment": report}
+		if outputErr := a.output(*jsonOut, result); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	default:
+		return exitError{2, fmt.Errorf("unknown delivery assignment subcommand %q", operation)}
 	}
 }
 
@@ -158,6 +249,11 @@ func (a App) deliveryOperation(ctx context.Context, l layout.Layout, operation s
 	if *expectedVersion != "" {
 		if _, parseErr := delivery.ParseSemVer(*expectedVersion); parseErr != nil {
 			return exitError{2, parseErr}
+		}
+	}
+	if operation == "apply" {
+		if cfg, loadErr := delivery.LoadConfig(path); loadErr == nil && cfg.Version == delivery.ConfigVersion {
+			return exitError{2, errors.New("host-wide delivery apply is disabled for per-repository config; use delivery assignment preview/apply")}
 		}
 	}
 	controller := delivery.Controller{Layout: l, ConfigPath: path, GH: ghPath, ExpectedVersion: *expectedVersion}

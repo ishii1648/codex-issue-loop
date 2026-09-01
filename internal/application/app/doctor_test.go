@@ -292,6 +292,50 @@ func TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog(t *testing.T) {
 	}
 }
 
+func TestDoctorFailsClosedForStaleStartingSupervisor(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		age    time.Duration
+		code   string
+		wantOK bool
+	}{
+		{name: "within deadline", age: 10 * time.Second, code: "SUPERVISOR_STARTING_WITHIN_DEADLINE", wantOK: true},
+		{name: "stale", age: 61 * time.Second, code: "SUPERVISOR_STARTING_STALE", wantOK: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo, l := testEnvironment(t)
+			if err := l.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			cfg := mustConfig(t, repo)
+			entry := registry.Entry{RepoID: registry.RepoID(cfg.GitHub.Repo, repo), RepoPath: repo, Commands: map[string]string{"git": "/usr/bin/git"}}
+			store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+			if err := store.Initialize(); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := store.Update("fixture_starting", 0, "", nil, func(snapshot *state.Snapshot) error {
+				snapshot.Supervisor.State = state.SupervisorStateStarting
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot.Supervisor.UpdatedAt = time.Now().UTC().Add(-test.age)
+			data, err := json.MarshalIndent(snapshot, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(store.StatePath(), append(data, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			item := diagnosticByCode(t, diagnoseDurableState(l, entry, cfg), test.code)
+			if item.OK != test.wantOK {
+				t.Fatalf("diagnostic=%+v", item)
+			}
+		})
+	}
+}
+
 func TestDoctorDiagnosesMissingRegisteredBinaryLabelsPlistAndState(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {

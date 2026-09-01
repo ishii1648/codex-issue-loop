@@ -28,11 +28,13 @@ printf '%s\n' "$version_json" | grep -Fq '"version":"v0.0.0-test"'
 printf '%s\n' "$version_json" | grep -Fq "\"commit\":\"$commit\""
 printf '%s\n' "$version_json" | grep -Fq '"target":"darwin/arm64"'
 printf '%s\n' "$version_json" | grep -Fq '"delivery_protocol":1'
+printf '%s\n' "$version_json" | grep -Fq '"assignment_protocol":1'
 printf '%s\n' "$version_json" | grep -Fq '"state_schema_current":4'
 printf '%s\n' "$version_json" | grep -Fq '"state_schema_migration_from":3'
 printf '%s\n' "$version_json" | grep -Fq '"semantic_contract_current":1'
 grep -Fq "\"artifact_sha256\": \"$(shasum -a 256 "$temporary_root/first/agent-loop_Darwin_arm64" | awk '{print $1}')\"" "$temporary_root/first/release-manifest.json"
 grep -Fq '"delivery_protocol": 1' "$temporary_root/first/release-manifest.json"
+grep -Fq '"assignment_protocol": 1' "$temporary_root/first/release-manifest.json"
 grep -Fq '"target": "darwin/arm64"' "$temporary_root/first/release-manifest.json"
 grep -Fq '"state_schema_current": 4' "$temporary_root/first/release-manifest.json"
 grep -Fq '"semantic_contract_minimum": 0' "$temporary_root/first/release-manifest.json"
@@ -42,7 +44,7 @@ grep -Fq '"semantic_contract_minimum": 0' "$temporary_root/first/release-manifes
 run_host_go_test ./internal/domain/statecontract ./internal/adapter/state \
   -run '^Test(CurrentContractHasMigrationRulesForEveryExecutionRequirement|EveryExecutionRequiredFieldHasRuntimeValidator)$' \
   -count=1
-run_host_go_test ./internal/application/delivery -run '^Test(ProductionStateIsolationRunsCredentiallessContractBetweenSnapshots|ProductionReleaseHealthFailsClosed|ReleaseWorkflowPreservesRequiredGateChain|ContractWorkflowsRequireNoLongLivedSecrets|HighRiskReviewUsesMachineVerifiableEvidence)$' -count=1
+run_host_go_test ./internal/application/delivery -run '^Test(ProductionStateIsolationRunsCredentiallessContractBetweenSnapshots|ProductionReleaseHealthFailsClosed|ProductionAssignmentHealthRequiresExactStableAssignmentsAndRollbackDrill|ReleaseWorkflowPreservesRequiredGateChain|ContractWorkflowsRequireNoLongLivedSecrets|HighRiskReviewUsesMachineVerifiableEvidence)$' -count=1
 
 conformance_json="$temporary_root/conformance.jsonl"
 run_host_go_test ./internal/application/conformance -count=1 -json >"$conformance_json"

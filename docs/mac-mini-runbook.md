@@ -2,6 +2,8 @@
 
 最終確認日: 2026-08-16
 
+repositoryごとのversion更新は[Repository別stable delivery](per-repository-delivery.md)を、`codex-issue-loop`自身が壊れて通常loopを利用できない場合は[break-glass repair](break-glass-repair.md)を正本とする。stable Release公開だけでは登録repositoryを自動更新しない。
+
 このrunbookは、Apple Silicon Mac mini上で`agent-loop`を常駐させ、ChatGPTモバイルアプリのCodex Remoteから起動、監視、質問への回答、停止を行うための標準手順である。ループ本体はLaunchAgentとして動作し、Codex taskやCodex desktop appの生存には依存しない。一方、スマートフォンからMacを操作する経路には、ログイン中のmacOSユーザーセッション、起動中のCodex desktop app、同一アカウントのRemote接続が必要である。
 
 コマンド例の`/absolute/path/to/repository`は、対象Git repositoryの絶対パスへ置き換える。複数repositoryを運用するときも、登録、操作、監視はrepository単位で行う。

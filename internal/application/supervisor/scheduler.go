@@ -392,7 +392,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 
 	if !pollCandidates {
-		return result, nil
+		return result, s.markPollingIfIdle(snapshot, "")
 	}
 	if s.dispatchTerminalPullRequestReconciliation(ctx, snapshot) {
 		result.dispatched = true

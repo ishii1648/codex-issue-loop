@@ -584,6 +584,28 @@ func (s Store) AcquireSupervisorLock() (*os.File, error) {
 	return f, nil
 }
 
+// InspectExclusive runs inspect while holding the repository state mutation
+// lock. The callback must not call Store methods. It may perform only a bounded
+// external action whose safety depends on preventing a concurrent admission.
+func (s Store) InspectExclusive(inspect func(Snapshot) error) error {
+	if inspect == nil {
+		return errors.New("exclusive state inspection callback is required")
+	}
+	if err := s.ensureDir(); err != nil {
+		return err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return err
+	}
+	defer unlock(lock)
+	snapshot, err := s.recoverUnlocked()
+	if err != nil {
+		return err
+	}
+	return inspect(snapshot)
+}
+
 func (s Store) ensureDir() error {
 	const managedModeMask = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {

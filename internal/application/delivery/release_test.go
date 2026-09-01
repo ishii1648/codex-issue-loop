@@ -34,7 +34,14 @@ type releaseRunner struct {
 func (r *releaseRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	if filepath.Base(name) == BinaryAsset && len(args) > 0 && args[0] == "version" {
 		r.binaryRuns++
-		return json.Marshal(BinaryInfo{Version: "v1.2.3", Commit: testCommit, Target: "darwin/arm64", DeliveryProtocol: 1, StateSchemaCurrent: 4, StateSchemaMigrationFrom: 3, SemanticContractCurrent: 1, SemanticContractMinimum: 0})
+		return json.Marshal(BinaryInfo{Version: "v1.2.3", Commit: testCommit, Target: "darwin/arm64", DeliveryProtocol: 1, AssignmentProtocol: 1, StateSchemaCurrent: 4, StateSchemaMigrationFrom: 3, SemanticContractCurrent: 1, SemanticContractMinimum: 0})
+	}
+	if filepath.Base(name) == "agent-loop" && len(args) > 0 && args[0] == "version" {
+		version, commit := "v1.2.3", testCommit
+		if data, err := os.ReadFile(name); err == nil && strings.Contains(string(data), "v1.2.2 installed binary") {
+			version, commit = "v1.2.2", strings.Repeat("a", 40)
+		}
+		return json.Marshal(BinaryInfo{Version: version, Commit: commit, Target: "darwin/arm64", DeliveryProtocol: 1, AssignmentProtocol: 1, StateSchemaCurrent: 4, StateSchemaMigrationFrom: 3, SemanticContractCurrent: 1, SemanticContractMinimum: 0})
 	}
 	if filepath.Base(name) == BinaryAsset && len(args) > 0 && args[0] == "update" {
 		r.updates++
@@ -95,7 +102,7 @@ func (r *releaseRunner) writeAssets(dir string) error {
 	binary := []byte("verified candidate bytes")
 	digest := sha256.Sum256(binary)
 	digestText := hex.EncodeToString(digest[:])
-	manifest := ReleaseManifest{ManifestVersion: 1, DeliveryProtocol: 1, Version: "v1.2.3", Commit: testCommit, Target: "darwin/arm64", Artifact: BinaryAsset, ArtifactSHA256: digestText, StateSchemaCurrent: 4, StateSchemaMigrationFrom: 3, SemanticContractCurrent: 1, SemanticContractMinimum: 0}
+	manifest := ReleaseManifest{ManifestVersion: 1, DeliveryProtocol: 1, AssignmentProtocol: 1, Version: "v1.2.3", Commit: testCommit, Target: "darwin/arm64", Artifact: BinaryAsset, ArtifactSHA256: digestText, StateSchemaCurrent: 4, StateSchemaMigrationFrom: 3, SemanticContractCurrent: 1, SemanticContractMinimum: 0}
 	manifestData, _ := json.MarshalIndent(manifest, "", "  ")
 	manifestData = append(manifestData, '\n')
 	manifestDigest := sha256.Sum256(manifestData)
@@ -129,6 +136,14 @@ func TestVerifierChecksEveryBoundaryBeforeExecutingCandidate(t *testing.T) {
 				t.Fatalf("binary runs=%d want=%d", test.runner.binaryRuns, test.wantRuns)
 			}
 		})
+	}
+}
+
+func TestExactAssignmentVerifierRejectsMovedReleaseTag(t *testing.T) {
+	runner := &releaseRunner{replaceReleaseAtView: 2}
+	_, err := (Verifier{GH: "gh", Runner: runner, CacheDir: t.TempDir(), ExpectedVersion: "v1.2.3"}).Check(context.Background(), DefaultConfig("owner/repo"))
+	if err == nil || (!strings.Contains(err.Error(), "exact requested version") && !strings.Contains(err.Error(), "changed")) {
+		t.Fatalf("moved exact tag error=%v", err)
 	}
 }
 

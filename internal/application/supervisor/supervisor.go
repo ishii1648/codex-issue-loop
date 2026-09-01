@@ -67,11 +67,13 @@ type Loop struct {
 	Random          RandomSource
 	Logger          *log.Logger
 	DiskAvailable   func(string) (uint64, error)
-	// MaintenanceFencePath is a host-level delivery fence. Its presence stops
-	// every kind of new lifecycle dispatch while allowing active workers to
-	// reach their normal durable checkpoint without signals.
-	MaintenanceFencePath string
-	publicationMu        sync.Mutex
+	// Delivery fences stop new lifecycle dispatch while allowing active workers
+	// to reach their normal durable checkpoint without signals. The host fence
+	// coordinates legacy all-repository delivery; the repository fence isolates
+	// an exact per-repository assignment transaction.
+	MaintenanceFencePath           string
+	RepositoryMaintenanceFencePath string
+	publicationMu                  sync.Mutex
 }
 
 type BlockedError struct{ Err error }
@@ -152,11 +154,16 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 func (l *Loop) maintenanceRequested() bool {
-	if l.MaintenanceFencePath == "" {
-		return false
+	for _, path := range []string{l.MaintenanceFencePath, l.RepositoryMaintenanceFencePath} {
+		if path == "" {
+			continue
+		}
+		_, err := os.Lstat(path)
+		if err == nil || !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
 	}
-	_, err := os.Lstat(l.MaintenanceFencePath)
-	return err == nil || !errors.Is(err, os.ErrNotExist)
+	return false
 }
 
 func (l *Loop) waitForDelay(ctx context.Context, delay time.Duration) {

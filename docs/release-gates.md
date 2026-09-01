@@ -2,6 +2,8 @@
 
 Stable Releaseはsuffixのないannotated `vMAJOR.MINOR.PATCH` tagだけを起点にし、alpha/beta/RC suffixをstableへ昇格しない。tag pushだけでは公開されない。`build-candidate`が作成したbinary、SBOM、manifest、checksumsを唯一の配布正本とし、比較用buildを配布へ使わない。
 
+Release公開とproduction assignmentは別のtransactionである。stable公開だけではrepositoryを更新しない。production rolloutとpost-release healthは[Repository別stable delivery](per-repository-delivery.md)に従い、先行repository、typed rollback drill、同じartifactの再適用、対象外repository不変、最後の全repository収束を検証する。時間経過だけを目的とするEnvironment waitやartifact再取得waitはgateとして扱わない。
+
 workflowは次の順で失敗停止する。
 
 1. `build-candidate`
@@ -42,17 +44,18 @@ tag push後にworkflow自体のrelease blockerを修正した場合は、tagを�
 
 失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production health failure時はdelivery controllerのmaintenance transactionでprevious versionへrollbackし、state、lease、park、request、worktreeを手編集しない。
 
-stable公開後はproduction delivery controllerによる適用後、production hostで5分間のhealth soakを行う。開始時、1分後、5分後にdelivery、doctor、status、versionを採取し、全sampleが成功してから同じstable Releaseへreportを追加する。定期LaunchAgentを待つ代わりにtyped CLIの`delivery reconcile`を明示実行してよい。
+stable公開後はrepository別assignmentによる段階展開とtyped rollback drillの後、production hostで5分間のhealth soakを行う。開始時、1分後、5分後に全repositoryのassignment、scoped doctor、statusを採取し、全sampleが成功してから同じstable Releaseへreportを追加する。定期LaunchAgentの実行やEnvironment timerを待つ必要はない。
 
 ```sh
-PRODUCTION_REPOSITORY_PATH='/absolute/production/repository' \
-PRODUCTION_AGENT_LOOP_BINARY='/absolute/installed/agent-loop' \
+PRODUCTION_AGENT_LOOP_BINARY='/absolute/verified/stable/agent-loop' \
+PRODUCTION_REPOSITORIES_FILE='/absolute/private/repositories.json' \
+ROLLBACK_DRILL_FILE='/absolute/private/rollback-drill.json' \
 HEALTH_ARTIFACT_DIR='/absolute/evidence-directory' \
-RELEASE_TAG='v0.8.0' \
+RELEASE_TAG='v0.9.0' \
 RELEASE_COMMIT='<40-character-merge-commit>' \
 STABLE_BINARY_SHA256='<stable-binary-sha256>' \
-scripts/production-release-health.sh
-gh release upload 'v0.8.0' '/absolute/evidence-directory/production-health-report.json'
+scripts/production-assignment-health.sh
+gh release upload 'v0.9.0' '/absolute/evidence-directory/production-health-report.json'
 ```
 
-`post-release-health`はinstalled version/commit、delivery `succeeded`、doctor成功、worker limit 1、active worker 1以下、rollback未発生を照合し、reportをattestする。reportが無い場合や不一致はskipせずrelease runを失敗させる。
+privateな`repositories.json`はrepository IDとlocal pathを入力するが、公開reportへpathを出力しない。`rollback-drill.json`は先行repositoryのstable→previous→同じstableというtyped操作と、state、Issue、lease、worktree、対象外repositoryのassignment/PID/binary/state revision保全を記録する。`post-release-health`は全repositoryのexact version/commit/digest、terminal transaction、fence不在、doctor成功、worker limit 1、active worker 1以下を照合してreportをattestする。reportが無い場合や不一致はskipせずrelease runを失敗させる。

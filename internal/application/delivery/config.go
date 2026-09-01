@@ -14,11 +14,40 @@ import (
 )
 
 const (
-	ConfigVersion   = 1
-	ProtocolVersion = 1
+	ConfigVersion             = 2
+	LegacyConfigVersion       = 1
+	ProtocolVersion           = 1
+	AssignmentProtocolVersion = 1
 )
 
+type AssignmentRef struct {
+	Version        string `yaml:"version" json:"version"`
+	Commit         string `yaml:"commit" json:"commit"`
+	ArtifactSHA256 string `yaml:"artifact_sha256" json:"artifact_sha256"`
+	Slot           string `yaml:"slot" json:"slot"`
+}
+
+type RepositoryAssignment struct {
+	RepositoryID  string `yaml:"repository_id" json:"repository_id"`
+	AssignmentRef `yaml:",inline"`
+	Generation    uint64         `yaml:"generation" json:"generation"`
+	Previous      *AssignmentRef `yaml:"previous,omitempty" json:"previous,omitempty"`
+	UpdatedAt     time.Time      `yaml:"updated_at" json:"updated_at"`
+}
+
 type Config struct {
+	Version           int                             `yaml:"version" json:"version"`
+	Enabled           bool                            `yaml:"enabled" json:"enabled"`
+	ReleaseRepository string                          `yaml:"release_repository" json:"release_repository"`
+	Channel           string                          `yaml:"channel" json:"channel"`
+	PollInterval      string                          `yaml:"poll_interval" json:"poll_interval"`
+	DrainTimeout      string                          `yaml:"drain_timeout" json:"drain_timeout"`
+	AutoApply         string                          `yaml:"auto_apply" json:"auto_apply"`
+	TrustedWorkflow   string                          `yaml:"trusted_workflow,omitempty" json:"trusted_workflow"`
+	Assignments       map[string]RepositoryAssignment `yaml:"assignments" json:"assignments"`
+}
+
+type LegacyConfig struct {
 	Version           int    `yaml:"version" json:"version"`
 	Enabled           bool   `yaml:"enabled" json:"enabled"`
 	ReleaseRepository string `yaml:"release_repository" json:"release_repository"`
@@ -30,7 +59,7 @@ type Config struct {
 }
 
 func DefaultConfig(repository string) Config {
-	return Config{Version: ConfigVersion, Enabled: true, ReleaseRepository: repository, Channel: "stable", PollInterval: "15m", DrainTimeout: "2h30m", AutoApply: "schema_compatible"}
+	return Config{Version: ConfigVersion, Enabled: true, ReleaseRepository: repository, Channel: "stable", PollInterval: "15m", DrainTimeout: "2h30m", AutoApply: "never", Assignments: map[string]RepositoryAssignment{}}
 }
 
 func DefaultConfigPath() (string, error) {
@@ -74,6 +103,49 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
+func LoadLegacyConfig(path string) (LegacyConfig, error) {
+	if !filepath.IsAbs(path) {
+		return LegacyConfig{}, errors.New("delivery config path must be absolute")
+	}
+	if err := validatePrivateRegularFile(path); err != nil {
+		return LegacyConfig{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return LegacyConfig{}, fmt.Errorf("read delivery config: %w", err)
+	}
+	var cfg LegacyConfig
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
+		return LegacyConfig{}, fmt.Errorf("decode legacy delivery config: %w", err)
+	}
+	if cfg.Version != LegacyConfigVersion {
+		return LegacyConfig{}, fmt.Errorf("delivery config version is %d, not the migratable version %d", cfg.Version, LegacyConfigVersion)
+	}
+	if cfg.ReleaseRepository == "" || !validRepository(cfg.ReleaseRepository) || cfg.Channel != "stable" {
+		return LegacyConfig{}, errors.New("legacy delivery config repository or channel is invalid")
+	}
+	if poll, err := time.ParseDuration(cfg.PollInterval); err != nil || poll < time.Minute {
+		return LegacyConfig{}, errors.New("legacy poll_interval must be at least 1m")
+	}
+	if drain, err := time.ParseDuration(cfg.DrainTimeout); err != nil || drain <= 0 {
+		return LegacyConfig{}, errors.New("legacy drain_timeout must be positive")
+	}
+	if cfg.AutoApply != "schema_compatible" && cfg.AutoApply != "never" {
+		return LegacyConfig{}, errors.New("legacy auto_apply is invalid")
+	}
+	return cfg, nil
+}
+
+func (c LegacyConfig) Migrated(assignments map[string]RepositoryAssignment) Config {
+	return Config{
+		Version: ConfigVersion, Enabled: c.Enabled, ReleaseRepository: c.ReleaseRepository,
+		Channel: c.Channel, PollInterval: c.PollInterval, DrainTimeout: c.DrainTimeout,
+		AutoApply: "never", TrustedWorkflow: c.TrustedWorkflow, Assignments: assignments,
+	}
+}
+
 func (c Config) Validate() error {
 	if c.Version != ConfigVersion {
 		return fmt.Errorf("unsupported delivery config version %d; this controller supports %d", c.Version, ConfigVersion)
@@ -92,8 +164,49 @@ func (c Config) Validate() error {
 	if err != nil || drain <= 0 {
 		return errors.New("drain_timeout must be a positive duration")
 	}
-	if c.AutoApply != "schema_compatible" && c.AutoApply != "never" {
-		return errors.New("auto_apply must be schema_compatible or never")
+	if c.AutoApply != "never" {
+		return errors.New("per-repository delivery requires auto_apply: never")
+	}
+	if c.Assignments == nil {
+		return errors.New("assignments must be present")
+	}
+	for id, assignment := range c.Assignments {
+		if id == "" || assignment.RepositoryID != id {
+			return fmt.Errorf("assignment key and repository_id must match: %q", id)
+		}
+		if assignment.Generation == 0 {
+			return fmt.Errorf("assignment %s generation must be positive", id)
+		}
+		if assignment.UpdatedAt.IsZero() {
+			return fmt.Errorf("assignment %s updated_at must be present", id)
+		}
+		if err := validateAssignmentRef(assignment.AssignmentRef); err != nil {
+			return fmt.Errorf("assignment %s: %w", id, err)
+		}
+		if assignment.Previous != nil {
+			if err := validateAssignmentRef(*assignment.Previous); err != nil {
+				return fmt.Errorf("assignment %s previous: %w", id, err)
+			}
+			if *assignment.Previous == assignment.AssignmentRef {
+				return fmt.Errorf("assignment %s previous must differ from current", id)
+			}
+		}
+	}
+	return nil
+}
+
+func validateAssignmentRef(ref AssignmentRef) error {
+	if _, err := ParseSemVer(ref.Version); err != nil {
+		return err
+	}
+	if !validSHA(ref.Commit) {
+		return errors.New("commit must be a lowercase 40-character SHA")
+	}
+	if !validDigest(ref.ArtifactSHA256) {
+		return errors.New("artifact_sha256 must be a lowercase SHA-256")
+	}
+	if !filepath.IsAbs(ref.Slot) {
+		return errors.New("slot must be an absolute path")
 	}
 	return nil
 }

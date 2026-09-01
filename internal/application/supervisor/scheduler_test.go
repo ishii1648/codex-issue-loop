@@ -82,6 +82,36 @@ func TestDeliveryMaintenanceFenceDrainsWithoutDispatchOrCancellation(t *testing.
 	}
 }
 
+func TestRepositoryAssignmentFenceDoesNotFenceAnotherRepository(t *testing.T) {
+	first, _ := testLoop(t, worker.Result{})
+	second, _ := testLoop(t, worker.Result{})
+	sharedGlobal := filepath.Join(t.TempDir(), "global-maintenance.json")
+	first.MaintenanceFencePath = sharedGlobal
+	second.MaintenanceFencePath = sharedGlobal
+	first.RepositoryMaintenanceFencePath = filepath.Join(first.Store.Dir, "assignment-maintenance.json")
+	second.RepositoryMaintenanceFencePath = filepath.Join(second.Store.Dir, "assignment-maintenance.json")
+	if err := os.WriteFile(first.RepositoryMaintenanceFencePath, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newScheduler := func(loop *Loop) *scheduler {
+		return &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	}
+	if _, err := newScheduler(first).schedule(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newScheduler(second).schedule(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	firstSnapshot, _ := first.Store.Load()
+	secondSnapshot, _ := second.Store.Load()
+	if firstSnapshot.Supervisor.State != state.SupervisorStateMaintenance {
+		t.Fatalf("target supervisor=%+v", firstSnapshot.Supervisor)
+	}
+	if secondSnapshot.Supervisor.State != state.SupervisorStatePolling {
+		t.Fatalf("other supervisor=%+v", secondSnapshot.Supervisor)
+	}
+}
+
 func (f *startupRateLimitObserverGitHub) PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool) {
 	f.statusCalls++
 	return f.status, true
@@ -575,6 +605,14 @@ func TestWebhookMailboxClaimsReadyIssueWithoutQueuePolling(t *testing.T) {
 func TestWebhookSchedulerNeverPerformsQueueSweep(t *testing.T) {
 	loop, baseGitHub := testLoop(t, worker.Result{})
 	loop.Config.Webhook.Mode = "webhook"
+	startedAt := time.Now().UTC()
+	if _, err := loop.Store.Update("fixture_starting", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = state.SupervisorStateStarting
+		snapshot.Supervisor.StartedAt = startedAt
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
 	loop.GitHub = github
 	s := &scheduler{
@@ -586,6 +624,10 @@ func TestWebhookSchedulerNeverPerformsQueueSweep(t *testing.T) {
 	}
 	if github.listCalls != 0 || github.conditionalCalls != 0 {
 		t.Fatalf("list=%d conditional=%d", github.listCalls, github.conditionalCalls)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil || snapshot.Supervisor.State != state.SupervisorStatePolling || snapshot.Supervisor.UpdatedAt.Sub(startedAt) > 10*time.Second {
+		t.Fatalf("webhook idle startup state=%+v err=%v", snapshot.Supervisor, err)
 	}
 }
 

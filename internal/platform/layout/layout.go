@@ -83,6 +83,24 @@ func (l Layout) BrokerLabel() string { return "com.codex-issue-loop.broker" }
 // $HOME/.agent-loop-delivery.yaml.
 func (l Layout) DeliveryDir() string { return filepath.Join(l.Root, "delivery") }
 
+func (l Layout) DeliverySlotsDir() string { return filepath.Join(l.DeliveryDir(), "slots") }
+
+func (l Layout) DeliveryAssignmentsDir() string {
+	return filepath.Join(l.DeliveryDir(), "assignments")
+}
+
+func (l Layout) DeliveryAssignmentDir(repoID string) string {
+	return filepath.Join(l.DeliveryAssignmentsDir(), repoID)
+}
+
+func (l Layout) DeliveryAssignmentFencePath(repoID string) string {
+	return filepath.Join(l.DeliveryAssignmentDir(repoID), "maintenance.json")
+}
+
+func (l Layout) DeliveryAssignmentTransactionPath(repoID string) string {
+	return filepath.Join(l.DeliveryAssignmentDir(repoID), "transaction.json")
+}
+
 func (l Layout) DeliveryPlistPath() string {
 	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop.delivery.plist")
 }

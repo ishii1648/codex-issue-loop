@@ -1189,6 +1189,44 @@ func TestFaultSecondSupervisorCannotAcquireLock(t *testing.T) {
 	ReleaseSupervisorLock(third)
 }
 
+func TestInspectExclusiveBlocksConcurrentStateMutation(t *testing.T) {
+	store := Store{Dir: t.TempDir(), RepoID: "repo-exclusive", RepoPath: "/tmp/repo-exclusive"}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	inspectDone := make(chan error, 1)
+	go func() {
+		inspectDone <- store.InspectExclusive(func(Snapshot) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	updateDone := make(chan error, 1)
+	go func() {
+		_, err := store.Update("concurrent_mutation", 0, "", nil, func(snapshot *Snapshot) error {
+			snapshot.Supervisor.Message = "updated"
+			return nil
+		})
+		updateDone <- err
+	}()
+	select {
+	case err := <-updateDone:
+		t.Fatalf("mutation crossed exclusive inspection: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-inspectDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updateDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFaultEventRotationKeepsCheckpointAndRecoverySequence(t *testing.T) {
 	store := Store{
 		Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo",
