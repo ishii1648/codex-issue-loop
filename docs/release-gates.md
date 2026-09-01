@@ -12,7 +12,7 @@ workflowは次の順で失敗停止する。
 6. `cli-surface-contract`
 7. `credentialless-isolated-canary`
 8. `production-state-isolation`
-9. `soak`
+9. `candidate-integrity`
 10. `promotion-evidence`
 11. `promote-stable`
 12. `post-release-health`
@@ -34,13 +34,15 @@ gh release upload 'candidate-v0.8.0-<workflow-run-id>' \
   '/absolute/evidence-directory/production-state-report.json'
 ```
 
-scriptはproductionの`doctor --json`と`status --json`だけを使用し、credentialless contract前後でstate revision、Issue、lease owner/generation、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`、doctor成功も必須である。`production-state-isolation`はreportのrelease commitとcandidate binary SHA-256を照合してattestし、成功後に30分soakを開始する。soakは開始、15分、30分にcandidate prereleaseからbinaryを再取得し、canonical candidateとのbyte一致とattestationを検査する。
+scriptはproductionの`doctor --json`と`status --json`だけを使用し、credentialless contract前後でstate revision、Issue、lease owner/generation、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`、doctor成功も必須である。`production-state-isolation`はreportのrelease commitとcandidate binary SHA-256を照合してattestする。`candidate-integrity`はcandidate prereleaseからbinaryを1回取得し、canonical candidateとのbyte一致とattestationを即時検査する。immutable artifactの再取得だけを目的とした時間待機は行わない。
 
-このrepositoryは単一maintainer運用のため、外部collaboratorや自己承認不能なrequired reviewerをrelease authorityにしない。`High-risk review gate`は変更headに結び付いたmachine-readable reviewについて全check成功・finding 0件を必須とする。`promotion-evidence`はCLI surface、offline lifecycle、production非変更、30分soakの全証跡とcandidate digestを再検証し、`production` Environment内で機械的な昇格許可を生成する。Environmentは`v*` refだけを許可し、production isolation前とstable promotion前にそれぞれ30分のwait timerを強制する。未解決conversationはmain rulesetで引き続きmergeを拒否する。
+このrepositoryは単一maintainer運用のため、外部collaboratorや自己承認不能なrequired reviewerをrelease authorityにしない。`High-risk review gate`は変更headに結び付いたmachine-readable reviewについて全check成功・finding 0件を必須とする。`promotion-evidence`はCLI surface、offline lifecycle、production非変更、candidate integrityとdigestを即時再検証する。`production` Environmentはstable公開jobだけに付与し、wait timerは`0`とする。通常releaseのstable tagに加え、修正版workflowを実行するdefault branchを許可し、後者では入力tagとpeeled commitの一致をworkflow内でfail closedに検証する。未解決conversationはmain rulesetで引き続きmergeを拒否する。
+
+tag push後にworkflow自体のrelease blockerを修正した場合は、tagを移動せず、default branchの修正版workflowを`workflow_dispatch`で実行する。入力したtagがannotated stable tagであること、そのpeeled commitが入力commitと一致すること、そのcommitが`main`のancestorであることを検査し、同じtagged sourceからcandidateを新規作成して全gateを再実行する。
 
 失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production health failure時はdelivery controllerのmaintenance transactionでprevious versionへrollbackし、state、lease、park、request、worktreeを手編集しない。
 
-stable公開後はproduction delivery controllerによる適用とsoakが完了してから、production hostで次を実行し、同じstable Releaseへreportを追加する。
+stable公開後はproduction delivery controllerによる適用後、production hostで5分間のhealth soakを行う。開始時、1分後、5分後にdelivery、doctor、status、versionを採取し、全sampleが成功してから同じstable Releaseへreportを追加する。定期LaunchAgentを待つ代わりにtyped CLIの`delivery reconcile`を明示実行してよい。
 
 ```sh
 PRODUCTION_REPOSITORY_PATH='/absolute/production/repository' \
