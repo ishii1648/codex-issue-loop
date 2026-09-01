@@ -36,12 +36,20 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
   -o "$artifact" \
   ./cmd/agent-loop
 
-SOURCE_DATE_EPOCH=$source_epoch go run ./cmd/releasegen sbom \
+run_releasegen() {
+  if [ "$(go env GOHOSTOS)" = darwin ]; then
+    CGO_ENABLED=1 go run -ldflags=-linkmode=external ./cmd/releasegen "$@"
+  else
+    go run ./cmd/releasegen "$@"
+  fi
+}
+
+SOURCE_DATE_EPOCH=$source_epoch run_releasegen sbom \
   --artifact "$artifact" \
   --version "$version" \
   --output "$sbom"
 
-go run ./cmd/releasegen manifest \
+run_releasegen manifest \
   --artifact "$artifact" \
   --version "$version" \
   --commit "$commit" \

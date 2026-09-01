@@ -8,6 +8,14 @@ commit=$(git rev-parse HEAD)
 source_epoch=$(git show -s --format=%ct HEAD)
 version=v0.0.0-test
 
+run_host_go_test() {
+  if [ "$(go env GOHOSTOS)" = darwin ]; then
+    CGO_ENABLED=1 go test -ldflags=-linkmode=external "$@"
+  else
+    go test "$@"
+  fi
+}
+
 scripts/build-release.sh "$version" "$commit" "$source_epoch" "$temporary_root/first"
 scripts/build-release.sh "$version" "$commit" "$source_epoch" "$temporary_root/second"
 
@@ -31,13 +39,13 @@ grep -Fq '"semantic_contract_minimum": 0' "$temporary_root/first/release-manifes
 
 # A new execution-required field without an explicit compatibility or
 # migration decision must fail both normal CI and the release gate.
-go test ./internal/domain/statecontract ./internal/adapter/state \
+run_host_go_test ./internal/domain/statecontract ./internal/adapter/state \
   -run '^Test(CurrentContractHasMigrationRulesForEveryExecutionRequirement|EveryExecutionRequiredFieldHasRuntimeValidator)$' \
   -count=1
-go test ./internal/application/delivery -run '^Test(ProductionStateIsolationRunsCredentiallessContractBetweenSnapshots|ProductionReleaseHealthFailsClosed|ReleaseWorkflowPreservesRequiredGateChain|ContractWorkflowsRequireNoLongLivedSecrets|HighRiskReviewUsesMachineVerifiableEvidence)$' -count=1
+run_host_go_test ./internal/application/delivery -run '^Test(ProductionStateIsolationRunsCredentiallessContractBetweenSnapshots|ProductionReleaseHealthFailsClosed|ReleaseWorkflowPreservesRequiredGateChain|ContractWorkflowsRequireNoLongLivedSecrets|HighRiskReviewUsesMachineVerifiableEvidence)$' -count=1
 
 conformance_json="$temporary_root/conformance.jsonl"
-go test ./internal/application/conformance -count=1 -json >"$conformance_json"
+run_host_go_test ./internal/application/conformance -count=1 -json >"$conformance_json"
 if grep -Eq '"Action":"(skip|fail)"' "$conformance_json"; then
   cat "$conformance_json"
   exit 1

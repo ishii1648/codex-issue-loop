@@ -15,6 +15,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
 )
 
 const testCommit = "0123456789abcdef0123456789abcdef01234567"
@@ -303,6 +304,50 @@ func TestRetryRollbackFinalizesAlreadyRestoredPreviousVersion(t *testing.T) {
 	stored, err := LoadTransaction(paths.Transaction)
 	if err != nil || stored.Current != tx.Previous || stored.Phase != PhaseVerified || stored.LastResult != "rolled_back" {
 		t.Fatalf("transaction=%+v err=%v", stored, err)
+	}
+}
+
+func TestEnsureExpectedStartedRestartsLoadedNotRunningRepository(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(root, "launchd-state")
+	if err := os.WriteFile(statePath, []byte("loaded\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launchctl := filepath.Join(root, "launchctl")
+	script := `#!/bin/sh
+case "$1" in
+  print)
+    test -f "$DELIVERY_LAUNCHD_STATE" || exit 1
+    if grep -q running "$DELIVERY_LAUNCHD_STATE"; then
+      printf 'state = running\npid = 123\n'
+    else
+      printf 'state = not running\n'
+    fi
+    ;;
+  bootout)
+    rm -f "$DELIVERY_LAUNCHD_STATE"
+    ;;
+  bootstrap)
+    printf 'running\n' > "$DELIVERY_LAUNCHD_STATE"
+    ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DELIVERY_LAUNCHD_STATE", statePath)
+	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), LaunchAgents: filepath.Join(root, "launch")}
+	entry := registry.Entry{RepoID: "repo-id", RepoPath: filepath.Join(root, "repo"), Commands: map[string]string{"launchctl": launchctl}}
+	if err := fsutil.WriteJSON(l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Controller{Layout: l}).ensureExpectedStarted(context.Background(), []string{entry.RepoID}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil || strings.TrimSpace(string(data)) != "running" {
+		t.Fatalf("loaded-not-running service was not restarted: state=%q err=%v", data, err)
 	}
 }
 

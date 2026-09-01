@@ -90,6 +90,7 @@ type Worker struct {
 	Command          string             `yaml:"command" json:"command"`
 	Model            string             `yaml:"model" json:"model,omitempty"`
 	Variant          string             `yaml:"variant" json:"variant,omitempty"`
+	LegacyAppServer  *LegacyAppServer   `yaml:"app_server" json:"-"`
 	CommandNetwork   CommandNetwork     `yaml:"command_network" json:"command_network"`
 	Sandbox          string             `yaml:"sandbox" json:"sandbox"`
 	SessionMode      string             `yaml:"session_mode" json:"session_mode"`
@@ -97,6 +98,10 @@ type Worker struct {
 	TimeoutGrace     Duration           `yaml:"timeout_grace" json:"timeout_grace"`
 	AmbiguousProfile string             `yaml:"ambiguous_profile" json:"ambiguous_profile"`
 	Profiles         map[string]Profile `yaml:"profiles" json:"profiles"`
+}
+
+type LegacyAppServer struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // CommandNetwork is deliberately narrower than Codex's native proxy
@@ -426,6 +431,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Worker.Command) != c.Worker.Command || strings.ContainsRune(c.Worker.Command, '\x00') {
 		return fmt.Errorf("worker.command must be a command name or path without surrounding whitespace")
+	}
+	if c.Worker.LegacyAppServer != nil && c.Worker.LegacyAppServer.Enabled {
+		return fmt.Errorf("worker.app_server.enabled=true is unsupported")
 	}
 	if c.Worker.Backend == "opencode" {
 		provider, model, ok := strings.Cut(c.Worker.Model, "/")

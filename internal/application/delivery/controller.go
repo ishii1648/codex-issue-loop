@@ -544,8 +544,8 @@ func (c Controller) ensureExpectedStarted(ctx context.Context, expectedLoaded []
 		if statusErr != nil {
 			return statusErr
 		}
-		if !status.Loaded {
-			if err := manager.Start(ctx, entry); err != nil {
+		if !status.Running {
+			if err := manager.Restart(ctx, entry); err != nil {
 				return fmt.Errorf("restart previously loaded repository %s: %w", repoID, err)
 			}
 		}

@@ -17,7 +17,7 @@ Codexの`exec resume`と、その`--json`、`--output-schema`、`--output-last-m
 
 ## App Server Goal adapter削除時の互換性
 
-`worker.app_server`は現行設定ではない。旧設定を使っていたrepositoryは、更新前に`worker.app_server` block全体を削除してから`register`と`doctor`を実行する。strict YAML decoderは残存するkeyを`field app_server not found in type config.Worker`として拒否するため、誤って有効な設定として扱われることはない。
+`worker.app_server`は現行設定ではない。既存repositoryの安全な更新を妨げないため、`enabled: false`だけをinertなlegacy互換として読み込む。`enabled: true`と未知fieldはstrict YAML decoderまたはvalidationで拒否し、App Server経路を暗黙に再有効化しない。legacy blockは次回の意図的な設定更新時に削除でき、更新前の一括書き換えを必須としない。
 
 旧durable stateの`goal` snapshotは読み込み時に無視され、次の通常state更新で書き戻されない。`session_id` / `session`、worktree、branch、answers、attempts、continuationsなどの継続情報はそのまま保持されるため、state fileやworktreeを削除しない。
 
