@@ -670,13 +670,15 @@ func (c AssignmentController) waitForLegacyIdleAndStop(ctx context.Context, cfg 
 				return nil
 			}
 			idle = true
-			stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			requested, err := manager.RequestStop(stopCtx, entry)
+			requestCtx, cancelRequest := context.WithTimeout(ctx, 5*time.Second)
+			requested, err := manager.RequestStop(requestCtx, entry)
+			cancelRequest()
 			if err != nil || !requested {
 				return err
 			}
-			return manager.WaitStopped(stopCtx, entry, 5*time.Second)
+			waitCtx, cancelWait := context.WithTimeout(ctx, 30*time.Second)
+			defer cancelWait()
+			return manager.WaitStopped(waitCtx, entry, 30*time.Second)
 		})
 		if stopErr != nil {
 			return fmt.Errorf("stop legacy repository runtime under admission lock: %w", stopErr)
@@ -705,6 +707,10 @@ func (c AssignmentController) runtimeAssignmentProtocol(ctx context.Context, man
 	if digest != current.ArtifactSHA256 {
 		return 0, errors.New("loaded repository binary digest does not match its current assignment")
 	}
+	return c.assignmentProtocol(ctx, program, current)
+}
+
+func (c AssignmentController) assignmentProtocol(ctx context.Context, program string, ref AssignmentRef) (int, error) {
 	out, err := c.runner().Run(ctx, program, "version", "--json")
 	if err != nil {
 		return 0, fmt.Errorf("inspect repository assignment protocol: %w", err)
@@ -713,7 +719,7 @@ func (c AssignmentController) runtimeAssignmentProtocol(ctx context.Context, man
 	if err := decodeStrictJSON(out, &info); err != nil {
 		return 0, fmt.Errorf("decode repository assignment protocol: %w", err)
 	}
-	if info.Version != current.Version || info.Commit != current.Commit {
+	if info.Version != ref.Version || info.Commit != ref.Commit {
 		return 0, errors.New("loaded repository version and commit do not match its current assignment")
 	}
 	if info.AssignmentProtocol < 0 || info.AssignmentProtocol > AssignmentProtocolVersion {
@@ -750,7 +756,16 @@ func (c AssignmentController) health(ctx context.Context, entry registry.Entry, 
 	if wasLoaded && (!status.Loaded || !status.Running) {
 		return errors.New("assigned repository LaunchAgent is not running")
 	}
-	out, err := c.runner().Run(ctx, ref.Slot, "doctor", "--repo", entry.RepoPath, "--assignment-health", "--json")
+	protocol, err := c.assignmentProtocol(ctx, ref.Slot, ref)
+	if err != nil {
+		return err
+	}
+	doctorArgs := []string{"doctor", "--repo", entry.RepoPath}
+	if protocol >= 1 {
+		doctorArgs = append(doctorArgs, "--assignment-health")
+	}
+	doctorArgs = append(doctorArgs, "--json")
+	out, err := c.runner().Run(ctx, ref.Slot, doctorArgs...)
 	if err != nil {
 		return fmt.Errorf("assigned repository doctor failed: %w", err)
 	}
