@@ -79,6 +79,8 @@ pause/resumeはactive maintenance transaction中には変更できない。schem
 
 `rollback_failed`の再試行は通常reconcileから行わない。原因解消、exact managed backup、retained maintenance fenceをoperatorが確認した場合だけ、検証済みcandidateの`delivery retry-rollback --backup <exact-path> --confirm-retained-fence --json`を使用する。previous installへ既に戻っている場合はrestoreを重ねずhealthだけを再検証し、成功時だけfenceを解除する。
 
+retry時のaggregate validationがlegacy completed merged identityだけを理由にmaintenance snapshotを隔離した場合は、検証済みcandidateの`recover-quarantined-snapshot`をdry-runし、exact backupと全GitHub PR identityを確認した後だけ専用confirmで復元する。これは一般の破損stateや追加invariant違反を許容するcompatibility bypassではない。
+
 ## 新規install
 
 loopが動いていないことを確認して、検証済みartifactから実行する。

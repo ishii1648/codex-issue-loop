@@ -251,6 +251,50 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	return state, nil
 }
 
+// ListMergedPullRequests returns repository-local merged Pull Requests without
+// status checks. Recovery callers use the complete identity set to validate
+// historical terminal records in one bounded GitHub query.
+func (c CLI) ListMergedPullRequests(ctx context.Context, cfg config.Config) ([]PullRequest, error) {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "merged", "--limit", "1000", "--json", "number,url,state,mergedAt,headRefName,baseRefName,headRefOid,mergeCommit,headRepository,headRepositoryOwner").CombinedOutput()
+	if err != nil {
+		return nil, c.commandError(ctx, path, "list merged Pull Requests", err, out)
+	}
+	var raw []struct {
+		Number      int        `json:"number"`
+		URL         string     `json:"url"`
+		State       string     `json:"state"`
+		MergedAt    *time.Time `json:"mergedAt"`
+		HeadRefName string     `json:"headRefName"`
+		BaseRefName string     `json:"baseRefName"`
+		HeadRefOID  string     `json:"headRefOid"`
+		MergeCommit *struct {
+			OID string `json:"oid"`
+		} `json:"mergeCommit"`
+		PullRequestHeadRepository
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("decode merged Pull Requests: %w", err)
+	}
+	result := make([]PullRequest, 0, len(raw))
+	for _, item := range raw {
+		mergeSHA := ""
+		if item.MergeCommit != nil {
+			mergeSHA = item.MergeCommit.OID
+		}
+		result = append(result, PullRequest{
+			Number: item.Number, URL: item.URL, State: item.State, MergedAt: item.MergedAt,
+			HeadRefName: item.HeadRefName, BaseRefName: item.BaseRefName, HeadSHA: item.HeadRefOID,
+			MergeSHA: mergeSHA, MergeCommitSHA: mergeSHA, HeadRepository: item.PullRequestHeadRepository.FullName(),
+		})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Number < result[j].Number })
+	return result, nil
+}
+
 func pullRequestChecksStatus(mergeState string, checks []checkRollup) string {
 	if len(checks) == 0 {
 		if strings.EqualFold(mergeState, "CLEAN") {

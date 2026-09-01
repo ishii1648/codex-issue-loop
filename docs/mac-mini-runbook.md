@@ -389,6 +389,17 @@ agent-loop delivery status --json
 
 commandはdelivery lock、`rollback_failed` transaction、maintenance generation、desired identity、exact backup manifest、installed current/previous identityを再検証する。installed binaryが既にpreviousと一致する場合はbackupを再適用せず、maintenance下で全repositoryの再開とdoctorだけを再検証する。成功時だけtyped transactionを`rolled_back`へ進めてfenceを解除する。不一致やhealth failureではfenceとbackupを保持する。
 
+retry中の新validator readが、旧`completed + pull_request_merged` recordのnumber/head欠落だけを理由にmaintenance snapshotを`recovery_blocked`へ隔離した場合は、JSONやbackupを手で戻さない。検証済みcandidateからexact backupを指定してpreviewし、全対象の旧identityとGitHub上のrepository-local merged PRがURL・branch・baseまで一致することを確認する。
+
+```sh
+/absolute/verified/agent-loop_Darwin_arm64 recover-quarantined-snapshot \
+  --repo /absolute/path/to/repository \
+  --backup '/exact/managed/recovery-backup' \
+  --dry-run --json
+```
+
+LaunchAgent非稼働、`eligible=true`、`github_verified=true`、mutation scope、全repairsをoperatorが確認した場合だけ、`--dry-run`を`--confirm-legacy-merged-identities`へ置き換える。成功後は`doctor`を実行し、同じdelivery backupで`retry-rollback`を再実行する。追加invariant違反、別repo/fork/open PR、URL/branch/number不一致、exact backup不一致では使用しない。
+
 初回導入とrelease前の実Mac E2Eでは、test repositoryと検証済みstable releaseを使い、次を記録する。
 
 1. login後にdelivery LaunchAgentがstable releaseを検出する。
