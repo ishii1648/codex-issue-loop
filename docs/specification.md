@@ -454,7 +454,18 @@ agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --con
 
 open/closed-unmerged PR、別repo/branch/base/head、dirty/unpushed worktree、active worker、pending request、running/completed state、missing/inconsistent lease、manual/security exclusion、supervisor markerのないterminal stateは変更せずfail closedとする。コマンドはbranch、commit、push、PR、mergeを新規作成せず、state fileやlabelの手編集を代替手順にしない。
 
-### 6.11 終了コード
+### 6.12 recover-quarantined-snapshot
+
+```sh
+agent-loop recover-quarantined-snapshot --repo /absolute/path/to/repository --backup /exact/recovery/backup --dry-run --json
+agent-loop recover-quarantined-snapshot --repo /absolute/path/to/repository --backup /exact/recovery/backup --confirm-legacy-merged-identities --json
+```
+
+aggregate validator導入前の`completed + pull_request_merged` recordがPR URLだけ、または途中のhead SHAだけを保持し、新validatorの初回readでsnapshot全体が`recovery_blocked`へ隔離された場合に限る。CLIは現在のrevision 1 recovery markerと単一`recovery_blocked` event、markerが指すmanaged recovery root直下のexact backup、delivery maintenance snapshot、active PID/PGID不在、prepared transaction不在、元snapshot/event sequenceを検証する。欠落対象を仮補完してaggregate validatorを再実行し、merged identity以外の違反が1件でもあれば拒否する。
+
+`--dry-run`とconfirmはいずれもGitHubのmerged PR一覧をread-onlyで取得し、各recordの保存URL・branch・configured base・head repositoryが一意なmerged PRと一致することを検証する。GitHubのPR numberと最終head SHAをauthoritative値として補完し、旧headが途中値ならbefore/afterをreportとeventへ残す。applyは元quarantine backupを変更せず、現在のrecovery markerも別のmanaged backupへ保存し、`legacy_merged_identity_quarantine_recovered` eventを追加した整合snapshot/event chainへ置換する。Issue status、run、attempt/continuation、session、回答、worktree、lease、GitHub labelは変更しない。これは汎用破損復旧ではなく、running LaunchAgent、open/fork/別branch PR、URL/number不一致、追加invariant違反、別backupでは副作用なくfail closedとする。
+
+### 6.13 終了コード
 
 | code | 意味 |
 | --- | --- |
@@ -827,6 +838,8 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 改行前で停止したevent log末尾は、最後の完全なeventとsnapshot revisionが一致する場合に限り切り詰め、`event_log_tail_truncated` を記録する。prepared transactionが残っている場合は、そのtransactionを正本としてeventとsnapshotのcommitを完了する。
 
 transactionなしでsnapshotとevent logが食い違う場合、途中に壊れたeventがある場合、またはsnapshotを復元できない場合は自動推測しない。既存の `state.json`、`events.jsonl`、`state.txn.json` をrepository state directory配下の `recovery/` へ隔離し、元の理由とbackup pathを含む `recovery_blocked` 状態を新しいsnapshotへ保存する。blocked状態では通常の状態更新とIssue処理を拒否し、backupを保持したまま手動復旧を待つ。
+
+唯一のtyped例外は§6.12のlegacy merged identity quarantine recoveryである。exact recovery marker、元snapshot/event、GitHub authoritative PR identityを再検証し、元backupとmarker backupを双方保持できる場合だけoperator確認付きで復元する。それ以外のquarantine reasonへ同commandを流用しない。
 
 ### 12.4 永続schema migration
 

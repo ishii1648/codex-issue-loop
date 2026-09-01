@@ -197,6 +197,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.recoverAnsweredWorkspace(ctx, l, args)
 	case "recover-workspace":
 		return a.recoverWorkspace(ctx, l, args)
+	case "recover-quarantined-snapshot":
+		return a.recoverQuarantinedSnapshot(ctx, l, args)
 	case "adopt-merged-pr":
 		return a.adoptMergedPullRequest(ctx, l, args)
 	case "logs":
@@ -248,6 +250,7 @@ Commands:
   recover-checks  Return an externally repaired Pull Request to its saved lifecycle
   recover-answered-workspace  Recover the exact answered legacy missing-Workspace chain
   recover-workspace  Verify and backfill missing Workspace provenance without resuming execution
+  recover-quarantined-snapshot  Restore an exact quarantined snapshot after verifying legacy merged PR identities
   export-recovery-fixture  Export sanitized read-only recovery evidence
   verify-recovery-fixture  Fail closed unless a fixture is complete and untampered
   adopt-merged-pr  Adopt one externally merged saved branch into terminal state

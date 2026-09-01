@@ -24,6 +24,9 @@ type transaction struct {
 }
 
 func (s Store) recoverUnlocked() (Snapshot, error) {
+	if err := s.completeQuarantineRecoveryUnlocked(); err != nil {
+		return Snapshot{}, fmt.Errorf("complete quarantined snapshot recovery: %w", err)
+	}
 	snapshot, snapshotExists, err := s.loadSnapshotUnlocked()
 	if err != nil {
 		if isSchemaVersionError(err) {

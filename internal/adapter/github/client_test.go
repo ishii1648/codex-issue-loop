@@ -60,6 +60,30 @@ esac
 	}
 }
 
+func TestListMergedPullRequestsUsesBoundedRepositoryQuery(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-gh")
+	script := `#!/bin/sh
+case " $* " in
+  *" pr list --repo owner/repo --state merged --limit 1000 "*) ;;
+  *) exit 3 ;;
+esac
+printf '%s\n' '[{"number":87,"url":"https://github.com/owner/repo/pull/87","state":"MERGED","mergedAt":"2026-08-18T00:00:00Z","headRefName":"codex/issue-67","baseRefName":"main","headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mergeCommit":{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"}}]'
+`
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	prs, err := (CLI{Path: fake}).ListMergedPullRequests(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 1 || prs[0].Number != 87 || prs[0].HeadRepository != "owner/repo" || prs[0].MergeCommitSHA == "" {
+		t.Fatalf("prs=%+v", prs)
+	}
+}
+
 func TestPullRequestLifecycleCommands(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")
