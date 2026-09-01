@@ -128,6 +128,7 @@ esac
 				"RELEASE_TAG=v0.8.0",
 				"RELEASE_COMMIT="+evidenceCommit,
 				"STABLE_BINARY_SHA256="+stableDigest,
+				"HEALTH_SOAK_SECONDS=0",
 			)
 			if test.bad {
 				cmd.Env = append(cmd.Env, "BAD_HEALTH=1")
@@ -146,8 +147,9 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		Uses string `yaml:"uses"`
 	}
 	type job struct {
-		Needs any    `yaml:"needs"`
-		Steps []step `yaml:"steps"`
+		Needs       any    `yaml:"needs"`
+		Environment string `yaml:"environment"`
+		Steps       []step `yaml:"steps"`
 	}
 	var workflow struct {
 		Jobs map[string]job `yaml:"jobs"`
@@ -169,8 +171,8 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		"cli-surface-contract":            {"lifecycle-conformance"},
 		"isolated-canary":                 {"build-candidate", "cli-surface-contract"},
 		"production-state-isolation":      {"build-candidate", "isolated-canary"},
-		"soak":                            {"production-state-isolation"},
-		"promotion-evidence":              {"soak"},
+		"candidate-integrity":             {"production-state-isolation"},
+		"promotion-evidence":              {"candidate-integrity"},
 		"promote-stable":                  {"build-candidate", "promotion-evidence"},
 		"post-release-health":             {"promote-stable"},
 	}
@@ -198,28 +200,36 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	if strings.Count(text, "scripts/build-release.sh") != 2 {
 		t.Fatal("release workflow must build the canonical candidate once and one comparison-only rebuild")
 	}
-	if !strings.Contains(text, `[[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]`) ||
+	if !strings.Contains(text, `[[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]`) ||
 		strings.Contains(text, `([.-][0-9A-Za-z.-]+)?`) {
 		t.Fatal("stable workflow accepts a prerelease tag suffix")
 	}
 	for _, required := range []string{
+		`workflow_dispatch:`,
+		`test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${RELEASE_COMMIT}"`,
 		`chmod 0755 "$CANDIDATE_BINARY"`,
 		`chmod 0755 dist/stable/agent-loop_Darwin_arm64`,
 		`gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY"`,
-		`for checkpoint in start minute-15 minute-30`,
+		`candidate-integrity/report.json`,
 		`cmp "dist/prerelease/$asset" "dist/stable/$asset"`,
 		`agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json`,
 		`mode:"machine-verifiable"`,
 		`.candidate_sha256 == $digest`,
-		`required_evidence:["cli-surface","offline-contract","production-isolation","soak-start","soak-minute-15","soak-minute-30"]`,
+		`required_evidence:["cli-surface","offline-contract","production-isolation","candidate-integrity"]`,
 		`subject-path: promotion-evidence.json`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow is missing byte-promotion evidence %q", required)
 		}
 	}
-	if strings.Count(text, "environment: production") != 2 {
-		t.Fatal("production isolation and promotion evidence must both use the protected environment")
+	if strings.Contains(text, "sleep 900") || strings.Contains(text, "minute-30") {
+		t.Fatal("release workflow contains a time-only artifact soak")
+	}
+	if workflow.Jobs["production-state-isolation"].Environment != "" || workflow.Jobs["promotion-evidence"].Environment != "" || workflow.Jobs["promote-stable"].Environment != "production" {
+		t.Fatal("only stable publication may use the protected production environment")
+	}
+	if strings.Count(text, "environment: production") != 1 {
+		t.Fatal("release workflow must enter the production environment exactly once")
 	}
 }
 
