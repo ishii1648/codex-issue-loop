@@ -22,6 +22,10 @@ func TestProductionStateIsolationRunsCredentiallessContractBetweenSnapshots(t *t
 	}{{name: "identical", wantOK: true}, {name: "revision changed", mismatch: true}} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
+			ambientHome := filepath.Join(root, "ambient-home")
+			if err := os.MkdirAll(ambientHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			productionRepo := filepath.Join(root, "production")
 			if err := os.MkdirAll(filepath.Join(productionRepo, ".git"), 0o700); err != nil {
 				t.Fatal(err)
@@ -41,13 +45,17 @@ printf '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"re
 `)
 			candidate := writeExecutable(t, root, "candidate", "#!/bin/sh\nexit 0\n")
 			fakeContract := writeExecutable(t, root, "offline-contract", `#!/bin/sh
+[ "$HOME" != "$EXPECTED_AMBIENT_HOME" ]
+[ -d "$HOME" ]
 mkdir -p "$CONTRACT_ARTIFACT_DIR"
-printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","credentials":{"canary_github_token":false,"openai_api_key":false},"external_network":false,"sequences":[{"status":"completed"},{"status":"completed"}],"supervisor_starts":2,"webhook_fixture_replay":1,"transaction_crash_recovery":1,"final":{"active_workers":0,"active_leases":0,"pending_requests":0,"orphan_pid_pgid":0,"duplicate_prs":0,"duplicate_comment_markers":0}}' >"$CONTRACT_ARTIFACT_DIR/offline-contract-report.json"
+printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","home_isolated":true,"credentials":{"canary_github_token":false,"openai_api_key":false},"external_network":false,"sequences":[{"status":"completed"},{"status":"completed"}],"supervisor_starts":2,"webhook_fixture_replay":1,"transaction_crash_recovery":1,"final":{"active_workers":0,"active_leases":0,"pending_requests":0,"orphan_pid_pgid":0,"duplicate_prs":0,"duplicate_comment_markers":0}}' >"$CONTRACT_ARTIFACT_DIR/offline-contract-report.json"
 `)
 			artifactDir := filepath.Join(root, "artifacts")
 			cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-state-isolation.sh"))
 			cmd.Dir = repositoryRoot(t)
 			cmd.Env = append(os.Environ(),
+				"HOME="+ambientHome,
+				"EXPECTED_AMBIENT_HOME="+ambientHome,
 				"PRODUCTION_REPOSITORY_PATH="+productionRepo,
 				"PRODUCTION_AGENT_LOOP_BINARY="+productionBinary,
 				"CANDIDATE_BINARY="+candidate,
@@ -83,7 +91,7 @@ printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","credentials"
 			if err := json.Unmarshal(data, &report); err != nil {
 				t.Fatal(err)
 			}
-			if report.Commit != evidenceCommit || len(report.Digest) != 64 || !report.StateAccessed || !mapsEqual(report.Before, report.After) || report.Contract["mode"] != "credentialless-offline" {
+			if report.Commit != evidenceCommit || len(report.Digest) != 64 || !report.StateAccessed || !mapsEqual(report.Before, report.After) || report.Contract["mode"] != "credentialless-offline" || report.Contract["home_isolated"] != true {
 				t.Fatalf("report=%s", data)
 			}
 		})

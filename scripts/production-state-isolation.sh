@@ -21,7 +21,8 @@ repo_root=$(git rev-parse --show-toplevel)
 offline_contract=${OFFLINE_CONTRACT_SCRIPT:-$repo_root/scripts/offline-release-contract.sh}
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-production-isolation.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
-mkdir -p "$artifact_dir"
+offline_home="$temporary_root/offline-home"
+mkdir -p "$artifact_dir" "$offline_home"
 [ -x "$offline_contract" ]
 
 snapshot_production() {
@@ -55,7 +56,8 @@ snapshot_production() {
 }
 
 snapshot_production "$temporary_root/production-before.json"
-CANDIDATE_BINARY="$candidate_binary" \
+HOME="$offline_home" \
+  CANDIDATE_BINARY="$candidate_binary" \
   CONTRACT_ARTIFACT_DIR="$temporary_root/offline-contract" \
   "$offline_contract"
 snapshot_production "$temporary_root/production-after.json"
