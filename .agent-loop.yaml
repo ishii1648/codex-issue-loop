@@ -1,43 +1,60 @@
 version: 5
+
 github:
-    repo: ishii1648/codex-issue-loop
-    repository_id: 1334901081
-    ready_labels: ['codex-loop:ready']
-    exclude_labels: [blocked, do-not-automate]
+  repo: ishii1648/codex-issue-loop
+  repository_id: 1334901081
+  ready_labels: [codex-loop:ready]
+  exclude_labels: [blocked, do-not-automate]
+
 queue:
-    concurrency: 1
+  concurrency: 1
+
 resources:
-    definitions:
-        - name: config
-          paths: [.agent-loop*.yaml, internal/platform/config/**, internal/domain/admission/**, internal/domain/capability/**, docs/resource-admission.md, docs/specification.md]
-        - name: scheduler
-          paths: [internal/domain/issue/**, internal/domain/statecontract/**, internal/application/supervisor/**, internal/adapter/state/**, internal/adapter/webhook/**, internal/platform/schema/**, internal/platform/failure/**, internal/platform/fsutil/**]
-        - name: github
-          paths: [internal/adapter/github/**, internal/adapter/publish/**, internal/domain/publication/**]
-        - name: worker
-          paths: [internal/adapter/worker/**, schemas/**]
-        - name: host
-          paths: [cmd/**, internal/application/app/**, internal/platform/launchd/**, internal/platform/registry/**, internal/platform/layout/**, internal/application/lifecycle/**, internal/adapter/worktree/**]
-        - name: operations
-          paths: [internal/application/observe/**, internal/platform/retention/**, internal/platform/redact/**, docs/*runbook.md]
-        - name: release
-          paths: [.github/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/platform/compat/**, internal/application/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
-        - name: docs
-          paths: [.gitignore, README.md, AGENTS.md, CLAUDE.md, docs/**]
+  definitions:
+    - name: config
+      paths: [.agent-loop*.yaml, internal/platform/config/**, internal/domain/admission/**, internal/domain/capability/**, docs/resource-admission.md, docs/specification.md]
+    - name: scheduler
+      paths: [internal/domain/issue/**, internal/domain/statecontract/**, internal/application/supervisor/**, internal/adapter/state/**, internal/adapter/webhook/**, internal/platform/schema/**, internal/platform/failure/**, internal/platform/fsutil/**]
+    - name: github
+      paths: [internal/adapter/github/**, internal/adapter/publish/**, internal/domain/publication/**]
+    - name: worker
+      paths: [internal/adapter/worker/**, schemas/**]
+    - name: host
+      paths: [cmd/**, internal/application/app/**, internal/platform/launchd/**, internal/platform/registry/**, internal/platform/layout/**, internal/application/lifecycle/**, internal/adapter/worktree/**]
+    - name: operations
+      paths: [internal/application/observe/**, internal/platform/retention/**, internal/platform/redact/**, docs/*runbook.md]
+    - name: release
+      paths: [.github/**, scripts/**, Makefile, go.mod, go.sum, assets.go, internal/platform/compat/**, internal/application/migration/**, docs/release.md, docs/compatibility.md, docs/migration.md]
+    - name: docs
+      paths: [.gitignore, README.md, AGENTS.md, CLAUDE.md, docs/**]
+
 git:
-    base_branch: main
+  base_branch: main
+
 formatters:
-    go:
-        enabled: true
+  go:
+    enabled: true
+
 completion:
-    auto_merge: false
+  auto_merge: false
+
+incident_automation:
+  enabled: true
+  dry_run: true
+  interval: 15m
+  analyzer_timeout: 10m
+  max_analysis_attempts: 3
+  retry_backoff: 1m
+  max_episode_items: 128
+  degradation_threshold: 2m
+
 # Cloudflare Tunnel構成はdocs/mac-mini-runbook.mdを参照する。
 # secret fileはrepository外の固定pathへowner-onlyで配置する。
 webhook:
-    mode: webhook
-    listener_address: 127.0.0.1:8787
-    public_url_identifier: hook.zeitreises.com/github/webhook
-    secret_source:
-        file: /usr/local/etc/codex-issue-loop/ishii1648-codex-issue-loop.webhook
-    # installationを持たないclassic repository webhookへの明示的なopt-in。
-    allow_repository_webhook: true
+  mode: webhook
+  listener_address: 127.0.0.1:8787
+  public_url_identifier: hook.zeitreises.com/github/webhook
+  secret_source:
+    file: /usr/local/etc/codex-issue-loop/ishii1648-codex-issue-loop.webhook
+  # installationを持たないclassic repository webhookへの明示的なopt-in。
+  allow_repository_webhook: true
