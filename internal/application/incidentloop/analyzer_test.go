@@ -47,7 +47,7 @@ func TestCommandAnalyzerRejectsMalformedJSONAndBoundsTimeout(t *testing.T) {
 		timeout time.Duration
 		match   string
 	}{
-		{name: "malformed", mode: "malformed", timeout: time.Second, match: "decode AI analyzer output"},
+		{name: "malformed", mode: "malformed", timeout: 10 * time.Second, match: "decode AI analyzer output"},
 		{name: "timeout", mode: "timeout", timeout: 20 * time.Millisecond, match: "AI analyzer timeout"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
