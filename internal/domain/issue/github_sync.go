@@ -17,6 +17,7 @@ const (
 	GitHubSyncPublicationRecovery       GitHubSync = "publication_recovery"
 	GitHubSyncPullRequestChecksRecovery GitHubSync = "pull_request_checks_recovery"
 	GitHubSyncAnsweredWorkspaceRecovery GitHubSync = "answered_workspace_recovery"
+	GitHubSyncIssueResolution           GitHubSync = "issue_resolution"
 )
 
 var allGitHubSyncs = [...]GitHubSync{
@@ -24,6 +25,7 @@ var allGitHubSyncs = [...]GitHubSync{
 	GitHubSyncBlocked, GitHubSyncConflictRetry, GitHubSyncEnvironmentResume,
 	GitHubSyncPublicationRecovery, GitHubSyncPullRequestChecksRecovery,
 	GitHubSyncAnsweredWorkspaceRecovery,
+	GitHubSyncIssueResolution,
 }
 
 func AllGitHubSyncs() []GitHubSync {

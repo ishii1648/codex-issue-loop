@@ -186,6 +186,9 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		workerSafety := current.Status == StatusBlocked && current.BlockedOrigin == "supervisor" && current.BlockedKind == "worker_workspace" && !current.BlockedResumable
 		workerEnvironment := current.Status == StatusBlocked && current.BlockedOrigin == "worker" && current.BlockedKind == "environment" && current.BlockedResumable
 		switch {
+		case current.GitHubSync == GitHubSyncIssueResolution && !current.Status.Terminal():
+			decision.Reason = "Issue resolution is waiting for GitHub label synchronization"
+			return decision
 		case workerSafety && observed.OnlyBlockedExclusion:
 			decision.Status, decision.WorkerPID, decision.RetryAt, decision.GitHubSync = StatusBlocked, 0, nil, GitHubSyncNone
 			decision.Reason = "supervisor-owned worker workspace safety block preserved"
@@ -210,6 +213,10 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		}
 	}
 	if observed.Failed {
+		if current.GitHubSync == GitHubSyncIssueResolution && !current.Status.Terminal() {
+			decision.Reason = "Issue resolution is waiting for GitHub label synchronization"
+			return decision
+		}
 		if current.GitHubSync == GitHubSyncPullRequestChecksRecovery && current.Status == StatusChecksRecovery {
 			decision.Reason = "explicit Pull Request checks recovery is waiting for GitHub label synchronization"
 			return decision

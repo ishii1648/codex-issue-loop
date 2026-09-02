@@ -299,6 +299,12 @@ func Validate(bundle Bundle) error {
 }
 
 func validateReconstructedSnapshot(bundle Bundle, issue state.Issue) error {
+	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion-1 && issue.Status.Terminal() {
+		// Previous-schema fixtures retain the execution lease that v5 migration
+		// must split. Remove only that known incompatibility while validating the
+		// rest of the captured aggregate; runtime loading never takes this path.
+		issue.Lease = nil
+	}
 	snapshot := state.Snapshot{
 		Version: state.CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion,
 		RepoID: bundle.Capture.Durable.RepoID, RepoPath: bundle.Capture.Durable.RepoPath,

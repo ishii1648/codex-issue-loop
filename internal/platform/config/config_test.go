@@ -11,6 +11,7 @@ import (
 
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
+	body = strings.Replace(body, "version: 4", fmt.Sprintf("version: %d", CurrentVersion), 1)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -460,10 +461,13 @@ func TestLoadRejectsLegacyAndFutureSchemaWithActionableErrors(t *testing.T) {
 		version int
 		want    string
 	}{
-		{version: 3, want: "migration required"},
+		{version: CurrentVersion - 1, want: "migration required"},
 		{version: CurrentVersion + 1, want: "unsupported config version"},
 	} {
-		dir := writeConfig(t, fmt.Sprintf("version: %d\ngithub:\n  repo: owner/repo\n", test.version))
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, FileName), []byte(fmt.Sprintf("version: %d\ngithub:\n  repo: owner/repo\n", test.version)), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("version %d: %v", test.version, err)
 		}

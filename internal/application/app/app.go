@@ -185,24 +185,10 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.watch(ctx, l, args)
 	case "answer":
 		return a.answer(ctx, l, args)
-	case "retry":
-		return a.retryConflict(ctx, l, args)
-	case "resume-blocked":
-		return a.resumeBlocked(ctx, l, args)
-	case "explain-recovery":
-		return a.explainRecovery(ctx, l, args)
-	case "recover-publication":
-		return a.recoverPublication(ctx, l, args)
-	case "recover-checks":
-		return a.recoverPullRequestChecks(ctx, l, args)
-	case "recover-answered-workspace":
-		return a.recoverAnsweredWorkspace(ctx, l, args)
-	case "recover-workspace":
-		return a.recoverWorkspace(ctx, l, args)
+	case "issue":
+		return a.issueCommand(ctx, l, args)
 	case "recover-quarantined-snapshot":
 		return a.recoverQuarantinedSnapshot(ctx, l, args)
-	case "adopt-merged-pr":
-		return a.adoptMergedPullRequest(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -245,17 +231,10 @@ Commands:
   status        Show durable and launchd state
   watch         Wait for needs_input, blocked, stopped, or optional idle
   answer        Record an answer for a pending request
-  retry         Explicitly resume a blocked Pull Request conflict recovery
-  resume-blocked  Explicitly resume a worker environment-blocked Issue
-  explain-recovery  Explain recovery predicates without changing state
-  recover-publication  Recover an eligible failed Issue at the publication boundary
-  recover-checks  Return an externally repaired Pull Request to its saved lifecycle
-  recover-answered-workspace  Recover the exact answered legacy missing-Workspace chain
-  recover-workspace  Verify and backfill missing Workspace provenance without resuming execution
+  issue         Plan or resolve one typed Issue suspension
   recover-quarantined-snapshot  Restore an exact quarantined snapshot after verifying legacy merged PR identities
   export-recovery-fixture  Export sanitized read-only recovery evidence
   verify-recovery-fixture  Fail closed unless a fixture is complete and untampered
-  adopt-merged-pr  Adopt one externally merged saved branch into terminal state
   logs          Print supervisor logs
   cleanup       Preview or remove expired safe worktrees
   purge         Force-remove one explicitly confirmed worktree

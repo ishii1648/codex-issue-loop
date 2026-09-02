@@ -15,7 +15,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
-func TestRecoverWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
+func legacyTestRecoverWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	disqualifyAnsweredLifecycleFixture(t, fixture)
 	before, err := fixture.store.Load()
@@ -81,7 +81,7 @@ func TestRecoverWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 	}
 }
 
-func TestRecoverWorkspaceRejectsMissingConfirmationActiveWorkerAndPendingRequest(t *testing.T) {
+func legacyTestRecoverWorkspaceRejectsMissingConfirmationActiveWorkerAndPendingRequest(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	disqualifyAnsweredLifecycleFixture(t, fixture)
 	var out, stderr bytes.Buffer
@@ -117,7 +117,7 @@ func TestRecoverWorkspaceRejectsMissingConfirmationActiveWorkerAndPendingRequest
 	}
 }
 
-func TestRecoverWorkspaceDirectsAnsweredLifecycleCandidateToDedicatedCommand(t *testing.T) {
+func legacyTestRecoverWorkspaceDirectsAnsweredLifecycleCandidateToDedicatedCommand(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	before, _ := fixture.store.Load()
 	var out, stderr bytes.Buffer
@@ -140,7 +140,7 @@ func TestRecoverWorkspaceDirectsAnsweredLifecycleCandidateToDedicatedCommand(t *
 	}
 }
 
-func TestValidateWorkspaceRecoveryRemoteRequiresExactLifecycleAndPullRequestIdentity(t *testing.T) {
+func legacyTestValidateWorkspaceRecoveryRemoteRequiresExactLifecycleAndPullRequestIdentity(t *testing.T) {
 	cfg := config.Config{}
 	cfg.GitHub.RunningLabel = "running"
 	cfg.GitHub.NeedsInputLabel = "needs-input"

@@ -132,6 +132,15 @@ func (s Store) ReserveLease(reservation LeaseReservation) (Snapshot, LeaseOwner,
 			Owner: owner, Slot: reservation.Slot, DeclaredResources: declared,
 			ResolvedResources: resolved, BaseSHA: reservation.BaseSHA, ReservedAt: reservation.ReservedAt,
 		}
+		if issue.ResourcePark != nil && issue.Suspension != nil && issue.Suspension.CheckpointID == issue.ResourcePark.ID {
+			issue.ResourcePark.Status = issuedomain.ResourceParkStatusResuming
+			issue.ResourcePark.RunID = reservation.RunID
+			issue.ResourcePark.ResumedAt = reservation.ReservedAt
+			issue.ResourcePark.ResumeOwner = &owner
+			issue.Suspension.Status = issuedomain.SuspensionResolved
+			issue.Suspension.Resolution = issuedomain.ResolutionRetryStage
+			issue.Suspension.ResolvedAt = reservation.ReservedAt
+		}
 		issue.UpdatedAt = reservation.ReservedAt
 		snapshot.Supervisor.State = SupervisorStateRunning
 		return nil
@@ -190,22 +199,12 @@ func (s Store) ExpandLease(issueNumber int, owner LeaseOwner, resources []string
 	})
 }
 
-func (s Store) ReleaseLease(issueNumber int, owner LeaseOwner, reason string) (Snapshot, error) {
-	return s.Update("lease_released", issueNumber, owner.RunID, map[string]any{"owner": owner, "reason": reason}, func(snapshot *Snapshot) error {
-		issue, err := ownedIssue(snapshot, issueNumber, owner)
-		if err != nil {
-			return err
-		}
-		issue.Lease = nil
-		return nil
-	})
-}
-
-// ReleaseIssueLease is used by lifecycle transitions that must release the
-// lease in the same snapshot/event transaction as their terminal status.
+// ReleaseIssueLease fences a lifecycle transition to the expected owner.
+// Store.Update performs the actual terminal lease split after the caller has
+// written the complete reason, provenance, and timestamp.
 func ReleaseIssueLease(issue *Issue, owner LeaseOwner) error {
 	if issue == nil || issue.Lease == nil {
-		if owner == (LeaseOwner{}) {
+		if owner == (LeaseOwner{}) || (issue != nil && issue.Status.Terminal()) {
 			return nil
 		}
 		return fmt.Errorf("lease is no longer active")
@@ -213,7 +212,6 @@ func ReleaseIssueLease(issue *Issue, owner LeaseOwner) error {
 	if issue.Lease.Owner != owner {
 		return fmt.Errorf("stale lease owner for Issue #%d: got run %s generation %d", issue.Number, owner.RunID, owner.Generation)
 	}
-	issue.Lease = nil
 	return nil
 }
 
@@ -232,8 +230,12 @@ func ParkIssueLease(issue *Issue, owner LeaseOwner, parkID string, parkedAt time
 	copy.DeclaredResources = append([]string{}, issue.Lease.DeclaredResources...)
 	copy.ResolvedResources = append([]string(nil), issue.Lease.ResolvedResources...)
 	copy.ActualResources = append([]string(nil), issue.Lease.ActualResources...)
+	canonicalizeCheckpointLease(&copy)
 	issue.ResourcePark = &ResourceLeasePark{
 		ID: parkID, Status: issuedomain.ResourceParkStatusParked, OriginalLease: copy, ParkedAt: parkedAt.UTC(),
+		RunID: issue.RunID, Workspace: cloneWorkspace(issue.Workspace), Session: cloneSession(issue.Session),
+		HeadSHA: issue.HeadSHA, PullRequestURL: issue.PullRequestURL, PullRequestNumber: issue.PullRequestNumber,
+		Stage: issue.Status,
 	}
 	issue.Lease = nil
 	return nil
@@ -288,6 +290,11 @@ func ResumeParkedLease(snapshot *Snapshot, issueNumber int, parkID string, slot 
 	park.Status = issuedomain.ResourceParkStatusResuming
 	park.ResumedAt = resumedAt.UTC()
 	park.ResumeOwner = &owner
+	if issue.Suspension != nil {
+		issue.Suspension.Status = issuedomain.SuspensionResolved
+		issue.Suspension.Resolution = issuedomain.ResolutionResume
+		issue.Suspension.ResolvedAt = resumedAt.UTC()
+	}
 	return owner, nil
 }
 
@@ -497,6 +504,24 @@ func validateResourceLeases(snapshot Snapshot) error {
 					return fmt.Errorf("Issue #%d parked actual resources are not canonical", issue.Number)
 				}
 			}
+			canonicalSuspension := issue.Suspension != nil && issue.Suspension.CheckpointID == park.ID &&
+				park.RunID == issue.RunID
+			if canonicalSuspension {
+				if park.Stage.Validate() != nil {
+					return fmt.Errorf("Issue #%d canonical continuation checkpoint is inconsistent", issue.Number)
+				}
+				if issue.Suspension.Status == issuedomain.SuspensionActive || issue.Suspension.Status == issuedomain.SuspensionQuarantined {
+					if issue.Lease != nil || park.Status != issuedomain.ResourceParkStatusParked {
+						return fmt.Errorf("Issue #%d active suspension retains execution capacity", issue.Number)
+					}
+				} else if issue.Suspension.Resolution == issuedomain.ResolutionResume || issue.Suspension.Resolution == issuedomain.ResolutionRetryStage {
+					resumed := park.Status == issuedomain.ResourceParkStatusResuming || park.Status == issuedomain.ResourceParkStatusResumed
+					if issue.Lease == nil || !resumed || park.ResumeOwner == nil || issue.Lease.Owner != *park.ResumeOwner {
+						return fmt.Errorf("Issue #%d resolved checkpoint is not fenced for execution", issue.Number)
+					}
+				}
+				goto checkpointValidated
+			}
 			if park.Status != issuedomain.ResourceParkStatusParked && park.Status != issuedomain.ResourceParkStatusResuming && park.Status != issuedomain.ResourceParkStatusResumed {
 				return fmt.Errorf("Issue #%d has invalid resource park status %q", issue.Number, park.Status)
 			}
@@ -537,6 +562,7 @@ func validateResourceLeases(snapshot Snapshot) error {
 				return fmt.Errorf("Issue #%d completed resource park has an unrelated active lease", issue.Number)
 			}
 		}
+	checkpointValidated:
 		if issue == nil || issue.Lease == nil {
 			continue
 		}

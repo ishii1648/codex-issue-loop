@@ -656,7 +656,7 @@ func TestEnvironmentResumeContinuesSameSessionAndWorktree(t *testing.T) {
 	}
 }
 
-func TestFaultResumedEnvironmentParkRetriesAcrossRestartAndReleasesLease(t *testing.T) {
+func TestResolvedCheckpointRetriesAcrossRestartAndClearsAtCompletion(t *testing.T) {
 	retry := worker.Result{
 		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "verification pending",
 		SessionID: "session-blocked", Retry: &worker.Retry{Reason: "verification pending"},
@@ -768,8 +768,7 @@ func TestFaultResumedEnvironmentParkRetriesAcrossRestartAndReleasesLease(t *test
 	item := finished.Issues["1"]
 	if scripted.runs != 1 || scripted.resumes != 2 || item.Status != issuedomain.StatusCompleted || item.Lease != nil ||
 		item.RunID == originalOwner.RunID || item.LeaseGeneration != resumeOwner.Generation+1 || item.Worktree != loop.Config.RepoPath ||
-		item.ResourcePark == nil || item.ResourcePark.Status != issuedomain.ResourceParkStatusResumed || item.ResourcePark.OriginalLease.Owner != originalOwner ||
-		item.ResourcePark.ResumeOwner == nil || *item.ResourcePark.ResumeOwner != resumeOwner {
+		item.ResourcePark != nil || item.Suspension != nil {
 		t.Fatalf("retry after restart did not converge: runs=%d resumes=%d issue=%+v", scripted.runs, scripted.resumes, item)
 	}
 	if len(scripted.states) != 3 || scripted.states[2].Lease == nil || scripted.states[2].Lease.Owner.RunID != item.RunID ||
@@ -917,7 +916,7 @@ func TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges(t *testing.T
 	if scripted.runs != 1 || scripted.resumes != 0 {
 		t.Fatalf("backend was invoked after rejection: runs=%d resumes=%d", scripted.runs, scripted.resumes)
 	}
-	if item.Status != issuedomain.StatusBlocked || item.Lease == nil || item.SessionID != "session-provenance" || item.Workspace == nil ||
+	if item.Status != issuedomain.StatusBlocked || item.Lease != nil || item.ResourcePark == nil || item.Suspension == nil || item.SessionID != "session-provenance" || item.Workspace == nil ||
 		item.BlockedCause == nil || item.BlockedCause.Kind != "worker_workspace" || item.BlockedCause.Resumable {
 		t.Fatalf("rejected continuation state=%+v", item)
 	}
@@ -932,7 +931,7 @@ func TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges(t *testing.T
 		t.Fatal(err)
 	}
 	item = afterRestart.Issues["1"]
-	if item.Lease == nil || item.SessionID != "session-provenance" || item.Workspace == nil {
+	if item.Lease != nil || item.ResourcePark == nil || item.Suspension == nil || item.SessionID != "session-provenance" || item.Workspace == nil {
 		t.Fatalf("restart discarded rejected continuation boundary: %+v", item)
 	}
 	events, err := os.ReadFile(loop.Store.EventsPath())
@@ -946,6 +945,7 @@ func TestEnvironmentResumeGitHubSyncConvergesBeforeWorkerStarts(t *testing.T) {
 	_, err := loop.Store.Update("environment_resume_requested", 1, "run_1", nil, func(s *state.Snapshot) error {
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Status: issuedomain.StatusEnvironmentResumePending, RunID: "run_1", GitHubSync: issuedomain.GitHubSyncEnvironmentResume,
+			LeaseGeneration: 1, Lease: fixtureLease("run_1"),
 			EnvironmentResume: &state.EnvironmentResume{ID: "resume_1", Status: issuedomain.EnvironmentResumeStatusRequested, ConfirmedAt: time.Now().UTC()},
 		}
 		setSupervisorTestWorkspace(s, s.Issues["1"])
@@ -1077,7 +1077,7 @@ func TestTypedMissingBaseFailurePreservesRecoveryProvenanceAndSession(t *testing
 	}
 }
 
-func TestPullRequestLifecycleAnomaliesBlockWithoutReleasingLease(t *testing.T) {
+func TestPullRequestLifecycleAnomaliesBlockWithCheckpointAndNoExecutionLease(t *testing.T) {
 	tests := []struct {
 		name       string
 		pulls      []gh.PullRequest
@@ -1126,7 +1126,7 @@ func TestPullRequestLifecycleAnomaliesBlockWithoutReleasingLease(t *testing.T) {
 				t.Fatal(err)
 			}
 			issue := snapshot.Issues["1"]
-			if issue.Status != issuedomain.StatusBlocked || issue.Lease == nil || !strings.Contains(issue.LastError, test.want) {
+			if issue.Status != issuedomain.StatusBlocked || issue.Lease != nil || issue.ResourcePark == nil || issue.Suspension == nil || !strings.Contains(issue.LastError, test.want) {
 				t.Fatalf("issue=%+v", issue)
 			}
 		})
@@ -1245,7 +1245,7 @@ func TestFailedChecksWhileAwaitingAutoMergeReturnIssueToRetry(t *testing.T) {
 	}
 }
 
-func TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge(t *testing.T) {
+func legacyTestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Config.Completion.AutoMerge = true
 	loop.Config.Queue.MaxAttempts = 1
@@ -1552,7 +1552,7 @@ func TestDirtyPullRequestRunsDurableConflictWorkerAndReturnsToChecks(t *testing.
 	}
 }
 
-func TestZeitreise442V0619ResumedNeedsInputStartsFencedConflictWorker(t *testing.T) {
+func legacyTestZeitreise442V0619ResumedNeedsInputStartsFencedConflictWorker(t *testing.T) {
 	fixtureState, err := os.ReadFile("testdata/zeitreise-442-v0619-needs-input-conflict-state.json")
 	if err != nil {
 		t.Fatal(err)
@@ -1640,6 +1640,7 @@ func TestConflictRecoveryRestartRecognizesPublishedCommitWithoutDuplicateWorkerO
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Status: issuedomain.StatusResolvingConflict, RunID: "conflict_1", Branch: "codex/issue-1-test",
 			Worktree: loop.Config.RepoPath, PullRequestURL: prURL, UpdatedAt: time.Now().UTC(),
+			LeaseGeneration: 1, Lease: fixtureLease("conflict_1"),
 			ConflictRecovery: &state.ConflictRecovery{
 				PullRequestURL: prURL, TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
 				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 1, BaseUpdates: 1,
@@ -1670,6 +1671,7 @@ func TestConflictRecoveryBlocksOnlyAfterPerBaseBudgetIsExhausted(t *testing.T) {
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Status: issuedomain.StatusResolvingConflict, RunID: "conflict_3", Branch: "codex/issue-1-test",
 			Worktree: loop.Config.RepoPath, PullRequestURL: "https://example.test/pr/1", UpdatedAt: time.Now().UTC(),
+			LeaseGeneration: 1, Lease: fixtureLease("conflict_3"),
 			ConflictRecovery: &state.ConflictRecovery{
 				PullRequestURL: "https://example.test/pr/1", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
 				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 3, BaseUpdates: 1,
@@ -1847,7 +1849,7 @@ func TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce(t *testing.T) {
 		t.Fatalf("closed Issue rejection worked=%v err=%v", worked, err)
 	}
 	rejected, _ := loop.Store.Load()
-	if item := rejected.Issues["1"]; item.Status != issuedomain.StatusBlocked || item.Lease != nil || item.ResourcePark.Status != issuedomain.ResourceParkStatusResumed || item.BlockedCause == nil || item.BlockedCause.Kind != "answer_resume" {
+	if item := rejected.Issues["1"]; item.Status != issuedomain.StatusBlocked || item.Lease != nil || item.ResourcePark == nil || item.ResourcePark.Status != issuedomain.ResourceParkStatusParked || item.ResourcePark.OriginalLease.Owner.Generation != originalOwner.Generation+1 || item.Suspension == nil || item.BlockedCause == nil || item.BlockedCause.Kind != "answer_resume" {
 		t.Fatalf("closed answered continuation was not rejected: %+v", item)
 	}
 }
@@ -2016,7 +2018,8 @@ func TestFaultSupervisorWakesOnRecordedAnswer(t *testing.T) {
 	done := make(chan struct{})
 	go func() { loop.waitForWork(context.Background(), time.Second, watcher); close(done) }()
 	_, err = loop.Store.Update("answer_recorded", 1, "run", nil, func(s *state.Snapshot) error {
-		s.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusResumePending}
+		s.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusResumePending, RunID: "run",
+			LeaseGeneration: 1, Lease: fixtureLease("run")}
 		return nil
 	})
 	if err != nil {

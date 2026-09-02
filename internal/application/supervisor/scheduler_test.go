@@ -352,7 +352,8 @@ func TestStartupReconciliationObservesRateLimitWithoutExiting(t *testing.T) {
 	}
 	loop.GitHub = client
 	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusRunning, RunID: "run_7"}
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusRunning, RunID: "run_7",
+			LeaseGeneration: 1, Lease: fixtureLease("run_7")}
 		return nil
 	})
 	if err != nil {

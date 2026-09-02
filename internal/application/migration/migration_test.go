@@ -2,6 +2,7 @@ package migration
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
@@ -63,7 +64,7 @@ func TestApplyMigratesV4FixturesAndRestoreRecoversOriginalBytes(t *testing.T) {
 		t.Fatalf("registry=%+v err=%v", loadedRegistry, err)
 	}
 	snapshot, err := (state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}).Load()
-	if err != nil || snapshot.Version != state.CurrentVersion || snapshot.SemanticContractVersion != 1 || snapshot.StateRevision != 2 {
+	if err != nil || snapshot.Version != state.CurrentVersion || snapshot.SemanticContractVersion != 2 || snapshot.StateRevision != 2 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	events, err := os.ReadFile(filepath.Join(l.RepoDir("repo-1"), "events.jsonl"))
@@ -96,7 +97,7 @@ func TestApplyMigratesV4FixturesAndRestoreRecoversOriginalBytes(t *testing.T) {
 	}
 }
 
-func TestZeitreise442MissingWorkspaceIsNonMigratableWithStableCode(t *testing.T) {
+func TestZeitreise442MissingWorkspaceMigratesToIsolatedQuarantine(t *testing.T) {
 	root := t.TempDir()
 	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos")}
 	dir := l.RepoDir("zeitreise")
@@ -107,7 +108,7 @@ func TestZeitreise442MissingWorkspaceIsNonMigratableWithStableCode(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateData := []byte(fmt.Sprintf(`{"version":4,"repo_id":"repo-fixture","repo_path":"/tmp/zeitreise","state_revision":27,"supervisor":{"state":"stopped","updated_at":"2026-08-17T12:34:00Z"},"issues":{"442":%s},"pending_requests":{}}`+"\n", issueData))
+	stateData := []byte(fmt.Sprintf(`{"version":4,"repo_id":"repo_zeitreise","repo_path":"/tmp/zeitreise","state_revision":3776,"supervisor":{"state":"stopped","updated_at":"2026-08-17T12:34:00Z"},"issues":{"442":%s},"pending_requests":{}}`+"\n", issueData))
 	eventData, err := os.ReadFile(filepath.Join("..", "..", "adapter", "state", "testdata", "zeitreise-442-v0614-missing-workspace-resume-events.jsonl"))
 	if err != nil {
 		t.Fatal(err)
@@ -121,24 +122,28 @@ func TestZeitreise442MissingWorkspaceIsNonMigratableWithStableCode(t *testing.T)
 		t.Fatal(err)
 	}
 	report, err := Inspect(l)
-	if err != nil || len(report.NonMigratable) != 1 {
+	if err != nil || len(report.NonMigratable) != 0 || len(report.SemanticFindings) != 1 || !report.SemanticFindings[0].Migratable {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
-	finding := report.NonMigratable[0]
-	if finding.IssueNumber != 442 || finding.Code != state.SemanticCodeWorkspaceProvenanceMissing ||
-		!strings.Contains(finding.OperatorGuide, "resume-blocked") || finding.Migratable {
-		t.Fatalf("finding=%+v", finding)
+	if _, err := (Migrator{Layout: l, Now: func() time.Time { return time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC) }}).Apply(); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := (Migrator{Layout: l}).Apply(); err == nil || !strings.Contains(err.Error(), finding.Code) {
-		t.Fatalf("non-migratable fixture was accepted: %v", err)
+	migrated, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	afterState, _ := os.ReadFile(statePath)
-	afterEvents, _ := os.ReadFile(eventsPath)
-	if !bytes.Equal(afterState, stateData) || !bytes.Equal(afterEvents, eventData) {
-		t.Fatal("refused semantic migration modified the #442 fixture")
+	var snapshot state.Snapshot
+	if err := json.Unmarshal(migrated, &snapshot); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "migrations")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("refused migration created a backup: %v", err)
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["442"]
+	if item == nil || item.Lease != nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionQuarantined ||
+		item.Suspension.Recoverability != issuedomain.RecoverabilityAmbiguous || len(item.Suspension.AllowedActions) != 1 ||
+		item.Suspension.AllowedActions[0] != issuedomain.ResolutionCancel {
+		t.Fatalf("migrated #442=%+v", item)
 	}
 }
 
@@ -224,7 +229,7 @@ func TestInterruptedApplyReusesJournalAndConvergesIdempotently(t *testing.T) {
 
 func TestUnsupportedVersionIsRejectedWithoutBackup(t *testing.T) {
 	l, _, _ := writeV4Fixture(t, false)
-	if err := os.WriteFile(l.RegistryPath, []byte(`{"version":5,"repos":{}}`), 0o600); err != nil {
+	if err := os.WriteFile(l.RegistryPath, []byte(`{"version":6,"repos":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	report, err := Inspect(l)
@@ -289,6 +294,7 @@ func TestV4ActiveLeaseAndParkedContinuationBlockRollback(t *testing.T) {
 	}
 	if _, err := store.Update("test_park_completed", 63, issue.RunID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["63"].ResourcePark = nil
+		snapshot.Issues["63"].Suspension = nil
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -300,6 +306,43 @@ func TestV4ActiveLeaseAndParkedContinuationBlockRollback(t *testing.T) {
 	after, err := os.ReadFile(statePath)
 	if err != nil || !bytes.Equal(after, []byte(v4)) {
 		t.Fatalf("v4 active state was not restored: %s err=%v", after, err)
+	}
+}
+
+func TestV4PreparedTransactionMigratesItsSnapshotThroughTheSameV5Boundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.txn.json")
+	startedAt := time.Date(2026, 9, 2, 1, 2, 3, 0, time.UTC)
+	transaction := `{"version":4,"snapshot":{"version":4,"semantic_contract_version":1,"repo_id":"repo-1","repo_path":"/sanitized/repo","state_revision":2,"supervisor":{"state":"stopped","updated_at":"2026-09-02T00:00:00Z"},"issues":{"1":{"number":1,"status":"blocked","run_id":"run_1","lease_generation":1,"lease":{"owner":{"run_id":"run_1","generation":1},"slot":0,"declared_resources":[],"resolved_resources":["repo:*"],"reserved_at":"2026-09-02T00:00:00Z"},"blocked_cause":{"origin":"worker","kind":"environment","resumable":true,"reason":"offline","blocked_at":"2026-09-02T00:00:00Z"},"last_error":"offline","updated_at":"2026-09-02T00:00:00Z"}},"pending_requests":{}},"event":{"version":4,"event_id":"evt-2","sequence":2,"timestamp":"2026-09-02T00:00:00Z","repo_id":"repo-1","issue_number":1,"run_id":"run_1","type":"issue_blocked"}}`
+	if err := os.WriteFile(path, []byte(transaction), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateTransaction(path, journal{StartedAt: startedAt}); err != nil {
+		t.Fatal(err)
+	}
+	object, err := readRawObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot state.Snapshot
+	if err := json.Unmarshal(object["snapshot"], &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if snapshot.Version != 5 || snapshot.SemanticContractVersion != 2 || item == nil || item.Lease != nil ||
+		item.ResourcePark == nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionQuarantined {
+		t.Fatalf("migrated transaction snapshot=%+v Issue=%+v", snapshot, item)
+	}
+	var rawSnapshot struct {
+		Issues map[string]map[string]json.RawMessage `json:"issues"`
+	}
+	if err := json.Unmarshal(object["snapshot"], &rawSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawSnapshot.Issues["1"]["lease"]) != 0 || len(rawSnapshot.Issues["1"]["blocked_cause"]) != 0 {
+		t.Fatalf("prepared transaction retained legacy runtime fields: %s", object["snapshot"])
 	}
 }
 

@@ -267,15 +267,10 @@ agent-loop <command> [options]
 | `status` | snapshot、launchd状態、GitHub状態の要約を返す |
 | `watch` | イベントを追跡する |
 | `answer` | 未回答requestへ回答を登録する |
-| `retry` | PR conflictで最終blockedになったIssueを監査付きで`resolving_conflict`へ戻す |
-| `resume-blocked` | worker起因の環境blockedをoperator確認付きで既存worktreeから再開する |
-| `explain-recovery` | recovery predicateをversioned JSONでread-only診断する |
-| `recover-publication` | typedなpre-publication failureだけをoperator確認付きで既存worktreeからpublicationへ戻す |
-| `recover-checks` | 外部修正済みのtyped checks retry exhaustionを同じPR lifecycleへ戻す |
-| `recover-answered-workspace` | 回答後にmissing `Workspace`だけでblockedになったexact legacy chainを同じcontinuationへ戻す |
+| `issue plan` | canonical snapshotと現在のprocess/git/GitHub観測から全resolution actionをread-only評価する |
+| `issue resolve --action resume\|retry-stage\|adopt-pr\|cancel` | revisionとsuspensionをfenceして単一の型付きresolutionを適用する |
 | `export-recovery-fixture` | 対象Issueのstate/event/worktree/GitHub recovery evidenceをread-only取得し決定的にsanitizationする |
 | `verify-recovery-fixture` | fixtureのscope、completeness metadata、record shape/value、hashをfail closedで検証する |
-| `adopt-merged-pr` | terminal state後に外部mergeされた保存branchの単一PRを明示確認付きで完了へ採用する |
 | `logs` | supervisorまたはIssue別ログを表示する |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
@@ -370,7 +365,27 @@ agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
 
 対象Issueが非activeな`blocked`で、原因がPR conflictであることを確認する。保存済みworktree、branch、open PRの対応をGitHubとGitで検査し、整合する場合だけ試行budgetを明示的に再開する。先にdurable stateへ`conflict_recovery_retry_requested`とGitHub同期intentを書き、blocked labelの除去、running label、idempotency marker付きcommentを同期する。無関係なblocked原因、missing branch/PR、別branchのPRは拒否し、新しいbranch/PRやforce pushは作らない。
 
-### 6.7 resume-blocked
+### 6.7 issue plan / issue resolve
+
+```sh
+agent-loop issue plan --repo /absolute/path/to/repository --issue 123 --json
+agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action resume --json
+agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action retry-stage --json
+agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action adopt-pr --json
+agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action cancel --json
+```
+
+`issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`と、現在のprocess、managed worktree、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。
+
+`issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`は保存checkpointから空slot・resource競合を再検査し、generationを一度だけ進めてExecutionLeaseを取得する。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずpending requestをcanceledへ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
+
+ambiguousなIssueはその`suspension`だけをquarantineする。terminal `blocked` / `failed`はPID/PGIDとExecutionLeaseを保持せず、他Issueのadmissionを妨げない。durable state、label、checkpointを手編集して判定を通してはならない。
+
+### 6.8 legacy v4 recovery（migration入力のみ）
+
+以下の旧scenario別仕様はv4 migration fixtureの解釈にだけ残す。v5 CLIには登録せず、operatorは§6.7の共通commandを使う。
+
+#### retired: resume-blocked
 
 ```sh
 agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
@@ -843,13 +858,13 @@ transactionなしでsnapshotとevent logが食い違う場合、途中に壊れ�
 
 ### 12.4 永続schema migration
 
-config、registry、state、active event log、prepared transactionの現行storage schemaはv4、state semantic contractはv1とする。release artifactは`state_schema_current=4`、`state_schema_migration_from=3`、`semantic_contract_current=1`、`semantic_contract_minimum=0`を`version --json`とinstall manifestへ埋め込む。v2以下、v5以上、未知semantic versionは自動変換しない。
+config、registry、state、active event log、prepared transactionの現行storage schemaはv5、state semantic contractはv2とする。release artifactは`state_schema_current=5`、`state_schema_migration_from=4`、`semantic_contract_current=2`、`semantic_contract_minimum=1`を`version --json`とinstall manifestへ埋め込む。v3以下、v6以上、未知semantic versionは自動変換しない。
 
-semantic contractはfieldをoptional、observational、execution-required provenanceへ分類するversioned sourceである。同じ宣言からruntime validator、migration preview、CI ruleを導出する。execution-required fieldの追加にdeterministic migrationまたはstable non-migratable codeと運用手順がなければrelease checkを失敗させる。現v1では`issues[].workspace`がworker実行境界後のactive、blocked、needs-input、retry、publication/Pull Request recovery stateに必須である。
+semantic contractはfieldをoptional、observational、execution-required provenanceへ分類するversioned sourceである。同じ宣言からruntime validator、migration preview、CI ruleを導出する。execution-required fieldの追加にdeterministic migrationまたはstable non-migratable codeと運用手順がなければrelease checkを失敗させる。現v2では`issues[].workspace`と実行statusの`issues[].execution_lease`を検証する。
 
-`migrate --json`はsupported旧stateへ新validatorをread-onlyで適用し、Issueごとのmigratable/non-migratable、stable code、理由、ruleをJSONで返す。missing Workspaceをsession、worktree、lease、PR metadataから合成しない。#442相当stateはrelease前に`EXECUTION_REQUIRED_WORKSPACE_PROVENANCE_MISSING`となり、v4の承認付き限定`resume-blocked` recoveryがdurable authorityを確立した後だけcompatibleになる。
+`migrate --json`はsupported v4 stateへ新validatorをread-onlyで適用し、Issueごとのmigratable/non-migratable、stable code、理由、ruleをJSONで返す。scenario別recovery fieldをcanonical snapshotだけからcheckpoint/suspensionへfoldし、ambiguousなIssueだけをquarantineする。
 
-v3→v4またはv4 semantic v0→v1 migrationは次の順序で行う。
+v4→v5かつsemantic v1→v2 migrationは次の順序で行う。
 
 1. 全登録LaunchAgentが停止中であることを確認する
 2. config、registry、state、active event、transactionをchecksum付きmigration backupへcopyする
@@ -858,9 +873,9 @@ v3→v4またはv4 semantic v0→v1 migrationは次の順序で行う。
 5. `semantic_migration_applied`へauthority、source、before/after、operator confirmation、provenance非合成を記録する
 6. 全対象へ新validatorを再適用し、journalを`completed`にする
 
-process停止後も再実行は同じjournal、backup、migration/event IDを使い、適用済みartifactを重複更新しない。外部配送設定とoutboxを削除する旧structural migrationでもIssue、request、lease、session、publication stateを保持する。startup時のsilent backfillは禁止し、supervisorはsemantic validator失敗時にworker/GitHub mutationより前でblockedになる。
+process停止後も再実行は同じjournal、backup、migration/event IDを使い、適用済みartifactを重複更新しない。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、Issue、request/answer、generation、session、publication/PR auditを保持する。startup時のsilent backfillは禁止し、supervisorはsemantic validator失敗時にworker/GitHub mutationより前でblockedになる。
 
-rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active v4 leaseがある間はrollbackを拒否する。schema v3対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。旧credential fileはmigration対象・backup対象に含めず、rollback互換のため暗黙削除しない。明示的な整理手順は[migration runbook](migration.md)を正本とする。
+rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active ExecutionLeaseがある間はrollbackを拒否する。schema v4対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。旧credential fileはmigration対象・backup対象に含めず、rollback互換のため暗黙削除しない。明示的な整理手順は[migration runbook](migration.md)を正本とする。
 
 ## 13. 監視とCodex task連携
 

@@ -29,22 +29,36 @@ printf '%s\n' "$version_json" | grep -Fq "\"commit\":\"$commit\""
 printf '%s\n' "$version_json" | grep -Fq '"target":"darwin/arm64"'
 printf '%s\n' "$version_json" | grep -Fq '"delivery_protocol":1'
 printf '%s\n' "$version_json" | grep -Fq '"assignment_protocol":1'
-printf '%s\n' "$version_json" | grep -Fq '"state_schema_current":4'
-printf '%s\n' "$version_json" | grep -Fq '"state_schema_migration_from":3'
-printf '%s\n' "$version_json" | grep -Fq '"semantic_contract_current":1'
+printf '%s\n' "$version_json" | grep -Fq '"state_schema_current":5'
+printf '%s\n' "$version_json" | grep -Fq '"state_schema_migration_from":4'
+printf '%s\n' "$version_json" | grep -Fq '"semantic_contract_current":2'
 grep -Fq "\"artifact_sha256\": \"$(shasum -a 256 "$temporary_root/first/agent-loop_Darwin_arm64" | awk '{print $1}')\"" "$temporary_root/first/release-manifest.json"
 grep -Fq '"delivery_protocol": 1' "$temporary_root/first/release-manifest.json"
 grep -Fq '"assignment_protocol": 1' "$temporary_root/first/release-manifest.json"
 grep -Fq '"target": "darwin/arm64"' "$temporary_root/first/release-manifest.json"
-grep -Fq '"state_schema_current": 4' "$temporary_root/first/release-manifest.json"
-grep -Fq '"semantic_contract_minimum": 0' "$temporary_root/first/release-manifest.json"
+grep -Fq '"state_schema_current": 5' "$temporary_root/first/release-manifest.json"
+grep -Fq '"state_schema_migration_from": 4' "$temporary_root/first/release-manifest.json"
+grep -Fq '"semantic_contract_current": 2' "$temporary_root/first/release-manifest.json"
+grep -Fq '"semantic_contract_minimum": 1' "$temporary_root/first/release-manifest.json"
 
 # A new execution-required field without an explicit compatibility or
 # migration decision must fail both normal CI and the release gate.
 run_host_go_test ./internal/domain/statecontract ./internal/adapter/state \
   -run '^Test(CurrentContractHasMigrationRulesForEveryExecutionRequirement|EveryExecutionRequiredFieldHasRuntimeValidator)$' \
   -count=1
+run_host_go_test ./internal/application/migration \
+  -run '^Test(ProductionDerivedV4RecoveryMatrixMigratesElevenIssuesAndFourteenSubstatesWithoutLoss|V4PreparedTransactionMigratesItsSnapshotThroughTheSameV5Boundary)$' \
+  -count=1
 run_host_go_test ./internal/application/delivery -run '^Test(ProductionStateIsolationRunsCredentiallessContractBetweenSnapshots|ProductionReleaseHealthFailsClosed|ProductionAssignmentHealthRequiresExactStableAssignmentsAndRollbackDrill|ReleaseWorkflowPreservesRequiredGateChain|ContractWorkflowsRequireNoLongLivedSecrets|HighRiskReviewUsesMachineVerifiableEvidence)$' -count=1
+
+help_output=$($temporary_root/first/agent-loop_Darwin_arm64 help)
+printf '%s\n' "$help_output" | grep -Fq 'issue         Plan or resolve one typed Issue suspension'
+for legacy_command in resume-blocked recover-publication recover-checks recover-answered-workspace recover-workspace adopt-merged-pr explain-recovery; do
+  if printf '%s\n' "$help_output" | grep -Fq "$legacy_command"; then
+    printf '%s\n' "legacy recovery command remains in help: $legacy_command" >&2
+    exit 1
+  fi
+done
 
 conformance_json="$temporary_root/conformance.jsonl"
 run_host_go_test ./internal/application/conformance -count=1 -json >"$conformance_json"

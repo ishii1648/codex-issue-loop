@@ -160,7 +160,7 @@ func (s Store) ReadRecoveryInputs() (Snapshot, []Event, error) {
 		if err := json.Unmarshal(stateBefore, &snapshot); err != nil {
 			return Snapshot{}, nil, fmt.Errorf("decode durable state without recovery: %w", err)
 		}
-		if snapshot.Version != CurrentVersion || snapshot.RepoID != s.RepoID {
+		if !supportedRecoverySchema(snapshot.Version) || snapshot.RepoID != s.RepoID {
 			return Snapshot{}, nil, fmt.Errorf("durable state schema or repository identity differs")
 		}
 		normalizeSnapshot(&snapshot)
@@ -171,6 +171,35 @@ func (s Store) ReadRecoveryInputs() (Snapshot, []Event, error) {
 		return snapshot, events, nil
 	}
 	return Snapshot{}, nil, errors.New("durable state or events changed during read-only recovery diagnosis")
+}
+
+// ReadCanonicalSnapshot is the read-only authority for generic Issue planning.
+// It deliberately does not inspect event history; events are audit evidence,
+// not continuation eligibility.
+func (s Store) ReadCanonicalSnapshot() (Snapshot, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		before, err := os.ReadFile(s.StatePath())
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("read canonical state: %w", err)
+		}
+		after, err := os.ReadFile(s.StatePath())
+		if err != nil || !bytes.Equal(before, after) {
+			continue
+		}
+		var snapshot Snapshot
+		if err := json.Unmarshal(before, &snapshot); err != nil {
+			return Snapshot{}, fmt.Errorf("decode canonical state: %w", err)
+		}
+		normalizeSnapshot(&snapshot)
+		if snapshot.Version != CurrentVersion || snapshot.RepoID != s.RepoID {
+			return Snapshot{}, fmt.Errorf("canonical state schema or repository identity differs")
+		}
+		if err := snapshot.Validate(); err != nil {
+			return Snapshot{}, err
+		}
+		return snapshot, nil
+	}
+	return Snapshot{}, errors.New("canonical state changed during read-only planning")
 }
 
 func decodeRecoveryEvents(data []byte, repoID string) ([]Event, error) {
@@ -186,7 +215,7 @@ func decodeRecoveryEvents(data []byte, repoID string) ([]Event, error) {
 		if err := json.Unmarshal(line, &event); err != nil {
 			return nil, fmt.Errorf("decode durable recovery event: %w", err)
 		}
-		if event.Version != CurrentVersion || event.RepoID != repoID {
+		if !supportedRecoverySchema(event.Version) || event.RepoID != repoID {
 			return nil, errors.New("durable recovery event schema or repository identity differs")
 		}
 		events = append(events, event)
@@ -195,4 +224,8 @@ func decodeRecoveryEvents(data []byte, repoID string) ([]Event, error) {
 		return nil, fmt.Errorf("scan durable recovery events: %w", err)
 	}
 	return events, nil
+}
+
+func supportedRecoverySchema(version int) bool {
+	return version == CurrentVersion || version == CurrentVersion-1
 }

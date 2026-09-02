@@ -143,7 +143,7 @@ func (f *legacyWorkerBlockFinder) finish() error {
 	}
 	var last uint64
 	for index, event := range f.events {
-		if event.Version != CurrentVersion || event.RepoID != f.repoID || event.Sequence == 0 {
+		if !supportedRecoverySchema(event.Version) || event.RepoID != f.repoID || event.Sequence == 0 {
 			return fmt.Errorf("invalid legacy worker block event metadata at history index %d", index)
 		}
 		if index > 0 {

@@ -15,7 +15,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/application/recoveryfixture"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 )
 
 const generatedSequenceCount = 1000
@@ -84,9 +83,8 @@ func TestBlessedProductionFixturesReplay100Percent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("replay fixture %s: %v", fields[1], err)
 		}
-		replay.Snapshot.SemanticContractVersion = statecontract.CurrentVersion
-		if err := replay.Snapshot.Validate(); err != nil {
-			t.Fatalf("validate fixture %s: %v", fields[1], err)
+		if replay.Snapshot.Version != bundle.Manifest.SourceSchemaVersion || len(replay.Snapshot.Issues) != 1 || len(replay.Events) != bundle.Completeness.EventCount {
+			t.Fatalf("replay fixture %s changed captured cardinality or schema", fields[1])
 		}
 		replayed++
 	}

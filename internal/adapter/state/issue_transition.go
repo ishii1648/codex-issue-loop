@@ -17,6 +17,31 @@ func ApplyIssueTransition(item *Issue, transition issuedomain.Transition) error 
 	if err := transition.ValidateCommit(item.Status); err != nil {
 		return err
 	}
+	if transition.To.Terminal() && transition.To != issuedomain.StatusCompleted && item.Lease != nil {
+		lease := *item.Lease
+		lease.DeclaredResources = append([]string(nil), item.Lease.DeclaredResources...)
+		lease.ResolvedResources = append([]string(nil), item.Lease.ResolvedResources...)
+		lease.ActualResources = append([]string(nil), item.Lease.ActualResources...)
+		captureContinuationCheckpoint(item, lease, item.UpdatedAt)
+	}
+	if transition.To.Terminal() && !transition.From.Terminal() && item.Suspension != nil && item.Suspension.Status == issuedomain.SuspensionResolved {
+		item.Suspension = nil
+	}
 	item.Status = transition.To
+	if transition.To == issuedomain.StatusCompleted {
+		item.ResourcePark = nil
+		item.Suspension = nil
+	}
 	return nil
+}
+
+func CancelPendingRequests(snapshot *Snapshot, issueNumber int) {
+	if snapshot == nil {
+		return
+	}
+	for _, request := range snapshot.PendingRequests {
+		if request != nil && request.IssueNumber == issueNumber && request.Status == issuedomain.RequestStatusPending {
+			request.Status = issuedomain.RequestStatusCanceled
+		}
+	}
 }

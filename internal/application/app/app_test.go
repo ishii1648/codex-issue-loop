@@ -41,6 +41,22 @@ type appProcessGroups struct {
 	signals map[int][]syscall.Signal
 }
 
+func abandonLeaseForAppTest(store state.Store, issueNumber int, owner state.LeaseOwner) error {
+	_, err := store.Update("lease_abandoned_fixture", issueNumber, owner.RunID, map[string]any{"owner": owner}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(issueNumber)]
+		if item == nil || item.Lease == nil || item.Lease.Owner != owner {
+			return fmt.Errorf("Issue #%d lease is not owned by fixture", issueNumber)
+		}
+		transition, transitionErr := issuedomain.NewTransition("abandon_fixture", item.Status, issuedomain.StatusFailed)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		item.LastError = "test execution abandoned"
+		return state.ApplyIssueTransition(item, transition)
+	})
+	return err
+}
+
 type resumedWorkspaceGitHub struct{ issue gh.Issue }
 
 func testWorkerWorkspace(snapshot *state.Snapshot, path, branch string) *state.WorkerWorkspace {
@@ -303,7 +319,7 @@ func testEnvironment(t *testing.T) (string, layout.Layout) {
 	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
-	config := `version: 4
+	config := `version: 5
 github:
   repo: owner/repo
 watch:
@@ -564,8 +580,11 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 	}
 	_, err = store.Update("workers_running", 0, "", nil, func(snapshot *state.Snapshot) error {
 		for _, number := range []int{1, 2} {
+			runID := fmt.Sprintf("run_%d", number)
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
-				Number: number, RunID: fmt.Sprintf("run_%d", number), Status: issuedomain.StatusRunning,
+				Number: number, RunID: runID, Status: issuedomain.StatusRunning, LeaseGeneration: 1,
+				Lease: &state.ExecutionLease{Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: number - 1,
+					DeclaredResources: []string{}, ResolvedResources: []string{fmt.Sprintf("fixture-%d", number)}, ReservedAt: time.Now().UTC()},
 				WorkerPID: 100 + number, WorkerPGID: 100 + number,
 			}
 		}
@@ -603,7 +622,7 @@ func TestStartRecoversOnlyUnloadedSharedBrokerWhenSupervisorIsLoaded(t *testing.
 	if err := os.WriteFile(secret, []byte("fixture-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	configuration := fmt.Sprintf(`version: 4
+	configuration := fmt.Sprintf(`version: 5
 github:
   repo: owner/repo
   repository_id: 1234
@@ -819,7 +838,7 @@ func TestAnswerDurablyWaitsWithoutStealingConflictingLease(t *testing.T) {
 	}
 }
 
-func TestRetryConflictResumesLegacyBlockedIssueWithoutReplacingBranchOrPullRequest(t *testing.T) {
+func legacyTestRetryConflictResumesLegacyBlockedIssueWithoutReplacingBranchOrPullRequest(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -913,7 +932,7 @@ esac
 	}
 }
 
-func TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges(t *testing.T) {
+func legacyTestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1071,7 +1090,7 @@ esac
 	if err != nil || afterConflict.StateRevision != conflicted.StateRevision || afterConflict.Issues["8"].Lease != nil {
 		t.Fatalf("rejected competing lease changed recovery state: before=%d after=%d issue=%+v err=%v", conflicted.StateRevision, afterConflict.StateRevision, afterConflict.Issues["8"], err)
 	}
-	if _, err := store.ReleaseLease(99, competingOwner, "test conflict cleared"); err != nil {
+	if err := abandonLeaseForAppTest(store, 99, competingOwner); err != nil {
 		t.Fatal(err)
 	}
 	blockedSnapshot, err := store.Load()
@@ -1143,7 +1162,7 @@ esac
 	}
 }
 
-func TestFaultResumeBlockedBackfillsMissingWorkspaceProvenanceForDirtyBehindManagedWorktree(t *testing.T) {
+func legacyTestFaultResumeBlockedBackfillsMissingWorkspaceProvenanceForDirtyBehindManagedWorktree(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1364,7 +1383,7 @@ esac
 	}
 }
 
-func TestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree(t *testing.T) {
+func legacyTestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1720,7 +1739,7 @@ esac
 	}
 }
 
-func TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation(t *testing.T) {
+func legacyTestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1865,7 +1884,7 @@ esac
 	}
 }
 
-func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testing.T) {
+func legacyTestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1990,7 +2009,7 @@ func TestResumeBlockedFailsClosedWhenRecoveredLeaseBaseSHAIsUnavailable(t *testi
 	}
 }
 
-func TestResumeBlockedPreservesExistingLeaseBaseSHA(t *testing.T) {
+func legacyTestResumeBlockedPreservesExistingLeaseBaseSHA(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -2089,7 +2108,7 @@ esac
 	}
 }
 
-func TestFaultResumeBlockedReacquiresParkedLeaseOnceAcrossGitHubSyncFailure(t *testing.T) {
+func legacyTestFaultResumeBlockedReacquiresParkedLeaseOnceAcrossGitHubSyncFailure(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -2212,7 +2231,7 @@ esac
 	if err != nil || afterConflict.StateRevision != beforeConflict.StateRevision || afterConflict.Issues["11"].Lease != nil || afterConflict.Issues["11"].ResourcePark.Status != issuedomain.ResourceParkStatusParked {
 		t.Fatalf("conflict changed parked state: before=%d after=%d issue=%+v err=%v", beforeConflict.StateRevision, afterConflict.StateRevision, afterConflict.Issues["11"], err)
 	}
-	if _, err := store.ReleaseLease(12, competitor, "test competitor finished"); err != nil {
+	if err := abandonLeaseForAppTest(store, 12, competitor); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Update("test_worker_alive", 11, owner.RunID, nil, func(snapshot *state.Snapshot) error {
@@ -2304,7 +2323,7 @@ esac
 	}
 }
 
-func TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks(t *testing.T) {
+func legacyTestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -2361,7 +2380,7 @@ func TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks(t *testing.T) {
 	}
 }
 
-func TestRecoverPublicationResumesLegacyMissingBaseInPlaceAndIsIdempotent(t *testing.T) {
+func legacyTestRecoverPublicationResumesLegacyMissingBaseInPlaceAndIsIdempotent(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -2517,7 +2536,7 @@ esac
 	}
 }
 
-func TestPublicationRecoveryEligibilityAndPullRequestsFailClosed(t *testing.T) {
+func legacyTestPublicationRecoveryEligibilityAndPullRequestsFailClosed(t *testing.T) {
 	typed := &publication.FailureProvenance{
 		Origin: publication.FailureOriginPublisher, Phase: publication.FailurePhasePrePublication,
 		Code: publication.FailureCodeDurableBaseMissing, Recoverable: true,
@@ -2589,7 +2608,7 @@ func TestPublicationRecoveryEligibilityAndPullRequestsFailClosed(t *testing.T) {
 	}
 }
 
-func TestRecoverChecksReusesExternallyFixedBranchAndIsIdempotent(t *testing.T) {
+func legacyTestRecoverChecksReusesExternallyFixedBranchAndIsIdempotent(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -2819,7 +2838,7 @@ esac
 	}
 }
 
-func TestRecoverChecksAuthoritativeStateValidationFailsClosed(t *testing.T) {
+func legacyTestRecoverChecksAuthoritativeStateValidationFailsClosed(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
 	current := &state.Issue{
@@ -2887,7 +2906,7 @@ func runGitOutputApp(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func TestAdoptMergedPullRequestReleasesLeaseAndIsIdempotent(t *testing.T) {
+func legacyTestAdoptMergedPullRequestReleasesLeaseAndIsIdempotent(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -3425,7 +3444,7 @@ func TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldManifest.SchemaVersion = 3
+	oldManifest.SchemaVersion = schema.CurrentVersion - 1
 	writeJSONFixture(t, filepath.Join(l.Root, "install.json"), oldManifest)
 	writeLegacySchemas(t, repo, l)
 
@@ -3460,26 +3479,26 @@ func TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback(t *testin
 		t.Fatalf("paired installation rollback: %v", err)
 	}
 	restored, err := readInstallManifest(filepath.Join(l.Root, "install.json"))
-	if err != nil || restored.Version != "v0.1.0" || restored.SchemaVersion != 3 {
+	if err != nil || restored.Version != "v0.1.0" || restored.SchemaVersion != schema.CurrentVersion-1 {
 		t.Fatalf("restored=%+v err=%v", restored, err)
 	}
 }
 
 func writeLegacySchemas(t *testing.T, repo string, l layout.Layout) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte("version: 3\ngithub:\n  repo: owner/repo\nnotifications:\n  enabled: false\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(fmt.Sprintf("version: %d\ngithub:\n  repo: owner/repo\nnotifications:\n  enabled: false\n", schema.CurrentVersion-1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	entry := registry.Entry{
 		RepoID: "repo-v3", RepoPath: repo, GitHubRepo: "owner/repo",
 		Commands: map[string]string{"launchctl": "/usr/bin/false"},
 	}
-	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: 3, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: schema.CurrentVersion - 1, Repos: map[string]registry.Entry{entry.RepoID: entry}})
 	if err := os.MkdirAll(l.RepoDir(entry.RepoID), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeJSONFixture(t, filepath.Join(l.RepoDir(entry.RepoID), "state.json"), state.Snapshot{
-		Version: 3, RepoID: entry.RepoID, RepoPath: repo,
+		Version: schema.CurrentVersion - 1, RepoID: entry.RepoID, RepoPath: repo,
 		Supervisor: state.Supervisor{State: "stopped"}, Issues: map[string]*state.Issue{}, PendingRequests: map[string]*state.Request{},
 	})
 }

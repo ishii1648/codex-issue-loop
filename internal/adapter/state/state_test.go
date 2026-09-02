@@ -192,26 +192,42 @@ func TestLeaseReservationSurvivesRestartAndFencesStaleOwners(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(loaded.Issues["7"].DeclaredResources, []string{"docs", "state"}) || !reflect.DeepEqual(loaded.Issues["7"].ActualResources, []string{"docs", "state"}) {
 		t.Fatalf("resource audit did not survive restart: issue=%+v err=%v", loaded.Issues["7"], err)
 	}
-	if _, err := store.ReleaseLease(7, LeaseOwner{RunID: "run_other", Generation: 1}, "stale"); err == nil {
+	if err := abandonLeaseForTest(store, 7, LeaseOwner{RunID: "run_other", Generation: 1}); err == nil {
 		t.Fatal("stale run released another run's lease")
 	}
-	if _, err := store.ReleaseLease(8, owner, "wrong Issue"); err == nil {
+	if err := abandonLeaseForTest(store, 8, owner); err == nil {
 		t.Fatal("owner released another Issue's lease")
 	}
 	loaded, err = store.Load()
 	if err != nil || loaded.Issues["7"].Lease == nil {
 		t.Fatalf("stale release changed lease: issue=%+v err=%v", loaded.Issues["7"], err)
 	}
-	if _, err := store.ReleaseLease(7, owner, "completed"); err != nil {
+	if err := abandonLeaseForTest(store, 7, owner); err != nil {
 		t.Fatal(err)
 	}
 	second, nextOwner, err := store.ReserveLease(LeaseReservation{IssueNumber: 7, RunID: "run_8", Slot: 0, ResolvedResources: []string{"state"}, ReservedAt: reservedAt.Add(time.Hour)})
 	if err != nil || nextOwner.Generation != 2 || second.Issues["7"].LeaseGeneration != 2 {
 		t.Fatalf("owner=%+v issue=%+v err=%v", nextOwner, second.Issues["7"], err)
 	}
-	if _, err := store.ReleaseLease(7, owner, "old generation"); err == nil {
+	if err := abandonLeaseForTest(store, 7, owner); err == nil {
 		t.Fatal("old generation released replacement lease")
 	}
+}
+
+func abandonLeaseForTest(store Store, issueNumber int, owner LeaseOwner) error {
+	_, err := store.Update("lease_abandoned_fixture", issueNumber, owner.RunID, map[string]any{"owner": owner}, func(snapshot *Snapshot) error {
+		item, ownedErr := ownedIssue(snapshot, issueNumber, owner)
+		if ownedErr != nil {
+			return ownedErr
+		}
+		transition, transitionErr := issuedomain.NewTransition("abandon_fixture", item.Status, issuedomain.StatusFailed)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		item.LastError = "test execution abandoned"
+		return ApplyIssueTransition(item, transition)
+	})
+	return err
 }
 
 func TestLeaseReservationAndExpansionAreExclusive(t *testing.T) {
@@ -362,7 +378,7 @@ func TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "Issue #448") {
 		t.Fatalf("competing lease was not preserved: %v", err)
 	}
-	if _, err := store.ReleaseLease(448, nextOwner, "test complete"); err != nil {
+	if err := abandonLeaseForTest(store, 448, nextOwner); err != nil {
 		t.Fatal(err)
 	}
 	var resumedOwner LeaseOwner
@@ -510,7 +526,7 @@ func TestResumedResourceParkAllowsRetryLeaseTransferAndRelease(t *testing.T) {
 		issue.ResourcePark.ResumeOwner == nil || *issue.ResourcePark.ResumeOwner != resumeOwner || issue.Lease.BaseSHA != "base-146" {
 		t.Fatalf("retry transfer lost resumed park provenance: owner=%+v issue=%+v", retryOwner, issue)
 	}
-	if _, err := store.ReleaseLease(146, retryOwner, "retry complete"); err != nil {
+	if err := abandonLeaseForTest(store, 146, retryOwner); err != nil {
 		t.Fatal(err)
 	}
 	released, err := store.Load()
@@ -518,8 +534,9 @@ func TestResumedResourceParkAllowsRetryLeaseTransferAndRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	issue = released.Issues["146"]
-	if issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.Status != issuedomain.ResourceParkStatusResumed ||
-		issue.ResourcePark.OriginalLease.Owner != originalOwner || issue.ResourcePark.ResumeOwner == nil || *issue.ResourcePark.ResumeOwner != resumeOwner {
+	if issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.Status != issuedomain.ResourceParkStatusParked ||
+		issue.ResourcePark.OriginalLease.Owner != retryOwner || issue.ResourcePark.ResumeOwner != nil ||
+		issue.Suspension == nil || issue.Suspension.Status != issuedomain.SuspensionActive {
 		t.Fatalf("retry completion lost terminal park provenance: %+v", issue)
 	}
 }

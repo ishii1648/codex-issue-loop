@@ -14,6 +14,7 @@ const (
 	SemanticCodeContractVersionMismatch    = "SEMANTIC_CONTRACT_VERSION_MISMATCH"
 	SemanticCodeWorkspaceProvenanceMissing = "EXECUTION_REQUIRED_WORKSPACE_PROVENANCE_MISSING"
 	SemanticCodeWorkspaceProvenanceInvalid = "EXECUTION_REQUIRED_WORKSPACE_PROVENANCE_INVALID"
+	SemanticCodeExecutionLeaseMissing      = "EXECUTION_REQUIRED_LEASE_MISSING"
 	SemanticCodePreparedTransactionPresent = "PREPARED_TRANSACTION_REQUIRES_OLD_RUNTIME_RECOVERY"
 )
 
@@ -69,6 +70,10 @@ func SemanticViolations(snapshot Snapshot) []SemanticViolation {
 	if !ok {
 		return append(violations, SemanticViolation{Field: "issues[].workspace", Code: SemanticCodeWorkspaceProvenanceInvalid, Reason: "workspace requirement is missing from the current contract"})
 	}
+	leaseField, ok := statecontract.FieldByPath("issues[].execution_lease")
+	if !ok {
+		return append(violations, SemanticViolation{Field: "issues[].execution_lease", Code: SemanticCodeExecutionLeaseMissing, Reason: "execution lease requirement is missing from the current contract"})
+	}
 	keys := make([]string, 0, len(snapshot.Issues))
 	for key := range snapshot.Issues {
 		keys = append(keys, key)
@@ -80,7 +85,18 @@ func SemanticViolations(snapshot Snapshot) []SemanticViolation {
 	})
 	for _, key := range keys {
 		issue := snapshot.Issues[key]
-		if issue == nil || !statecontract.RequiredForStatus(field, issue.Status) || !crossedWorkerExecutionBoundary(issue) {
+		if issue == nil {
+			continue
+		}
+		if statecontract.RequiredForStatus(leaseField, issue.Status) && issue.Lease == nil {
+			violations = append(violations, SemanticViolation{
+				IssueNumber: issue.Number, Status: string(issue.Status), Field: leaseField.Path,
+				Code: SemanticCodeExecutionLeaseMissing, Migratable: false,
+				Reason:        "executing lifecycle has no fenced execution lease",
+				MigrationRule: leaseField.Migration.Code, OperatorGuide: leaseField.Migration.OperatorGuide,
+			})
+		}
+		if !statecontract.RequiredForStatus(field, issue.Status) || !crossedWorkerExecutionBoundary(issue) {
 			continue
 		}
 		base := SemanticViolation{
@@ -107,7 +123,7 @@ func SemanticViolations(snapshot Snapshot) []SemanticViolation {
 
 func supportsExecutionRequiredField(path string) bool {
 	switch path {
-	case "issues[].workspace":
+	case "issues[].workspace", "issues[].execution_lease":
 		return true
 	default:
 		return false

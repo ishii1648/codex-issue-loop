@@ -454,7 +454,13 @@ func (c CLI) MarkFailed(ctx context.Context, cfg config.Config, number int, reas
 }
 
 func (c CLI) MarkRunning(ctx context.Context, cfg config.Config, number int) error {
-	return c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel})
+	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
+	for _, label := range cfg.GitHub.ExcludeLabels {
+		if strings.EqualFold(label, "blocked") {
+			remove = append(remove, label)
+		}
+	}
+	return c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove)
 }
 
 func (c CLI) MarkConflictRetry(ctx context.Context, cfg config.Config, number int, recoveryID string) error {

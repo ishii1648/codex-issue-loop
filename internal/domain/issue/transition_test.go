@@ -107,6 +107,29 @@ func TestRecoveryTransitionsRejectUnrelatedStatesAndTargets(t *testing.T) {
 	}
 }
 
+func TestResolveSuspensionUsesGenericActionsAndSavedStage(t *testing.T) {
+	tests := []struct {
+		action ResolutionAction
+		stage  Status
+		want   Status
+	}{
+		{action: ResolutionResume, stage: StatusAwaitingChecks, want: StatusResumePending},
+		{action: ResolutionRetryStage, stage: StatusAwaitingChecks, want: StatusAwaitingChecks},
+		{action: ResolutionRetryStage, stage: StatusRunning, want: StatusResumePending},
+		{action: ResolutionAdoptPR, want: StatusCompleted},
+		{action: ResolutionCancel, want: StatusBlocked},
+	}
+	for _, test := range tests {
+		transition, err := ResolveSuspension(StatusBlocked, test.action, test.stage)
+		if err != nil || transition.To != test.want {
+			t.Fatalf("action=%s stage=%s transition=%+v err=%v", test.action, test.stage, transition, err)
+		}
+	}
+	if _, err := ResolveSuspension(StatusRunning, ResolutionResume, StatusRunning); err == nil {
+		t.Fatal("running Issue accepted terminal suspension resolution")
+	}
+}
+
 func TestExecutionTransitions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -322,8 +345,8 @@ func TestAllStatusesAreValidAndClassifiedForWorkspaceProvenance(t *testing.T) {
 	if StatusClaiming.RequiresWorkspaceProvenance() || StatusCompleted.RequiresWorkspaceProvenance() {
 		t.Fatal("pre-execution and completed records must not require retained workspace provenance")
 	}
-	if !StatusRunning.RequiresWorkspaceProvenance() || !StatusFailed.RequiresWorkspaceProvenance() {
-		t.Fatal("execution and recoverable terminal records must require workspace provenance")
+	if !StatusRunning.RequiresWorkspaceProvenance() || StatusFailed.RequiresWorkspaceProvenance() {
+		t.Fatal("only execution states require live workspace provenance; terminal continuation uses a checkpoint")
 	}
 }
 
