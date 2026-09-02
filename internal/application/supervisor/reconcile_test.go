@@ -13,7 +13,6 @@ import (
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
-	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
@@ -94,26 +93,6 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 			name: "partial done sync preserves pending comment write", current: func() state.Issue { value := base; value.GitHubSync = issuedomain.GitHubSyncDone; return value }(),
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.DoneLabel}}},
 			status: issuedomain.StatusCompleted, githubSync: issuedomain.GitHubSyncDone, reason: "done label",
-		},
-		{
-			name: "checks recovery before label sync survives restart", current: func() state.Issue {
-				value := base
-				value.Status = issuedomain.StatusChecksRecovery
-				value.GitHubSync = issuedomain.GitHubSyncPullRequestChecksRecovery
-				return value
-			}(),
-			remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.FailedLabel}}}, inspection: valid,
-			status: issuedomain.StatusChecksRecovery, githubSync: issuedomain.GitHubSyncPullRequestChecksRecovery, reason: "waiting for GitHub label synchronization",
-		},
-		{
-			name: "checks recovery after label sync survives restart", current: func() state.Issue {
-				value := base
-				value.Status = issuedomain.StatusChecksRecovery
-				value.GitHubSync = issuedomain.GitHubSyncPullRequestChecksRecovery
-				return value
-			}(),
-			remote: gh.RemoteState{Issue: runningIssue}, inspection: valid,
-			status: issuedomain.StatusChecksRecovery, githubSync: issuedomain.GitHubSyncPullRequestChecksRecovery, reason: "remains pending",
 		},
 		{
 			name: "legacy completed draft returns to check monitoring", current: func() state.Issue {
@@ -449,67 +428,7 @@ func TestFaultStartupReconciliationConvergesOnDirtyPullRequestWithoutDuplicateCo
 	}
 }
 
-func legacyTestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t *testing.T) {
-	loop, github := testLoop(t, worker.Result{})
-	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Test", RunID: "run_1", Slot: 0,
-		DeclaredResources: []string{"scheduler"}, ResolvedResources: []string{"scheduler"}, BaseSHA: "base-sha", ReservedAt: time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	branch := "codex/issue-1-test"
-	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues["1"]
-		item.Status = issuedomain.StatusBlocked
-		item.Branch = branch
-		item.Worktree = loop.Config.RepoPath
-		item.GitHubSync = issuedomain.GitHubSyncBlocked
-		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: time.Now().UTC()}
-		setSupervisorTestWorkspace(snapshot, item)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stale, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}}}
-	inspection := worktree.Inspection{Exists: true, Valid: true, Branch: branch, LocalBranchExists: true, RemoteBranchExists: true}
-	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: &inspection}
-	github.inspectHook = func() {
-		github.inspectHook = nil
-		_, updateErr := loop.Store.Update("environment_resume_requested", 1, owner.RunID, map[string]string{"resume_id": "resume_race", "base_sha": "base-sha"}, func(snapshot *state.Snapshot) error {
-			item := snapshot.Issues["1"]
-			item.Status = issuedomain.StatusEnvironmentResumePending
-			item.GitHubSync = issuedomain.GitHubSyncEnvironmentResume
-			item.EnvironmentResume = &state.EnvironmentResume{ID: "resume_race", Status: issuedomain.EnvironmentResumeStatusRequested, ConfirmedAt: time.Now().UTC(), BaseSHA: "base-sha"}
-			return nil
-		})
-		if updateErr != nil {
-			t.Fatal(updateErr)
-		}
-	}
-
-	if err := loop.reconcileStartup(context.Background(), stale); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := loaded.Issues["1"]
-	if item.Status != issuedomain.StatusEnvironmentResumePending || item.GitHubSync != issuedomain.GitHubSyncEnvironmentResume || item.EnvironmentResume == nil || item.EnvironmentResume.ID != "resume_race" || item.Lease == nil || item.Lease.Owner != owner {
-		t.Fatalf("concurrent environment resume was overwritten: %+v", item)
-	}
-	if github.inspectCalls != 2 {
-		t.Fatalf("inspect calls=%d, want stale inspection plus retry", github.inspectCalls)
-	}
-}
-
-func TestTerminalTransitionParksExistingTypedEnvironmentBlockWithoutRecoveryInspection(t *testing.T) {
+func TestTerminalTransitionParksGenericCheckpointWithoutRecoveryInspection(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Processes = fakeProcesses{}
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
@@ -529,7 +448,6 @@ func TestTerminalTransitionParksExistingTypedEnvironmentBlockWithoutRecoveryInsp
 		item.Branch = branch
 		item.Worktree = loop.Config.RepoPath
 		item.SessionID = "session-typed"
-		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: now.Add(-time.Minute)}
 		item.LastError = "worker blocked: network unavailable"
 		item.FailureKind = "issue"
 		return nil
@@ -556,7 +474,7 @@ func TestTerminalTransitionParksExistingTypedEnvironmentBlockWithoutRecoveryInsp
 	if item.Lease != nil || item.ResourcePark == nil || item.ResourcePark.Status != issuedomain.ResourceParkStatusParked || item.ResourcePark.OriginalLease.Owner != owner {
 		t.Fatalf("existing typed block was not parked: %+v", item)
 	}
-	if item.RunID != "run_typed" || item.Worktree != loop.Config.RepoPath || item.Branch != branch || item.SessionID != "session-typed" || item.BlockedCause == nil || item.BlockedCause.Reason != "network unavailable" {
+	if item.RunID != "run_typed" || item.Worktree != loop.Config.RepoPath || item.Branch != branch || item.SessionID != "session-typed" || item.Suspension == nil || item.Suspension.Reason != "worker blocked: network unavailable" {
 		t.Fatalf("startup park changed continuation state: %+v", item)
 	}
 	if github.inspectCalls != 0 {
@@ -607,192 +525,6 @@ func TestStartupReconciliationParksExistingNeedsInputLease(t *testing.T) {
 	}
 	if request.RunID != item.RunID || request.ResourceParkID != item.ResourcePark.ID || request.ReleasedOwner == nil || *request.ReleasedOwner != owner || item.SessionID != "session-input" || item.Worktree != loop.Config.RepoPath || item.Branch != branch {
 		t.Fatalf("startup park changed request/continuation provenance: item=%+v request=%+v", item, request)
-	}
-}
-
-func TestStartupReconciliationNormalizesSynchronizedLegacyWorkerBlock(t *testing.T) {
-	loop, github := testLoop(t, worker.Result{})
-	blockedAt := time.Date(2026, 8, 17, 12, 30, 0, 0, time.UTC)
-	loop.Clock = fixedClock{value: blockedAt.Add(time.Hour)}
-	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Legacy block", RunID: "run_legacy", Slot: 0,
-		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
-		BaseSHA: "base-sha", ReservedAt: blockedAt.Add(-time.Minute),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	branch := "codex/issue-1-legacy-block"
-	_, err = loop.Store.Update("worker_started", 1, owner.RunID, map[string]string{"worktree": loop.Config.RepoPath, "branch": branch}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues["1"]
-		item.Status = issuedomain.StatusRunning
-		item.Branch = branch
-		item.Worktree = loop.Config.RepoPath
-		setSupervisorTestWorkspace(snapshot, item)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyError := "worker blocked: localhost listen denied"
-	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues["1"]
-		item.Status = issuedomain.StatusBlocked
-		item.Branch = branch
-		item.Worktree = loop.Config.RepoPath
-		item.FailureKind = "issue"
-		item.LastError = legacyError
-		item.GitHubSync = issuedomain.GitHubSyncBlocked
-		setSupervisorTestWorkspace(snapshot, item)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = loop.Store.Update("github_state_synced", 1, owner.RunID, map[string]string{"state": "blocked"}, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"].GitHubSync = issuedomain.GitHubSyncNone
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = loop.Store.Update("startup_reconciled", 1, owner.RunID, map[string]string{
-		"previous_status": "blocked", "status": "blocked", "reason": "GitHub exclusion label was applied manually",
-	}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues["1"]
-		item.LastError = "startup reconciliation blocked: GitHub exclusion label was applied manually"
-		return state.ReleaseIssueLease(item, owner)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	expectedCause, err := loop.Store.LegacyWorkerBlockProvenance(*before.Issues["1"])
-	if err != nil {
-		t.Fatal(err)
-	}
-	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}}}
-	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: &worktree.Inspection{
-		Exists: true, Valid: true, Branch: branch, LocalBranchExists: true, RemoteBranchExists: true,
-	}}
-
-	if err := loop.reconcileStartup(context.Background(), before); err != nil {
-		t.Fatal(err)
-	}
-	after, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := after.Issues["1"]
-	if item.Status != issuedomain.StatusBlocked || item.LastError != legacyError || item.BlockedCause == nil || item.BlockedCause.Origin != "worker" || item.BlockedCause.Kind != "environment" || !item.BlockedCause.Resumable {
-		t.Fatalf("legacy provenance was not normalized: %+v", item)
-	}
-	if item.BlockedCause.Reason != "localhost listen denied" || !item.BlockedCause.BlockedAt.Equal(expectedCause.BlockedAt) {
-		t.Fatalf("legacy reason/time were not preserved: %+v", item.BlockedCause)
-	}
-	if item.Lease != nil {
-		t.Fatalf("legacy lease released by the old reconciliation unexpectedly returned: %+v", item.Lease)
-	}
-	recovery, err := loop.Store.LegacyWorkerBlockRecoveryEvidence(*item)
-	if err != nil || recovery.BaseSHA != "base-sha" || !reflect.DeepEqual(&recovery.Cause, item.BlockedCause) {
-		t.Fatalf("typed legacy recovery evidence=%+v err=%v", recovery, err)
-	}
-}
-
-func TestStartupReconciliationRejectsLegacyChainWithManualExclusion(t *testing.T) {
-	loop, github := testLoop(t, worker.Result{})
-	legacyError := "issue: worker blocked: localhost listen denied"
-	_, err := loop.Store.Update("issue_blocked", 1, "run_legacy", map[string]string{"error": legacyError, "failure_kind": "issue"}, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, Status: issuedomain.StatusBlocked, RunID: "run_legacy", FailureKind: "issue", LastError: legacyError,
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = loop.Store.Update("github_state_synced", 1, "run_legacy", map[string]string{"state": "blocked"}, func(*state.Snapshot) error { return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked", "do-not-automate"}}}
-
-	if err := loop.reconcileStartup(context.Background(), before); err != nil {
-		t.Fatal(err)
-	}
-	after, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := after.Issues["1"]
-	if item.BlockedCause != nil || item.Status != issuedomain.StatusBlocked || !strings.Contains(item.LastError, "do not contain only the supervisor-owned blocked label") {
-		t.Fatalf("manual exclusion was normalized as resumable provenance: %+v", item)
-	}
-}
-
-func legacyTestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t *testing.T) {
-	loop, github := testLoop(t, worker.Result{})
-	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Test", RunID: "run_1", Slot: 0,
-		DeclaredResources: []string{"scheduler"}, ResolvedResources: []string{"scheduler"}, BaseSHA: "base-sha", ReservedAt: time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	branch := "codex/issue-1-test"
-	_, err = loop.Store.Update("issue_blocked", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues["1"]
-		item.Status = issuedomain.StatusBlocked
-		item.Branch = branch
-		item.Worktree = loop.Config.RepoPath
-		item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "network unavailable", BlockedAt: time.Now().UTC()}
-		setSupervisorTestWorkspace(snapshot, item)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stale, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{"blocked"}}}
-	inspection := worktree.Inspection{Exists: true, Valid: true, Branch: branch, LocalBranchExists: true, RemoteBranchExists: true}
-	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, inspection: &inspection}
-	github.inspectHook = func() {
-		github.inspectHook = nil
-		_, updateErr := loop.Store.Update("environment_resume_requested", 1, owner.RunID, map[string]string{"resume_id": "resume_webhook", "base_sha": "base-sha"}, func(snapshot *state.Snapshot) error {
-			item := snapshot.Issues["1"]
-			item.Status = issuedomain.StatusEnvironmentResumePending
-			item.GitHubSync = issuedomain.GitHubSyncEnvironmentResume
-			item.EnvironmentResume = &state.EnvironmentResume{ID: "resume_webhook", Status: issuedomain.EnvironmentResumeStatusRequested, ConfirmedAt: time.Now().UTC(), BaseSHA: "base-sha"}
-			return nil
-		})
-		if updateErr != nil {
-			t.Fatal(updateErr)
-		}
-	}
-	handled, err := loop.reconcileTerminalWebhook(context.Background(), *stale.Issues["1"], webhook.Delivery{DeliveryID: "delivery-race", Event: "issues", Action: "labeled"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if handled {
-		t.Fatal("stale webhook reconciliation was acknowledged")
-	}
-	loaded, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := loaded.Issues["1"]
-	if item.Status != issuedomain.StatusEnvironmentResumePending || item.GitHubSync != issuedomain.GitHubSyncEnvironmentResume || item.EnvironmentResume == nil || item.EnvironmentResume.ID != "resume_webhook" || item.Lease == nil || item.Lease.Owner != owner {
-		t.Fatalf("webhook reconciliation overwrote concurrent environment resume: %+v", item)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
@@ -160,6 +161,41 @@ func TestIssueResolveResumeRetriesGitHubWithoutRefencing(t *testing.T) {
 	}
 }
 
+func TestIssueResolveResumeRejectsChangedWorktreeAndCheckpointBase(t *testing.T) {
+	fixture := newIssueResolutionFixture(t, 450, "OPEN", nil)
+	fixture.block(t, issuedomain.StatusRunning, "environment unavailable", true, "")
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "after-checkpoint.txt"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "450", "--action", "resume", "--json"}
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	if code := a.Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "worktree content differs") {
+		t.Fatalf("changed worktree was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	if err := os.Remove(filepath.Join(fixture.worktree, "after-checkpoint.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.Update("fixture_change_checkpoint_base", 450, fixture.runID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["450"].ResourcePark.OriginalLease.BaseSHA = strings.Repeat("f", 40)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "checkpoint base is not an ancestor") {
+		t.Fatalf("invalid checkpoint base was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	snapshot, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item := snapshot.Issues["450"]; item.Lease != nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionActive {
+		t.Fatalf("rejected resolution changed execution state: %+v", item)
+	}
+}
+
 func TestIssueResolveRetryStageReturnsToCheckpointStage(t *testing.T) {
 	mergedAt := "null"
 	fixture := newIssueResolutionFixture(t, 102, "OPEN", []map[string]any{{
@@ -169,14 +205,25 @@ func TestIssueResolveRetryStageReturnsToCheckpointStage(t *testing.T) {
 	fixture.block(t, issuedomain.StatusAwaitingChecks, "checks failed", false, "https://example.test/pull/12")
 	fixture.rewritePullRequests(t, []map[string]any{{
 		"number": 12, "url": "https://example.test/pull/12", "state": "OPEN", "isDraft": false,
+		"mergedAt": nil, "headRefName": fixture.branch, "baseRefName": "main", "headRefOid": fixture.base,
+		"mergeCommit": nil, "headRepository": map[string]any{"name": "repo"},
+		"headRepositoryOwner": map[string]any{"login": "owner"}, "mergeStateStatus": "CLEAN", "statusCheckRollup": []any{},
+	}})
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	args := []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "102", "--action", "retry-stage", "--json"}
+	if code := a.Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "not cleanly reproducible") {
+		t.Fatalf("mismatched repaired head was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	fixture.rewritePullRequests(t, []map[string]any{{
+		"number": 12, "url": "https://example.test/pull/12", "state": "OPEN", "isDraft": false,
 		"mergedAt": nil, "headRefName": fixture.branch, "baseRefName": "main", "headRefOid": fixture.head,
 		"mergeCommit": nil, "headRepository": map[string]any{"name": "repo"},
 		"headRepositoryOwner": map[string]any{"login": "owner"}, "mergeStateStatus": "CLEAN", "statusCheckRollup": []any{},
 	}})
 
-	var out, stderr bytes.Buffer
-	a := App{Out: &out, Err: &stderr}
-	args := []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "102", "--action", "retry-stage", "--json"}
+	out.Reset()
+	stderr.Reset()
 	if code := a.Run(context.Background(), args); code != 0 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
 	}
@@ -188,6 +235,9 @@ func TestIssueResolveRetryStageReturnsToCheckpointStage(t *testing.T) {
 	if item.Status != issuedomain.StatusAwaitingChecks || item.Lease == nil || item.Lease.Owner.Generation != 2 ||
 		item.Suspension == nil || item.Suspension.Resolution != issuedomain.ResolutionRetryStage || item.GitHubSync != issuedomain.GitHubSyncNone {
 		t.Fatalf("retry-stage result=%+v", item)
+	}
+	if item.HeadSHA != fixture.head || item.PullRequestNumber != 12 {
+		t.Fatalf("repaired Pull Request identity was not committed: %+v", item)
 	}
 }
 
@@ -340,20 +390,30 @@ func newIssueResolutionFixture(t *testing.T, number int, issueState string, pull
 
 func (f *issueResolutionFixture) block(t *testing.T, from issuedomain.Status, reason string, resumable bool, pullRequestURL string) {
 	t.Helper()
+	digest, err := worktree.ContentDigest(context.Background(), "/usr/bin/git", f.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.store.Update("fixture_terminal", numberFromRunID(t, f.runID), f.runID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[fmt.Sprint(numberFromRunID(t, f.runID))]
 		item.Status, item.Branch, item.Worktree = from, f.branch, f.worktree
 		item.Workspace = testWorkerWorkspace(snapshot, f.worktree, f.branch)
 		item.HeadSHA, item.PullRequestURL = f.head, pullRequestURL
 		item.LastError = reason
-		if resumable {
-			item.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: reason, BlockedAt: time.Now().UTC()}
-		}
 		decision, err := issuedomain.Fail(from, reason, "issue", true)
 		if err != nil {
 			return err
 		}
-		return state.ApplyIssueTransition(item, decision.Transition)
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
+			return err
+		}
+		item.ResourcePark.WorktreeSHA256 = digest
+		if resumable && item.ResourcePark != nil {
+			item.Suspension = &state.Suspension{ID: state.NewID("suspension"), Origin: "worker", Status: issuedomain.SuspensionActive,
+				ReasonCode: "environment", Recoverability: issuedomain.RecoverabilityOperator, Reason: reason,
+				AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionResume}, CheckpointID: item.ResourcePark.ID, SuspendedAt: time.Now().UTC()}
+		}
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}

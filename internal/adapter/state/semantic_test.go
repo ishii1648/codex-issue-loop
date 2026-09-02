@@ -18,7 +18,7 @@ func TestEveryExecutionRequiredFieldHasRuntimeValidator(t *testing.T) {
 }
 
 func TestSemanticContractValidatesSupportedRecoveryStates(t *testing.T) {
-	statuses := []string{"running", "needs_input", "retry_wait", "publication_recovery_pending", "pull_request_checks_recovery_pending"}
+	statuses := []string{"running", "needs_input", "retry_wait", "resume_pending", "awaiting_checks"}
 	for _, status := range statuses {
 		t.Run(status, func(t *testing.T) {
 			snapshot := semanticFixture(status)

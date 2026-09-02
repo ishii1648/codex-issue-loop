@@ -70,14 +70,7 @@ func TestRecoveryTransitions(t *testing.T) {
 		{name: "resume answer", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusResumePending) }, to: StatusResumePending},
 		{name: "wait for answer resources", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusAnswerClaimWaiting) }, to: StatusAnswerClaimWaiting},
 		{name: "retry conflict", make: func() (Transition, error) { return RetryConflict(StatusBlocked) }, to: StatusResolvingConflict},
-		{name: "resume environment", make: func() (Transition, error) { return RequestEnvironmentResume(StatusBlocked) }, to: StatusEnvironmentResumePending},
 		{name: "recover workspace", make: func() (Transition, error) { return RecoverAnsweredWorkspace(StatusBlocked) }, to: StatusResumePending},
-		{name: "recover checks", make: func() (Transition, error) { return RequestChecksRecovery(StatusFailed) }, to: StatusChecksRecovery},
-		{name: "resume recovered checks", make: func() (Transition, error) {
-			decision, err := AwaitChecks(StatusChecksRecovery)
-			return decision.Transition, err
-		}, to: StatusAwaitingChecks},
-		{name: "recover publication", make: func() (Transition, error) { return RequestPublicationRecovery(StatusFailed) }, to: StatusPublicationRecovery},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -93,9 +86,6 @@ func TestRecoveryTransitions(t *testing.T) {
 }
 
 func TestRecoveryTransitionsRejectUnrelatedStatesAndTargets(t *testing.T) {
-	if _, err := RequestChecksRecovery(StatusRunning); err == nil {
-		t.Fatal("running Issue must not enter checks recovery")
-	}
 	if _, err := RetryConflict(StatusFailed); err == nil {
 		t.Fatal("failed Issue must not enter conflict retry")
 	}
@@ -110,12 +100,14 @@ func TestRecoveryTransitionsRejectUnrelatedStatesAndTargets(t *testing.T) {
 func TestResolveSuspensionUsesGenericActionsAndSavedStage(t *testing.T) {
 	tests := []struct {
 		action ResolutionAction
-		stage  Status
+		stage  ContinuationStage
 		want   Status
 	}{
-		{action: ResolutionResume, stage: StatusAwaitingChecks, want: StatusResumePending},
-		{action: ResolutionRetryStage, stage: StatusAwaitingChecks, want: StatusAwaitingChecks},
-		{action: ResolutionRetryStage, stage: StatusRunning, want: StatusResumePending},
+		{action: ResolutionResume, stage: ContinuationStageChecks, want: StatusResumePending},
+		{action: ResolutionRetryStage, stage: ContinuationStageChecks, want: StatusAwaitingChecks},
+		{action: ResolutionRetryStage, stage: ContinuationStagePublish, want: StatusResumePending},
+		{action: ResolutionRetryStage, stage: ContinuationStageResume, want: StatusResumePending},
+		{action: ResolutionRetryStage, stage: ContinuationStageConflict, want: StatusResolvingConflict},
 		{action: ResolutionAdoptPR, want: StatusCompleted},
 		{action: ResolutionCancel, want: StatusBlocked},
 	}
@@ -125,7 +117,7 @@ func TestResolveSuspensionUsesGenericActionsAndSavedStage(t *testing.T) {
 			t.Fatalf("action=%s stage=%s transition=%+v err=%v", test.action, test.stage, transition, err)
 		}
 	}
-	if _, err := ResolveSuspension(StatusRunning, ResolutionResume, StatusRunning); err == nil {
+	if _, err := ResolveSuspension(StatusRunning, ResolutionResume, ContinuationStageResume); err == nil {
 		t.Fatal("running Issue accepted terminal suspension resolution")
 	}
 }
@@ -140,7 +132,6 @@ func TestExecutionTransitions(t *testing.T) {
 		{name: "confirm claim", make: func() (Transition, error) { return ConfirmClaim(StatusClaiming) }, from: StatusClaiming, to: StatusClaimed},
 		{name: "start claimed worker", make: func() (Transition, error) { return StartClaimedWorker(StatusClaimed) }, from: StatusClaimed, to: StatusRunning},
 		{name: "start answered resume", make: func() (Transition, error) { return StartAnsweredResume(StatusResumePending) }, from: StatusResumePending, to: StatusRunning},
-		{name: "start environment resume", make: func() (Transition, error) { return StartEnvironmentResume(StatusEnvironmentResumePending) }, from: StatusEnvironmentResumePending, to: StatusRunning},
 		{name: "start retry", make: func() (Transition, error) { return StartRetry(StatusRetryWait) }, from: StatusRetryWait, to: StatusRunning},
 		{name: "acquire answered claim", make: func() (Transition, error) { return AcquireAnsweredClaim(StatusAnswerClaimWaiting) }, from: StatusAnswerClaimWaiting, to: StatusResumePending},
 		{name: "interrupt claim", make: func() (Transition, error) { return InterruptExecution(StatusClaiming) }, from: StatusClaiming, to: StatusRetryWait},
@@ -216,24 +207,6 @@ func TestOutcomeDecisionsRejectIncompleteOrUnrelatedInput(t *testing.T) {
 	}
 }
 
-func TestPublicationRecoveryFailureDecision(t *testing.T) {
-	retryAt := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
-	retry, err := RecordPublicationRecoveryFailure(StatusPublicationRecovery, "formatter unavailable", "issue", false, retryAt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retry.Outcome.Transition.To != StatusPublicationRecovery || retry.RetryAt == nil || !retry.RetryAt.Equal(retryAt) || retry.RecoveryStatus != PublicationRecoveryStatusRetryWait {
-		t.Fatalf("unexpected retry decision: %+v", retry)
-	}
-	terminal, err := RecordPublicationRecoveryFailure(StatusPublicationRecovery, "unsafe path", "issue", true, time.Time{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if terminal.Outcome.Transition.To != StatusFailed || terminal.RetryAt != nil || terminal.Outcome.GitHubSync != GitHubSyncFailed || terminal.RecoveryStatus != PublicationRecoveryStatusFailed {
-		t.Fatalf("unexpected terminal decision: %+v", terminal)
-	}
-}
-
 func TestReconcileObservationTransitions(t *testing.T) {
 	tests := []struct{ from, to Status }{
 		{from: StatusRunning, to: StatusRetryWait},
@@ -264,7 +237,6 @@ func TestStatusOperationalPredicates(t *testing.T) {
 		{status: StatusRunning, occupiesSlot: true, webhookRoutable: true},
 		{status: StatusRetryWait, capabilityRecheck: true, webhookRoutable: true},
 		{status: StatusNeedsInput, webhookTerminal: true, webhookRoutable: true},
-		{status: StatusPublicationRecovery},
 		{status: StatusCompleted, webhookTerminal: true},
 	}
 	for _, test := range tests {
@@ -299,7 +271,6 @@ func TestStatusSchedulingPredicates(t *testing.T) {
 		{status: StatusNeedsInput, retainsLogs: true, ineligible: true, usesSlot: true},
 		{status: StatusAwaitingChecks, pending: true, retainsLogs: true, preventsIdle: true, blocksPRQueue: true},
 		{status: StatusAwaitingMerge, pending: true, retainsLogs: true, preventsIdle: true},
-		{status: StatusPublicationRecovery, pending: true, retainsLogs: true, preventsIdle: true},
 		{status: StatusCompleted, ineligible: true, usesSlot: true},
 	}
 	for _, test := range tests {

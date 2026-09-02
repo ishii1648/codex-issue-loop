@@ -429,6 +429,89 @@ func (c AssignmentController) Rollback(ctx context.Context, repoPath string, exp
 	return c.switchTo(ctx, repoPath, *assignment.Previous, expectedGeneration, true, false)
 }
 
+func (c AssignmentController) RetryRollback(ctx context.Context, repoPath string) (AssignmentReport, error) {
+	lock, err := AcquireLock(RuntimePaths(c.Layout.Root).Lock)
+	if err != nil {
+		return AssignmentReport{}, err
+	}
+	defer lock.Close()
+	cfg, _, err := c.loadAssignmentSet()
+	if err != nil {
+		return AssignmentReport{}, err
+	}
+	entry, err := (registry.Store{Path: c.Layout.RegistryPath}).Resolve(repoPath, "")
+	if err != nil {
+		return AssignmentReport{}, err
+	}
+	current, ok := cfg.Assignments[entry.RepoID]
+	if !ok {
+		return AssignmentReport{}, errors.New("repository has no initialized assignment")
+	}
+	txPath := c.Layout.DeliveryAssignmentTransactionPath(entry.RepoID)
+	tx, err := LoadAssignmentTransaction(txPath)
+	if err != nil {
+		return AssignmentReport{}, err
+	}
+	if tx.RepositoryID != entry.RepoID || tx.Phase != AssignmentRollbackFailed || tx.Result != "rollback_failed" {
+		return AssignmentReport{}, errors.New("assignment rollback retry requires the exact active rollback_failed transaction")
+	}
+	if current.Generation != tx.ExpectedGeneration || current.AssignmentRef != tx.Current {
+		return AssignmentReport{}, errors.New("assignment rollback retry no longer matches the committed assignment")
+	}
+	fencePath := c.Layout.DeliveryAssignmentFencePath(entry.RepoID)
+	fence, err := LoadMaintenance(fencePath)
+	if err != nil {
+		return AssignmentReport{}, fmt.Errorf("load retained assignment fence: %w", err)
+	}
+	if fence.Generation != fmt.Sprintf("assignment-%d", tx.TargetGeneration) || fence.Desired.Version != tx.Desired.Version || fence.Desired.Commit != tx.Desired.Commit {
+		return AssignmentReport{}, errors.New("retained assignment fence does not match the rollback_failed transaction")
+	}
+	manager := launchd.Manager{Layout: c.Layout, Launchctl: entry.Commands["launchctl"]}
+	status, err := manager.Status(ctx, entry)
+	if err != nil {
+		return AssignmentReport{}, err
+	}
+	if status.Loaded != tx.WasLoaded {
+		return AssignmentReport{}, errors.New("repository loaded state changed since the failed assignment")
+	}
+	if status.Loaded {
+		if err := manager.Stop(ctx, entry); err != nil {
+			return AssignmentReport{}, err
+		}
+	}
+	if err := VerifySlot(current.AssignmentRef); err != nil {
+		return AssignmentReport{}, fmt.Errorf("verify rollback assignment slot: %w", err)
+	}
+	if err := manager.WritePlist(entry, current.Slot); err != nil {
+		return AssignmentReport{}, err
+	}
+	if tx.WasLoaded {
+		if err := manager.Start(ctx, entry); err != nil {
+			return AssignmentReport{}, err
+		}
+	}
+	if err := c.health(ctx, entry, current.AssignmentRef, tx.WasLoaded); err != nil {
+		tx.Reason = "assignment rollback retry health failed: " + err.Error()
+		_ = SaveAssignmentTransaction(txPath, tx)
+		return c.reportWithTransaction(ctx, entry, current, tx, errors.New(tx.Reason))
+	}
+	if err := ClearMaintenance(fencePath); err != nil {
+		return AssignmentReport{}, err
+	}
+	if err := c.wake(entry, "assignment-rollback-retry-cleared"); err != nil {
+		return AssignmentReport{}, err
+	}
+	tx.Phase = AssignmentRolledBack
+	tx.Result = "rolled_back"
+	tx.Reason = ""
+	if err := SaveAssignmentTransaction(txPath, tx); err != nil {
+		return AssignmentReport{}, err
+	}
+	report, err := c.assignmentReport(ctx, entry, current)
+	report.Result = "rolled_back"
+	return report, err
+}
+
 func (c AssignmentController) switchTo(ctx context.Context, repoPath string, desired AssignmentRef, expectedGeneration uint64, rollback, retryRetainedFence bool) (AssignmentReport, error) {
 	lock, err := AcquireLock(RuntimePaths(c.Layout.Root).Lock)
 	if err != nil {
@@ -819,6 +902,19 @@ func (c AssignmentController) health(ctx context.Context, entry registry.Entry, 
 	protocol, err := c.assignmentProtocol(ctx, ref.Slot, ref)
 	if err != nil {
 		return err
+	}
+	if !wasLoaded {
+		snapshot, err := (state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}).Load()
+		if err != nil {
+			return fmt.Errorf("validate stopped repository canonical snapshot: %w", err)
+		}
+		if snapshot.Supervisor.State != state.SupervisorStateStopped {
+			return fmt.Errorf("stopped assignment requires supervisor state stopped, got %s", snapshot.Supervisor.State)
+		}
+		if snapshotHasWorker(snapshot) {
+			return errors.New("stopped assignment canonical snapshot still owns a worker process")
+		}
+		return nil
 	}
 	doctorArgs := []string{"doctor", "--repo", entry.RepoPath}
 	if protocol >= 1 {

@@ -26,8 +26,8 @@ func captureContinuationCheckpoint(issue *Issue, lease ExecutionLease, now time.
 		checkpoint.HeadSHA = issue.HeadSHA
 		checkpoint.PullRequestURL = issue.PullRequestURL
 		checkpoint.PullRequestNumber = issue.PullRequestNumber
-		if checkpoint.Stage == issuedomain.StatusUnset || checkpoint.Stage.Terminal() {
-			checkpoint.Stage = issue.Status
+		if checkpoint.Stage.Validate() != nil {
+			checkpoint.Stage = issuedomain.ContinuationStageForStatus(issue.Status)
 		}
 		return
 	}
@@ -42,12 +42,14 @@ func captureContinuationCheckpoint(issue *Issue, lease ExecutionLease, now time.
 		HeadSHA:           issue.HeadSHA,
 		PullRequestURL:    issue.PullRequestURL,
 		PullRequestNumber: issue.PullRequestNumber,
-		Stage:             issue.Status,
+		Stage:             issuedomain.ContinuationStageForStatus(issue.Status),
 	}
 	issue.ResourcePark = checkpoint
 }
 
-func normalizeLifecycleBoundaries(snapshot *Snapshot, now time.Time) {
+// finalizeLifecycleBoundaries enforces the generic lease/checkpoint/suspension
+// split after a transaction's domain transition and outcome fields are set.
+func finalizeLifecycleBoundaries(snapshot *Snapshot, now time.Time) {
 	if snapshot == nil {
 		return
 	}
@@ -56,7 +58,6 @@ func normalizeLifecycleBoundaries(snapshot *Snapshot, now time.Time) {
 			continue
 		}
 		if !item.Status.Terminal() {
-			resolveExecutingSuspension(item, now)
 			continue
 		}
 		if item.Lease != nil {
@@ -70,31 +71,16 @@ func normalizeLifecycleBoundaries(snapshot *Snapshot, now time.Time) {
 			item.Lease = nil
 		}
 		if item.Status == issuedomain.StatusCompleted {
-			item.ResourcePark = nil
-			item.Suspension = nil
+			pendingAdoptionSync := item.GitHubSync == issuedomain.GitHubSyncDone && item.Suspension != nil &&
+				item.Suspension.Status == issuedomain.SuspensionResolved && item.Suspension.Resolution == issuedomain.ResolutionAdoptPR
+			if !pendingAdoptionSync {
+				item.ResourcePark = nil
+				item.Suspension = nil
+			}
 			continue
 		}
 		ensureTerminalSuspension(item, now)
 	}
-}
-
-// resolveExecutingSuspension keeps the v5 boundary compatible with one-release
-// transition callers that already reacquired an ExecutionLease before changing
-// lifecycle state. A quarantined suspension is never inferred as resolved.
-func resolveExecutingSuspension(issue *Issue, now time.Time) {
-	if issue == nil || issue.Lease == nil || issue.Suspension == nil || issue.Suspension.Status != issuedomain.SuspensionActive {
-		return
-	}
-	action := issuedomain.ResolutionRetryStage
-	if issue.Status == issuedomain.StatusResumePending || issue.Status == issuedomain.StatusEnvironmentResumePending {
-		action = issuedomain.ResolutionResume
-	}
-	if !containsResolutionAction(issue.Suspension.AllowedActions, action) {
-		return
-	}
-	issue.Suspension.Status = issuedomain.SuspensionResolved
-	issue.Suspension.Resolution = action
-	issue.Suspension.ResolvedAt = now.UTC()
 }
 
 func canonicalizeCheckpointLease(lease *ExecutionLease) {
@@ -122,14 +108,11 @@ func ensureTerminalSuspension(issue *Issue, now time.Time) {
 		return
 	}
 	reasonCode, recoverability := "terminal", issuedomain.RecoverabilityOperator
+	if strings.TrimSpace(issue.FailureKind) != "" {
+		reasonCode = strings.TrimSpace(issue.FailureKind)
+	}
 	missing := []string{}
 	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}
-	if issue.BlockedCause != nil {
-		reasonCode = strings.TrimSpace(issue.BlockedCause.Kind)
-		if issue.BlockedCause.Resumable {
-			actions = append(actions, issuedomain.ResolutionResume)
-		}
-	}
 	if issue.Worktree == "" || issue.Workspace == nil {
 		missing = append(missing, "workspace")
 	}
@@ -137,7 +120,21 @@ func ensureTerminalSuspension(issue *Issue, now time.Time) {
 		actions = append(actions, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionRetryStage)
 	}
 	if issue.ResourcePark != nil {
-		actions = append(actions, issuedomain.ResolutionResume)
+		if issue.ResourcePark.Kind != "" {
+			reasonCode = issue.ResourcePark.Kind
+		}
+		switch issue.ResourcePark.Stage {
+		case issuedomain.ContinuationStagePublish, issuedomain.ContinuationStageChecks, issuedomain.ContinuationStageConflict:
+			actions = append(actions, issuedomain.ResolutionRetryStage)
+		default:
+			actions = append(actions, issuedomain.ResolutionResume)
+		}
+		if (issue.ResourcePark.Stage == issuedomain.ContinuationStageResume || issue.ResourcePark.Stage == issuedomain.ContinuationStagePublish) &&
+			strings.TrimSpace(issue.ResourcePark.WorktreeSHA256) == "" {
+			missing = append(missing, "worktree_sha256")
+			recoverability = issuedomain.RecoverabilityAmbiguous
+			actions = []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}
+		}
 	}
 	if len(missing) > 0 && issue.Worktree == "" {
 		recoverability = issuedomain.RecoverabilityAmbiguous
@@ -145,9 +142,6 @@ func ensureTerminalSuspension(issue *Issue, now time.Time) {
 	sort.Slice(actions, func(i, j int) bool { return actions[i] < actions[j] })
 	actions = uniqueResolutionActions(actions)
 	reason := strings.TrimSpace(issue.LastError)
-	if issue.BlockedCause != nil && strings.TrimSpace(issue.BlockedCause.Reason) != "" {
-		reason = strings.TrimSpace(issue.BlockedCause.Reason)
-	}
 	if reason == "" {
 		reason = "terminal lifecycle boundary"
 	}
@@ -160,7 +154,7 @@ func ensureTerminalSuspension(issue *Issue, now time.Time) {
 		status = issuedomain.SuspensionQuarantined
 	}
 	issue.Suspension = &Suspension{
-		ID: NewID("suspension"), Status: status,
+		ID: NewID("suspension"), Origin: "runtime", Status: status,
 		ReasonCode: reasonCode, Recoverability: recoverability, Reason: reason,
 		MissingEvidence: missing, AllowedActions: actions, CheckpointID: checkpointID,
 		SuspendedAt: now.UTC(),
@@ -175,15 +169,6 @@ func uniqueResolutionActions(actions []issuedomain.ResolutionAction) []issuedoma
 		}
 	}
 	return result
-}
-
-func containsResolutionAction(actions []issuedomain.ResolutionAction, target issuedomain.ResolutionAction) bool {
-	for _, action := range actions {
-		if action == target {
-			return true
-		}
-	}
-	return false
 }
 
 func cloneWorkspace(workspace *WorkerWorkspace) *WorkerWorkspace {

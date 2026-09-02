@@ -169,6 +169,49 @@ func TestV5MigrationQuarantinesOnlyAmbiguousExecutingIssue(t *testing.T) {
 	}
 }
 
+func TestV5MigrationConvertsLegacyScenarioStatusesToTypedSuspensions(t *testing.T) {
+	now := "2026-09-02T00:00:00Z"
+	issues := map[string]any{}
+	for number, status := range []string{"environment_resume_pending", "publication_recovery_pending", "pull_request_checks_recovery_pending"} {
+		key := fmt.Sprint(number + 1)
+		issues[key] = map[string]any{
+			"number": number + 1, "status": status, "run_id": "run_" + key,
+			"last_error": "legacy scenario boundary", "updated_at": now,
+			"worktree": "/sanitized/worktrees/" + key, "branch": "codex/issue-" + key,
+			"workspace": map[string]any{"path": "/sanitized/worktrees/" + key, "branch": "codex/issue-" + key, "repo_id": "repo_scenarios", "repository": "owner/repo", "git_common_dir": "/sanitized/repository/.git", "main_checkout": "/sanitized/repository", "captured_at": now},
+		}
+	}
+	root := map[string]any{
+		"version": 4, "semantic_contract_version": 1, "repo_id": "repo_scenarios", "repo_path": "/sanitized/repository",
+		"state_revision": 1, "supervisor": map[string]any{"state": "stopped", "updated_at": now},
+		"issues": issues, "pending_requests": map[string]any{},
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	encoded, _ := json.Marshal(root)
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateState(path, journal{StartedAt: time.Date(2026, 9, 2, 1, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot state.Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for key, item := range snapshot.Issues {
+		if item.Status != issuedomain.StatusBlocked || item.Suspension == nil || item.Lease != nil {
+			t.Fatalf("Issue %s retained legacy scenario runtime: %+v", key, item)
+		}
+	}
+}
+
 func migratedRecoveryCounts(t *testing.T, data []byte) (legacyCount, terminalLeases, answerCount, generationTotal int) {
 	t.Helper()
 	var object struct {

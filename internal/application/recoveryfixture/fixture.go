@@ -23,6 +23,7 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
@@ -541,6 +542,9 @@ func (s *sanitizer) string(value, key string) string {
 	}
 	if key == "comments" {
 		return sanitizeComment(value, s)
+	}
+	if key == "stage" && issuedomain.ContinuationStage(value).Validate() == nil {
+		return value
 	}
 	if isIdentityKey(key) && idValuePattern.MatchString(value) {
 		return s.replace("id", value, identityPrefix(value))

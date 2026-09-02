@@ -80,8 +80,8 @@ type CompletionDecision struct {
 
 func Complete(from Status, pullRequestURL string) (CompletionDecision, error) {
 	transition, err := newAllowedTransition("complete", from, StatusCompleted,
-		StatusRunning, StatusAwaitingChecks, StatusAwaitingMerge, StatusPublicationRecovery,
-		StatusBlocked, StatusFailed)
+		StatusRunning, StatusAwaitingChecks, StatusAwaitingMerge,
+		StatusResumePending, StatusBlocked, StatusFailed)
 	if err != nil {
 		return CompletionDecision{}, err
 	}
@@ -111,7 +111,7 @@ type ChecksDecision struct {
 
 func AwaitChecks(from Status) (ChecksDecision, error) {
 	transition, err := newAllowedTransition("await_pull_request_checks", from, StatusAwaitingChecks,
-		StatusRunning, StatusResolvingConflict, StatusPublicationRecovery, StatusChecksRecovery)
+		StatusRunning, StatusResumePending, StatusResolvingConflict)
 	return ChecksDecision{Transition: transition}, err
 }
 
@@ -146,20 +146,8 @@ func RetryConflict(from Status) (Transition, error) {
 	return newAllowedTransition("retry_conflict", from, StatusResolvingConflict, StatusBlocked)
 }
 
-func RequestEnvironmentResume(from Status) (Transition, error) {
-	return newAllowedTransition("request_environment_resume", from, StatusEnvironmentResumePending, StatusBlocked)
-}
-
 func RecoverAnsweredWorkspace(from Status) (Transition, error) {
 	return newAllowedTransition("recover_answered_workspace", from, StatusResumePending, StatusBlocked)
-}
-
-func RequestChecksRecovery(from Status) (Transition, error) {
-	return newAllowedTransition("request_pull_request_checks_recovery", from, StatusChecksRecovery, StatusFailed)
-}
-
-func RequestPublicationRecovery(from Status) (Transition, error) {
-	return newAllowedTransition("request_publication_recovery", from, StatusPublicationRecovery, StatusFailed)
 }
 
 func ConfirmClaim(from Status) (Transition, error) {
@@ -172,10 +160,6 @@ func StartClaimedWorker(from Status) (Transition, error) {
 
 func StartAnsweredResume(from Status) (Transition, error) {
 	return newAllowedTransition("start_answered_resume", from, StatusRunning, StatusResumePending)
-}
-
-func StartEnvironmentResume(from Status) (Transition, error) {
-	return newAllowedTransition("start_environment_resume", from, StatusRunning, StatusEnvironmentResumePending)
 }
 
 func StartRetry(from Status) (Transition, error) {
@@ -243,11 +227,11 @@ func Fail(from Status, reason, failureKind string, blocked bool) (OutcomeDecisio
 	}
 	return newOutcomeDecision(name, from, target, reason, failureKind, githubSync,
 		StatusUnset, StatusClaimed, StatusRunning, StatusAwaitingChecks, StatusAwaitingMerge,
-		StatusResolvingConflict, StatusPublicationRecovery, StatusRetryWait)
+		StatusResumePending, StatusResolvingConflict, StatusRetryWait)
 }
 
-func BlockWorkerEnvironment(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("block_worker_environment", from, StatusBlocked, reason, failureKind, GitHubSyncBlocked, StatusRunning)
+func SuspendWorker(from Status, reason, failureKind string) (OutcomeDecision, error) {
+	return newOutcomeDecision("suspend_worker", from, StatusBlocked, reason, failureKind, GitHubSyncBlocked, StatusRunning)
 }
 
 func StartConflictAttempt(from Status) (Transition, error) {
@@ -256,35 +240,6 @@ func StartConflictAttempt(from Status) (Transition, error) {
 
 func ScheduleConflictRetry(from Status) (Transition, error) {
 	return newAllowedTransition("schedule_conflict_retry", from, StatusResolvingConflict, StatusResolvingConflict)
-}
-
-type PublicationRecoveryFailureDecision struct {
-	Outcome        OutcomeDecision
-	RetryAt        *time.Time
-	RecoveryStatus PublicationRecoveryStatus
-}
-
-func RecordPublicationRecoveryFailure(from Status, reason, failureKind string, terminal bool, retryAt time.Time) (PublicationRecoveryFailureDecision, error) {
-	target, githubSync, recoveryStatus := StatusPublicationRecovery, GitHubSyncNone, PublicationRecoveryStatusRetryWait
-	if terminal {
-		target, githubSync, recoveryStatus = StatusFailed, GitHubSyncFailed, PublicationRecoveryStatusFailed
-	} else if retryAt.IsZero() {
-		return PublicationRecoveryFailureDecision{}, fmt.Errorf("non-terminal publication recovery failure requires retry time")
-	}
-	outcome, err := newOutcomeDecision("record_publication_recovery_failure", from, target, reason, failureKind, githubSync, StatusPublicationRecovery)
-	if err != nil {
-		return PublicationRecoveryFailureDecision{}, err
-	}
-	decision := PublicationRecoveryFailureDecision{Outcome: outcome, RecoveryStatus: recoveryStatus}
-	if !terminal {
-		retry := retryAt
-		decision.RetryAt = &retry
-	}
-	return decision, nil
-}
-
-func RefusePublicationRecovery(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("refuse_publication_recovery", from, StatusFailed, reason, failureKind, GitHubSyncFailed, StatusPublicationRecovery)
 }
 
 // ReconcileObservation accepts same-state transitions so repeated
@@ -301,8 +256,7 @@ func ReconcileObservation(from, to Status) (Transition, error) {
 	case StatusCompleted, StatusFailed, StatusBlocked:
 		return newAllowedTransition("reconcile_observation", from, to,
 			StatusClaiming, StatusClaimed, StatusRunning, StatusAnswerClaimWaiting,
-			StatusResumePending, StatusEnvironmentResumePending, StatusPublicationRecovery,
-			StatusChecksRecovery, StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks,
+			StatusResumePending, StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks,
 			StatusAwaitingMerge, StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted)
 	default:
 		return Transition{}, fmt.Errorf("reconciliation does not allow status %q to converge to %q", from, to)

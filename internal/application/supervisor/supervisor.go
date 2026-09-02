@@ -487,12 +487,6 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	if current.Status == issuedomain.StatusResolvingConflict {
 		return l.processConflictRecovery(ctx, current)
 	}
-	if current.Status == issuedomain.StatusPublicationRecovery {
-		return l.processPublicationRecovery(ctx, current)
-	}
-	if current.Status == issuedomain.StatusChecksRecovery {
-		return failure.Wrap(failure.Issue, "route Pull Request checks recovery", fmt.Errorf("Issue #%d checks recovery has no pending GitHub synchronization", current.Number))
-	}
 	issue, err := l.getIssue(ctx, current.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh existing GitHub Issue", err)
@@ -504,6 +498,9 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		return l.reacquireAnsweredClaim(ctx, issue, current)
 	}
 	if current.Status == issuedomain.StatusResumePending {
+		if current.ResourcePark != nil && current.ResourcePark.Stage == issuedomain.ContinuationStagePublish {
+			return l.processPublicationCheckpoint(ctx, current)
+		}
 		resumeTransition, transitionErr := issuedomain.StartAnsweredResume(current.Status)
 		if transitionErr != nil {
 			return failure.Wrap(failure.Issue, "decide answered resume start", transitionErr)
@@ -529,7 +526,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 				return err
 			}
 			item.RetryAfter = nil
-			if item.ResourcePark != nil && item.ResourcePark.Kind == state.ResourceParkKindNeedsInput && item.ResourcePark.Status == issuedomain.ResourceParkStatusResuming {
+			if item.ResourcePark != nil && item.ResourcePark.Status == issuedomain.ResourceParkStatusResuming {
 				item.ResourcePark.Status = issuedomain.ResourceParkStatusResumed
 			}
 			item.UpdatedAt = l.now()
@@ -540,7 +537,12 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		workerCfg := l.Config
 		workerCfg.RepoPath = current.Worktree
-		instruction := "Continue after the user's recorded answer. Implement the decision, verify the work, and return the schema-conforming result."
+		instruction := "Continue from the operator-resolved checkpoint in the existing worktree, preserve valid work and prior metadata, rerun the blocked verification, and return the schema-conforming result."
+		if current.ResourcePark != nil && current.ResourcePark.Kind == state.ResourceParkKindNeedsInput {
+			instruction = "Continue after the user's recorded answer. Implement the decision, verify the work, and return the schema-conforming result."
+		} else if current.Suspension != nil && current.Suspension.Reason != "" {
+			instruction += " Previous block: " + current.Suspension.Reason
+		}
 		var result worker.Result
 		if l.canResume(current) {
 			result, err = l.resumeWorker(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current))
@@ -552,58 +554,6 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
-	if current.Status == issuedomain.StatusEnvironmentResumePending {
-		resumeTransition, transitionErr := issuedomain.StartEnvironmentResume(current.Status)
-		if transitionErr != nil {
-			return failure.Wrap(failure.Issue, "decide environment resume start", transitionErr)
-		}
-		if err := state.ApplyIssueTransition(&current, resumeTransition); err != nil {
-			return err
-		}
-		current.RetryAfter = nil
-		_, err = l.Store.Update("worker_started", current.Number, current.RunID, map[string]string{"mode": "environment_block_resume"}, func(s *state.Snapshot) error {
-			item := s.Issues[strconv.Itoa(current.Number)]
-			if item == nil || item.Status != issuedomain.StatusEnvironmentResumePending || item.GitHubSync != issuedomain.GitHubSyncNone {
-				return fmt.Errorf("Issue #%d environment resume is no longer pending", current.Number)
-			}
-			if err := state.ApplyIssueTransition(item, resumeTransition); err != nil {
-				return err
-			}
-			item.RetryAfter = nil
-			if item.EnvironmentResume != nil {
-				item.EnvironmentResume.Status = issuedomain.EnvironmentResumeStatusRunning
-			}
-			if item.ResourcePark != nil && item.ResourcePark.Status == issuedomain.ResourceParkStatusResuming {
-				item.ResourcePark.Status = issuedomain.ResourceParkStatusResumed
-			}
-			item.UpdatedAt = l.now()
-			return nil
-		})
-		if err != nil {
-			return failure.Wrap(failure.Supervisor, "persist environment-blocked resume", err)
-		}
-		workerCfg := l.Config
-		workerCfg.RepoPath = current.Worktree
-		instruction := "The operator confirmed that the external environment prerequisite is resolved. Continue in the existing worktree, preserve all valid dirty changes and prior metadata, rerun the blocked verification, and return the schema-conforming result."
-		previousReason := ""
-		if current.EnvironmentResume != nil {
-			previousReason = current.EnvironmentResume.PreviousReason
-		}
-		if previousReason == "" && current.BlockedCause != nil {
-			previousReason = current.BlockedCause.Reason
-		}
-		if previousReason != "" {
-			instruction += " Previous environment block: " + previousReason
-		}
-		var result worker.Result
-		if l.canResume(current) {
-			result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
-		} else {
-			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
-		}
-		return l.handleResult(ctx, issue, current, result, err)
-	}
-
 	retryTransition, transitionErr := issuedomain.StartRetry(current.Status)
 	if transitionErr != nil {
 		return failure.Wrap(failure.Issue, "decide retry start", transitionErr)
@@ -724,8 +674,6 @@ var errAnsweredClaimWaiting = errors.New("answered needs-input claim is still wa
 var errWorkerResultSuperseded = errors.New("worker result superseded by authoritative state")
 
 func deadlinePointer(value time.Time) *time.Time { return &value }
-
-var errAnsweredWorkspaceSyncConverged = errors.New("answered workspace recovery GitHub synchronization already converged")
 
 func (l *Loop) issueState(number int) (state.Issue, error) {
 	snapshot, err := l.Store.Load()

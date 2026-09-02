@@ -22,29 +22,25 @@ const (
 )
 
 const (
-	StatusUnset                    Status = ""
-	StatusClaiming                 Status = "claiming"
-	StatusClaimed                  Status = "claimed"
-	StatusRunning                  Status = "running"
-	StatusAnswerClaimWaiting       Status = "answer_claim_waiting"
-	StatusResumePending            Status = "resume_pending"
-	StatusEnvironmentResumePending Status = "environment_resume_pending"
-	StatusPublicationRecovery      Status = "publication_recovery_pending"
-	StatusChecksRecovery           Status = "pull_request_checks_recovery_pending"
-	StatusRetryWait                Status = "retry_wait"
-	StatusNeedsInput               Status = "needs_input"
-	StatusAwaitingChecks           Status = "awaiting_checks"
-	StatusAwaitingMerge            Status = "awaiting_merge"
-	StatusResolvingConflict        Status = "resolving_conflict"
-	StatusBlocked                  Status = "blocked"
-	StatusFailed                   Status = "failed"
-	StatusCompleted                Status = "completed"
+	StatusUnset              Status = ""
+	StatusClaiming           Status = "claiming"
+	StatusClaimed            Status = "claimed"
+	StatusRunning            Status = "running"
+	StatusAnswerClaimWaiting Status = "answer_claim_waiting"
+	StatusResumePending      Status = "resume_pending"
+	StatusRetryWait          Status = "retry_wait"
+	StatusNeedsInput         Status = "needs_input"
+	StatusAwaitingChecks     Status = "awaiting_checks"
+	StatusAwaitingMerge      Status = "awaiting_merge"
+	StatusResolvingConflict  Status = "resolving_conflict"
+	StatusBlocked            Status = "blocked"
+	StatusFailed             Status = "failed"
+	StatusCompleted          Status = "completed"
 )
 
 var allStatuses = [...]Status{
 	StatusUnset, StatusClaiming, StatusClaimed, StatusRunning,
-	StatusAnswerClaimWaiting, StatusResumePending, StatusEnvironmentResumePending,
-	StatusPublicationRecovery, StatusChecksRecovery, StatusRetryWait,
+	StatusAnswerClaimWaiting, StatusResumePending, StatusRetryWait,
 	StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 	StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted,
 }
@@ -94,7 +90,6 @@ func (s Status) WorktreeRetentionClass() WorktreeRetentionClass {
 func (s Status) RequiresWorkspaceProvenance() bool {
 	switch s {
 	case StatusClaimed, StatusRunning, StatusAnswerClaimWaiting, StatusResumePending,
-		StatusEnvironmentResumePending, StatusPublicationRecovery, StatusChecksRecovery,
 		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 		StatusResolvingConflict:
 		return true
@@ -107,8 +102,7 @@ func (s Status) RequiresWorkspaceProvenance() bool {
 // do not consume a bounded worker slot.
 func (s Status) OccupiesWorkerSlot() bool {
 	switch s {
-	case StatusClaiming, StatusClaimed, StatusRunning, StatusResumePending,
-		StatusEnvironmentResumePending, StatusResolvingConflict:
+	case StatusClaiming, StatusClaimed, StatusRunning, StatusResumePending, StatusResolvingConflict:
 		return true
 	default:
 		return false
@@ -121,8 +115,7 @@ func (s Status) RequiresExecutionLease() bool {
 
 func (s Status) RequiresCapabilityRecheck() bool {
 	switch s {
-	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending,
-		StatusEnvironmentResumePending, StatusRetryWait:
+	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending, StatusRetryWait:
 		return true
 	default:
 		return false
@@ -136,7 +129,7 @@ func (s Status) TerminalForWebhook() bool {
 func (s Status) WebhookRoutable() bool {
 	switch s {
 	case StatusClaiming, StatusClaimed, StatusRunning, StatusAnswerClaimWaiting,
-		StatusResumePending, StatusEnvironmentResumePending, StatusChecksRecovery,
+		StatusResumePending,
 		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 		StatusResolvingConflict:
 		return true
@@ -150,7 +143,6 @@ func (s Status) WebhookRoutable() bool {
 func (s Status) PendingDispatch() bool {
 	switch s {
 	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending,
-		StatusEnvironmentResumePending, StatusPublicationRecovery, StatusChecksRecovery,
 		StatusRetryWait, StatusAwaitingChecks, StatusAwaitingMerge, StatusResolvingConflict:
 		return true
 	default:
@@ -187,7 +179,7 @@ func (s Status) IneligibleForAdmission() bool {
 
 func (s Status) UsesWorkerSlot() bool {
 	switch s {
-	case StatusAwaitingChecks, StatusAwaitingMerge, StatusPublicationRecovery, StatusChecksRecovery:
+	case StatusAwaitingChecks, StatusAwaitingMerge:
 		return false
 	default:
 		return true

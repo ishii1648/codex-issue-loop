@@ -27,7 +27,6 @@ const (
 	RecoveryCodeGitHubIdentity          RecoveryPredicateCode = "RECOVERY_GITHUB_IDENTITY"
 	RecoveryCodeReplacementChecks       RecoveryPredicateCode = "RECOVERY_REPLACEMENT_CHECKS"
 	RecoveryCodeReadOnlyInvariant       RecoveryPredicateCode = "RECOVERY_READ_ONLY_INVARIANT"
-	RecoveryCodeBlockedCause            RecoveryPredicateCode = "RECOVERY_BLOCKED_CAUSE"
 	RecoveryCodeCapability              RecoveryPredicateCode = "RECOVERY_CAPABILITY"
 	RecoveryCodeWorkspace               RecoveryPredicateCode = "RECOVERY_WORKSPACE"
 	RecoveryCodeWorkspaceProvenance     RecoveryPredicateCode = "RECOVERY_WORKSPACE_PROVENANCE"

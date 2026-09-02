@@ -129,7 +129,11 @@ func validateSuspension(issue *Issue) error {
 	}
 	suspension := issue.Suspension
 	if issue.Status == issuedomain.StatusCompleted {
-		return fmt.Errorf("completed lifecycle retains a suspension")
+		pendingAdoptionSync := issue.GitHubSync == issuedomain.GitHubSyncDone && suspension.Status == issuedomain.SuspensionResolved &&
+			suspension.Resolution == issuedomain.ResolutionAdoptPR && issue.ResourcePark != nil && suspension.CheckpointID == issue.ResourcePark.ID
+		if !pendingAdoptionSync {
+			return fmt.Errorf("completed lifecycle retains a suspension outside pending adoption synchronization")
+		}
 	}
 	if !issue.Status.Terminal() && suspension.Status != issuedomain.SuspensionResolved {
 		return fmt.Errorf("active suspension is attached to executing lifecycle %q", issue.Status)
@@ -140,7 +144,7 @@ func validateSuspension(issue *Issue) error {
 	}
 	switch suspension.Status {
 	case issuedomain.SuspensionActive, issuedomain.SuspensionQuarantined:
-		if !suspension.ResolvedAt.IsZero() || suspension.Resolution != "" {
+		if !suspension.ResolvedAt.IsZero() || suspension.Resolution != issuedomain.ResolutionNone {
 			return fmt.Errorf("active suspension contains a resolution")
 		}
 	case issuedomain.SuspensionResolved:
@@ -184,26 +188,6 @@ func validateGitHubSyncSubstate(issue *Issue) error {
 		wantStatus = issuedomain.StatusBlocked
 	case issuedomain.GitHubSyncConflictRetry:
 		wantStatus = issuedomain.StatusResolvingConflict
-	case issuedomain.GitHubSyncEnvironmentResume:
-		wantStatus = issuedomain.StatusEnvironmentResumePending
-		if issue.EnvironmentResume == nil {
-			return fmt.Errorf("environment resume synchronization has no recovery substate")
-		}
-	case issuedomain.GitHubSyncPublicationRecovery:
-		wantStatus = issuedomain.StatusPublicationRecovery
-		if issue.PublicationRecovery == nil {
-			return fmt.Errorf("publication recovery synchronization has no recovery substate")
-		}
-	case issuedomain.GitHubSyncPullRequestChecksRecovery:
-		wantStatus = issuedomain.StatusChecksRecovery
-		if issue.PullRequestChecksRecovery == nil {
-			return fmt.Errorf("checks recovery synchronization has no recovery substate")
-		}
-	case issuedomain.GitHubSyncAnsweredWorkspaceRecovery:
-		wantStatus = issuedomain.StatusResumePending
-		if issue.AnsweredWorkspaceRecovery == nil {
-			return fmt.Errorf("answered workspace synchronization has no recovery substate")
-		}
 	case issuedomain.GitHubSyncIssueResolution:
 		if issue.Status.Terminal() || issue.Suspension == nil || issue.Suspension.Status != issuedomain.SuspensionResolved {
 			return fmt.Errorf("Issue resolution synchronization has no resolved executable suspension")

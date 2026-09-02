@@ -2,8 +2,10 @@ package supervisor
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,7 +122,6 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		// A fresh worker result supersedes any publisher provenance from an
 		// earlier worker attempt. A new publication failure is recorded below
 		// only if this completed result reaches that boundary again.
-		item.PublicationFailure = nil
 		if result.SessionID != "" {
 			item.SessionID = result.SessionID
 			backend := result.Identity.Backend
@@ -187,10 +188,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 				if errors.As(publishErr, &mismatch) {
 					return l.requestResourceCorrection(ctx, current, audit, publishErr.Error())
 				}
-				if provenanceErr := l.recordPublicationFailure(current, publishErr); provenanceErr != nil {
-					return provenanceErr
-				}
-				return l.schedulePublicationRetry(ctx, current, "publish completed work: "+publishErr.Error())
+				return l.schedulePublicationRetry(ctx, current, fmt.Errorf("publish completed work: %w", publishErr), result.Summary)
 			}
 			result.Git = &published
 		}
@@ -247,7 +245,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 				item.Lease == nil || item.Lease.Owner != owner || item.ConflictRecovery != nil {
 				return fmt.Errorf("Issue #%d no longer has a parkable needs-input worker boundary", issue.Number)
 			}
-			if err := state.ParkIssueLease(item, owner, parkID, parkedAt); err != nil {
+			if err := state.CaptureContinuationLease(item, owner, parkID, parkedAt); err != nil {
 				return err
 			}
 			item.ResourcePark.Kind = state.ResourceParkKindNeedsInput
@@ -281,7 +279,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		}
 		return l.scheduleRetry(ctx, current, reason)
 	case "blocked":
-		return l.blockWorkerEnvironment(ctx, issue.Number, result.Summary)
+		return l.suspendWorker(ctx, issue.Number, result.Summary)
 	default:
 		return l.scheduleRetry(ctx, current, "worker returned an unknown status")
 	}
@@ -318,10 +316,7 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 		if item == nil || item.Status != issuedomain.StatusResumePending || item.RunID != current.RunID || item.Lease == nil || current.Lease == nil || item.Lease.Owner != current.Lease.Owner {
 			return fmt.Errorf("Issue #%d answered continuation changed before rejection", current.Number)
 		}
-		recoveredPark := item.ResourcePark != nil && item.ResourcePark.Status == issuedomain.ResourceParkStatusResumed && item.AnsweredWorkspaceRecovery != nil &&
-			item.AnsweredWorkspaceRecovery.NewOwner == item.Lease.Owner && item.ResourcePark.ResumeOwner != nil &&
-			item.AnsweredWorkspaceRecovery.OldOwner == *item.ResourcePark.ResumeOwner
-		if item.ResourcePark == nil || item.ResourcePark.Kind != state.ResourceParkKindNeedsInput || (item.ResourcePark.Status != issuedomain.ResourceParkStatusResuming && !recoveredPark) {
+		if item.ResourcePark == nil || item.ResourcePark.Kind != state.ResourceParkKindNeedsInput || item.ResourcePark.Status != issuedomain.ResourceParkStatusResuming {
 			return fmt.Errorf("Issue #%d answered continuation park is inconsistent", current.Number)
 		}
 		item.ResourcePark.Status = issuedomain.ResourceParkStatusResumed
@@ -334,7 +329,9 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 		item.LastError = decision.LastError
 		item.FailureKind = decision.FailureKind
 		item.GitHubSync = decision.GitHubSync
-		item.BlockedCause = &state.BlockedCause{Origin: "supervisor", Kind: "answer_resume", Resumable: false, Reason: reason, BlockedAt: now}
+		item.Suspension = &state.Suspension{ID: state.NewID("suspension"), Origin: "supervisor", Status: issuedomain.SuspensionActive,
+			ReasonCode: "answer_resume", Recoverability: issuedomain.RecoverabilityNone, Reason: reason,
+			AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}, CheckpointID: item.ResourcePark.ID, SuspendedAt: now}
 		item.RetryAfter = nil
 		item.UpdatedAt = now
 		return nil
@@ -454,10 +451,9 @@ func (l *Loop) blockWorkerWorkspace(ctx context.Context, expected state.Issue, v
 		item.WorkerPID = 0
 		item.WorkerPGID = 0
 		item.RetryAfter = nil
-		item.BlockedCause = &state.BlockedCause{
-			Origin: "supervisor", Kind: "worker_workspace", Resumable: false,
-			Reason: reason, BlockedAt: l.now(),
-		}
+		item.Suspension = &state.Suspension{ID: state.NewID("suspension"), Origin: "supervisor", Status: issuedomain.SuspensionActive,
+			ReasonCode: "worker_workspace", Recoverability: issuedomain.RecoverabilityNone, Reason: reason,
+			AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}, CheckpointID: item.ResourcePark.ID, SuspendedAt: l.now()}
 		item.UpdatedAt = l.now()
 		return nil
 	})
@@ -639,10 +635,17 @@ func (l *Loop) scheduleRetry(ctx context.Context, issue state.Issue, reason stri
 // path may start a fresh validation run; at the terminal boundary failIssue
 // retains typed recoverable provenance and the completed session for the
 // operator-only publication recovery transaction.
-func (l *Loop) schedulePublicationRetry(ctx context.Context, issue state.Issue, reason string) error {
+func (l *Loop) schedulePublicationRetry(ctx context.Context, issue state.Issue, cause error, summary string) error {
+	reason := cause.Error()
 	budget := issuedomain.PublicationRetryBudget{Attempts: issue.Attempts, MaxAttempts: l.Config.Queue.MaxAttempts}
 	if !budget.Allowed() {
-		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "worker retry limit reached", errors.New(reason)), false)
+		_, encoded, loadErr := worker.LoadLatestCompletedResult(filepath.Join(l.Store.Dir, "runs", issue.RunID))
+		if loadErr != nil {
+			return l.failIssueAtStage(ctx, issue.Number, failure.Wrap(failure.Issue, "worker retry limit reached", cause), false,
+				issuedomain.ContinuationStagePublish, summary, "")
+		}
+		return l.failIssueAtStage(ctx, issue.Number, failure.Wrap(failure.Issue, "worker retry limit reached", cause), false,
+			issuedomain.ContinuationStagePublish, summary, fmt.Sprintf("%x", sha256.Sum256(encoded)))
 	}
 	delay := l.retryDelay(budget.DelayIndex())
 	retryAt := l.now().Add(delay)
@@ -666,6 +669,10 @@ func (l *Loop) schedulePublicationRetry(ctx context.Context, issue state.Issue, 
 }
 
 func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked bool) error {
+	return l.failIssueAtStage(ctx, number, cause, blocked, issuedomain.ContinuationStageNone, "", "")
+}
+
+func (l *Loop) failIssueAtStage(ctx context.Context, number int, cause error, blocked bool, stage issuedomain.ContinuationStage, summary, resultSHA256 string) error {
 	current, stateErr := l.issueState(number)
 	if stateErr != nil {
 		return failure.Wrap(failure.Supervisor, "load Issue before failure transition", stateErr)
@@ -679,30 +686,40 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 	if decisionErr != nil {
 		return failure.Wrap(failure.Issue, "decide Issue failure", decisionErr)
 	}
+	worktreeSHA256, _ := l.continuationWorktreeDigest(ctx, current)
 	_, err := l.Store.Update("issue_"+decision.Transition.To.String(), number, current.RunID, map[string]string{"error": cause.Error(), "failure_kind": string(kind)}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(number)]
 		if item == nil {
 			return fmt.Errorf("Issue #%d disappeared before failure transition", number)
 		}
-		publicationRecoverable := item.PublicationFailure != nil && item.PublicationFailure.Origin == publication.FailureOriginPublisher &&
-			item.PublicationFailure.Phase == publication.FailurePhasePrePublication && item.PublicationFailure.Recoverable
-		// An open or previously published Pull Request keeps the lease until
-		// reconciliation confirms merge or explicit abandonment. A terminal
-		// pre-publication failure releases it so the queue remains live; the
-		// recovery command reacquires resources transactionally.
-		if issuedomain.DecideLease(decision.Transition.To, item.PullRequestURL != "", false) == issuedomain.ReleaseLease {
+		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
+			return err
+		}
+		if stage != issuedomain.ContinuationStageNone {
+			if item.ResourcePark == nil {
+				return fmt.Errorf("Issue #%d terminal transition did not capture a continuation checkpoint", number)
+			}
+			item.ResourcePark.Stage = stage
+			item.ResourcePark.Summary = summary
+			item.ResourcePark.ResultSHA256 = resultSHA256
+			evidence := state.ContinuationEvidence{Origin: "runtime", Phase: string(stage), Code: string(kind), Status: decision.Transition.To.String(), ObservedAt: l.now()}
+			if stage == issuedomain.ContinuationStagePublish {
+				provenance := publication.ClassifyFailure(cause, l.now())
+				evidence.Origin, evidence.Phase, evidence.Code = provenance.Origin, provenance.Phase, provenance.Code
+			}
+			item.ResourcePark.Evidence = &evidence
+		}
+		if item.ResourcePark != nil {
+			item.ResourcePark.WorktreeSHA256 = worktreeSHA256
+		}
+		if issuedomain.DecideLease(decision.Transition.To, item.PullRequestURL != "", false) == issuedomain.ReleaseLease && item.Lease != nil {
 			if err := state.ReleaseIssueLease(item, owner); err != nil {
 				return err
 			}
 		}
-		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
-			return err
-		}
 		item.LastError = decision.LastError
-		if !publicationRecoverable {
-			item.SessionID = ""
-			item.Session = nil
-		}
+		item.SessionID = ""
+		item.Session = nil
 		item.FailureKind = decision.FailureKind
 		item.GitHubSync = decision.GitHubSync
 		item.RetryAfter, item.UpdatedAt = nil, l.now()
@@ -714,70 +731,6 @@ func (l *Loop) failIssue(ctx context.Context, number int, cause error, blocked b
 	updated, stateErr := l.issueState(number)
 	if stateErr != nil {
 		return stateErr
-	}
-	return l.syncGitHub(ctx, updated)
-}
-
-func (l *Loop) blockWorkerEnvironment(ctx context.Context, number int, reason string) error {
-	if strings.TrimSpace(reason) == "" {
-		reason = "worker reported an unresolved environment prerequisite"
-	}
-	current, err := l.issueState(number)
-	if err != nil {
-		return err
-	}
-	cause := failure.Wrap(failure.Issue, "worker blocked", errors.New(reason))
-	decision, decisionErr := issuedomain.BlockWorkerEnvironment(current.Status, cause.Error(), string(failure.Issue))
-	if decisionErr != nil {
-		return failure.Wrap(failure.Issue, "decide worker environment block", decisionErr)
-	}
-	parkID := state.NewID("park")
-	parkedAt := l.now()
-	owner := state.LeaseOwner{}
-	if current.Lease != nil {
-		owner = current.Lease.Owner
-	}
-	_, err = l.Store.Update("issue_blocked", number, current.RunID, map[string]any{
-		"error": cause.Error(), "failure_kind": string(failure.Issue), "blocked_origin": "worker", "blocked_kind": "environment",
-		"resource_park_id": parkID, "released_owner": owner, "parked_at": parkedAt,
-	}, func(s *state.Snapshot) error {
-		item := s.Issues[strconv.Itoa(number)]
-		if item == nil || item.RunID != current.RunID {
-			return fmt.Errorf("Issue #%d run changed while recording worker block", number)
-		}
-		if item.WorkerPID != 0 || item.WorkerPGID != 0 {
-			return fmt.Errorf("Issue #%d worker process identity still exists while parking resources", number)
-		}
-		if item.Lease == nil || item.Lease.Owner != owner {
-			return fmt.Errorf("Issue #%d does not own a consistent resource lease to park", number)
-		}
-		// Move the full lease into a non-admitting park record. Session, Goal,
-		// answers, worktree, branch, dirty files, and Issue resource metadata stay
-		// untouched as the continuation boundary.
-		if err := state.ParkIssueLease(item, owner, parkID, parkedAt); err != nil {
-			return err
-		}
-		item.ResourcePark.Kind = state.ResourceParkKindEnvironmentBlock
-		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
-			return err
-		}
-		item.LastError = decision.LastError
-		item.FailureKind = decision.FailureKind
-		item.GitHubSync = decision.GitHubSync
-		item.BlockedCause = &state.BlockedCause{
-			Origin: "worker", Kind: "environment", Resumable: true,
-			Reason: reason, BlockedAt: l.now(),
-		}
-		item.RetryAfter = nil
-		item.UpdatedAt = l.now()
-		return nil
-	})
-	if err != nil {
-		return failure.Wrap(failure.Supervisor, "persist worker environment block", err)
-	}
-	updated, err := l.issueState(number)
-	if err != nil {
-		return err
 	}
 	return l.syncGitHub(ctx, updated)
 }

@@ -22,7 +22,7 @@ func TestApplyIssueTransitionFencesStaleDecision(t *testing.T) {
 	}
 }
 
-func TestLifecycleBoundaryNormalizerAtomicallySplitsTerminalLease(t *testing.T) {
+func TestLifecycleBoundaryFinalizerAtomicallySplitsTerminalLease(t *testing.T) {
 	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 	item := &Issue{
 		Number: 9, Status: issuedomain.StatusRunning, RunID: "run_9", Branch: "codex/issue-9",
@@ -39,7 +39,7 @@ func TestLifecycleBoundaryNormalizerAtomicallySplitsTerminalLease(t *testing.T) 
 	}
 	item.LastError = "final worker reason"
 	snapshot := Snapshot{Issues: map[string]*Issue{"9": item}}
-	normalizeLifecycleBoundaries(&snapshot, now)
+	finalizeLifecycleBoundaries(&snapshot, now)
 	if item.Lease != nil || item.ResourcePark == nil || item.Suspension == nil || item.ResourcePark.OriginalLease.Owner.Generation != 3 {
 		t.Fatalf("terminal boundary did not split execution capacity from continuation state: %+v", item)
 	}
@@ -48,7 +48,7 @@ func TestLifecycleBoundaryNormalizerAtomicallySplitsTerminalLease(t *testing.T) 
 	}
 }
 
-func TestLifecycleBoundaryNormalizerKeepsAnsweredRequestAuditAfterCheckpointCleanup(t *testing.T) {
+func TestLifecycleBoundaryFinalizerKeepsAnsweredRequestAuditAfterCheckpointCleanup(t *testing.T) {
 	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 	answeredAt := now.Add(-time.Minute)
 	originalOwner := LeaseOwner{RunID: "run_1", Generation: 1}
@@ -80,7 +80,7 @@ func TestLifecycleBoundaryNormalizerKeepsAnsweredRequestAuditAfterCheckpointClea
 			Status: issuedomain.RequestStatusAnswered, Answer: "continue", AnsweredAt: &answeredAt,
 		}},
 	}
-	normalizeLifecycleBoundaries(&snapshot, now)
+	finalizeLifecycleBoundaries(&snapshot, now)
 	if item.Lease != nil || item.ResourcePark != nil || item.Suspension != nil {
 		t.Fatalf("completed lifecycle retained active continuation state: %+v", item)
 	}

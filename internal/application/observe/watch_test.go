@@ -85,7 +85,10 @@ func TestWatchReportsAnsweredClaimWaitingWithParkSnapshot(t *testing.T) {
 		snapshot.PendingRequests[request.ID] = request
 		snapshot.Issues["1"] = &state.Issue{
 			Number: 1, RunID: owner.RunID, Status: issuedomain.StatusAnswerClaimWaiting, LeaseGeneration: 1,
-			ResourcePark: &state.ResourceLeasePark{
+			Worktree: "/tmp/issue-1", Branch: "codex/issue-1",
+			Workspace: &state.WorkerWorkspace{Path: "/tmp/issue-1", Branch: "codex/issue-1", RepoID: snapshot.RepoID,
+				Repository: "owner/repo", GitCommonDir: snapshot.RepoPath + "/.git", MainCheckout: snapshot.RepoPath, CapturedAt: now},
+			ResourcePark: &state.ContinuationCheckpoint{
 				ID: "park_1", Kind: state.ResourceParkKindNeedsInput, RequestID: request.ID, Status: issuedomain.ResourceParkStatusParked, ParkedAt: now,
 				OriginalLease: state.ResourceLease{Owner: owner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-1", ReservedAt: now},
 			},

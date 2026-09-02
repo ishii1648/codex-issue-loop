@@ -82,14 +82,15 @@ type Migrator struct {
 }
 
 type journal struct {
-	Version     int        `json:"version"`
-	MigrationID string     `json:"migration_id"`
-	Status      string     `json:"status"`
-	From        int        `json:"from_version"`
-	To          int        `json:"to_version"`
-	Backup      string     `json:"backup"`
-	StartedAt   time.Time  `json:"started_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	Version      int        `json:"version"`
+	MigrationID  string     `json:"migration_id"`
+	Status       string     `json:"status"`
+	From         int        `json:"from_version"`
+	FromSemantic int        `json:"from_semantic_contract,omitempty"`
+	To           int        `json:"to_version"`
+	Backup       string     `json:"backup"`
+	StartedAt    time.Time  `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
 type backupManifest struct {
@@ -244,6 +245,23 @@ func inspectSemanticState(path string) ([]SemanticFinding, error) {
 	if err != nil {
 		return nil, err
 	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return nil, err
+	}
+	var version, semanticVersion int
+	_ = json.Unmarshal(object["version"], &version)
+	_ = json.Unmarshal(object["semantic_contract_version"], &semanticVersion)
+	if version == CurrentVersion && semanticVersion >= statecontract.MinimumVersion && semanticVersion < statecontract.CurrentVersion {
+		if err := normalizeV5SemanticStateObject(object); err != nil {
+			return nil, err
+		}
+		object["semantic_contract_version"] = json.RawMessage(fmt.Sprint(statecontract.CurrentVersion))
+		data, err = json.Marshal(object)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var snapshot state.Snapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return nil, err
@@ -268,7 +286,7 @@ func inspectSemanticState(path string) ([]SemanticFinding, error) {
 	}
 	// Legacy v4 has no explicit contract marker. Preview applies the current validator in
 	// memory and never writes the source file.
-	if snapshot.SemanticContractVersion == statecontract.MinimumVersion {
+	if snapshot.SemanticContractVersion >= statecontract.MinimumVersion && snapshot.SemanticContractVersion < statecontract.CurrentVersion {
 		snapshot.SemanticContractVersion = statecontract.CurrentVersion
 	}
 	violations := state.SemanticViolations(snapshot)
@@ -374,7 +392,8 @@ func (m Migrator) Apply() (Result, error) {
 			return Result{}, err
 		}
 		startedAt := m.now()
-		j = journal{Version: journalVersion, MigrationID: migrationID(backup), Status: "prepared", From: from, To: CurrentVersion, Backup: backup, StartedAt: startedAt}
+		j = journal{Version: journalVersion, MigrationID: migrationID(backup), Status: "prepared", From: from,
+			FromSemantic: migrationSemanticFrom(report), To: CurrentVersion, Backup: backup, StartedAt: startedAt}
 		if err := fsutil.WriteJSON(m.journalPath(), j, 0o600); err != nil {
 			return Result{}, err
 		}
@@ -712,12 +731,21 @@ func migrateTransaction(path string, migration journal) error {
 		if err := json.Unmarshal(object[key], &nested); err != nil {
 			return fmt.Errorf("decode transaction %s: %w", key, err)
 		}
-		nested["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
 		if key == "snapshot" {
+			var sourceVersion, sourceSemanticVersion int
+			_ = json.Unmarshal(nested["version"], &sourceVersion)
+			_ = json.Unmarshal(nested["semantic_contract_version"], &sourceSemanticVersion)
+			nested["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
 			nested["semantic_contract_version"] = json.RawMessage(fmt.Sprint(statecontract.CurrentVersion))
 			delete(nested, "notifications")
-			if err := migrateV5StateObject(nested, migration.StartedAt); err != nil {
-				return fmt.Errorf("migrate transaction snapshot: %w", err)
+			if sourceVersion == schemaversion.Previous {
+				if err := migrateV5StateObject(nested, migration.StartedAt); err != nil {
+					return fmt.Errorf("migrate transaction snapshot: %w", err)
+				}
+			} else if sourceVersion == CurrentVersion && sourceSemanticVersion < statecontract.CurrentVersion {
+				if err := normalizeV5SemanticStateObject(nested); err != nil {
+					return fmt.Errorf("migrate transaction snapshot semantic contract: %w", err)
+				}
 			}
 			encodedSnapshot, err := json.Marshal(nested)
 			if err != nil {
@@ -731,6 +759,7 @@ func migrateTransaction(path string, migration journal) error {
 				return fmt.Errorf("validate migrated transaction snapshot: %w", err)
 			}
 		} else {
+			nested["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
 			removeLegacyDeliveryEvent(nested)
 		}
 		encoded, err := json.Marshal(nested)
@@ -747,6 +776,9 @@ func migrateState(path string, migration journal) error {
 	if err != nil {
 		return err
 	}
+	var sourceVersion, sourceSemanticVersion int
+	_ = json.Unmarshal(object["version"], &sourceVersion)
+	_ = json.Unmarshal(object["semantic_contract_version"], &sourceSemanticVersion)
 	object["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
 	object["semantic_contract_version"] = json.RawMessage(fmt.Sprint(statecontract.CurrentVersion))
 	var revision uint64
@@ -767,11 +799,17 @@ func migrateState(path string, migration journal) error {
 	}
 	object["supervisor"] = encodedSupervisor
 	delete(object, "notifications")
-	if err := normalizeMigratedSessions(object); err != nil {
-		return err
-	}
-	if err := migrateV5StateObject(object, migration.StartedAt); err != nil {
-		return err
+	if sourceVersion == schemaversion.Previous {
+		if err := normalizeMigratedSessions(object); err != nil {
+			return err
+		}
+		if err := migrateV5StateObject(object, migration.StartedAt); err != nil {
+			return err
+		}
+	} else if sourceVersion == CurrentVersion && sourceSemanticVersion < statecontract.CurrentVersion {
+		if err := normalizeV5SemanticStateObject(object); err != nil {
+			return err
+		}
 	}
 	encoded, err := json.Marshal(object)
 	if err != nil {
@@ -933,11 +971,15 @@ func migrateEvents(path string, migration journal, fromSchema int) error {
 	if hasAudit {
 		return fsutil.WriteFile(path, output, 0o600)
 	}
+	fromSemantic := migration.FromSemantic
+	if fromSemantic == 0 {
+		fromSemantic = statecontract.MinimumVersion
+	}
 	payload := map[string]any{
 		"migration_id":           migration.MigrationID,
 		"authority":              "operator",
 		"source":                 "agent-loop migrate --apply",
-		"before":                 map[string]int{"state_schema_version": fromSchema, "semantic_contract_version": statecontract.MinimumVersion},
+		"before":                 map[string]int{"state_schema_version": fromSchema, "semantic_contract_version": fromSemantic},
 		"after":                  map[string]int{"state_schema_version": CurrentVersion, "semantic_contract_version": statecontract.CurrentVersion},
 		"operator_confirmation":  map[string]bool{"apply": true},
 		"provenance_synthesized": false,
@@ -963,6 +1005,23 @@ func migrateEvents(path string, migration journal, fromSchema int) error {
 func migrationID(backup string) string {
 	digest := sha256.Sum256([]byte(backup))
 	return fmt.Sprintf("migration_%x", digest[:12])
+}
+
+func migrationSemanticFrom(report Report) int {
+	from := statecontract.CurrentVersion
+	for _, artifact := range report.Artifacts {
+		if artifact.Kind != "state" || !artifact.SemanticMigration {
+			continue
+		}
+		version, err := semanticVersion(artifact.Path)
+		if err == nil && version > 0 && version < from {
+			from = version
+		}
+	}
+	if from == statecontract.CurrentVersion {
+		return statecontract.MinimumVersion
+	}
+	return from
 }
 
 func migrationAuditEventID(id, repoID string) string {

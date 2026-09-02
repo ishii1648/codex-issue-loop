@@ -37,7 +37,7 @@ func (a App) delivery(ctx context.Context, l layout.Layout, args []string) error
 
 func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []string) error {
 	if len(args) == 0 {
-		return exitError{2, errors.New("delivery assignment subcommand is required: migrate, status, preview, apply, retry, rollback, verify")}
+		return exitError{2, errors.New("delivery assignment subcommand is required: migrate, status, preview, apply, retry, rollback, retry-rollback, verify")}
 	}
 	operation := args[0]
 	fs := flag.NewFlagSet("delivery assignment "+operation, flag.ContinueOnError)
@@ -115,6 +115,15 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 			return exitError{2, errors.New("assignment rollback requires --repo and --expected-generation")}
 		}
 		report, operationErr := controller.Rollback(ctx, *repoPath, *expectedGeneration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "retry-rollback":
+		if *repoPath == "" || *version != "" || *expectedGeneration != 0 || *applyMigration || !*confirmRetainedFence {
+			return exitError{2, errors.New("assignment retry-rollback requires --repo and --confirm-retained-fence")}
+		}
+		report, operationErr := controller.RetryRollback(ctx, *repoPath)
 		if outputErr := a.output(*jsonOut, report); outputErr != nil {
 			return outputErr
 		}

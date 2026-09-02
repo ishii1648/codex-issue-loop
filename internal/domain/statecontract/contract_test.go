@@ -11,7 +11,7 @@ func TestCurrentContractHasMigrationRulesForEveryExecutionRequirement(t *testing
 		t.Fatal(err)
 	}
 	field, ok := FieldByPath("issues[].workspace")
-	if !ok || field.Class != ExecutionRequiredProvenance || !RequiredForStatus(field, issuedomain.StatusRetryWait) || !RequiredForStatus(field, issuedomain.StatusPublicationRecovery) {
+	if !ok || field.Class != ExecutionRequiredProvenance || !RequiredForStatus(field, issuedomain.StatusRetryWait) {
 		t.Fatalf("workspace contract=%+v ok=%v", field, ok)
 	}
 }

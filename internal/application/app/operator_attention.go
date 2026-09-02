@@ -274,7 +274,7 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 				return exitError{4, err}
 			}
 			resumeStatus = issuedomain.StatusAnswerClaimWaiting
-			if slot, ok := availableLeaseSlot(s, cfg.Queue.Concurrency, issue.ResourcePark.OriginalLease.Slot, issue.Number); ok {
+			if slot, ok := availableExecutionSlot(s, cfg.Queue.Concurrency, issue.ResourcePark.OriginalLease.Slot, issue.Number); ok {
 				owner, resumeErr := state.ResumeParkedLease(s, issue.Number, issue.ResourcePark.ID, slot, now)
 				if resumeErr == nil {
 					resumeStatus = issuedomain.StatusResumePending
