@@ -44,17 +44,24 @@ type Pipeline struct {
 }
 
 type RunReport struct {
-	Version       int          `json:"version"`
-	ProcessedAt   time.Time    `json:"processed_at"`
-	SignalCount   int          `json:"signal_count"`
-	EpisodeCount  int          `json:"episode_count"`
-	Analyzed      int          `json:"analyzed"`
-	AnalysisRetry int          `json:"analysis_retry"`
-	CircuitOpened int          `json:"circuit_opened"`
-	IssueRetry    int          `json:"issue_retry"`
-	IssueDrafts   []IssueDraft `json:"issue_drafts"`
-	IssuesCreated []IssueRef   `json:"issues_created"`
-	IssuesReused  []IssueRef   `json:"issues_reused"`
+	Version          int               `json:"version"`
+	ProcessedAt      time.Time         `json:"processed_at"`
+	SignalCount      int               `json:"signal_count"`
+	EpisodeCount     int               `json:"episode_count"`
+	Analyzed         int               `json:"analyzed"`
+	AnalysisRetry    int               `json:"analysis_retry"`
+	AnalysisFailures []AnalysisFailure `json:"analysis_failures"`
+	CircuitOpened    int               `json:"circuit_opened"`
+	IssueRetry       int               `json:"issue_retry"`
+	IssueDrafts      []IssueDraft      `json:"issue_drafts"`
+	IssuesCreated    []IssueRef        `json:"issues_created"`
+	IssuesReused     []IssueRef        `json:"issues_reused"`
+}
+
+type AnalysisFailure struct {
+	EpisodeID   string `json:"episode_id"`
+	Fingerprint string `json:"fingerprint"`
+	Code        string `json:"code"`
 }
 
 func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
@@ -67,7 +74,7 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 	}
 	defer release()
 	now := p.now()
-	report := RunReport{Version: SchemaVersion, ProcessedAt: now, IssueDrafts: []IssueDraft{}, IssuesCreated: []IssueRef{}, IssuesReused: []IssueRef{}}
+	report := RunReport{Version: SchemaVersion, ProcessedAt: now, AnalysisFailures: []AnalysisFailure{}, IssueDrafts: []IssueDraft{}, IssuesCreated: []IssueRef{}, IssuesReused: []IssueRef{}}
 	signals, err := p.Store.ReadSignals()
 	if err != nil {
 		return report, err
@@ -115,6 +122,9 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 			analysis, analyzeErr := p.analyze(ctx, episode, signalsForEpisode(episode, analysisSignals))
 			metrics.AnalysisAttempts[outcomeKey(analyzeErr)]++
 			if analyzeErr != nil {
+				code := analysisFailureCode(analyzeErr)
+				metrics.AnalysisFailures[code]++
+				report.AnalysisFailures = append(report.AnalysisFailures, AnalysisFailure{EpisodeID: episode.ID, Fingerprint: episode.Fingerprint, Code: code})
 				episode.Attempts++
 				if episode.Attempts >= p.Config.MaxAttempts {
 					episode.CircuitOpen = true
@@ -257,10 +267,10 @@ func (p Pipeline) analyze(ctx context.Context, episode Episode, signals []Signal
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&analysis); err != nil {
-		return AIAnalysis{}, err
+		return AIAnalysis{}, analysisFailure("invalid_output", err)
 	}
 	if err := analysis.Validate(episode); err != nil {
-		return AIAnalysis{}, err
+		return AIAnalysis{}, analysisFailure("invalid_output", err)
 	}
 	return analysis, nil
 }

@@ -313,13 +313,14 @@ type Metrics struct {
 	Classifications  map[string]uint64          `json:"classifications"`
 	Issues           map[string]uint64          `json:"issues"`
 	AnalysisAttempts map[string]uint64          `json:"analysis_attempts"`
+	AnalysisFailures map[string]uint64          `json:"analysis_failures"`
 	DurationsMS      map[string]DurationSummary `json:"durations_ms"`
 	OpenEpisodes     int                        `json:"open_episodes"`
 	CircuitOpen      int                        `json:"circuit_open"`
 }
 
 func (m Metrics) Validate() error {
-	if m.Version != SchemaVersion || m.SignalsByName == nil || m.Outcomes == nil || m.Classifications == nil || m.Issues == nil || m.AnalysisAttempts == nil || m.DurationsMS == nil || m.OpenEpisodes < 0 || m.CircuitOpen < 0 {
+	if m.Version != SchemaVersion || m.SignalsByName == nil || m.Outcomes == nil || m.Classifications == nil || m.Issues == nil || m.AnalysisAttempts == nil || m.AnalysisFailures == nil || m.DurationsMS == nil || m.OpenEpisodes < 0 || m.CircuitOpen < 0 {
 		return errors.New("unsupported or invalid incident metrics")
 	}
 	if err := validateCounterKeys(m.SignalsByName, allowedSignalNames, "signal"); err != nil {
@@ -335,6 +336,9 @@ func (m Metrics) Validate() error {
 		return err
 	}
 	if err := validateCounterKeys(m.AnalysisAttempts, stringSet("succeeded", "failed"), "analysis attempt"); err != nil {
+		return err
+	}
+	if err := validateCounterKeys(m.AnalysisFailures, stringSet("timeout", "invalid_output_schema", "invalid_output", "command_failed", "analyzer_failed"), "analysis failure"); err != nil {
 		return err
 	}
 	for operation, summary := range m.DurationsMS {

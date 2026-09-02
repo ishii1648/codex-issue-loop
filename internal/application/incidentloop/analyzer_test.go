@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,19 @@ func TestCodexAnalysisSchemaDeclaresTypeForConstProperties(t *testing.T) {
 		if _, hasConst := property["const"]; hasConst && property["type"] == nil {
 			t.Errorf("property %q uses const without type", name)
 		}
+	}
+}
+
+func TestCodexAnalyzerClassifiesInvalidOutputSchema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '{\"error\":{\"code\":\"invalid_json_schema\"}}' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	analyzer := CodexAnalyzer{Path: path, RepoPath: dir, StateDir: dir, Timeout: 10 * time.Second}
+	_, err := analyzer.Analyze(context.Background(), EvidenceBundle{Version: SchemaVersion})
+	if err == nil || analysisFailureCode(err) != "invalid_output_schema" {
+		t.Fatalf("err=%v code=%s", err, analysisFailureCode(err))
 	}
 }
 

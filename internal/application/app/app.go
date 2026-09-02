@@ -243,7 +243,7 @@ Commands:
   doctor        Validate dependencies, auth, config, and registration
   delivery      Configure and operate the host-level Release delivery controller
   bootstrap-labels  Preview or create required GitHub labels
-  incident      Analyze incidents, show status, or retry an open circuit
+  incident      Analyze incidents, show status, seed a dedicated canary, or retry an open circuit
   run           Run the supervisor (used by launchd)`)
 	// broker is intentionally omitted from the primary operator workflow; it is
 	// the shared LaunchAgent entrypoint managed by register/start/unregister.

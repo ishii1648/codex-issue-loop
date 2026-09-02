@@ -36,7 +36,7 @@ func newIncidentAutomation(l layout.Layout, repoID string, cfg config.Config, so
 
 func (a App) incident(ctx context.Context, l layout.Layout, args []string) error {
 	if len(args) == 0 {
-		return exitError{2, fmt.Errorf("incident requires analyze-once, status, or retry")}
+		return exitError{2, fmt.Errorf("incident requires analyze-once, status, seed-canary, or retry")}
 	}
 	command := args[0]
 	fs := flag.NewFlagSet("incident "+command, flag.ContinueOnError)
@@ -44,6 +44,8 @@ func (a App) incident(ctx context.Context, l layout.Layout, args []string) error
 	repo := fs.String("repo", "", "repository path")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	fingerprint := fs.String("fingerprint", "", "incident fingerprint (retry only)")
+	canaryID := fs.String("id", "", "stable canary identifier (seed-canary only)")
+	confirmSyntheticEvidence := fs.Bool("confirm-synthetic-evidence", false, "confirm writing synthetic invariant signals (seed-canary only)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitError{2, err}
 	}
@@ -86,6 +88,15 @@ func (a App) incident(ctx context.Context, l layout.Layout, args []string) error
 			Metrics incidentloop.Metrics      `json:"metrics"`
 		}{incidentloop.SchemaVersion, cfg.IncidentAutomation.Enabled, cfg.IncidentAutomation.DryRun, stateValue, metrics}
 		return a.output(*jsonOut, status)
+	case "seed-canary":
+		if !*confirmSyntheticEvidence {
+			return exitError{2, fmt.Errorf("incident seed-canary requires --confirm-synthetic-evidence")}
+		}
+		report, seedErr := incidentloop.SeedCanary(incidentStore, cfg.GitHub.Repo, *canaryID, time.Now().UTC())
+		if seedErr != nil {
+			return seedErr
+		}
+		return a.output(*jsonOut, report)
 	case "retry":
 		episode, retryErr := incidentStore.ResetCircuit(*fingerprint, time.Now().UTC())
 		if retryErr != nil {

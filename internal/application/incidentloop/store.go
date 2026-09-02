@@ -455,6 +455,9 @@ func ensureMetricMaps(metrics *Metrics) {
 	if metrics.AnalysisAttempts == nil {
 		metrics.AnalysisAttempts = map[string]uint64{}
 	}
+	if metrics.AnalysisFailures == nil {
+		metrics.AnalysisFailures = map[string]uint64{}
+	}
 	if metrics.DurationsMS == nil {
 		metrics.DurationsMS = map[string]DurationSummary{}
 	}

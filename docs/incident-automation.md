@@ -95,3 +95,18 @@ historical corpusとgolden resultは別の1コマンドで検証する。
 ```sh
 go run ./cmd/incident-eval
 ```
+
+## Live canary
+
+GitHub Issue作成とfingerprint dedupの実環境確認には、repository名が`-canary`で終わる専用repositoryだけを使う。先に`doctor`と`incident status`を確認し、synthetic evidenceの書き込みを明示したうえでstableなIDをseedする。
+
+```sh
+agent-loop incident seed-canary \
+  --repo /absolute/path/to/codex-issue-loop-canary \
+  --id release-v1-2-3 \
+  --confirm-synthetic-evidence \
+  --json
+agent-loop incident analyze-once --repo /absolute/path/to/codex-issue-loop-canary --json
+```
+
+同じ`--id`で再度`seed-canary`と`analyze-once`を実行し、`status: reused`、`issues_created: []`、既存Issueの再利用または保存済みIssue identityを確認する。再起動後にも同じ手順を行い、fingerprintを含むIssueがGitHub上で1件だけであることをreadbackする。通常repository、confirmation flagなし、partialなcanary signal setはfail-closedで拒否する。

@@ -64,11 +64,21 @@ func TestAIErrorAndLowConfidenceNeverCreateIssue(t *testing.T) {
 				}),
 			)
 			issues := &fakeIssues{byFingerprint: map[string]IssueRef{}}
-			if _, err := testPipeline(store, test.analyzer, issues, &now, false).RunOnce(context.Background()); err != nil {
+			report, err := testPipeline(store, test.analyzer, issues, &now, false).RunOnce(context.Background())
+			if err != nil {
 				t.Fatal(err)
 			}
 			if len(issues.drafts) != 0 {
 				t.Fatal("AI failure or low confidence created an Issue")
+			}
+			if test.name == "timeout" {
+				if len(report.AnalysisFailures) != 1 || report.AnalysisFailures[0].Code != "timeout" {
+					t.Fatalf("analysis failures=%+v", report.AnalysisFailures)
+				}
+				metrics, metricsErr := store.LoadMetrics()
+				if metricsErr != nil || metrics.AnalysisFailures["timeout"] != 1 {
+					t.Fatalf("analysis failure metrics=%+v err=%v", metrics.AnalysisFailures, metricsErr)
+				}
 			}
 			if test.name == "low-confidence" {
 				test.analyzer.confidence = "high"
@@ -361,6 +371,10 @@ func TestInvalidAIOutputRetriesThenOpensCircuitWithoutIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, _ := store.LoadState()
+	metrics, metricsErr := store.LoadMetrics()
+	if metricsErr != nil || metrics.AnalysisFailures["invalid_output"] != 2 {
+		t.Fatalf("analysis failure metrics=%+v err=%v", metrics.AnalysisFailures, metricsErr)
+	}
 	foundCircuit := false
 	foundAttention := false
 	for _, episode := range state.Episodes {

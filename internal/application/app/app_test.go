@@ -390,6 +390,34 @@ func TestIncidentStatusReportsDisabledDryRunHealthWithoutNetwork(t *testing.T) {
 	}
 }
 
+func TestIncidentSeedCanaryRequiresConfirmationAndDedicatedRepository(t *testing.T) {
+	repo, l := testEnvironment(t)
+	cfg, err := config.Load(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (registry.Store{Path: l.RegistryPath}).Add(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		args []string
+		code int
+		want string
+	}{
+		{name: "confirmation", args: []string{"incident", "seed-canary", "--repo", repo, "--id", "release-v1-2-3", "--json"}, code: 2, want: "--confirm-synthetic-evidence"},
+		{name: "repository", args: []string{"incident", "seed-canary", "--repo", repo, "--id", "release-v1-2-3", "--confirm-synthetic-evidence", "--json"}, code: 1, want: "ends with -canary"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			code := (App{Out: &out, Err: &stderr}).Run(context.Background(), test.args)
+			if code != test.code || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+		})
+	}
+}
+
 func mustConfig(t *testing.T, repo string) config.Config {
 	t.Helper()
 	cfg, err := config.Load(repo)
