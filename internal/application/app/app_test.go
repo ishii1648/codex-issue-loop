@@ -24,6 +24,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
+	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	schema "github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/application/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/application/recoveryfixture"
@@ -3334,6 +3335,58 @@ func TestInstallArtifactsAreIdempotentAndVersioned(t *testing.T) {
 	match, err := installationMatches(l, source, "v1.2.3", "abc123")
 	if err != nil || !match {
 		t.Fatalf("match=%v err=%v", match, err)
+	}
+}
+
+func TestRewritePlistsPreservesPerRepositoryAssignment(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalBinary := filepath.Join(l.BinDir, "agent-loop")
+	if err := os.WriteFile(globalBinary, []byte("global-v-next"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	assignedSource := filepath.Join(t.TempDir(), "assigned-agent-loop")
+	if err := os.WriteFile(assignedSource, []byte("assigned-v-current"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(assignedSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := delivery.SlotRef(l, "v1.2.3", strings.Repeat("a", 40), digest)
+	if err := delivery.StageSlot(l, ref, assignedSource); err != nil {
+		t.Fatal(err)
+	}
+	deliveryConfig := delivery.DefaultConfig("owner/release")
+	deliveryConfig.Assignments[entry.RepoID] = delivery.RepositoryAssignment{
+		RepositoryID: entry.RepoID, AssignmentRef: ref, Generation: 4, UpdatedAt: time.Now().UTC(),
+	}
+	deliveryConfigPath, err := delivery.ResolveConfigPath("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.WriteConfig(deliveryConfigPath, deliveryConfig); err != nil {
+		t.Fatal(err)
+	}
+	if err := rewritePlists(l); err != nil {
+		t.Fatal(err)
+	}
+	program, err := (launchd.Manager{Layout: l}).Program(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(program) != filepath.Clean(ref.Slot) {
+		t.Fatalf("repository plist program=%q want assignment=%q global=%q", program, ref.Slot, globalBinary)
 	}
 }
 

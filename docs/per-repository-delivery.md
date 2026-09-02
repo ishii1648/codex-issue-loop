@@ -8,6 +8,7 @@
 - applyとrollbackは対象repository以外のplist、PID、assignment、durable stateを変更しない。
 - active workerは停止しない。drain期限では変更をdeferしてfenceを解除する。
 - rollback失敗時は対象repositoryのfenceとtransactionを保持する。
+- global operatorのupdate/rollbackはrepository plistを各assignmentのimmutable slotへ維持し、global binaryへ差し替えない。
 
 ## v1からv2への明示migration
 
