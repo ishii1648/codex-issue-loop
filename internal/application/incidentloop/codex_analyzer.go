@@ -80,14 +80,14 @@ func (a CodexAnalyzer) Analyze(parent context.Context, bundle EvidenceBundle) (A
 ` + string(bundleJSON)
 	ctx, cancel := context.WithTimeout(parent, a.Timeout)
 	defer cancel()
-	args := []string{"exec", "--sandbox", "read-only", "--config", `approval_policy="never"`, "--cd", a.RepoPath, "--json", "--output-schema", schemaPath, "--output-last-message", resultPath}
+	args := []string{"exec", "--sandbox", "read-only", "--config", `approval_policy="never"`, "--cd", runDir, "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--json", "--output-schema", schemaPath, "--output-last-message", resultPath}
 	if a.Model != "" {
 		args = append(args, "--model", a.Model)
 	}
 	args = append(args, a.ExtraArgs...)
 	args = append(args, "-")
 	command := exec.CommandContext(ctx, a.Path, args...)
-	command.Dir = a.RepoPath
+	command.Dir = runDir
 	command.Stdin = strings.NewReader(prompt)
 	command.Stdout = io.Discard
 	var stderr bytes.Buffer

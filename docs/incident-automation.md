@@ -6,7 +6,7 @@ Incident automationは、supervisorと既存のdurable state eventを構造化si
 
 1. scheduler、GitHub、worker、CI、review、retry、recoveryのsignalをprivateなrepository stateへ追記する。
 2. signalをstable fingerprint単位に集約し、`analysis/incident-taxonomy/rules.json`でprimary classificationを1つだけ決める。
-3. `expected_transient`はAIへ渡さない。それ以外はsanitized evidenceだけを`codex exec --sandbox read-only`へ渡し、versioned output schemaを検証する。
+3. `expected_transient`はAIへ渡さない。それ以外はsanitized evidenceだけをowner-onlyの一時directoryで`codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check`へ渡し、versioned output schemaを検証する。repository checkout、user MCP/plugin、session rolloutはanalysis contextへ含めない。
 4. `suspected_bug`または`confirmed_bug`で、決定論的証拠、AI recommendation、medium以上のAI confidenceがすべて揃った場合だけIssue候補にする。
 5. local stateとGitHub本文の`incident-fingerprint`を照合し、既存Issueを再利用する。作成後はnumber、URL、ready label、fingerprintをreadbackする。
 6. 起票したIssueは通常queueへ入り、既存workerが修正、test、PR作成へ進む。GitHubのrequired checksと`reviewDecision`を観測し、`CHANGES_REQUESTED`または`REVIEW_REQUIRED`中はmergeへ進まない。approvalを本機能が合成することはなく、repository側の自動reviewまたは実reviewがauthoritativeである。
