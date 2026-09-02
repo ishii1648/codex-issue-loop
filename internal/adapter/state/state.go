@@ -16,6 +16,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
@@ -297,13 +298,14 @@ type Snapshot struct {
 // fields; silently discarding them here could resume without their evidence.
 func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
 	var envelope struct {
-		Version int                                   `json:"version"`
-		Issues  map[string]map[string]json.RawMessage `json:"issues"`
+		Version                 int                                   `json:"version"`
+		SemanticContractVersion int                                   `json:"semantic_contract_version"`
+		Issues                  map[string]map[string]json.RawMessage `json:"issues"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return err
 	}
-	if envelope.Version == CurrentVersion {
+	if envelope.Version == CurrentVersion && envelope.SemanticContractVersion == statecontract.CurrentVersion {
 		for number, issue := range envelope.Issues {
 			for _, field := range []string{
 				"blocked_cause", "environment_resume", "answered_workspace_recovery",

@@ -1,7 +1,9 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,81 @@ import (
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 )
+
+func TestSemanticMismatchRecoveryRestoresOneExactBackupWithoutRewritingIt(t *testing.T) {
+	store := newStore(t)
+	if _, err := store.Update("checkpoint", 0, "", nil, func(*Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original Snapshot
+	if err := json.Unmarshal(data, &original); err != nil {
+		t.Fatal(err)
+	}
+	original.SemanticContractVersion--
+	if err := fsutil.WriteJSON(store.StatePath(), original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := store.quarantineUnlocked(SemanticContractVersionError{Version: original.SemanticContractVersion, Current: original.SemanticContractVersion + 1})
+	if err != nil || blocked.Recovery == nil {
+		t.Fatalf("blocked=%+v err=%v", blocked, err)
+	}
+	backup := blocked.Recovery.BackupDir
+	backupStateBefore, err := os.ReadFile(filepath.Join(backup, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupEventsBefore, err := os.ReadFile(filepath.Join(backup, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PreviewSemanticMismatchRecovery(filepath.Join(store.Dir, "recovery", "wrong")); err == nil {
+		t.Fatal("mismatched semantic recovery backup was accepted")
+	}
+	plan, err := store.PreviewSemanticMismatchRecovery(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Eligible || !plan.SemanticMigrationRequired || plan.RestoredRecoveryMarker || plan.RestoredRevision != original.StateRevision || plan.RestoredSemanticContract != original.SemanticContractVersion {
+		t.Fatalf("plan=%+v", plan)
+	}
+	applied, markerBackup, err := store.ApplySemanticMismatchRecovery(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied.Eligible || markerBackup == "" {
+		t.Fatalf("applied=%+v marker=%q", applied, markerBackup)
+	}
+	liveState, err := os.ReadFile(store.StatePath())
+	if err != nil || !bytes.Equal(liveState, backupStateBefore) {
+		t.Fatalf("restored state differs from backup: err=%v", err)
+	}
+	liveEvents, err := os.ReadFile(store.EventsPath())
+	if err != nil || !bytes.Equal(liveEvents, backupEventsBefore) {
+		t.Fatalf("restored events differ from backup: err=%v", err)
+	}
+	if _, err := store.Load(); err == nil {
+		t.Fatal("restored older semantic contract was accepted before migration")
+	} else {
+		var versionErr SemanticContractVersionError
+		if !errors.As(err, &versionErr) {
+			t.Fatalf("restored error=%T %v", err, err)
+		}
+	}
+	for _, name := range []string{"state.json", "events.jsonl", "restore-journal.json"} {
+		if _, err := os.Stat(filepath.Join(markerBackup, name)); err != nil {
+			t.Fatalf("missing marker audit %s: %v", name, err)
+		}
+	}
+	backupStateAfter, _ := os.ReadFile(filepath.Join(backup, "state.json"))
+	backupEventsAfter, _ := os.ReadFile(filepath.Join(backup, "events.jsonl"))
+	if !bytes.Equal(backupStateBefore, backupStateAfter) || !bytes.Equal(backupEventsBefore, backupEventsAfter) {
+		t.Fatal("exact semantic recovery backup was modified")
+	}
+}
 
 func TestLegacyMergedIdentityRecoveryRestoresExactQuarantine(t *testing.T) {
 	store, backup := quarantinedLegacyMergedStore(t, false)

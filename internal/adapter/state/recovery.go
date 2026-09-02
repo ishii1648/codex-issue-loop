@@ -29,14 +29,14 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 	}
 	snapshot, snapshotExists, err := s.loadSnapshotUnlocked()
 	if err != nil {
-		if isSchemaVersionError(err) {
+		if isVersionCompatibilityError(err) {
 			return Snapshot{}, err
 		}
 		return s.quarantineUnlocked(err)
 	}
 	events, validBytes, partial, err := s.readEventsUnlocked()
 	if err != nil {
-		if isSchemaVersionError(err) {
+		if isVersionCompatibilityError(err) {
 			return Snapshot{}, err
 		}
 		return s.quarantineUnlocked(err)
@@ -44,14 +44,14 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 
 	txn, txnExists, err := s.loadTransactionUnlocked()
 	if err != nil {
-		if isSchemaVersionError(err) {
+		if isVersionCompatibilityError(err) {
 			return Snapshot{}, err
 		}
 		return s.quarantineUnlocked(err)
 	}
 	if txnExists {
 		if err := s.validateTransaction(txn); err != nil {
-			if isSchemaVersionError(err) {
+			if isVersionCompatibilityError(err) {
 				return Snapshot{}, err
 			}
 			return s.quarantineUnlocked(err)
@@ -137,6 +137,9 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 	}
 
 	if err := s.validateConsistency(snapshot, events); err != nil {
+		if isVersionCompatibilityError(err) {
+			return Snapshot{}, err
+		}
 		return s.quarantineUnlocked(err)
 	}
 	return snapshot, nil
@@ -281,6 +284,13 @@ func (s Store) validateTransaction(txn transaction) error {
 }
 
 func (s Store) validateConsistency(snapshot Snapshot, events []Event) error {
+	if err := validateEventSequence(snapshot, events); err != nil {
+		return err
+	}
+	return snapshot.Validate()
+}
+
+func validateEventSequence(snapshot Snapshot, events []Event) error {
 	last := uint64(0)
 	for index, event := range events {
 		if index == 0 && event.Type == "event_log_checkpoint" {
@@ -299,7 +309,7 @@ func (s Store) validateConsistency(snapshot Snapshot, events []Event) error {
 	if snapshot.StateRevision != last {
 		return fmt.Errorf("state revision %d does not match last event sequence %d", snapshot.StateRevision, last)
 	}
-	return snapshot.Validate()
+	return nil
 }
 
 func sameEvent(left, right Event) bool {
@@ -420,7 +430,11 @@ func syncDirectory(path string) error {
 	return dir.Sync()
 }
 
-func isSchemaVersionError(err error) bool {
+func isVersionCompatibilityError(err error) bool {
 	var versionError SchemaVersionError
-	return errors.As(err, &versionError)
+	if errors.As(err, &versionError) {
+		return true
+	}
+	var semanticError SemanticContractVersionError
+	return errors.As(err, &semanticError)
 }

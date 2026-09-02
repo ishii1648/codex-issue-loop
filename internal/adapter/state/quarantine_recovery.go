@@ -14,6 +14,7 @@ import (
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
@@ -45,6 +46,26 @@ type QuarantinedSnapshotRecoveryPlan struct {
 	MutationScope        []string                     `json:"mutation_scope"`
 }
 
+type SemanticMismatchRecoveryPlan struct {
+	Eligible                  bool     `json:"eligible"`
+	ConfirmationRequired      bool     `json:"confirmation_required"`
+	Backup                    string   `json:"backup"`
+	RecoveryReason            string   `json:"recovery_reason"`
+	CurrentSemanticContract   int      `json:"current_semantic_contract"`
+	RestoredSemanticContract  int      `json:"restored_semantic_contract"`
+	RestoredRevision          uint64   `json:"restored_revision"`
+	RestoredIssueCount        int      `json:"restored_issue_count"`
+	RestoredActiveWorkers     int      `json:"restored_active_workers"`
+	RestoredActiveLeases      int      `json:"restored_active_leases"`
+	RestoredPendingRequests   int      `json:"restored_pending_requests"`
+	RestoredRecoveryMarker    bool     `json:"restored_recovery_marker"`
+	NextBackup                string   `json:"next_backup,omitempty"`
+	StateSHA256               string   `json:"state_sha256"`
+	EventsSHA256              string   `json:"events_sha256"`
+	SemanticMigrationRequired bool     `json:"semantic_migration_required"`
+	MutationScope             []string `json:"mutation_scope"`
+}
+
 type quarantineRecoveryTransaction struct {
 	Version      int    `json:"version"`
 	RepoID       string `json:"repo_id"`
@@ -65,6 +86,185 @@ func (s Store) PreviewLegacyMergedIdentityRecovery(expectedBackup string) (Quara
 	defer unlock(lock)
 	_, plan, err := s.legacyMergedIdentityRecoveryPlanUnlocked(expectedBackup)
 	return plan, err
+}
+
+func (s Store) PreviewSemanticMismatchRecovery(expectedBackup string) (SemanticMismatchRecoveryPlan, error) {
+	if err := s.ensureDir(); err != nil {
+		return SemanticMismatchRecoveryPlan{}, err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return SemanticMismatchRecoveryPlan{}, err
+	}
+	defer unlock(lock)
+	_, plan, err := s.semanticMismatchRecoveryPlanUnlocked(expectedBackup)
+	return plan, err
+}
+
+func semanticMismatchVersions(reason string) (int, int, bool) {
+	var source, target int
+	n, err := fmt.Sscanf(reason, "snapshot semantic contract version %d does not match %d", &source, &target)
+	return source, target, err == nil && n == 2 && reason == fmt.Sprintf("snapshot semantic contract version %d does not match %d", source, target)
+}
+
+func (s Store) validateSemanticRecoveryMarker(snapshot Snapshot, events []Event) (int, error) {
+	if snapshot.Recovery == nil || snapshot.Recovery.Status != RecoveryStateBlocked || snapshot.Supervisor.State != "blocked" ||
+		snapshot.StateRevision != 1 || len(snapshot.Issues) != 0 || len(snapshot.PendingRequests) != 0 {
+		return 0, errors.New("snapshot is not an exact semantic recovery marker")
+	}
+	if len(events) != 1 || events[0].Type != "recovery_blocked" || events[0].Sequence != 1 {
+		return 0, errors.New("semantic recovery marker event chain is not exact")
+	}
+	source, target, ok := semanticMismatchVersions(snapshot.Recovery.Reason)
+	if !ok || source == target || target != snapshot.SemanticContractVersion {
+		return 0, fmt.Errorf("recovery reason is not an exact semantic contract mismatch: %s", snapshot.Recovery.Reason)
+	}
+	expectedMessage := fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
+	if snapshot.Supervisor.Message != expectedMessage {
+		return 0, errors.New("semantic recovery marker supervisor message does not match its recovery record")
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil || payload["reason"] != snapshot.Recovery.Reason ||
+		filepath.Clean(payload["backup_dir"]) != filepath.Clean(snapshot.Recovery.BackupDir) {
+		return 0, errors.New("semantic recovery marker payload does not match its snapshot")
+	}
+	probe, err := cloneSnapshot(snapshot)
+	if err != nil {
+		return 0, err
+	}
+	probe.SemanticContractVersion = statecontract.CurrentVersion
+	if err := s.validateConsistency(probe, events); err != nil {
+		return 0, fmt.Errorf("validate semantic recovery marker: %w", err)
+	}
+	return source, nil
+}
+
+func (s Store) semanticMismatchRecoveryPlanUnlocked(expectedBackup string) (Snapshot, SemanticMismatchRecoveryPlan, error) {
+	current, exists, err := s.loadSnapshotUnlocked()
+	if err != nil || !exists {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("load semantic recovery marker: %w", err)
+	}
+	currentEvents, _, partial, err := s.readEventsUnlocked()
+	if err != nil || partial {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("read semantic recovery marker events: partial=%t: %w", partial, err)
+	}
+	source, err := s.validateSemanticRecoveryMarker(current, currentEvents)
+	if err != nil {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, err
+	}
+	backup, err := s.validateExactRecoveryBackup(expectedBackup, current.Recovery.BackupDir)
+	if err != nil {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, err
+	}
+	for _, path := range []string{s.TransactionPath(), s.quarantineRecoveryTransactionPath()} {
+		if _, err := os.Stat(path); err == nil {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("semantic recovery marker has an active transaction: %s", filepath.Base(path))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, err
+		}
+	}
+	if _, err := os.Stat(filepath.Join(backup, "state.txn.json")); err == nil {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, errors.New("semantic recovery backup contains a prepared transaction")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, err
+	}
+	backupStore := Store{Dir: backup, RepoID: s.RepoID, RepoPath: s.RepoPath, Secrets: s.Secrets}
+	restored, exists, err := backupStore.loadSnapshotForSemanticRecoveryUnlocked()
+	if err != nil || !exists {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("load semantic recovery backup: %w", err)
+	}
+	if restored.SemanticContractVersion != source {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("backup semantic contract version is %d, expected mismatch source %d", restored.SemanticContractVersion, source)
+	}
+	events, _, partial, err := backupStore.readEventsUnlocked()
+	if err != nil || partial {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("read semantic recovery backup events: partial=%t: %w", partial, err)
+	}
+	restoredMarker := restored.Recovery != nil && restored.Recovery.Status == RecoveryStateBlocked
+	nextBackup := ""
+	activeWorkers := 0
+	activeLeases := 0
+	pendingRequests := 0
+	for _, issue := range restored.Issues {
+		if issue != nil && (issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
+			activeWorkers++
+		}
+		if issue != nil && issue.Lease != nil {
+			activeLeases++
+		}
+	}
+	for _, request := range restored.PendingRequests {
+		if request != nil && request.Status == issuedomain.RequestStatusPending {
+			pendingRequests++
+		}
+	}
+	if restoredMarker {
+		if _, err := backupStore.validateSemanticRecoveryMarker(restored, events); err != nil {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("validate nested semantic recovery marker: %w", err)
+		}
+		if _, err := s.validateExactRecoveryBackup(restored.Recovery.BackupDir, restored.Recovery.BackupDir); err != nil {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("validate nested semantic recovery backup: %w", err)
+		}
+		nextBackup = restored.Recovery.BackupDir
+	} else {
+		if restored.SemanticContractVersion < statecontract.MinimumVersion || restored.SemanticContractVersion >= statecontract.CurrentVersion {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("restored semantic contract version %d is not a supported migration source", restored.SemanticContractVersion)
+		}
+		if restored.Supervisor.State != SupervisorStateStopped {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("restored snapshot supervisor is not stopped: %s", restored.Supervisor.State)
+		}
+		if pendingRequests != 0 {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("restored snapshot retains %d pending requests", pendingRequests)
+		}
+		if activeWorkers != 0 || activeLeases != 0 {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("restored snapshot retains active workers=%d leases=%d", activeWorkers, activeLeases)
+		}
+		if err := validateEventSequence(restored, events); err != nil {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("semantic recovery backup event chain is invalid: %w", err)
+		}
+	}
+	stateData, err := os.ReadFile(filepath.Join(backup, "state.json"))
+	if err != nil {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, err
+	}
+	eventsData, err := os.ReadFile(filepath.Join(backup, "events.jsonl"))
+	if err != nil {
+		return Snapshot{}, SemanticMismatchRecoveryPlan{}, err
+	}
+	plan := SemanticMismatchRecoveryPlan{
+		Eligible: true, ConfirmationRequired: true, Backup: backup, RecoveryReason: current.Recovery.Reason,
+		CurrentSemanticContract: current.SemanticContractVersion, RestoredSemanticContract: restored.SemanticContractVersion,
+		RestoredRevision: restored.StateRevision, RestoredIssueCount: len(restored.Issues), RestoredRecoveryMarker: restoredMarker,
+		RestoredActiveWorkers: activeWorkers, RestoredActiveLeases: activeLeases, RestoredPendingRequests: pendingRequests,
+		NextBackup: nextBackup, StateSHA256: fileSHA256(stateData), EventsSHA256: fileSHA256(eventsData),
+		SemanticMigrationRequired: !restoredMarker && restored.SemanticContractVersion != statecontract.CurrentVersion,
+		MutationScope:             []string{"current recovery marker backup", "exact state snapshot restore", "exact event log restore", "recovery journal"},
+	}
+	return restored, plan, nil
+}
+
+func (s Store) loadSnapshotForSemanticRecoveryUnlocked() (Snapshot, bool, error) {
+	data, err := os.ReadFile(s.StatePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return Snapshot{}, false, nil
+	}
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("read state: %w", err)
+	}
+	type snapshotAlias Snapshot
+	var decoded snapshotAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return Snapshot{}, false, fmt.Errorf("decode state: %w", err)
+	}
+	snapshot := Snapshot(decoded)
+	if snapshot.Version != CurrentVersion {
+		return Snapshot{}, false, SchemaVersionError{Kind: "state", Version: snapshot.Version}
+	}
+	if snapshot.RepoID != s.RepoID || snapshot.RepoPath != s.RepoPath {
+		return Snapshot{}, false, errors.New("semantic recovery backup repository identity does not match")
+	}
+	normalizeSnapshot(&snapshot)
+	return snapshot, true, nil
 }
 
 func (s Store) legacyMergedIdentityRecoveryPlanUnlocked(expectedBackup string) (Snapshot, QuarantinedSnapshotRecoveryPlan, error) {
@@ -266,6 +466,59 @@ func (s Store) completeQuarantineRecoveryUnlocked() error {
 		return err
 	}
 	return syncDirectory(s.Dir)
+}
+
+func (s Store) ApplySemanticMismatchRecovery(expectedBackup string) (SemanticMismatchRecoveryPlan, string, error) {
+	if err := s.ensureDir(); err != nil {
+		return SemanticMismatchRecoveryPlan{}, "", err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return SemanticMismatchRecoveryPlan{}, "", err
+	}
+	defer unlock(lock)
+	_, plan, err := s.semanticMismatchRecoveryPlanUnlocked(expectedBackup)
+	if err != nil {
+		return SemanticMismatchRecoveryPlan{}, "", err
+	}
+	markerBackup := filepath.Join(s.Dir, "recovery", time.Now().UTC().Format("20060102T150405.000000000Z")+"-semantic-recovery-marker_"+strings.TrimPrefix(NewID("marker"), "marker_"))
+	if err := os.MkdirAll(markerBackup, 0o700); err != nil {
+		return SemanticMismatchRecoveryPlan{}, "", err
+	}
+	for _, name := range []string{"state.json", "events.jsonl"} {
+		data, readErr := os.ReadFile(filepath.Join(s.Dir, name))
+		if readErr != nil {
+			return SemanticMismatchRecoveryPlan{}, markerBackup, readErr
+		}
+		if writeErr := fsutil.WriteFile(filepath.Join(markerBackup, name), data, 0o600); writeErr != nil {
+			return SemanticMismatchRecoveryPlan{}, markerBackup, writeErr
+		}
+	}
+	j := map[string]any{
+		"version": 1, "status": "prepared", "reason": plan.RecoveryReason, "backup": plan.Backup,
+		"marker_backup": markerBackup, "state_sha256": plan.StateSHA256, "events_sha256": plan.EventsSHA256,
+		"operator_confirmation": map[string]bool{"exact_semantic_mismatch_backup": true},
+	}
+	journalPath := filepath.Join(markerBackup, "restore-journal.json")
+	if err := fsutil.WriteJSON(journalPath, j, 0o600); err != nil {
+		return SemanticMismatchRecoveryPlan{}, markerBackup, err
+	}
+	txn := quarantineRecoveryTransaction{
+		Version: 1, RepoID: s.RepoID,
+		StateFile: filepath.Join(plan.Backup, "state.json"), EventsFile: filepath.Join(plan.Backup, "events.jsonl"),
+		StateSHA256: plan.StateSHA256, EventsSHA256: plan.EventsSHA256,
+	}
+	if err := fsutil.WriteJSON(s.quarantineRecoveryTransactionPath(), txn, 0o600); err != nil {
+		return SemanticMismatchRecoveryPlan{}, markerBackup, err
+	}
+	if err := s.completeQuarantineRecoveryUnlocked(); err != nil {
+		return SemanticMismatchRecoveryPlan{}, markerBackup, err
+	}
+	j["status"] = "completed"
+	if err := fsutil.WriteJSON(journalPath, j, 0o600); err != nil {
+		return SemanticMismatchRecoveryPlan{}, markerBackup, err
+	}
+	return plan, markerBackup, nil
 }
 
 func (s Store) ApplyLegacyMergedIdentityRecovery(expectedBackup string, repairs []LegacyMergedIdentityRepair) (Snapshot, string, error) {
