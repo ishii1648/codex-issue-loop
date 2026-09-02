@@ -650,7 +650,11 @@ esac
 	}
 	if _, err := store.Update("fixture_active_worker", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Supervisor.State = state.SupervisorStateMaintenance
-		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusRunning, RunID: "run-1", WorkerPID: 7101, WorkerPGID: 7101}
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Status: issuedomain.StatusRunning, RunID: "run-1", WorkerPID: 7101, WorkerPGID: 7101,
+			LeaseGeneration: 1, Lease: &state.ExecutionLease{Owner: state.LeaseOwner{RunID: "run-1", Generation: 1}, Slot: 0,
+				DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: time.Now().UTC()},
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)

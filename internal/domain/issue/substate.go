@@ -15,6 +15,7 @@ type RequestStatus string
 const (
 	RequestStatusPending  RequestStatus = "pending"
 	RequestStatusAnswered RequestStatus = "answered"
+	RequestStatusCanceled RequestStatus = "canceled"
 )
 
 type EnvironmentResumeStatus string
@@ -95,7 +96,7 @@ func (s ResourceParkStatus) Validate() error {
 }
 
 func (s RequestStatus) Validate() error {
-	return validateVocabulary("request status", s, RequestStatusPending, RequestStatusAnswered)
+	return validateVocabulary("request status", s, RequestStatusPending, RequestStatusAnswered, RequestStatusCanceled)
 }
 
 func (s EnvironmentResumeStatus) Validate() error {

@@ -1,6 +1,6 @@
 package schema
 
 const (
-	Previous = 3
-	Current  = 4
+	Previous = 4
+	Current  = 5
 )

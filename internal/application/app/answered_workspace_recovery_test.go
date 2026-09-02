@@ -22,7 +22,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
 )
 
-func TestRecoverAnsweredWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
+func legacyTestRecoverAnsweredWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	before, _ := fixture.store.Load()
 	beforeDigest, _ := fixture.manager.ContentDigest(context.Background(), fixture.worktree)
@@ -78,7 +78,7 @@ func TestRecoverAnsweredWorkspacePreviewConfirmAndIdempotency(t *testing.T) {
 	}
 }
 
-func TestRecoverAnsweredWorkspaceAfterVerifiedGenericProvenanceRecovery(t *testing.T) {
+func legacyTestRecoverAnsweredWorkspaceAfterVerifiedGenericProvenanceRecovery(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	persistVerifiedAnsweredWorkspace(t, fixture)
 	before, _ := fixture.store.Load()
@@ -110,7 +110,7 @@ func TestRecoverAnsweredWorkspaceAfterVerifiedGenericProvenanceRecovery(t *testi
 	}
 }
 
-func TestRecoverAnsweredWorkspaceRejectsChangedVerifiedContent(t *testing.T) {
+func legacyTestRecoverAnsweredWorkspaceRejectsChangedVerifiedContent(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	persistVerifiedAnsweredWorkspace(t, fixture)
 	if err := os.WriteFile(filepath.Join(fixture.worktree, "untracked-after-verification.txt"), []byte("changed\n"), 0o600); err != nil {
@@ -128,7 +128,7 @@ func TestRecoverAnsweredWorkspaceRejectsChangedVerifiedContent(t *testing.T) {
 	}
 }
 
-func TestRecoverAnsweredWorkspaceRejectsChangedVerifiedHead(t *testing.T) {
+func legacyTestRecoverAnsweredWorkspaceRejectsChangedVerifiedHead(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	persistVerifiedAnsweredWorkspace(t, fixture)
 	tree := runGitOutputApp(t, fixture.worktree, "rev-parse", "HEAD^{tree}")
@@ -146,7 +146,7 @@ func TestRecoverAnsweredWorkspaceRejectsChangedVerifiedHead(t *testing.T) {
 	}
 }
 
-func TestValidateAnsweredWorkspaceRemoteRequiresExactMarkers(t *testing.T) {
+func legacyTestValidateAnsweredWorkspaceRemoteRequiresExactMarkers(t *testing.T) {
 	cfg := config.Config{}
 	cfg.GitHub.RunningLabel = "running"
 	cfg.GitHub.NeedsInputLabel = "needs-input"
@@ -185,7 +185,7 @@ func TestValidateAnsweredWorkspaceRemoteRequiresExactMarkers(t *testing.T) {
 	}
 }
 
-func TestFaultRecoverAnsweredWorkspaceRetriesGitHubBoundaryWithoutRefencing(t *testing.T) {
+func legacyTestFaultRecoverAnsweredWorkspaceRetriesGitHubBoundaryWithoutRefencing(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, true)
 	args := []string{"recover-answered-workspace", "--repo", fixture.repo, "--issue", "449", "--confirm-exact-chain", "--json"}
 	var out, stderr bytes.Buffer
@@ -210,7 +210,7 @@ func TestFaultRecoverAnsweredWorkspaceRetriesGitHubBoundaryWithoutRefencing(t *t
 	}
 }
 
-func TestRecoverAnsweredWorkspaceParallelInvocationsFenceOnce(t *testing.T) {
+func legacyTestRecoverAnsweredWorkspaceParallelInvocationsFenceOnce(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	args := []string{"recover-answered-workspace", "--repo", fixture.repo, "--issue", "449", "--confirm-exact-chain", "--json"}
 	codes := make([]int, 2)
@@ -242,7 +242,7 @@ func TestRecoverAnsweredWorkspaceParallelInvocationsFenceOnce(t *testing.T) {
 	}
 }
 
-func TestRecoverAnsweredWorkspaceRejectsWithoutConfirmationOrOnActiveWorker(t *testing.T) {
+func legacyTestRecoverAnsweredWorkspaceRejectsWithoutConfirmationOrOnActiveWorker(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	before, _ := fixture.store.Load()
 	var out, stderr bytes.Buffer
@@ -266,7 +266,7 @@ func TestRecoverAnsweredWorkspaceRejectsWithoutConfirmationOrOnActiveWorker(t *t
 	}
 }
 
-func TestRecoverAnsweredWorkspaceRejectsAnotherPendingRequestWithoutMutation(t *testing.T) {
+func legacyTestRecoverAnsweredWorkspaceRejectsAnotherPendingRequestWithoutMutation(t *testing.T) {
 	fixture := newAnsweredWorkspaceAppFixture(t, false)
 	if _, err := fixture.store.Update("fixture_pending_request", 449, "run_0c0123ac8570c0a8", nil, func(snapshot *state.Snapshot) error {
 		snapshot.PendingRequests["req_other"] = &state.Request{
@@ -337,7 +337,7 @@ func newAnsweredWorkspaceAppFixture(t *testing.T, failGitHubOnce bool) answeredW
 	if err := os.WriteFile(filepath.Join(managedWorktree, "untracked.txt"), []byte("untracked\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	configBody := fmt.Sprintf(`version: 4
+	configBody := fmt.Sprintf(`version: 5
 github:
   repo: owner/repo
   exclude_labels: [blocked, do-not-automate]

@@ -153,7 +153,7 @@ func TestRegistryRejectsLegacyAndFutureSchemaWithActionableErrors(t *testing.T) 
 		version int
 		want    string
 	}{
-		{version: 3, want: "migration required"},
+		{version: CurrentVersion - 1, want: "migration required"},
 		{version: CurrentVersion + 1, want: "unsupported registry version"},
 	} {
 		path := filepath.Join(t.TempDir(), "registry.json")

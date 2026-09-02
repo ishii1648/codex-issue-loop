@@ -248,6 +248,24 @@ func inspectSemanticState(path string) ([]SemanticFinding, error) {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return nil, err
 	}
+	if snapshot.Version == schemaversion.Previous {
+		keys := make([]string, 0, len(snapshot.Issues))
+		for key := range snapshot.Issues {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		findings := make([]SemanticFinding, 0, len(keys))
+		for _, key := range keys {
+			item := snapshot.Issues[key]
+			if item == nil {
+				continue
+			}
+			findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: item.Number, Status: item.Status.String(),
+				Field: "issues[].suspension", Code: "V4_RECOVERY_CONTRACT_MIGRATABLE", Migratable: true,
+				Reason: "v4 execution lease and recovery fields have a deterministic v5 checkpoint migration", MigrationRule: "FOLD_LEGACY_RECOVERY_TO_CHECKPOINT"})
+		}
+		return findings, nil
+	}
 	// Legacy v4 has no explicit contract marker. Preview applies the current validator in
 	// memory and never writes the source file.
 	if snapshot.SemanticContractVersion == statecontract.MinimumVersion {
@@ -629,7 +647,7 @@ func migrateArtifact(artifact Artifact, migration journal) error {
 	case "events":
 		return migrateEvents(artifact.Path, migration, artifact.Version)
 	case "transaction":
-		return migrateTransaction(artifact.Path)
+		return migrateTransaction(artifact.Path, migration)
 	case "state":
 		return migrateState(artifact.Path, migration)
 	case "registry":
@@ -683,7 +701,7 @@ func migrateJSONObject(path string) error {
 	return writeRawObject(path, object)
 }
 
-func migrateTransaction(path string) error {
+func migrateTransaction(path string, migration journal) error {
 	object, err := readRawObject(path)
 	if err != nil {
 		return err
@@ -696,7 +714,22 @@ func migrateTransaction(path string) error {
 		}
 		nested["version"] = json.RawMessage(fmt.Sprint(CurrentVersion))
 		if key == "snapshot" {
+			nested["semantic_contract_version"] = json.RawMessage(fmt.Sprint(statecontract.CurrentVersion))
 			delete(nested, "notifications")
+			if err := migrateV5StateObject(nested, migration.StartedAt); err != nil {
+				return fmt.Errorf("migrate transaction snapshot: %w", err)
+			}
+			encodedSnapshot, err := json.Marshal(nested)
+			if err != nil {
+				return err
+			}
+			var snapshot state.Snapshot
+			if err := json.Unmarshal(encodedSnapshot, &snapshot); err != nil {
+				return fmt.Errorf("decode migrated transaction snapshot: %w", err)
+			}
+			if err := snapshot.Validate(); err != nil {
+				return fmt.Errorf("validate migrated transaction snapshot: %w", err)
+			}
 		} else {
 			removeLegacyDeliveryEvent(nested)
 		}
@@ -735,6 +768,9 @@ func migrateState(path string, migration journal) error {
 	object["supervisor"] = encodedSupervisor
 	delete(object, "notifications")
 	if err := normalizeMigratedSessions(object); err != nil {
+		return err
+	}
+	if err := migrateV5StateObject(object, migration.StartedAt); err != nil {
 		return err
 	}
 	encoded, err := json.Marshal(object)
@@ -802,19 +838,26 @@ func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
 			}
 		}
 		var issues map[string]struct {
-			Lease        json.RawMessage `json:"lease"`
-			ResourcePark *struct {
+			Lease          json.RawMessage `json:"lease"`
+			ExecutionLease json.RawMessage `json:"execution_lease"`
+			ResourcePark   *struct {
 				Status string `json:"status"`
 			} `json:"resource_park"`
+			Checkpoint *struct {
+				Status string `json:"status"`
+			} `json:"continuation_checkpoint"`
 		}
 		if err := json.Unmarshal(object["issues"], &issues); err != nil {
 			return err
 		}
 		for number, issue := range issues {
-			if len(issue.Lease) > 0 && string(issue.Lease) != "null" {
+			if len(issue.Lease) > 0 && string(issue.Lease) != "null" || len(issue.ExecutionLease) > 0 && string(issue.ExecutionLease) != "null" {
 				return fmt.Errorf("rollback blocked: active resource lease for Issue #%s in %s", number, entry.Source)
 			}
 			if issue.ResourcePark != nil && (issue.ResourcePark.Status == "parked" || issue.ResourcePark.Status == "resuming") {
+				return fmt.Errorf("rollback blocked: parked resource continuation for Issue #%s in %s", number, entry.Source)
+			}
+			if issue.Checkpoint != nil && (issue.Checkpoint.Status == "parked" || issue.Checkpoint.Status == "resuming") {
 				return fmt.Errorf("rollback blocked: parked resource continuation for Issue #%s in %s", number, entry.Source)
 			}
 		}

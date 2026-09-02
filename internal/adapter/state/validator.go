@@ -81,6 +81,12 @@ func validateIssueAggregate(issue *Issue) error {
 	if issue.WorkerPID > 0 && (issue.RunID == "" || !issue.Status.OccupiesWorkerSlot()) {
 		return fmt.Errorf("worker process is not owned by an executing lifecycle")
 	}
+	if issue.Status.Terminal() && issue.Lease != nil {
+		return fmt.Errorf("terminal lifecycle must not retain an execution lease")
+	}
+	if issue.Status.RequiresExecutionLease() && issue.Lease == nil {
+		return fmt.Errorf("executing lifecycle %q has no execution lease", issue.Status)
+	}
 	if issue.Session != nil {
 		if strings.TrimSpace(issue.Session.Backend) == "" || strings.TrimSpace(issue.Session.ID) == "" || issue.SessionID != issue.Session.ID {
 			return fmt.Errorf("worker session identity is incomplete or inconsistent")
@@ -106,7 +112,58 @@ func validateIssueAggregate(issue *Issue) error {
 	if issue.Workspace != nil && issue.Workspace.RepositoryID < 0 {
 		return fmt.Errorf("workspace repository ID must not be negative")
 	}
+	if err := validateSuspension(issue); err != nil {
+		return err
+	}
 	return validateGitHubSyncSubstate(issue)
+}
+
+func validateSuspension(issue *Issue) error {
+	if issue.Suspension == nil {
+		return nil
+	}
+	suspension := issue.Suspension
+	if issue.Status == issuedomain.StatusCompleted {
+		return fmt.Errorf("completed lifecycle retains a suspension")
+	}
+	if !issue.Status.Terminal() && suspension.Status != issuedomain.SuspensionResolved {
+		return fmt.Errorf("active suspension is attached to executing lifecycle %q", issue.Status)
+	}
+	if !ValidID(suspension.ID, "suspension_") || strings.TrimSpace(suspension.ReasonCode) == "" ||
+		strings.TrimSpace(suspension.Reason) == "" || suspension.SuspendedAt.IsZero() || len(suspension.AllowedActions) == 0 {
+		return fmt.Errorf("suspension identity, reason, time, and actions must be complete")
+	}
+	switch suspension.Status {
+	case issuedomain.SuspensionActive, issuedomain.SuspensionQuarantined:
+		if !suspension.ResolvedAt.IsZero() || suspension.Resolution != "" {
+			return fmt.Errorf("active suspension contains a resolution")
+		}
+	case issuedomain.SuspensionResolved:
+		if suspension.ResolvedAt.IsZero() || suspension.Resolution.Validate() != nil {
+			return fmt.Errorf("resolved suspension has no valid resolution")
+		}
+	default:
+		return fmt.Errorf("unknown suspension status %q", suspension.Status)
+	}
+	switch suspension.Recoverability {
+	case issuedomain.RecoverabilityOperator, issuedomain.RecoverabilityAutomatic,
+		issuedomain.RecoverabilityNone, issuedomain.RecoverabilityAmbiguous:
+	default:
+		return fmt.Errorf("unknown suspension recoverability %q", suspension.Recoverability)
+	}
+	seen := map[issuedomain.ResolutionAction]bool{}
+	for _, action := range suspension.AllowedActions {
+		if err := action.Validate(); err != nil || seen[action] {
+			return fmt.Errorf("suspension contains an invalid or duplicate action %q", action)
+		}
+		seen[action] = true
+	}
+	if suspension.CheckpointID != "" {
+		if issue.ResourcePark == nil || issue.ResourcePark.ID != suspension.CheckpointID {
+			return fmt.Errorf("suspension checkpoint identity is inconsistent")
+		}
+	}
+	return nil
 }
 
 func validateGitHubSyncSubstate(issue *Issue) error {
@@ -141,6 +198,10 @@ func validateGitHubSyncSubstate(issue *Issue) error {
 		wantStatus = issuedomain.StatusResumePending
 		if issue.AnsweredWorkspaceRecovery == nil {
 			return fmt.Errorf("answered workspace synchronization has no recovery substate")
+		}
+	case issuedomain.GitHubSyncIssueResolution:
+		if issue.Status.Terminal() || issue.Suspension == nil || issue.Suspension.Status != issuedomain.SuspensionResolved {
+			return fmt.Errorf("Issue resolution synchronization has no resolved executable suspension")
 		}
 	}
 	if wantStatus != issuedomain.StatusUnset && issue.Status != wantStatus {
@@ -177,6 +238,10 @@ func validateRequestAggregate(snapshot Snapshot, id string, request *Request) er
 	case issuedomain.RequestStatusAnswered:
 		if strings.TrimSpace(request.Answer) == "" {
 			return fmt.Errorf("answered request %s has no answer", id)
+		}
+	case issuedomain.RequestStatusCanceled:
+		if request.Answer != "" || request.AnsweredAt != nil {
+			return fmt.Errorf("canceled request %s contains an answer", id)
 		}
 	}
 	if request.ResourceParkID != "" {

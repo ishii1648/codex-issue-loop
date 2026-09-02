@@ -119,69 +119,19 @@ sleep 3
 
 多数のrepositoryを常駐させる場合は、明示的な`webhook.mode: webhook`で共有localhost brokerを利用できます。公開HTTPS endpointはagent-loopが用意せず、既存のreverse proxyから`127.0.0.1`または`::1`へ配送します。署名検証、secret管理、GitHub event、rotation、15分の条件付きREST safety sweep、pollingへのrollbackは[Mac mini常駐運用runbook](docs/mac-mini-runbook.md#12-webhook-brokerとreverse-proxy)を参照してください。
 
-`completion.auto_merge: true`でPR conflictが発生した場合は、同じworktree・branch・PRを使う`resolving_conflict`へ自動遷移します。規定回数後に最終`blocked`となったconflictだけ、原因を修復したうえで次の明示操作から再開します。
+`completion.auto_merge: true`でPR conflictが発生した場合は、同じworktree・branch・PRを使う`resolving_conflict`へ自動遷移します。通常の自動lifecycleで処理できない`blocked` / `failed` Issueは、scenario別commandではなく共通のread-only planと型付きresolutionで扱います。
 
 ```sh
-"$agent_loop_bin" retry --repo "$PWD" --issue 123 --json
+"$agent_loop_bin" issue plan --repo "$PWD" --issue 123 --json
+"$agent_loop_bin" issue resolve --repo "$PWD" --issue 123 --action resume --json
+"$agent_loop_bin" issue resolve --repo "$PWD" --issue 123 --action retry-stage --json
+"$agent_loop_bin" issue resolve --repo "$PWD" --issue 123 --action adopt-pr --json
+"$agent_loop_bin" issue resolve --repo "$PWD" --issue 123 --action cancel --json
 ```
 
-workerが外部環境前提を理由にtyped `blocked`を返すと、supervisorはPID/PGID不在を確認し、run・worktree・branch・dirty changes・session・answers・resource/base provenanceを`resource_park`へ保持したままactive leaseだけを自動parkします。GitHubは`blocked`のままですが、後続queueは同じresourceを予約できます。`status --json`の`resource_admission.resource_parks`で保存claimとpark状態、`claim_waiting_candidates`でresumeを妨げるIssue/resource/slotを確認できます。
+`issue plan`はcanonical snapshotと現在のprocess、worktree/git、GitHub状態だけを読み、event件数や順序には依存しません。state revision、checkpoint、suspension、全actionの可否と理由をJSONで返し、state/eventを変更しないことも検査します。`issue resolve`はplan時のrevisionとsuspensionを再照合し、`resume` / `retry-stage`では新generationのExecutionLeaseをtransaction内で取得します。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEADだけを採用し、`cancel`はpending requestをcanceledへ収束させます。
 
-通常workerが`needs_input`を返した場合も、pending requestとrequest IDをrun・元lease ownerへ結び付け、PID/PGID消失後に同じtransactionでleaseをparkします。GitHubの`codex-loop:needs-input`は回答まで維持されるため、質問、worktree、dirty changes、branch、session、base SHAを残したまま無関係なready queueを継続できます。`answer`は保存provenanceを検証し、競合がなければ新generationを1回だけ取得します。競合中は回答を`answer_claim_waiting`として保存し、相手lease解放後に自動再取得します。
-
-前提をoperatorが解消し、active processがないことを確認した後だけ、次の明示操作で同じworktree・branch・sessionから再開します。park済みclaimは他Issueのactive leaseとworker slotを同じtransactionで再検証し、新しいowner generationを1回だけ取得します。競合中は他Issueのleaseを奪わず拒否します。PR conflict、手動exclusion、security block、failed、completed/closed Issueには適用されません。
-
-```sh
-"$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
-"$agent_loop_bin" resume-blocked --repo "$PWD" --issue 123 --dry-run --json
-```
-
-park済みstateでは元のresource集合、base SHA、reservation provenanceを使い、legacy stateでleaseが欠けている場合だけ、既存の厳密なdurable history検証後に保守的な`repo:*` leaseを補います。base SHAを検証できない場合はstateとGitHub labelを変更せず拒否するため、state fileを編集せずremote-tracking branchを復旧して再実行します。
-
-v0.6.22以前の通常`needs_input` workerが回答後にleaseをgeneration 2で再取得したものの、導入前の`Workspace`欠損だけでspawn直前にblockedへ収束したexact chainには、通常のenvironment recoveryと分離した専用操作を使います。必ずpreview後に明示確認し、state・label・worktreeを手編集しません。
-
-```sh
-"$agent_loop_bin" recover-answered-workspace --repo "$PWD" --issue 123 --dry-run --json
-"$agent_loop_bin" recover-answered-workspace --repo "$PWD" --issue 123 --confirm-exact-chain --json
-```
-
-CLIは同じrequest/answer/park/run/session/worktree/branch/base、generation 1→2、全check成功の`worker_workspace_rejected`、blocked GitHub markerまでの完全な11-event chainを照合します。その直後に同じrun/status/worktree/branch/repository/HEAD/content fingerprint/validatorを証明する`workspace_provenance_recovered`がexactly 1件ある場合も、保存済みverified provenanceを再利用して限定的に受け付けます。成功時だけgeneration 3 fenceと`resume_pending`を単一transactionへ保存し、同じsession/worktreeからcontinuationを再開します。
-
-実行再開を伴う限定recoveryに一致しないlegacy `blocked` / `failed` recordは、lifecycleを一切変更しない`recover-workspace`でWorkspace provenanceだけを復旧できます。必ずpreviewし、run/worktree/branch、HEAD/content digest、LaunchValidation、GitHub Issue/label、保存PR identityを確認してから適用します。
-
-```sh
-"$agent_loop_bin" recover-workspace --repo "$PWD" --issue 123 --dry-run --json
-"$agent_loop_bin" recover-workspace --repo "$PWD" --issue 123 --confirm-verified-workspace --json
-```
-
-成功時に変わるのは`workspace`、`workspace_provenance_recovery`監査record、対応eventだけです。status、lease/resource park、session、attempt/continuation、GitHub label/comment、worktree内容は変更しません。active process、pending request、別exclusion、closed Issue、保存PR/branch/HEAD不一致ではfail closedとなります。11-event answered missing-workspace lifecycle candidateではpreviewが`eligible=false`と専用`recover-answered-workspace` remediationを返し、generic confirmはstateを変更せず拒否します。
-
-worker完了後、commit/push/PR作成前のpublisherで`durable_base_sha_missing`として最終`failed`になったIssueは、保存済みcompleted resultとdirty worktreeが一致する場合だけpublication-only recoveryを明示要求できます。workerは再実行せず、元のattempt budget、run、worktree、branch、回答、session、resource metadataを保持します。
-
-```sh
-"$agent_loop_bin" recover-publication --repo "$PWD" --issue 123 --confirm-prerequisite-resolved --json
-```
-
-このコマンドは汎用failed retryではありません。manual exclusion、worker failure、security block、PR conflict、closed Issue、unknown failure provenance、missing/changed resultやworktreeをfail closedで拒否します。
-
-保存済みPRのrequired checks失敗でretry budgetを使い切ったIssueは、同じbranchへ外部修正をpushした後だけ、明示操作で既存PR lifecycleへ戻せます。旧headと異なるclean・fully pushedなhead、same-repositoryのopen Issue/PR、typed failure provenance、retained leaseを検証し、worker retry budgetはresetしません。v0.6.20のpublisher decode bug後にfinal retryでprovenanceが失われたrecordだけは、欠落・重複・順序・run/generation・PR identityをdurable eventsから完全に再構成できる場合に限り同じ経路へ復帰できます。
-
-```sh
-"$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --confirm-external-fix --json
-"$agent_loop_bin" recover-checks --repo "$PWD" --issue 123 --dry-run --json
-```
-
-Production由来の復旧証跡を手編集せずsanitizationして固定する場合は、[recovery fixture runbook](docs/recovery-fixtures.md)に従い`export-recovery-fixture`と`verify-recovery-fixture`を使用する。
-
-checksがpendingまたはgreenなら`awaiting_checks`から通常のDraft解除・auto mergeへ収束し、failureならterminal `failed`を維持します。manual/security exclusion、active worker、pending request、dirty/unpushed worktree、別branch/PR/head、closed-without-mergeでは拒否します。
-
-terminal `blocked` / `failed`の保存branchからoperatorがPRを作成・merge済みなのに、durable stateへPR URLが保存されずretained leaseがqueueを止めている場合は、限定adoptionを明示実行できます。
-
-```sh
-"$agent_loop_bin" adopt-merged-pr --repo "$PWD" --issue 123 --confirm-merged-pr-adoption --json
-```
-
-同一repo・保存branchのmerged PRがちょうど1件で、cleanかつfully pushedなworktree/head、lease owner/generation/base SHA、supervisor-owned terminal provenance、process/request不在がすべて一致する場合だけterminal stateへ採用します。新しいcommit、push、branch、PR、mergeは作成せず、attempt、continuation、session、回答を保持したままPR情報と監査metadataを保存し、leaseを1回だけ解放します。
+実行中のcapacityは`execution_lease`だけが表し、中断可能なworkspace・session・base/resource・PR情報は`continuation_checkpoint`、理由・recoverability・許可actionは`suspension`が保持します。terminal `blocked` / `failed`はExecutionLeaseとPID/PGIDを保持しないため、ambiguousな1 Issueをquarantineしてもrepository全体のqueueは停止しません。state、label、checkpointは手編集せず、planが拒否した場合は観測された不一致を解消して再planします。
 
 local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_network` localhost-only policyへopt-inできます。既定はnetwork無効です。設定と残余リスクは[localhost-only command network](docs/localhost-network.md)を参照してください。
 

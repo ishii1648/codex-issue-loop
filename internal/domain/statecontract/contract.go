@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	CurrentVersion       = 1
-	MinimumVersion       = 0 // v4 snapshots predate the explicit contract marker.
-	CurrentSchemaVersion = 4
-	MigrationFromSchema  = 3
+	CurrentVersion       = 2
+	MinimumVersion       = 1
+	CurrentSchemaVersion = 5
+	MigrationFromSchema  = 4
 )
 
 type Class string
@@ -54,9 +54,16 @@ func Current() Contract {
 			{Path: "issues[].workspace", Class: ExecutionRequiredProvenance, Introduced: 1,
 				RequiredStatuses: workspaceRequiredStatuses(),
 				Migration: MigrationPolicy{
-					Code: "WORKSPACE_PROVENANCE_REQUIRES_VERIFIED_RECOVERY", Kind: "non_migratable",
-					OperatorGuide: "use the supported v4 agent-loop resume-blocked recovery while stopped, then preview v5 migration again",
+					Code: "WORKSPACE_PROVENANCE_PRESERVED_OR_QUARANTINED", Kind: "migrate",
+					OperatorGuide: "stopped v4 records are converted to a typed continuation checkpoint; ambiguous records are isolated",
 				}},
+			{Path: "issues[].execution_lease", Class: ExecutionRequiredProvenance, Introduced: 2,
+				RequiredStatuses: executionLeaseStatuses(),
+				Migration:        MigrationPolicy{Code: "RENAME_ACTIVE_EXECUTION_LEASE", Kind: "migrate"}},
+			{Path: "issues[].continuation_checkpoint", Class: Optional, Introduced: 2,
+				Migration: MigrationPolicy{Code: "FOLD_LEGACY_RECOVERY_TO_CHECKPOINT", Kind: "migrate"}},
+			{Path: "issues[].suspension", Class: Optional, Introduced: 2,
+				Migration: MigrationPolicy{Code: "FOLD_TERMINAL_RECOVERY_TO_SUSPENSION", Kind: "migrate"}},
 			{Path: "issues[].session", Class: Optional, Introduced: 1,
 				Migration: MigrationPolicy{Code: "OPTIONAL_NO_MIGRATION", Kind: "compatible"}},
 			{Path: "issues[].publication_audit", Class: Optional, Introduced: 1,
@@ -121,6 +128,16 @@ func workspaceRequiredStatuses() []issuedomain.Status {
 	statuses := make([]issuedomain.Status, 0, len(issuedomain.AllStatuses()))
 	for _, status := range issuedomain.AllStatuses() {
 		if status.RequiresWorkspaceProvenance() {
+			statuses = append(statuses, status)
+		}
+	}
+	return statuses
+}
+
+func executionLeaseStatuses() []issuedomain.Status {
+	statuses := make([]issuedomain.Status, 0)
+	for _, status := range issuedomain.AllStatuses() {
+		if status.RequiresExecutionLease() {
 			statuses = append(statuses, status)
 		}
 	}

@@ -96,7 +96,7 @@ func (s Status) RequiresWorkspaceProvenance() bool {
 	case StatusClaimed, StatusRunning, StatusAnswerClaimWaiting, StatusResumePending,
 		StatusEnvironmentResumePending, StatusPublicationRecovery, StatusChecksRecovery,
 		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
-		StatusResolvingConflict, StatusBlocked, StatusFailed:
+		StatusResolvingConflict:
 		return true
 	default:
 		return false
@@ -113,6 +113,10 @@ func (s Status) OccupiesWorkerSlot() bool {
 	default:
 		return false
 	}
+}
+
+func (s Status) RequiresExecutionLease() bool {
+	return s.OccupiesWorkerSlot()
 }
 
 func (s Status) RequiresCapabilityRecheck() bool {

@@ -84,9 +84,9 @@ type LeaseOwner struct {
 	Generation uint64 `json:"generation"`
 }
 
-// ResourceLease is the write-ahead reservation that must exist before a worker
+// ExecutionLease is the write-ahead reservation that must exist before a worker
 // is started. A lease has no wall-clock expiry; ReservedAt is audit metadata.
-type ResourceLease struct {
+type ExecutionLease struct {
 	Owner             LeaseOwner `json:"owner"`
 	Slot              int        `json:"slot"`
 	DeclaredResources []string   `json:"declared_resources"`
@@ -96,19 +96,49 @@ type ResourceLease struct {
 	ReservedAt        time.Time  `json:"reserved_at"`
 }
 
+// ResourceLease remains an internal source compatibility alias during the v5
+// migration. It is not a distinct durable concept.
+type ResourceLease = ExecutionLease
+
 // ResourceLeasePark is the durable continuation boundary for a resumable
 // worker environment block. OriginalLease is an immutable copy of the released
 // active lease; keeping it separate from Issue.Lease makes it visible to
 // operators without participating in resource admission.
-type ResourceLeasePark struct {
-	ID            string                         `json:"id"`
-	Kind          string                         `json:"kind,omitempty"`
-	RequestID     string                         `json:"request_id,omitempty"`
-	Status        issuedomain.ResourceParkStatus `json:"status"`
-	OriginalLease ResourceLease                  `json:"original_lease"`
-	ParkedAt      time.Time                      `json:"parked_at"`
-	ResumedAt     time.Time                      `json:"resumed_at,omitempty"`
-	ResumeOwner   *LeaseOwner                    `json:"resume_owner,omitempty"`
+type ContinuationCheckpoint struct {
+	ID                string                         `json:"id"`
+	Kind              string                         `json:"kind,omitempty"`
+	RequestID         string                         `json:"request_id,omitempty"`
+	Status            issuedomain.ResourceParkStatus `json:"status"`
+	OriginalLease     ExecutionLease                 `json:"original_execution_lease"`
+	ParkedAt          time.Time                      `json:"parked_at"`
+	ResumedAt         time.Time                      `json:"resumed_at,omitempty"`
+	ResumeOwner       *LeaseOwner                    `json:"resume_owner,omitempty"`
+	RunID             string                         `json:"run_id"`
+	Workspace         *WorkerWorkspace               `json:"workspace,omitempty"`
+	Session           *WorkerSession                 `json:"session,omitempty"`
+	HeadSHA           string                         `json:"head_sha,omitempty"`
+	WorktreeSHA256    string                         `json:"worktree_sha256,omitempty"`
+	PullRequestURL    string                         `json:"pull_request_url,omitempty"`
+	PullRequestNumber int                            `json:"pull_request_number,omitempty"`
+	Stage             issuedomain.Status             `json:"stage,omitempty"`
+}
+
+// ResourceLeasePark remains an internal source compatibility alias while all
+// runtime callers move to the canonical checkpoint vocabulary.
+type ResourceLeasePark = ContinuationCheckpoint
+
+type Suspension struct {
+	ID              string                         `json:"id"`
+	Status          issuedomain.SuspensionStatus   `json:"status"`
+	ReasonCode      string                         `json:"reason_code"`
+	Recoverability  issuedomain.Recoverability     `json:"recoverability"`
+	Reason          string                         `json:"reason"`
+	MissingEvidence []string                       `json:"missing_evidence,omitempty"`
+	AllowedActions  []issuedomain.ResolutionAction `json:"allowed_actions"`
+	CheckpointID    string                         `json:"checkpoint_id,omitempty"`
+	SuspendedAt     time.Time                      `json:"suspended_at"`
+	ResolvedAt      time.Time                      `json:"resolved_at,omitempty"`
+	Resolution      issuedomain.ResolutionAction   `json:"resolution,omitempty"`
 }
 
 // ConflictAttempt is an append-only audit record for one autonomous conflict
@@ -326,8 +356,9 @@ type Issue struct {
 	Status                    issuedomain.Status           `json:"status"`
 	RunID                     string                       `json:"run_id,omitempty"`
 	LeaseGeneration           uint64                       `json:"lease_generation,omitempty"`
-	Lease                     *ResourceLease               `json:"lease,omitempty"`
-	ResourcePark              *ResourceLeasePark           `json:"resource_park,omitempty"`
+	Lease                     *ExecutionLease              `json:"execution_lease,omitempty"`
+	ResourcePark              *ContinuationCheckpoint      `json:"continuation_checkpoint,omitempty"`
+	Suspension                *Suspension                  `json:"suspension,omitempty"`
 	DeclaredResources         []string                     `json:"declared_resources,omitempty"`
 	ActualResources           []string                     `json:"actual_resources,omitempty"`
 	PublicationAudit          *publication.Audit           `json:"publication_audit,omitempty"`
@@ -479,6 +510,7 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	normalizeSnapshot(&snapshot)
+	normalizeLifecycleBoundaries(&snapshot, time.Now().UTC())
 	if err := snapshot.Validate(); err != nil {
 		return Snapshot{}, fmt.Errorf("validate snapshot before event %q: %w", eventType, err)
 	}

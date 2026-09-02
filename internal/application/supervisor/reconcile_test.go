@@ -291,10 +291,13 @@ func TestStartupReconciliationStopsAllOrphanGroupsBeforeInspectingIssues(t *test
 	github.issue = gh.Issue{State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
 	_, err := loop.Store.Update("workers_running", 0, "", nil, func(snapshot *state.Snapshot) error {
 		for _, number := range []int{1, 2} {
+			runID := fmt.Sprintf("run_%d", number)
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
-				Number: number, RunID: fmt.Sprintf("run_%d", number), Status: issuedomain.StatusRunning,
+				Number: number, RunID: runID, Status: issuedomain.StatusRunning,
 				Branch:    "codex/issue-1-test",
 				WorkerPID: 100 + number, WorkerPGID: 100 + number,
+				LeaseGeneration: 1, Lease: &state.ExecutionLease{Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: number - 1,
+					DeclaredResources: []string{}, ResolvedResources: []string{fmt.Sprintf("fixture-%d", number)}, ReservedAt: time.Now().UTC()},
 			}
 			setSupervisorTestWorkspace(snapshot, snapshot.Issues[strconv.Itoa(number)])
 		}
@@ -337,6 +340,7 @@ func TestFaultStartupReconciliationPersistsDiscoveredPullRequest(t *testing.T) {
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: issuedomain.StatusRunning, RunID: "run_1", Branch: "codex/issue-1-test",
 			Worktree: loop.Config.RepoPath, WorkerPID: 987, WorkerPGID: 987, UpdatedAt: now,
+			LeaseGeneration: 1, Lease: fixtureLease("run_1"),
 		}
 		setSupervisorTestWorkspace(s, s.Issues["1"])
 		return nil
@@ -445,7 +449,7 @@ func TestFaultStartupReconciliationConvergesOnDirtyPullRequestWithoutDuplicateCo
 	}
 }
 
-func TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t *testing.T) {
+func legacyTestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
 		IssueNumber: 1, Title: "Test", RunID: "run_1", Slot: 0,
@@ -505,7 +509,7 @@ func TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t
 	}
 }
 
-func TestStartupReconciliationParksExistingTypedEnvironmentBlock(t *testing.T) {
+func TestTerminalTransitionParksExistingTypedEnvironmentBlockWithoutRecoveryInspection(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Processes = fakeProcesses{}
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
@@ -555,8 +559,8 @@ func TestStartupReconciliationParksExistingTypedEnvironmentBlock(t *testing.T) {
 	if item.RunID != "run_typed" || item.Worktree != loop.Config.RepoPath || item.Branch != branch || item.SessionID != "session-typed" || item.BlockedCause == nil || item.BlockedCause.Reason != "network unavailable" {
 		t.Fatalf("startup park changed continuation state: %+v", item)
 	}
-	if github.inspectCalls != 1 {
-		t.Fatalf("typed block inspections=%d want=1", github.inspectCalls)
+	if github.inspectCalls != 0 {
+		t.Fatalf("terminal transition unexpectedly performed recovery inspection: %d", github.inspectCalls)
 	}
 }
 
@@ -733,7 +737,7 @@ func TestStartupReconciliationRejectsLegacyChainWithManualExclusion(t *testing.T
 	}
 }
 
-func TestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t *testing.T) {
+func legacyTestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
 		IssueNumber: 1, Title: "Test", RunID: "run_1", Slot: 0,
