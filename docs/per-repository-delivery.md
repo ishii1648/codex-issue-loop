@@ -52,6 +52,19 @@ rollback先はconfigに記録されたpreviousだけである。
 
 rollbackもgenerationを1増やす。成功後のpreviousはrollback前versionになるため、同じartifactの再適用を新しいpreviewから行える。
 
+## rollback_failedからの限定再試行
+
+`rollback_failed`ではfenceやtransactionを削除・編集しない。対象repositoryにactive workerがなく、retained fence、transaction、current assignment、expected generation、保存済みのexact targetが一致することを確認してから、同じtargetだけを再試行する。
+
+```sh
+"$operator_binary" delivery assignment retry \
+  --repo /absolute/path/to/repository \
+  --expected-generation 1 \
+  --confirm-retained-fence --json
+```
+
+CLIは保存済みtarget slotのdigest、fence generation、repository stateを再検証する。targetの差し替え、active workerの停止、別repositoryの変更は拒否し、成功時だけtransactionを完了してfenceを解除する。
+
 ## Evidence
 
 段階展開では対象外repositoryについて、切替前後の次を保存する。
