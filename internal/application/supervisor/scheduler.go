@@ -66,6 +66,7 @@ type activeJob struct {
 
 type scheduler struct {
 	loop                *Loop
+	runtimeRunID        string
 	events              chan schedulerEvent
 	active              map[int]activeJob
 	issueRetry          map[int]time.Time
@@ -81,6 +82,7 @@ type scheduler struct {
 
 type scheduleResult struct {
 	dispatched      bool
+	githubAttempted bool
 	githubSucceeded bool
 }
 
@@ -106,7 +108,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 		concurrency = 1
 	}
 	s := &scheduler{
-		loop: l, events: make(chan schedulerEvent, concurrency+1), active: map[int]activeJob{},
+		loop: l, runtimeRunID: state.NewID("run"), events: make(chan schedulerEvent, concurrency+1), active: map[int]activeJob{},
 		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, terminalPoll: map[int]time.Time{},
 		consecutiveFailures: current.Supervisor.ConsecutiveFailures,
 		rateLimitActive:     current.Supervisor.RateLimit != nil,
@@ -131,7 +133,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 			scheduledDeadline = &deadline
 		}
 		if err := l.recordIncidentSignal(incidentloop.Signal{
-			CycleID: cycleID, Kind: "event", Name: "scheduler_cycle", Component: "scheduler", Phase: "poll",
+			RunID: s.runtimeRunID, CycleID: cycleID, Kind: "event", Name: "scheduler_cycle", Component: "scheduler", Phase: "poll",
 			OutcomeCode: "started", ReasonCode: "scheduler_wake", Trigger: trigger,
 			ScheduledDeadline: scheduledDeadline, AttemptAllowed: !s.pollAt.After(cycleStarted), CoalescedWakeCount: coalescedWakeCount,
 		}); err != nil {
@@ -155,21 +157,27 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 		degradationThreshold := l.Config.IncidentAutomation.DegradationThreshold.Duration
 		degraded := degradationThreshold > 0 && elapsed >= degradationThreshold
 		if err := l.recordIncidentSignal(incidentloop.Signal{
-			CycleID: cycleID, Kind: "event", Name: "operation_duration", Component: "scheduler", Phase: "poll",
+			RunID: s.runtimeRunID, CycleID: cycleID, Kind: "event", Name: "operation_duration", Component: "scheduler", Phase: "poll",
 			OutcomeCode: cycleOutcome, ReasonCode: cycleReason, OperationCode: "scheduler_cycle", ElapsedMS: elapsed.Milliseconds(), DeadlineRemainingMS: deadlineRemaining,
 			ProgressStalled: degraded, ThresholdExceeded: degraded,
 		}); err != nil {
 			return failure.Wrap(failure.Supervisor, "record scheduler duration signal", err)
 		}
-		if result.githubSucceeded {
+		if result.githubAttempted {
+			outcome, reason := "failed", "github_queue_poll_failed"
+			if result.githubSucceeded {
+				outcome, reason = "succeeded", "github_queue_polled"
+			}
 			if err := l.recordIncidentSignal(incidentloop.Signal{
-				CycleID: cycleID, Kind: "event", Name: "external_attempt_completed", Component: "github", Phase: "poll",
-				OutcomeCode: "succeeded", ReasonCode: "github_queue_polled", Provider: "github", OperationCode: "list_ready_issues",
+				RunID: s.runtimeRunID, CycleID: cycleID, Kind: "event", Name: "external_attempt_completed", Component: "github", Phase: "poll",
+				OutcomeCode: outcome, ReasonCode: reason, Provider: "github", OperationCode: "list_ready_issues",
 			}); err != nil {
 				return failure.Wrap(failure.Supervisor, "record GitHub attempt signal", err)
 			}
+		}
+		if result.githubSucceeded {
 			if err := l.recordIncidentSignal(incidentloop.Signal{
-				CycleID: cycleID, EpisodeID: s.retryEpisodeID(), Kind: "status", Name: "progress", Component: "scheduler", Phase: "poll",
+				RunID: s.runtimeRunID, CycleID: cycleID, EpisodeID: s.retryEpisodeID(), Kind: "status", Name: "progress", Component: "scheduler", Phase: "poll",
 				OutcomeCode: "succeeded", ReasonCode: "github_queue_progress", ProgressKind: "github_poll",
 			}); err != nil {
 				return failure.Wrap(failure.Supervisor, "record scheduler progress signal", err)
@@ -479,6 +487,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		}
 	}
 	issues, err := s.listReady(ctx)
+	result.githubAttempted = true
 	if err != nil {
 		return result, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
@@ -518,7 +527,7 @@ func (s *scheduler) handleCycleError(cause error) error {
 			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "record rate-limit incident signal", err), failure.Supervisor, s.consecutiveFailures)
 		}
 		if err := s.loop.recordIncidentSignal(incidentloop.Signal{
-			EpisodeID: s.retryEpisodeID(), Kind: "event", Name: "external_attempt_completed", Component: "github", Phase: "poll",
+			RunID: s.runtimeRunID, EpisodeID: s.retryEpisodeID(), Kind: "event", Name: "external_attempt_completed", Component: "github", Phase: "poll",
 			OutcomeCode: "rate_limited", ReasonCode: "github_rate_limit", Provider: "github", OperationCode: "list_ready_issues",
 			RateLimitResource: cooldown.Resource, ResetAt: &cooldown.ResetAt,
 		}); err != nil {
@@ -532,7 +541,7 @@ func (s *scheduler) handleCycleError(cause error) error {
 	}
 	kind := failure.KindOf(cause)
 	if kind == failure.Supervisor {
-		if err := s.loop.recordFailureSignal("supervisor", "poll", 0, "", s.retryEpisodeID(), "supervisor_failure", cause, s.consecutiveFailures+1, nil, true); err != nil {
+		if err := s.loop.recordFailureSignal("supervisor", "poll", 0, s.runtimeRunID, s.retryEpisodeID(), "supervisor_failure", cause, s.consecutiveFailures+1, nil, true); err != nil {
 			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "record supervisor failure signal", err), failure.Supervisor, s.consecutiveFailures+1)
 		}
 		return s.loop.blockSupervisor(cause, kind, s.consecutiveFailures+1)
@@ -540,7 +549,7 @@ func (s *scheduler) handleCycleError(cause error) error {
 	s.consecutiveFailures++
 	s.loop.Logger.Printf("scheduler cycle failed (%d, %s): %v", s.consecutiveFailures, kind, cause)
 	if s.consecutiveFailures >= 5 {
-		if err := s.loop.recordFailureSignal("scheduler", "poll", 0, "", s.retryEpisodeID(), "scheduler_retry_exhausted", cause, s.consecutiveFailures, nil, true); err != nil {
+		if err := s.loop.recordFailureSignal("scheduler", "poll", 0, s.runtimeRunID, s.retryEpisodeID(), "scheduler_retry_exhausted", cause, s.consecutiveFailures, nil, true); err != nil {
 			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "record retry exhaustion signal", err), failure.Supervisor, s.consecutiveFailures)
 		}
 		return s.loop.blockSupervisor(cause, kind, s.consecutiveFailures)
@@ -564,11 +573,11 @@ func (s *scheduler) retryEpisodeID() string {
 
 func (s *scheduler) recordRetrySignals(cause error, code string, attempt int, retryAt time.Time, human bool) error {
 	episodeID := s.retryEpisodeID()
-	if err := s.loop.recordFailureSignal("scheduler", "poll", 0, "", episodeID, code, cause, attempt, &retryAt, human); err != nil {
+	if err := s.loop.recordFailureSignal("scheduler", "poll", 0, s.runtimeRunID, episodeID, code, cause, attempt, &retryAt, human); err != nil {
 		return err
 	}
 	return s.loop.recordIncidentSignal(incidentloop.Signal{
-		EpisodeID: episodeID, Kind: "event", Name: "retry_episode", Component: "scheduler", Phase: "poll",
+		RunID: s.runtimeRunID, EpisodeID: episodeID, Kind: "event", Name: "retry_episode", Component: "scheduler", Phase: "poll",
 		OutcomeCode: "retrying", ReasonCode: code, FailureKind: string(failure.KindOf(cause)), FailureCode: code,
 		ScopeKind: "repository", Attempt: attempt, RetryAt: &retryAt,
 	})

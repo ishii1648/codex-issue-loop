@@ -94,6 +94,7 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 	if err != nil {
 		return report, err
 	}
+	analysisSignals := append(append([]Signal(nil), signals...), deriveInvariantSignals(signals)...)
 	metrics, err := p.Store.LoadMetrics()
 	if err != nil {
 		return report, err
@@ -111,7 +112,7 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 			continue
 		}
 		if episode.AI == nil && !episode.CircuitOpen && (episode.NextAttemptAt == nil || !episode.NextAttemptAt.After(now)) {
-			analysis, analyzeErr := p.analyze(ctx, episode)
+			analysis, analyzeErr := p.analyze(ctx, episode, signalsForEpisode(episode, analysisSignals))
 			metrics.AnalysisAttempts[outcomeKey(analyzeErr)]++
 			if analyzeErr != nil {
 				episode.Attempts++
@@ -238,11 +239,11 @@ func (p Pipeline) validate() error {
 	return nil
 }
 
-func (p Pipeline) analyze(ctx context.Context, episode Episode) (AIAnalysis, error) {
+func (p Pipeline) analyze(ctx context.Context, episode Episode, signals []Signal) (AIAnalysis, error) {
 	bundle := EvidenceBundle{
 		Version: SchemaVersion, EpisodeID: episode.ID, Fingerprint: episode.Fingerprint,
 		Repository: episode.Repository, PrimaryClassification: episode.PrimaryClassification,
-		Confidence: episode.Confidence, SignalIDs: append([]string(nil), episode.SignalIDs...),
+		Confidence: episode.Confidence, SignalIDs: append([]string(nil), episode.SignalIDs...), Signals: signals,
 		Evidence: append([]EvidenceRef(nil), episode.Evidence...), MissingEvidence: append([]string(nil), episode.MissingEvidence...),
 	}
 	analysis, err := p.Analyzer.Analyze(ctx, bundle)
@@ -264,6 +265,26 @@ func (p Pipeline) analyze(ctx context.Context, episode Episode) (AIAnalysis, err
 	return analysis, nil
 }
 
+func signalsForEpisode(episode Episode, signals []Signal) []Signal {
+	byID := make(map[string]Signal, len(signals))
+	for _, signal := range signals {
+		byID[signal.ID] = signal
+	}
+	result := make([]Signal, 0, len(episode.SignalIDs))
+	for _, id := range episode.SignalIDs {
+		if signal, ok := byID[id]; ok {
+			result = append(result, signal)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Timestamp.Equal(result[j].Timestamp) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].Timestamp.Before(result[j].Timestamp)
+	})
+	return result
+}
+
 func issueEligible(episode Episode) bool {
 	if episode.AI == nil || !episode.AI.RecommendIssue || episode.Confidence == "low" || episode.AI.Confidence == "low" {
 		return false
@@ -280,9 +301,9 @@ func issueEligible(episode Episode) bool {
 
 func (p Pipeline) issueDraft(episode Episode) (IssueDraft, error) {
 	title := fmt.Sprintf("[auto-detected] %s incident %s", episode.PrimaryClassification, episode.Fingerprint[:12])
-	body := fmt.Sprintf("## 自動検出したincident\n\n- Classification: `%s`\n- Confidence: `%s`\n- First observed: `%s`\n- Last observed: `%s`\n- Occurrences: %d\n- Matched rules: `%s`\n- Signal IDs: `%s`\n\n## 期待値\n\n監視対象の不変条件を維持し、同一scopeの処理が保存済みdeadlineとlifecycle契約に従うこと。\n\n## 実測値\n\n決定論的分類器が `%s` を検出しました。再現証拠は上記signal IDと保存済みincident stateで参照できます。\n\n## 分析\n\n%s\n\n## 原因仮説\n\n%s\n\n## 反証・追加調査\n\n- Counter evidence: %s\n- Additional investigation: %s\n\n## Acceptance criteria\n\n- 同じfingerprintを再現する回帰testが追加される\n- CIとreviewが成功する\n- merge後にincidentがresolvedとなり、再発時はreopenedとなる\n\n<!-- incident-fingerprint:%s -->\n",
+	body := fmt.Sprintf("## 自動検出したincident\n\n- Classification: `%s`\n- Confidence: `%s`\n- First observed: `%s`\n- Last observed: `%s`\n- Occurrences: %d\n- Invariant codes: `%s`\n- Matched rules: `%s`\n- Signal IDs: `%s`\n\n## 期待値\n\n`%s`で識別される不変条件を維持し、同一scopeの処理が保存済みdeadlineとlifecycle契約に従うこと。\n\n## 実測値\n\n決定論的分類器が `%s` を検出しました。再現証拠は上記signal IDと保存済みincident stateで参照できます。\n\n## 分析\n\n%s\n\n## 原因仮説\n\n%s\n\n## 反証・追加調査\n\n- Counter evidence: %s\n- Additional investigation: %s\n\n## Acceptance criteria\n\n- 同じfingerprintを再現する回帰testが追加される\n- CIとreviewが成功する\n- merge後にincidentがresolvedとなり、再発時はreopenedとなる\n\n<!-- incident-fingerprint:%s -->\n",
 		episode.PrimaryClassification, episode.Confidence, episode.StartedAt.UTC().Format(time.RFC3339), episode.UpdatedAt.UTC().Format(time.RFC3339), episode.OccurrenceCount,
-		strings.Join(episode.MatchedRules, "`, `"), strings.Join(episode.SignalIDs, "`, `"), episode.PrimaryClassification, episode.AI.Summary, episode.AI.CauseHypothesis,
+		strings.Join(episode.InvariantCodes, "`, `"), strings.Join(episode.MatchedRules, "`, `"), strings.Join(episode.SignalIDs, "`, `"), strings.Join(episode.InvariantCodes, "`, `"), episode.PrimaryClassification, episode.AI.Summary, episode.AI.CauseHypothesis,
 		boundedIssueList(episode.AI.CounterEvidence), boundedIssueList(episode.AI.AdditionalInvestigation), episode.Fingerprint)
 	draft := IssueDraft{Version: SchemaVersion, EpisodeID: episode.ID, Fingerprint: episode.Fingerprint, Title: title, Body: body, Labels: append([]string(nil), p.Config.ReadyLabels...)}
 	raw, err := redact.Marshal(draft, p.Store.Secrets)

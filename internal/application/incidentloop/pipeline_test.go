@@ -16,6 +16,7 @@ import (
 
 type fakeAnalyzer struct {
 	calls      int
+	bundles    []EvidenceBundle
 	err        error
 	alter      string
 	confidence string
@@ -24,6 +25,7 @@ type fakeAnalyzer struct {
 
 func (a *fakeAnalyzer) Analyze(_ context.Context, bundle EvidenceBundle) (AIAnalysis, error) {
 	a.calls++
+	a.bundles = append(a.bundles, bundle)
 	if a.err != nil {
 		return AIAnalysis{}, a.err
 	}
@@ -186,12 +188,15 @@ func TestExpectedTransientNeverReachesAIOrIssue(t *testing.T) {
 func TestSuspectedBugCreatesExactlyOneIssueAcrossRestart(t *testing.T) {
 	now := time.Date(2026, 9, 2, 2, 0, 0, 0, time.UTC)
 	store := testStore(t)
+	firstDeadline := now.Add(time.Minute)
 	recordSignals(t, store,
-		signalAt(now, "failure-1", "bug-scope", "failure_classified", "failed", func(s *Signal) {
-			s.EpisodeID, s.RunID, s.FailureKind, s.FailureCode, s.InvariantViolation = "episode-bug", "run-1", "product", "queue_deadline_bypass", true
+		signalAt(now, "cycle-1", "run-1", "scheduler_cycle", "started", func(s *Signal) {
+			s.Component, s.Phase, s.ReasonCode = "scheduler", "poll", "scheduler_wake"
+			s.CycleID, s.RunID, s.Trigger, s.ScheduledDeadline = "cycle-1", "run-1", "fsnotify", &firstDeadline
 		}),
-		signalAt(now.Add(time.Minute), "failure-2", "bug-scope", "failure_classified", "failed", func(s *Signal) {
-			s.EpisodeID, s.RunID, s.FailureKind, s.FailureCode, s.InvariantViolation = "episode-bug", "run-2", "product", "queue_deadline_bypass", true
+		signalAt(now.Add(time.Second), "attempt-1", "run-1", "external_attempt_completed", "succeeded", func(s *Signal) {
+			s.Component, s.Phase, s.ReasonCode = "github", "poll", "github_queue_polled"
+			s.CycleID, s.RunID, s.Provider, s.OperationCode = "cycle-1", "run-1", "github", "list_ready_issues"
 		}),
 	)
 	analyzer := &fakeAnalyzer{issue: true}
@@ -201,15 +206,41 @@ func TestSuspectedBugCreatesExactlyOneIssueAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.IssuesCreated) != 1 || len(issues.drafts) != 1 {
-		t.Fatalf("first run=%+v drafts=%d", first, len(issues.drafts))
+	if len(first.IssuesCreated) != 0 || len(issues.drafts) != 0 {
+		t.Fatalf("one runtime reproduction created an Issue: report=%+v drafts=%d", first, len(issues.drafts))
 	}
+
+	secondStarted := now.Add(2 * time.Minute)
+	secondDeadline := secondStarted.Add(time.Minute)
+	recordSignals(t, store,
+		signalAt(secondStarted, "cycle-2", "run-2", "scheduler_cycle", "started", func(s *Signal) {
+			s.Component, s.Phase, s.ReasonCode = "scheduler", "poll", "scheduler_wake"
+			s.CycleID, s.RunID, s.Trigger, s.ScheduledDeadline = "cycle-2", "run-2", "fsnotify", &secondDeadline
+		}),
+		signalAt(secondStarted.Add(time.Second), "attempt-2", "run-2", "external_attempt_completed", "succeeded", func(s *Signal) {
+			s.Component, s.Phase, s.ReasonCode = "github", "poll", "github_queue_polled"
+			s.CycleID, s.RunID, s.Provider, s.OperationCode = "cycle-2", "run-2", "github", "list_ready_issues"
+		}),
+	)
+	now = secondStarted.Add(2 * time.Second)
 	second, err := testPipeline(store, analyzer, issues, &now, false).RunOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.IssuesCreated) != 0 || len(issues.drafts) != 1 || analyzer.calls != 1 {
-		t.Fatalf("restart duplicated work: second=%+v drafts=%d calls=%d", second, len(issues.drafts), analyzer.calls)
+	if len(second.IssuesCreated) != 1 || len(issues.drafts) != 1 {
+		t.Fatalf("two runtime reproductions did not create one Issue: report=%+v drafts=%d", second, len(issues.drafts))
+	}
+	latestBundle := analyzer.bundles[len(analyzer.bundles)-1]
+	if len(latestBundle.Signals) != 2 || latestBundle.Signals[0].FailureCode != "retry_deadline_bypass" || latestBundle.Signals[0].ScheduledDeadline == nil ||
+		!strings.Contains(issues.drafts[0].Body, "Invariant codes: `retry_deadline_bypass`") {
+		t.Fatalf("AI or Issue did not receive invariant evidence: bundle=%+v body=%s", latestBundle, issues.drafts[0].Body)
+	}
+	third, err := testPipeline(store, analyzer, issues, &now, false).RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.IssuesCreated) != 0 || len(issues.drafts) != 1 || analyzer.calls != 2 {
+		t.Fatalf("restart duplicated work: third=%+v drafts=%d calls=%d", third, len(issues.drafts), analyzer.calls)
 	}
 }
 

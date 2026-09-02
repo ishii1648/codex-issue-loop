@@ -40,6 +40,25 @@ func BuildEpisodesWithLimit(signals []Signal, previous DurableState, rules incid
 		}
 		return ordered[i].Timestamp.Before(ordered[j].Timestamp)
 	})
+	for _, signal := range deriveInvariantSignals(ordered) {
+		if err := signal.Validate(); err != nil {
+			return DurableState{}, fmt.Errorf("derived signal %s: %w", signal.ID, err)
+		}
+		if prior, exists := byID[signal.ID]; exists && !signalsEqual(prior, signal) {
+			return DurableState{}, fmt.Errorf("derived signal %s conflicts with recorded content", signal.ID)
+		}
+		byID[signal.ID] = signal
+	}
+	ordered = ordered[:0]
+	for _, signal := range byID {
+		ordered = append(ordered, signal)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].Timestamp.Equal(ordered[j].Timestamp) {
+			return ordered[i].ID < ordered[j].ID
+		}
+		return ordered[i].Timestamp.Before(ordered[j].Timestamp)
+	})
 	groups := map[string][]Signal{}
 	for _, signal := range ordered {
 		fingerprint := signalFingerprint(signal)
@@ -87,6 +106,57 @@ func BuildEpisodesWithLimit(signals []Signal, previous DurableState, rules incid
 	return state, nil
 }
 
+func deriveInvariantSignals(signals []Signal) []Signal {
+	type cycleKey struct {
+		repository string
+		cycleID    string
+	}
+	candidates := map[cycleKey]Signal{}
+	for _, signal := range signals {
+		if signal.Name != "scheduler_cycle" || signal.CycleID == "" || signal.AttemptAllowed || signal.ScheduledDeadline == nil ||
+			!signal.ScheduledDeadline.After(signal.Timestamp) {
+			continue
+		}
+		candidates[cycleKey{repository: signal.Repository, cycleID: signal.CycleID}] = signal
+	}
+	derived := []Signal{}
+	for _, attempt := range signals {
+		if attempt.Name != "external_attempt_completed" || attempt.CycleID == "" || attempt.OperationCode != "list_ready_issues" {
+			continue
+		}
+		cycle, ok := candidates[cycleKey{repository: attempt.Repository, cycleID: attempt.CycleID}]
+		if !ok || attempt.Timestamp.Before(cycle.Timestamp) || !attempt.Timestamp.Before(*cycle.ScheduledDeadline) {
+			continue
+		}
+		if cycle.RunID != "" && attempt.RunID != "" && cycle.RunID != attempt.RunID {
+			continue
+		}
+		runID := cycle.RunID
+		if runID == "" {
+			runID = attempt.RunID
+		}
+		correlationID := cycle.CorrelationID
+		if runID != "" {
+			correlationID = runID
+		}
+		scopeHash := cycle.ScopeHash
+		if scopeHash == "" {
+			scopeHash = OpaqueScopeID(cycle.Repository + ":scheduler:retry-deadline")
+		}
+		derived = append(derived, Signal{
+			Version: SchemaVersion, ID: "inv-" + OpaqueScopeID(cycle.ID+":"+attempt.ID), Timestamp: attempt.Timestamp,
+			Repository: cycle.Repository, CorrelationID: correlationID, RunID: runID, CycleID: cycle.CycleID,
+			EpisodeID: "retry-deadline-bypass-" + OpaqueScopeID(cycle.Repository),
+			Kind:      "event", Name: "failure_classified", Component: "scheduler", Phase: "poll",
+			OutcomeCode: "failed", ReasonCode: "retry_deadline_bypass", FailureKind: "product", FailureCode: "retry_deadline_bypass",
+			ScheduledDeadline: cycle.ScheduledDeadline, AttemptAllowed: false, OperationCode: "list_ready_issues",
+			ScopeKind: "repository", ScopeHash: scopeHash, InvariantViolation: true,
+			Evidence: []EvidenceRef{{Source: "incident-signal", Ref: cycle.ID}, {Source: "incident-signal", Ref: attempt.ID}},
+		})
+	}
+	return derived
+}
+
 func unseenSignals(signals []Signal, old Episode) []Signal {
 	seen := make(map[string]bool, len(old.SignalIDs))
 	for _, id := range old.SignalIDs {
@@ -119,6 +189,7 @@ func mergeEpisode(old, delta Episode, added int, rules incidentanalysis.Rules, m
 	merged.SignalIDs = boundedStrings(uniqueSorted(append(append([]string(nil), old.SignalIDs...), delta.SignalIDs...)), maxItems)
 	merged.Evidence = boundedEvidence(uniqueEvidence(append(append([]EvidenceRef(nil), old.Evidence...), delta.Evidence...)), maxItems)
 	merged.RunIDs = uniqueSorted(append(append([]string(nil), old.RunIDs...), delta.RunIDs...))
+	merged.InvariantCodes = boundedStrings(uniqueSorted(append(append([]string(nil), old.InvariantCodes...), delta.InvariantCodes...)), maxItems)
 	merged.Features = mergeFeatures(old.Features, delta.Features)
 	if len(merged.RunIDs) >= 2 {
 		merged.Features.RepeatedIndependentRuns = true
@@ -265,6 +336,9 @@ func buildEpisode(fingerprint string, signals []Signal, rules incidentanalysis.R
 		if signal.FailureKind == "transient" {
 			episode.Features.TypedTransient = true
 		}
+		if signal.InvariantViolation && signal.FailureCode != "" {
+			episode.InvariantCodes = append(episode.InvariantCodes, signal.FailureCode)
+		}
 		if signal.Name == "retry_episode" {
 			hasRetry = true
 			if priorRetryAt != nil && signal.Timestamp.Before(*priorRetryAt) {
@@ -309,6 +383,7 @@ func buildEpisode(fingerprint string, signals []Signal, rules incidentanalysis.R
 		episode.RunIDs = append(episode.RunIDs, runID)
 	}
 	sort.Strings(episode.RunIDs)
+	episode.InvariantCodes = boundedStrings(uniqueSorted(episode.InvariantCodes), maxItems)
 	if len(episode.RunIDs) >= 2 {
 		episode.Features.RepeatedIndependentRuns = true
 	}

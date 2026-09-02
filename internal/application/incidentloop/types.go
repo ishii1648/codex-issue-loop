@@ -185,6 +185,7 @@ type Episode struct {
 	CorrelationID          string                    `json:"correlation_id"`
 	IssueNumber            int                       `json:"issue_number,omitempty"`
 	RunIDs                 []string                  `json:"run_ids,omitempty"`
+	InvariantCodes         []string                  `json:"invariant_codes,omitempty"`
 	State                  string                    `json:"state"`
 	StartedAt              time.Time                 `json:"started_at"`
 	UpdatedAt              time.Time                 `json:"updated_at"`
@@ -218,6 +219,7 @@ type EvidenceBundle struct {
 	PrimaryClassification string        `json:"primary_classification"`
 	Confidence            string        `json:"confidence"`
 	SignalIDs             []string      `json:"signal_ids"`
+	Signals               []Signal      `json:"signals"`
 	Evidence              []EvidenceRef `json:"evidence"`
 	MissingEvidence       []string      `json:"missing_evidence,omitempty"`
 }
@@ -397,6 +399,14 @@ func (e Episode) Validate() error {
 	for _, id := range e.SignalIDs {
 		if !identifierPattern.MatchString(id) {
 			return errors.New("invalid episode signal ID")
+		}
+	}
+	if len(e.InvariantCodes) > 128 {
+		return errors.New("episode invariant codes exceed 128 items")
+	}
+	for _, code := range e.InvariantCodes {
+		if !identifierPattern.MatchString(code) {
+			return errors.New("invalid episode invariant code")
 		}
 	}
 	if len(e.Evidence) > 128 {
