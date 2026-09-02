@@ -91,6 +91,7 @@ type journal struct {
 	Backup       string     `json:"backup"`
 	StartedAt    time.Time  `json:"started_at"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	Source       string     `json:"source,omitempty"`
 }
 
 type backupManifest struct {
@@ -975,13 +976,20 @@ func migrateEvents(path string, migration journal, fromSchema int) error {
 	if fromSemantic == 0 {
 		fromSemantic = statecontract.MinimumVersion
 	}
+	source := migration.Source
+	if source == "" {
+		source = "agent-loop migrate --apply"
+	}
 	payload := map[string]any{
-		"migration_id":           migration.MigrationID,
-		"authority":              "operator",
-		"source":                 "agent-loop migrate --apply",
-		"before":                 map[string]int{"state_schema_version": fromSchema, "semantic_contract_version": fromSemantic},
-		"after":                  map[string]int{"state_schema_version": CurrentVersion, "semantic_contract_version": statecontract.CurrentVersion},
-		"operator_confirmation":  map[string]bool{"apply": true},
+		"migration_id": migration.MigrationID,
+		"authority":    "operator",
+		"source":       source,
+		"before":       map[string]int{"state_schema_version": fromSchema, "semantic_contract_version": fromSemantic},
+		"after":        map[string]int{"state_schema_version": CurrentVersion, "semantic_contract_version": statecontract.CurrentVersion},
+		"operator_confirmation": map[string]bool{
+			"apply":              true,
+			"quarantined_backup": source == "agent-loop migrate --apply --quarantined-backup",
+		},
 		"provenance_synthesized": false,
 	}
 	payloadJSON, err := json.Marshal(payload)

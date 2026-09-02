@@ -26,6 +26,17 @@ agent-loop migrate --json
 
 unknown storage/contract version、decode error、non-migratable findingがある場合はapplyしない。versionやWorkspaceを手編集しない。
 
+semantic contract mismatchは破損ではなくversioned migration要求なので、runtime readはstate/eventをquarantineせず副作用なしで拒否する。v0.11.2以前のreadによって、対応可能な旧semantic snapshotが既に`recovery_blocked`へ隔離された場合だけ、exact markerとbackupを指定して専用previewを行う。
+
+```sh
+agent-loop migrate --repo /absolute/path/to/repository \
+  --quarantined-backup '/exact/managed/recovery-backup' --json
+agent-loop migrate --repo /absolute/path/to/repository \
+  --quarantined-backup '/exact/managed/recovery-backup' --apply --json
+```
+
+この経路は、markerが記録したexact backup、理由が`semantic_contract_version`の旧supported versionからcurrentへの不一致だけであること、全LaunchAgent停止、worker/PID/PGID/ExecutionLease 0、prepared transaction不在、repository identity、source digest、migrated snapshot/event chain、Issue/request件数を検証する。applyは元backupを変更せずrecovery markerも別backupへ保持し、`quarantined_backup=true`のsemantic migration auditとmigration済みsnapshot/eventをcrash-safe transactionで一括置換する。別の破損理由、minimum未満/current以上、active execution、digest変化には流用しない。
+
 ## v4 recovery recordの変換
 
 v4のscenario別recovery fieldは、status、lease/park、workspace、session、PR、request/answer、generationを同じsnapshotから読み、決定的に`ContinuationCheckpoint`と`Suspension`へfoldする。event件数・順序はauthorityにしない。実行再開を一意に証明できないIssueだけを`recoverability=ambiguous`かつ`suspension.status=quarantined`にし、他Issueのmigrationとqueue進行は継続する。

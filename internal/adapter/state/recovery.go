@@ -29,14 +29,14 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 	}
 	snapshot, snapshotExists, err := s.loadSnapshotUnlocked()
 	if err != nil {
-		if isSchemaVersionError(err) {
+		if isVersionCompatibilityError(err) {
 			return Snapshot{}, err
 		}
 		return s.quarantineUnlocked(err)
 	}
 	events, validBytes, partial, err := s.readEventsUnlocked()
 	if err != nil {
-		if isSchemaVersionError(err) {
+		if isVersionCompatibilityError(err) {
 			return Snapshot{}, err
 		}
 		return s.quarantineUnlocked(err)
@@ -44,14 +44,14 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 
 	txn, txnExists, err := s.loadTransactionUnlocked()
 	if err != nil {
-		if isSchemaVersionError(err) {
+		if isVersionCompatibilityError(err) {
 			return Snapshot{}, err
 		}
 		return s.quarantineUnlocked(err)
 	}
 	if txnExists {
 		if err := s.validateTransaction(txn); err != nil {
-			if isSchemaVersionError(err) {
+			if isVersionCompatibilityError(err) {
 				return Snapshot{}, err
 			}
 			return s.quarantineUnlocked(err)
@@ -137,6 +137,9 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 	}
 
 	if err := s.validateConsistency(snapshot, events); err != nil {
+		if isVersionCompatibilityError(err) {
+			return Snapshot{}, err
+		}
 		return s.quarantineUnlocked(err)
 	}
 	return snapshot, nil
@@ -420,7 +423,7 @@ func syncDirectory(path string) error {
 	return dir.Sync()
 }
 
-func isSchemaVersionError(err error) bool {
+func isVersionCompatibilityError(err error) bool {
 	var versionError SchemaVersionError
-	return errors.As(err, &versionError)
+	return errors.As(err, &versionError) || IsSemanticContractVersionError(err)
 }

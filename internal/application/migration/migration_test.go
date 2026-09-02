@@ -157,6 +157,7 @@ func TestApplyMigratesV5SemanticV2CheckpointWithoutChangingEvidence(t *testing.T
 	if _, err := (Migrator{Layout: l, Now: func() time.Time { return first }}).Apply(); err != nil {
 		t.Fatal(err)
 	}
+	repo = canonicalizeFixtureRegistry(t, l, repo)
 	store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
 	snapshot, err := store.Load()
 	if err != nil {
@@ -211,6 +212,159 @@ func TestApplyMigratesV5SemanticV2CheckpointWithoutChangingEvidence(t *testing.T
 	if err != nil || !bytes.Contains(events, []byte(`"before":{"semantic_contract_version":2,"state_schema_version":5}`)) {
 		t.Fatalf("semantic v2 audit missing: err=%v events=%s", err, events)
 	}
+}
+
+func TestApplyMigratesExactQuarantinedSemanticSnapshotWithoutChangingBackup(t *testing.T) {
+	l, repo, _ := writeV4Fixture(t, false)
+	first := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+	if _, err := (Migrator{Layout: l, Now: func() time.Time { return first }}).Apply(); err != nil {
+		t.Fatal(err)
+	}
+	repo = canonicalizeFixtureRegistry(t, l, repo)
+	store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.SemanticContractVersion = 2
+	snapshot.RepoPath = repo
+	snapshot.Supervisor = state.Supervisor{State: "stopped", UpdatedAt: first}
+	snapshot.Issues["183"] = &state.Issue{Number: 183, Status: issuedomain.StatusCompleted, Attempts: 1, UpdatedAt: first}
+	sourceState, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceState = append(sourceState, '\n')
+	sourceEvents, err := os.ReadFile(store.EventsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(store.Dir, "recovery", "20260903T000100.000000000Z-backup_semantic")
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "state.json"), sourceState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "events.jsonl"), sourceEvents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reason := (state.SemanticContractVersionError{Actual: 2, Expected: statecontract.CurrentVersion}).Error()
+	marker := state.Snapshot{
+		Version: state.CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion,
+		RepoID: "repo-1", RepoPath: repo, StateRevision: 1,
+		Supervisor: state.Supervisor{State: "blocked", UpdatedAt: first, Message: reason},
+		Issues:     map[string]*state.Issue{}, PendingRequests: map[string]*state.Request{},
+		Recovery: &state.Recovery{Status: state.RecoveryStateBlocked, Reason: reason, BackupDir: backup, DetectedAt: first},
+	}
+	markerState, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerEvent, err := json.Marshal(state.Event{Version: state.CurrentVersion, EventID: "evt_recovery_marker", Sequence: 1,
+		Timestamp: first, RepoID: "repo-1", Type: "recovery_blocked"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.StatePath(), append(markerState, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.EventsPath(), append(markerEvent, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := InspectQuarantinedSemantic(l, repo, backup)
+	if err != nil || !report.ApplyAllowed || !report.Plan.Eligible || report.Plan.FromSemanticContract != 2 ||
+		report.Plan.ToSemanticContract != statecontract.CurrentVersion || report.Plan.IssueCount != 1 || len(report.NonMigratable) != 0 {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	beforeState := append([]byte(nil), sourceState...)
+	beforeEvents := append([]byte(nil), sourceEvents...)
+	second := first.Add(time.Hour)
+	result, err := (Migrator{Layout: l, Now: func() time.Time { return second }}).ApplyQuarantinedSemantic(repo, backup)
+	if err != nil || !result.Changed || result.RepositoryID != "repo-1" || result.SnapshotRevision != snapshot.StateRevision+1 || result.IssueCount != 1 || result.RecoveryMarkerBackup == "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for path, want := range map[string][]byte{
+		filepath.Join(backup, "state.json"):   beforeState,
+		filepath.Join(backup, "events.jsonl"): beforeEvents,
+	} {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("quarantine backup changed: path=%s err=%v", path, readErr)
+		}
+	}
+	migrated, err := store.Load()
+	if err != nil || migrated.SemanticContractVersion != statecontract.CurrentVersion || migrated.StateRevision != snapshot.StateRevision+1 ||
+		len(migrated.Issues) != 1 || migrated.Issues["183"] == nil || migrated.Recovery != nil {
+		t.Fatalf("migrated=%+v err=%v", migrated, err)
+	}
+	events, err := os.ReadFile(store.EventsPath())
+	if err != nil || !bytes.Contains(events, []byte(`"source":"agent-loop migrate --apply --quarantined-backup"`)) ||
+		!bytes.Contains(events, []byte(`"quarantined_backup":true`)) {
+		t.Fatalf("quarantined migration audit missing: err=%v events=%s", err, events)
+	}
+	if _, err := os.Stat(filepath.Join(result.RecoveryMarkerBackup, "migration-journal.json")); err != nil {
+		t.Fatalf("recovery marker backup was not retained: %v", err)
+	}
+	if _, err := InspectQuarantinedSemantic(l, repo, backup); err == nil || !strings.Contains(err.Error(), "isolated recovery-blocked marker") {
+		t.Fatalf("completed migration remained replayable: %v", err)
+	}
+}
+
+func TestQuarantinedSemanticMigrationRejectsUnrelatedRecoveryReason(t *testing.T) {
+	l, repo, _ := writeV4Fixture(t, false)
+	if _, err := (Migrator{Layout: l}).Apply(); err != nil {
+		t.Fatal(err)
+	}
+	repo = canonicalizeFixtureRegistry(t, l, repo)
+	store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
+	backup := filepath.Join(store.Dir, "recovery", "unrelated")
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := fmt.Sprintf(`{"version":5,"semantic_contract_version":2,"repo_id":"repo-1","repo_path":%q,"state_revision":1,"supervisor":{"state":"stopped"},"issues":{},"pending_requests":{}}`, repo)
+	if err := os.WriteFile(filepath.Join(backup, "state.json"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := state.Snapshot{Version: state.CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion,
+		RepoID: "repo-1", RepoPath: repo, StateRevision: 1, Supervisor: state.Supervisor{State: "blocked"},
+		Issues: map[string]*state.Issue{}, PendingRequests: map[string]*state.Request{},
+		Recovery: &state.Recovery{Status: state.RecoveryStateBlocked, Reason: "state revision mismatch", BackupDir: backup}}
+	markerData, _ := json.Marshal(marker)
+	eventData, _ := json.Marshal(state.Event{Version: state.CurrentVersion, EventID: "evt_marker", Sequence: 1, RepoID: "repo-1", Type: "recovery_blocked"})
+	if err := os.WriteFile(store.StatePath(), append(markerData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.EventsPath(), append(eventData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectQuarantinedSemantic(l, repo, backup); err == nil || !strings.Contains(err.Error(), "exact semantic contract mismatch") {
+		t.Fatalf("unrelated recovery reason was accepted: %v", err)
+	}
+}
+
+func canonicalizeFixtureRegistry(t *testing.T, l layout.Layout, repo string) string {
+	t.Helper()
+	canonical, err := config.CanonicalRepoPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := current.Repos["repo-1"]
+	entry.RepoPath = canonical
+	current.Repos["repo-1"] = entry
+	data, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.RegistryPath, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }
 
 func TestFaultMigrationCanRestorePreparedBackupWithoutTouchingWorktree(t *testing.T) {

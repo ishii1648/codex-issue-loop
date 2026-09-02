@@ -227,7 +227,7 @@ Commands:
   install       Install the binary and Codex Skill
   update        Safely replace the binary and Skill, preserving state
   rollback      Restore a backup created by update
-  migrate       Inspect, apply, or roll back durable schema migrations
+  migrate       Inspect, apply, recover, or roll back durable schema migrations
   uninstall     Remove installed binary and Skill when no loop is running
   register      Register a repository and write its LaunchAgent
   unregister    Stop and unregister a repository

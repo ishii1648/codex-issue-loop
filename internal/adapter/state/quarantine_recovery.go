@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
@@ -45,6 +47,24 @@ type QuarantinedSnapshotRecoveryPlan struct {
 	MutationScope        []string                     `json:"mutation_scope"`
 }
 
+type QuarantinedSemanticMigrationPlan struct {
+	Eligible             bool     `json:"eligible"`
+	ConfirmationRequired bool     `json:"confirmation_required"`
+	Backup               string   `json:"backup"`
+	RecoveryReason       string   `json:"recovery_reason"`
+	RepositoryID         string   `json:"repository_id"`
+	SnapshotRevision     uint64   `json:"snapshot_revision"`
+	IssueCount           int      `json:"issue_count"`
+	IssueNumbers         []int    `json:"issue_numbers"`
+	PendingRequestCount  int      `json:"pending_request_count"`
+	PendingRequestIDs    []string `json:"pending_request_ids"`
+	FromSemanticContract int      `json:"from_semantic_contract"`
+	ToSemanticContract   int      `json:"to_semantic_contract"`
+	SourceStateSHA256    string   `json:"source_state_sha256"`
+	SourceEventsSHA256   string   `json:"source_events_sha256"`
+	MutationScope        []string `json:"mutation_scope"`
+}
+
 type quarantineRecoveryTransaction struct {
 	Version      int    `json:"version"`
 	RepoID       string `json:"repo_id"`
@@ -68,25 +88,7 @@ func (s Store) PreviewLegacyMergedIdentityRecovery(expectedBackup string) (Quara
 }
 
 func (s Store) legacyMergedIdentityRecoveryPlanUnlocked(expectedBackup string) (Snapshot, QuarantinedSnapshotRecoveryPlan, error) {
-	current, exists, err := s.loadSnapshotUnlocked()
-	if err != nil || !exists {
-		return Snapshot{}, QuarantinedSnapshotRecoveryPlan{}, fmt.Errorf("load recovery marker snapshot: %w", err)
-	}
-	if current.Recovery == nil || current.Recovery.Status != RecoveryStateBlocked || current.Supervisor.State != "blocked" ||
-		current.StateRevision != 1 || len(current.Issues) != 0 || len(current.PendingRequests) != 0 {
-		return Snapshot{}, QuarantinedSnapshotRecoveryPlan{}, errors.New("current snapshot is not the isolated recovery-blocked marker")
-	}
-	currentEvents, _, currentPartial, err := s.readEventsUnlocked()
-	if err != nil || currentPartial {
-		return Snapshot{}, QuarantinedSnapshotRecoveryPlan{}, fmt.Errorf("read recovery marker event log: partial=%t: %w", currentPartial, err)
-	}
-	if len(currentEvents) != 1 || currentEvents[0].Type != "recovery_blocked" {
-		return Snapshot{}, QuarantinedSnapshotRecoveryPlan{}, errors.New("current recovery marker event chain is not exact")
-	}
-	if err := s.validateConsistency(current, currentEvents); err != nil {
-		return Snapshot{}, QuarantinedSnapshotRecoveryPlan{}, fmt.Errorf("validate recovery marker: %w", err)
-	}
-	backup, err := s.validateExactRecoveryBackup(expectedBackup, current.Recovery.BackupDir)
+	current, backup, err := s.exactRecoveryMarkerUnlocked(expectedBackup)
 	if err != nil {
 		return Snapshot{}, QuarantinedSnapshotRecoveryPlan{}, err
 	}
@@ -159,6 +161,239 @@ func (s Store) legacyMergedIdentityRecoveryPlanUnlocked(expectedBackup string) (
 		SnapshotRevision: restored.StateRevision, Targets: targets,
 		MutationScope: []string{"legacy completed Pull Request number/head identity", "restored snapshot", "recovery audit event"},
 	}, nil
+}
+
+func (s Store) exactRecoveryMarkerUnlocked(expectedBackup string) (Snapshot, string, error) {
+	current, exists, err := s.loadSnapshotUnlocked()
+	if err != nil || !exists {
+		return Snapshot{}, "", fmt.Errorf("load recovery marker snapshot: %w", err)
+	}
+	if current.Recovery == nil || current.Recovery.Status != RecoveryStateBlocked || current.Supervisor.State != "blocked" ||
+		current.StateRevision != 1 || len(current.Issues) != 0 || len(current.PendingRequests) != 0 {
+		return Snapshot{}, "", errors.New("current snapshot is not the isolated recovery-blocked marker")
+	}
+	currentEvents, _, currentPartial, err := s.readEventsUnlocked()
+	if err != nil || currentPartial {
+		return Snapshot{}, "", fmt.Errorf("read recovery marker event log: partial=%t: %w", currentPartial, err)
+	}
+	if len(currentEvents) != 1 || currentEvents[0].Type != "recovery_blocked" {
+		return Snapshot{}, "", errors.New("current recovery marker event chain is not exact")
+	}
+	if err := s.validateConsistency(current, currentEvents); err != nil {
+		return Snapshot{}, "", fmt.Errorf("validate recovery marker: %w", err)
+	}
+	backup, err := s.validateExactRecoveryBackup(expectedBackup, current.Recovery.BackupDir)
+	if err != nil {
+		return Snapshot{}, "", err
+	}
+	return current, backup, nil
+}
+
+func (s Store) PreviewQuarantinedSemanticMigration(expectedBackup string) (QuarantinedSemanticMigrationPlan, error) {
+	if err := s.ensureDir(); err != nil {
+		return QuarantinedSemanticMigrationPlan{}, err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return QuarantinedSemanticMigrationPlan{}, err
+	}
+	defer unlock(lock)
+	plan, _, _, err := s.quarantinedSemanticMigrationPlanUnlocked(expectedBackup)
+	return plan, err
+}
+
+func (s Store) quarantinedSemanticMigrationPlanUnlocked(expectedBackup string) (QuarantinedSemanticMigrationPlan, []byte, []byte, error) {
+	current, backup, err := s.exactRecoveryMarkerUnlocked(expectedBackup)
+	if err != nil {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, err
+	}
+	stateData, err := os.ReadFile(filepath.Join(backup, "state.json"))
+	if err != nil {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("read quarantined semantic snapshot: %w", err)
+	}
+	eventsData, err := os.ReadFile(filepath.Join(backup, "events.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		eventsData = nil
+		err = nil
+	}
+	if err != nil {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("read quarantined semantic events: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(backup, "state.txn.json")); err == nil {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, errors.New("quarantined semantic snapshot contains a prepared transaction")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, err
+	}
+	var source struct {
+		Version                 int    `json:"version"`
+		SemanticContractVersion int    `json:"semantic_contract_version"`
+		RepoID                  string `json:"repo_id"`
+		RepoPath                string `json:"repo_path"`
+		StateRevision           uint64 `json:"state_revision"`
+		Supervisor              struct {
+			State string `json:"state"`
+		} `json:"supervisor"`
+		Issues map[string]struct {
+			WorkerPID      int             `json:"worker_pid"`
+			WorkerPGID     int             `json:"worker_pgid"`
+			ExecutionLease json.RawMessage `json:"execution_lease"`
+		} `json:"issues"`
+		PendingRequests map[string]json.RawMessage `json:"pending_requests"`
+		Recovery        json.RawMessage            `json:"recovery"`
+	}
+	if err := json.Unmarshal(stateData, &source); err != nil {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("decode quarantined semantic snapshot: %w", err)
+	}
+	if source.Version != CurrentVersion || source.SemanticContractVersion < statecontract.MinimumVersion || source.SemanticContractVersion >= statecontract.CurrentVersion {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("quarantined snapshot is not a supported prior semantic contract: schema=%d semantic=%d", source.Version, source.SemanticContractVersion)
+	}
+	if source.RepoID != s.RepoID || filepath.Clean(source.RepoPath) != filepath.Clean(s.RepoPath) {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, errors.New("quarantined semantic snapshot repository identity differs")
+	}
+	expectedReason := (SemanticContractVersionError{Actual: source.SemanticContractVersion, Expected: statecontract.CurrentVersion}).Error()
+	if current.Recovery.Reason != expectedReason {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("recovery reason is not the exact semantic contract mismatch: %s", current.Recovery.Reason)
+	}
+	if source.Supervisor.State != "stopped" && source.Supervisor.State != "maintenance" {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("quarantined semantic snapshot supervisor is not stopped: %s", source.Supervisor.State)
+	}
+	if len(source.Recovery) > 0 && string(source.Recovery) != "null" {
+		return QuarantinedSemanticMigrationPlan{}, nil, nil, errors.New("quarantined semantic snapshot already contains a recovery marker")
+	}
+	for number, issue := range source.Issues {
+		if issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
+			return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("Issue #%s retains an active worker identity", number)
+		}
+		if len(issue.ExecutionLease) > 0 && string(issue.ExecutionLease) != "null" {
+			return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("Issue #%s retains an active execution lease", number)
+		}
+	}
+	issueNumbers := make([]int, 0, len(source.Issues))
+	for key := range source.Issues {
+		number, err := strconv.Atoi(key)
+		if err != nil || number < 1 {
+			return QuarantinedSemanticMigrationPlan{}, nil, nil, fmt.Errorf("quarantined semantic snapshot has invalid Issue key %q", key)
+		}
+		issueNumbers = append(issueNumbers, number)
+	}
+	sort.Ints(issueNumbers)
+	requestIDs := make([]string, 0, len(source.PendingRequests))
+	for id := range source.PendingRequests {
+		if strings.TrimSpace(id) == "" {
+			return QuarantinedSemanticMigrationPlan{}, nil, nil, errors.New("quarantined semantic snapshot has an empty request ID")
+		}
+		requestIDs = append(requestIDs, id)
+	}
+	sort.Strings(requestIDs)
+	return QuarantinedSemanticMigrationPlan{
+		Eligible: true, ConfirmationRequired: true, Backup: backup, RecoveryReason: current.Recovery.Reason,
+		RepositoryID: source.RepoID, SnapshotRevision: source.StateRevision, IssueCount: len(source.Issues), IssueNumbers: issueNumbers,
+		PendingRequestCount: len(source.PendingRequests), PendingRequestIDs: requestIDs, FromSemanticContract: source.SemanticContractVersion,
+		ToSemanticContract: statecontract.CurrentVersion, SourceStateSHA256: fileSHA256(stateData),
+		SourceEventsSHA256: fileSHA256(eventsData),
+		MutationScope:      []string{"semantic contract normalization", "restored snapshot and event chain", "semantic migration audit event"},
+	}, stateData, eventsData, nil
+}
+
+func (s Store) ApplyQuarantinedSemanticMigration(expectedBackup string, expectedStateSHA256 string, expectedEventsSHA256 string, migratedState []byte, migratedEvents []byte) (Snapshot, string, error) {
+	if err := s.ensureDir(); err != nil {
+		return Snapshot{}, "", err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return Snapshot{}, "", err
+	}
+	defer unlock(lock)
+	plan, _, _, err := s.quarantinedSemanticMigrationPlanUnlocked(expectedBackup)
+	if err != nil {
+		return Snapshot{}, "", err
+	}
+	if plan.SourceStateSHA256 != expectedStateSHA256 || plan.SourceEventsSHA256 != expectedEventsSHA256 {
+		return Snapshot{}, "", errors.New("quarantined semantic source changed after preview")
+	}
+	var migrated Snapshot
+	if err := json.Unmarshal(migratedState, &migrated); err != nil {
+		return Snapshot{}, "", fmt.Errorf("decode migrated quarantined snapshot: %w", err)
+	}
+	if err := migrated.Validate(); err != nil {
+		return Snapshot{}, "", fmt.Errorf("validate migrated quarantined snapshot: %w", err)
+	}
+	if migrated.RepoID != s.RepoID || filepath.Clean(migrated.RepoPath) != filepath.Clean(s.RepoPath) || migrated.StateRevision != plan.SnapshotRevision+1 {
+		return Snapshot{}, "", errors.New("migrated quarantined snapshot identity or revision differs")
+	}
+	issueNumbers := make([]int, 0, len(migrated.Issues))
+	for key := range migrated.Issues {
+		number, err := strconv.Atoi(key)
+		if err != nil {
+			return Snapshot{}, "", fmt.Errorf("migrated quarantined snapshot has invalid Issue key %q", key)
+		}
+		issueNumbers = append(issueNumbers, number)
+	}
+	sort.Ints(issueNumbers)
+	requestIDs := make([]string, 0, len(migrated.PendingRequests))
+	for id := range migrated.PendingRequests {
+		requestIDs = append(requestIDs, id)
+	}
+	sort.Strings(requestIDs)
+	if !slices.Equal(issueNumbers, plan.IssueNumbers) || !slices.Equal(requestIDs, plan.PendingRequestIDs) {
+		return Snapshot{}, "", errors.New("migrated quarantined snapshot changed Issue or request identity")
+	}
+	events, err := decodeRecoveryEvents(migratedEvents, s.RepoID)
+	if err != nil {
+		return Snapshot{}, "", fmt.Errorf("decode migrated quarantined events: %w", err)
+	}
+	if err := s.validateConsistency(migrated, events); err != nil {
+		return Snapshot{}, "", fmt.Errorf("validate migrated quarantined event chain: %w", err)
+	}
+
+	markerBackup := filepath.Join(s.Dir, "recovery", time.Now().UTC().Format("20060102T150405.000000000Z")+"-semantic-migration-marker_"+strings.TrimPrefix(NewID("marker"), "marker_"))
+	if err := os.MkdirAll(markerBackup, 0o700); err != nil {
+		return Snapshot{}, "", err
+	}
+	for _, name := range []string{"state.json", "events.jsonl"} {
+		data, readErr := os.ReadFile(filepath.Join(s.Dir, name))
+		if readErr != nil {
+			return Snapshot{}, markerBackup, readErr
+		}
+		if writeErr := fsutil.WriteFile(filepath.Join(markerBackup, name), data, 0o600); writeErr != nil {
+			return Snapshot{}, markerBackup, writeErr
+		}
+	}
+	stagedState := filepath.Join(markerBackup, "migrated-state.json")
+	stagedEvents := filepath.Join(markerBackup, "migrated-events.jsonl")
+	if err := fsutil.WriteFile(stagedState, migratedState, 0o600); err != nil {
+		return Snapshot{}, markerBackup, err
+	}
+	if err := fsutil.WriteFile(stagedEvents, migratedEvents, 0o600); err != nil {
+		return Snapshot{}, markerBackup, err
+	}
+	journal := map[string]any{
+		"version": 1, "status": "prepared", "operation": "quarantined_semantic_migration",
+		"source_backup": plan.Backup, "marker_backup": markerBackup,
+		"source_state_sha256": plan.SourceStateSHA256, "source_events_sha256": plan.SourceEventsSHA256,
+		"migrated_state_sha256": fileSHA256(migratedState), "migrated_events_sha256": fileSHA256(migratedEvents),
+	}
+	journalPath := filepath.Join(markerBackup, "migration-journal.json")
+	if err := fsutil.WriteJSON(journalPath, journal, 0o600); err != nil {
+		return Snapshot{}, markerBackup, err
+	}
+	txn := quarantineRecoveryTransaction{Version: 1, RepoID: s.RepoID, StateFile: stagedState, EventsFile: stagedEvents,
+		StateSHA256: fileSHA256(migratedState), EventsSHA256: fileSHA256(migratedEvents)}
+	if err := fsutil.WriteJSON(s.quarantineRecoveryTransactionPath(), txn, 0o600); err != nil {
+		return Snapshot{}, markerBackup, err
+	}
+	if err := s.completeQuarantineRecoveryUnlocked(); err != nil {
+		return Snapshot{}, markerBackup, err
+	}
+	loaded, err := s.recoverUnlocked()
+	if err != nil {
+		return Snapshot{}, markerBackup, err
+	}
+	journal["status"] = "completed"
+	if err := fsutil.WriteJSON(journalPath, journal, 0o600); err != nil {
+		return Snapshot{}, markerBackup, err
+	}
+	return loaded, markerBackup, nil
 }
 
 func cloneSnapshot(snapshot Snapshot) (Snapshot, error) {

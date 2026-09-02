@@ -705,7 +705,7 @@ esac
 	}
 }
 
-func TestStartQuarantinesLegacySemanticStateBeforeLaunchdMutation(t *testing.T) {
+func TestStartRejectsLegacySemanticStateWithoutQuarantineOrLaunchdMutation(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -731,13 +731,34 @@ func TestStartQuarantinesLegacySemanticStateBeforeLaunchdMutation(t *testing.T) 
 	}
 	snapshot.SemanticContractVersion = 0
 	writeJSONFixture(t, store.StatePath(), snapshot)
+	original, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = (App{Out: io.Discard, Err: io.Discard}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"})
-	if err == nil || !strings.Contains(err.Error(), "recovery-blocked") || !strings.Contains(err.Error(), "semantic contract version") {
+	if err == nil || !strings.Contains(err.Error(), "semantic contract version") {
 		t.Fatalf("legacy semantic state was not rejected: %v", err)
 	}
-	blocked, loadErr := store.Load()
-	if loadErr != nil || blocked.Recovery == nil || blocked.Recovery.Status != state.RecoveryStateBlocked || blocked.Recovery.BackupDir == "" {
-		t.Fatalf("semantic quarantine did not preserve a recovery backup: snapshot=%+v err=%v", blocked, loadErr)
+	after, readErr := os.ReadFile(store.StatePath())
+	if readErr != nil || !bytes.Equal(after, original) {
+		t.Fatalf("semantic mismatch changed durable state: err=%v\nafter=%s\noriginal=%s", readErr, after, original)
+	}
+	if _, statErr := os.Stat(filepath.Join(store.Dir, "recovery")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("semantic mismatch created a recovery quarantine: %v", statErr)
+	}
+}
+
+func TestMigrateQuarantinedBackupRequiresExactRepositoryPair(t *testing.T) {
+	l := layout.Layout{Root: t.TempDir()}
+	app := App{Out: io.Discard, Err: io.Discard}
+	for _, args := range [][]string{
+		{"--quarantined-backup", "/tmp/recovery", "--json"},
+		{"--repo", "/tmp/repo", "--json"},
+		{"--repo", "/tmp/repo", "--quarantined-backup", "/tmp/recovery", "--rollback", "--json"},
+	} {
+		if err := app.migrate(context.Background(), l, args); err == nil {
+			t.Fatalf("invalid quarantined migration flags were accepted: %v", args)
+		}
 	}
 }
 

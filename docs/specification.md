@@ -758,7 +758,7 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 
 transactionなしでsnapshotとevent logが食い違う場合、途中に壊れたeventがある場合、またはsnapshotを復元できない場合は自動推測しない。既存の `state.json`、`events.jsonl`、`state.txn.json` をrepository state directory配下の `recovery/` へ隔離し、元の理由とbackup pathを含む `recovery_blocked` 状態を新しいsnapshotへ保存する。blocked状態では通常の状態更新とIssue処理を拒否し、backupを保持したまま手動復旧を待つ。
 
-唯一のtyped例外は§6.12のlegacy merged identity quarantine recoveryである。exact recovery marker、元snapshot/event、GitHub authoritative PR identityを再検証し、元backupとmarker backupを双方保持できる場合だけoperator確認付きで復元する。それ以外のquarantine reasonへ同commandを流用しない。
+typed例外は§6.12のlegacy merged identity quarantine recoveryと、supportedな旧semantic contract mismatchだけを対象にした§12.4のquarantined semantic migrationである。どちらもexact recovery marker、元snapshot/event、repository identity、停止状態を再検証し、元backupとmarker backupを双方保持できる場合だけoperator確認付きでcommitする。それ以外のquarantine reasonへ流用しない。
 
 ### 12.4 永続schema migration
 
@@ -777,7 +777,9 @@ v4→v5かつsemantic v1→v3、またはv5 semantic v2→v3 migrationは次の�
 5. `semantic_migration_applied`へauthority、source、before/after、operator confirmation、provenance非合成を記録する
 6. 全対象へ新validatorを再適用し、journalを`completed`にする
 
-process停止後も再実行は同じjournal、backup、migration/event IDを使い、適用済みartifactを重複更新しない。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、Issue、request/answer、generation、session、publication/PR auditを保持する。startup時のsilent backfillは禁止し、supervisorはsemantic validator失敗時にworker/GitHub mutationより前でblockedになる。
+process停止後も再実行は同じjournal、backup、migration/event IDを使い、適用済みartifactを重複更新しない。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、Issue、request/answer、generation、session、publication/PR auditを保持する。startup時のsilent backfillは禁止し、supervisorはsemantic validator失敗時にworker/GitHub mutationより前で副作用なく拒否する。semantic mismatch自体を破損扱いでquarantineしない。
+
+旧runtimeがsupportedなsemantic mismatchだけを理由に既にsnapshotを隔離した場合、`migrate --repo <exact> --quarantined-backup <exact>`はcurrent revision 1 markerと単一`recovery_blocked` event、managed recovery root内のrecorded backup、旧semantic version、state/event digest、prepared transaction不在、worker identity/ExecutionLease 0、全LaunchAgent停止をpreviewする。`--apply`は同じpredicateをlock内で再検証し、元backupとmarker backupを保持したまま、通常migrationと同じnormalization/auditを適用したsnapshot/event pairをcrash-safe transactionでcommitする。別のrecovery reasonやunknown semantic versionから復元してはならない。
 
 rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active ExecutionLeaseがある間はrollbackを拒否する。schema v4対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。旧credential fileはmigration対象・backup対象に含めず、rollback互換のため暗黙削除しない。明示的な整理手順は[migration runbook](migration.md)を正本とする。
 

@@ -17,12 +17,48 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 	apply := fs.Bool("apply", false, "apply the supported forward migration")
 	rollback := fs.Bool("rollback", false, "restore a migration backup")
 	backup := fs.String("backup", "", "absolute migration backup path")
+	repoPath := fs.String("repo", "", "exact registered repository path for quarantined semantic migration")
+	quarantinedBackup := fs.String("quarantined-backup", "", "exact recovery backup recorded by the current semantic mismatch marker")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
 	}
 	if *apply && *rollback {
 		return exitError{2, fmt.Errorf("--apply and --rollback are mutually exclusive")}
+	}
+	if *quarantinedBackup != "" {
+		if *repoPath == "" || *rollback || *backup != "" {
+			return exitError{2, fmt.Errorf("--quarantined-backup requires --repo and does not accept --rollback or --backup")}
+		}
+		repositories, err := schema.RegisteredRepositories(l)
+		if err != nil {
+			return err
+		}
+		loaded, err := loadedMigrationEntries(ctx, l, repositories)
+		if err != nil {
+			return err
+		}
+		report, err := schema.InspectQuarantinedSemantic(l, *repoPath, *quarantinedBackup)
+		if err != nil {
+			return err
+		}
+		if !*apply {
+			return a.output(*jsonOut, map[string]any{"report": report, "loaded_repositories": repoIDs(loaded), "apply_allowed": len(loaded) == 0 && report.ApplyAllowed})
+		}
+		if len(loaded) > 0 {
+			return fmt.Errorf("quarantined semantic migration requires every registered LaunchAgent to be stopped; loaded: %v", repoIDs(loaded))
+		}
+		if !report.ApplyAllowed {
+			return fmt.Errorf("quarantined semantic migration is not allowed")
+		}
+		result, err := (schema.Migrator{Layout: l}).ApplyQuarantinedSemantic(*repoPath, *quarantinedBackup)
+		if err != nil {
+			return err
+		}
+		return a.output(*jsonOut, result)
+	}
+	if *repoPath != "" {
+		return exitError{2, fmt.Errorf("--repo requires --quarantined-backup")}
 	}
 	if *rollback != (*backup != "") {
 		return exitError{2, fmt.Errorf("--rollback requires --backup, and --backup requires --rollback")}
