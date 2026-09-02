@@ -372,7 +372,28 @@ func (c AssignmentController) Apply(ctx context.Context, repoPath, version strin
 	if err := StageSlot(c.Layout, ref, filepath.Join(candidate.Dir, BinaryAsset)); err != nil {
 		return AssignmentReport{}, err
 	}
-	return c.switchTo(ctx, repoPath, ref, expectedGeneration, false)
+	return c.switchTo(ctx, repoPath, ref, expectedGeneration, false, false)
+}
+
+func (c AssignmentController) Retry(ctx context.Context, repoPath string, expectedGeneration uint64) (AssignmentReport, error) {
+	entry, err := (registry.Store{Path: c.Layout.RegistryPath}).Resolve(repoPath, "")
+	if err != nil {
+		return AssignmentReport{}, err
+	}
+	tx, err := LoadAssignmentTransaction(c.Layout.DeliveryAssignmentTransactionPath(entry.RepoID))
+	if err != nil {
+		return AssignmentReport{}, err
+	}
+	if tx.Phase != AssignmentRollbackFailed {
+		return AssignmentReport{}, errors.New("assignment retry requires a rollback_failed transaction")
+	}
+	if tx.ExpectedGeneration != expectedGeneration {
+		return AssignmentReport{}, fmt.Errorf("stale assignment retry: transaction generation is %d, expected %d", tx.ExpectedGeneration, expectedGeneration)
+	}
+	if err := VerifySlot(tx.Desired); err != nil {
+		return AssignmentReport{}, fmt.Errorf("verify retained assignment target: %w", err)
+	}
+	return c.switchTo(ctx, repoPath, tx.Desired, expectedGeneration, tx.Operation == AssignmentOperationRollback, true)
 }
 
 func (c AssignmentController) Rollback(ctx context.Context, repoPath string, expectedGeneration uint64) (AssignmentReport, error) {
@@ -397,7 +418,7 @@ func (c AssignmentController) Rollback(ctx context.Context, repoPath string, exp
 		if err := VerifySlot(tx.Desired); err != nil {
 			return AssignmentReport{}, fmt.Errorf("verify rollback transaction target: %w", err)
 		}
-		return c.switchTo(ctx, repoPath, tx.Desired, expectedGeneration, true)
+		return c.switchTo(ctx, repoPath, tx.Desired, expectedGeneration, true, false)
 	}
 	if assignment.Previous == nil {
 		return AssignmentReport{}, errors.New("repository assignment has no previous version")
@@ -405,10 +426,10 @@ func (c AssignmentController) Rollback(ctx context.Context, repoPath string, exp
 	if err := VerifySlot(*assignment.Previous); err != nil {
 		return AssignmentReport{}, fmt.Errorf("verify previous assignment slot: %w", err)
 	}
-	return c.switchTo(ctx, repoPath, *assignment.Previous, expectedGeneration, true)
+	return c.switchTo(ctx, repoPath, *assignment.Previous, expectedGeneration, true, false)
 }
 
-func (c AssignmentController) switchTo(ctx context.Context, repoPath string, desired AssignmentRef, expectedGeneration uint64, rollback bool) (AssignmentReport, error) {
+func (c AssignmentController) switchTo(ctx context.Context, repoPath string, desired AssignmentRef, expectedGeneration uint64, rollback, retryRetainedFence bool) (AssignmentReport, error) {
 	lock, err := AcquireLock(RuntimePaths(c.Layout.Root).Lock)
 	if err != nil {
 		return AssignmentReport{}, err
@@ -478,8 +499,21 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 			return AssignmentReport{}, errors.New("assignment apply does not allow downgrade; use assignment rollback")
 		}
 	}
-	if tx.Phase == AssignmentRollbackFailed {
-		return AssignmentReport{}, errors.New("previous assignment rollback failed; repository fence remains active")
+	retrying := tx.Phase == AssignmentRollbackFailed
+	if retrying {
+		if !retryRetainedFence {
+			return AssignmentReport{}, errors.New("previous assignment rollback failed; repository fence remains active")
+		}
+		if tx.RepositoryID != entry.RepoID || tx.Operation != operation || tx.ExpectedGeneration != expectedGeneration || tx.Current != current.AssignmentRef || tx.Desired != desired {
+			return AssignmentReport{}, errors.New("retained assignment transaction does not match the requested retry")
+		}
+		fence, err := LoadMaintenance(c.Layout.DeliveryAssignmentFencePath(entry.RepoID))
+		if err != nil {
+			return AssignmentReport{}, fmt.Errorf("load retained assignment fence: %w", err)
+		}
+		if fence.Generation != fmt.Sprintf("assignment-%d", tx.TargetGeneration) || fence.Desired.Version != desired.Version || fence.Desired.Commit != desired.Commit {
+			return AssignmentReport{}, errors.New("retained assignment fence does not match the failed transaction")
+		}
 	}
 	if tx.RepositoryID != "" && tx.Phase != AssignmentSucceeded && tx.Phase != AssignmentRolledBack && tx.Desired != desired {
 		return AssignmentReport{}, errors.New("another assignment target is already in progress")
@@ -498,6 +532,32 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 	status, err := manager.Status(ctx, entry)
 	if err != nil {
 		return AssignmentReport{}, err
+	}
+	if retrying {
+		snapshot, loadErr := (state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}).Load()
+		if loadErr != nil {
+			return AssignmentReport{}, fmt.Errorf("inspect retained assignment state: %w", loadErr)
+		}
+		if snapshotHasWorker(snapshot) {
+			return AssignmentReport{}, errors.New("retained assignment retry refuses to stop an active worker")
+		}
+		if status.Loaded {
+			if err := manager.Stop(ctx, entry); err != nil {
+				return AssignmentReport{}, fmt.Errorf("stop idle retained assignment runtime: %w", err)
+			}
+			status, err = manager.Status(ctx, entry)
+			if err != nil {
+				return AssignmentReport{}, err
+			}
+			if status.Loaded || status.Running {
+				return AssignmentReport{}, errors.New("retained assignment runtime did not stop")
+			}
+		}
+		tx.Phase = AssignmentPlanned
+		tx.Result = "retrying"
+		if err := SaveAssignmentTransaction(txPath, tx); err != nil {
+			return AssignmentReport{}, err
+		}
 	}
 	legacyRuntime := false
 	if status.Loaded {

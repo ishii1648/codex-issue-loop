@@ -164,6 +164,21 @@ func TestDoctorOutputHasStableSchemaCodesAndSafeRemediations(t *testing.T) {
 	}
 }
 
+func TestAssignmentHealthAcceptsIntentionallyStoppedSupervisor(t *testing.T) {
+	diagnostics := allowStoppedAssignmentHealth([]diagnostic{
+		failedDiagnostic("SUPERVISOR_STOPPED", "repository", "repo_1", "stopped", "state=stopped", command("start", "agent-loop start --repo /repo")),
+		failedDiagnostic("SUPERVISOR_BLOCKED", "repository", "repo_2", "blocked", "state=blocked"),
+	})
+	stopped := diagnosticByCode(t, diagnostics, "SUPERVISOR_STOPPED_ASSIGNMENT_HEALTH")
+	if !stopped.OK || len(stopped.Remediations) != 0 {
+		t.Fatalf("stopped assignment health=%+v", stopped)
+	}
+	blocked := diagnosticByCode(t, diagnostics, "SUPERVISOR_BLOCKED")
+	if blocked.OK {
+		t.Fatalf("blocked supervisor became healthy: %+v", blocked)
+	}
+}
+
 func TestDoctorReportsInitAsAdvisoryUserRuleRemediation(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))

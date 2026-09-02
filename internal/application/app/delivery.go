@@ -37,7 +37,7 @@ func (a App) delivery(ctx context.Context, l layout.Layout, args []string) error
 
 func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []string) error {
 	if len(args) == 0 {
-		return exitError{2, errors.New("delivery assignment subcommand is required: migrate, status, preview, apply, rollback, verify")}
+		return exitError{2, errors.New("delivery assignment subcommand is required: migrate, status, preview, apply, retry, rollback, verify")}
 	}
 	operation := args[0]
 	fs := flag.NewFlagSet("delivery assignment "+operation, flag.ContinueOnError)
@@ -47,6 +47,7 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 	version := fs.String("version", "", "exact stable version")
 	expectedGeneration := fs.Uint64("expected-generation", 0, "generation returned by preview or status")
 	applyMigration := fs.Bool("apply", false, "apply the reviewed v1 to v2 config migration")
+	confirmRetainedFence := fs.Bool("confirm-retained-fence", false, "confirm the retained rollback_failed transaction and retry its exact target")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitError{2, err}
@@ -65,7 +66,7 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 	controller := delivery.AssignmentController{Layout: l, ConfigPath: path, GH: ghPath}
 	switch operation {
 	case "migrate":
-		if *repoPath != "" || *version != "" || *expectedGeneration != 0 {
+		if *repoPath != "" || *version != "" || *expectedGeneration != 0 || *confirmRetainedFence {
 			return exitError{2, errors.New("assignment migrate does not accept --repo, --version, or --expected-generation")}
 		}
 		report, operationErr := controller.MigrateConfig(ctx, *applyMigration)
@@ -74,7 +75,7 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 		}
 		return operationErr
 	case "status":
-		if *version != "" || *expectedGeneration != 0 || *applyMigration {
+		if *version != "" || *expectedGeneration != 0 || *applyMigration || *confirmRetainedFence {
 			return exitError{2, errors.New("assignment status accepts only --repo")}
 		}
 		reports, operationErr := controller.Status(ctx, *repoPath)
@@ -83,7 +84,7 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 		}
 		return operationErr
 	case "preview":
-		if *repoPath == "" || *version == "" || *expectedGeneration != 0 || *applyMigration {
+		if *repoPath == "" || *version == "" || *expectedGeneration != 0 || *applyMigration || *confirmRetainedFence {
 			return exitError{2, errors.New("assignment preview requires --repo and --version")}
 		}
 		plan, operationErr := controller.Preview(ctx, *repoPath, *version)
@@ -92,7 +93,7 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 		}
 		return operationErr
 	case "apply":
-		if *repoPath == "" || *version == "" || *expectedGeneration == 0 || *applyMigration {
+		if *repoPath == "" || *version == "" || *expectedGeneration == 0 || *applyMigration || *confirmRetainedFence {
 			return exitError{2, errors.New("assignment apply requires --repo, --version, and --expected-generation")}
 		}
 		report, operationErr := controller.Apply(ctx, *repoPath, *version, *expectedGeneration)
@@ -100,8 +101,17 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 			return outputErr
 		}
 		return operationErr
+	case "retry":
+		if *repoPath == "" || *version != "" || *expectedGeneration == 0 || *applyMigration || !*confirmRetainedFence {
+			return exitError{2, errors.New("assignment retry requires --repo, --expected-generation, and --confirm-retained-fence")}
+		}
+		report, operationErr := controller.Retry(ctx, *repoPath, *expectedGeneration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
 	case "rollback":
-		if *repoPath == "" || *version != "" || *expectedGeneration == 0 || *applyMigration {
+		if *repoPath == "" || *version != "" || *expectedGeneration == 0 || *applyMigration || *confirmRetainedFence {
 			return exitError{2, errors.New("assignment rollback requires --repo and --expected-generation")}
 		}
 		report, operationErr := controller.Rollback(ctx, *repoPath, *expectedGeneration)
@@ -110,7 +120,7 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 		}
 		return operationErr
 	case "verify":
-		if *repoPath == "" || *version != "" || *expectedGeneration != 0 || *applyMigration {
+		if *repoPath == "" || *version != "" || *expectedGeneration != 0 || *applyMigration || *confirmRetainedFence {
 			return exitError{2, errors.New("assignment verify requires --repo")}
 		}
 		report, operationErr := controller.Verify(ctx, *repoPath)
