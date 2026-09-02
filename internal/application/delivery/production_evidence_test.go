@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"gopkg.in/yaml.v3"
 )
 
@@ -332,6 +334,10 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	}
 	if strings.Count(text, "scripts/build-release.sh") != 2 {
 		t.Fatal("release workflow must build the canonical candidate once and one comparison-only rebuild")
+	}
+	semanticPredicate := fmt.Sprintf(".semantic_contract_current == %d", statecontract.CurrentVersion)
+	if strings.Count(text, semanticPredicate) != 1 {
+		t.Fatalf("release workflow does not require current semantic contract %d", statecontract.CurrentVersion)
 	}
 	if !strings.Contains(text, `[[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]`) ||
 		strings.Contains(text, `([.-][0-9A-Za-z.-]+)?`) {
