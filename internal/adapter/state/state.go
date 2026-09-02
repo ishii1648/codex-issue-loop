@@ -100,10 +100,8 @@ type ExecutionLease struct {
 // migration. It is not a distinct durable concept.
 type ResourceLease = ExecutionLease
 
-// ResourceLeasePark is the durable continuation boundary for a resumable
-// worker environment block. OriginalLease is an immutable copy of the released
-// active lease; keeping it separate from Issue.Lease makes it visible to
-// operators without participating in resource admission.
+// ContinuationCheckpoint is the durable boundary between released execution
+// capacity and a later, explicitly validated continuation.
 type ContinuationCheckpoint struct {
 	ID                string                         `json:"id"`
 	Kind              string                         `json:"kind,omitempty"`
@@ -120,15 +118,25 @@ type ContinuationCheckpoint struct {
 	WorktreeSHA256    string                         `json:"worktree_sha256,omitempty"`
 	PullRequestURL    string                         `json:"pull_request_url,omitempty"`
 	PullRequestNumber int                            `json:"pull_request_number,omitempty"`
-	Stage             issuedomain.Status             `json:"stage,omitempty"`
+	Stage             issuedomain.ContinuationStage  `json:"stage,omitempty"`
+	ResultSHA256      string                         `json:"result_sha256,omitempty"`
+	Summary           string                         `json:"summary,omitempty"`
+	Evidence          *ContinuationEvidence          `json:"evidence,omitempty"`
 }
 
-// ResourceLeasePark remains an internal source compatibility alias while all
-// runtime callers move to the canonical checkpoint vocabulary.
-type ResourceLeasePark = ContinuationCheckpoint
+// ContinuationEvidence records the immutable observation that caused a stage
+// to stop without introducing a scenario-specific recovery aggregate.
+type ContinuationEvidence struct {
+	Origin     string    `json:"origin"`
+	Phase      string    `json:"phase"`
+	Code       string    `json:"code"`
+	Status     string    `json:"status"`
+	ObservedAt time.Time `json:"observed_at"`
+}
 
 type Suspension struct {
 	ID              string                         `json:"id"`
+	Origin          string                         `json:"origin,omitempty"`
 	Status          issuedomain.SuspensionStatus   `json:"status"`
 	ReasonCode      string                         `json:"reason_code"`
 	Recoverability  issuedomain.Recoverability     `json:"recoverability"`
@@ -182,92 +190,6 @@ type ConflictRecovery struct {
 	UpdatedAt       time.Time              `json:"updated_at,omitempty"`
 }
 
-// BlockedCause records provenance needed by the operator resume command. Older
-// or manually-created blocked records intentionally have no provenance and are
-// therefore not resumable.
-type BlockedCause struct {
-	Origin    string    `json:"origin"`
-	Kind      string    `json:"kind"`
-	Resumable bool      `json:"resumable"`
-	Reason    string    `json:"reason"`
-	BlockedAt time.Time `json:"blocked_at"`
-}
-
-type EnvironmentResume struct {
-	ID             string                              `json:"id"`
-	Status         issuedomain.EnvironmentResumeStatus `json:"status"`
-	ConfirmedAt    time.Time                           `json:"confirmed_at"`
-	PreviousReason string                              `json:"previous_reason"`
-	BaseSHA        string                              `json:"base_sha,omitempty"`
-	CurrentBaseSHA string                              `json:"current_base_sha,omitempty"`
-}
-
-type PublicationRecoveryAttempt struct {
-	Number     int                                          `json:"number"`
-	Generation int                                          `json:"generation"`
-	Status     issuedomain.PublicationRecoveryAttemptStatus `json:"status"`
-	Reason     string                                       `json:"reason,omitempty"`
-	StartedAt  time.Time                                    `json:"started_at"`
-	FinishedAt time.Time                                    `json:"finished_at,omitempty"`
-}
-
-// PublicationRecovery records an operator-confirmed, publication-only retry.
-// Worker attempt counters and history are intentionally separate and are never
-// reset by this recovery path.
-type PublicationRecovery struct {
-	ID               string                                `json:"id"`
-	Status           issuedomain.PublicationRecoveryStatus `json:"status"`
-	Generation       int                                   `json:"generation"`
-	Attempts         int                                   `json:"attempts"`
-	MaxAttempts      int                                   `json:"max_attempts"`
-	History          []PublicationRecoveryAttempt          `json:"history,omitempty"`
-	ConfirmedAt      time.Time                             `json:"confirmed_at"`
-	PreviousReason   string                                `json:"previous_reason"`
-	ResultSHA256     string                                `json:"result_sha256"`
-	Summary          string                                `json:"summary"`
-	ExpectedHeadSHA  string                                `json:"expected_head_sha"`
-	WorktreeSHA256   string                                `json:"worktree_sha256"`
-	OriginalDirty    bool                                  `json:"original_dirty"`
-	OriginalUnpushed bool                                  `json:"original_unpushed_commits"`
-}
-
-const (
-	ChecksFailureOriginPullRequest  = "pull_request_lifecycle"
-	ChecksFailurePhaseRequired      = "required_checks"
-	ChecksFailureCodeRetryExhausted = "checks_retry_exhausted"
-)
-
-// PullRequestChecksFailure is immutable provenance for the Pull Request head
-// that exhausted the normal worker retry budget. Recovery compares a later
-// authoritative head against this record instead of the mutable observed head.
-type PullRequestChecksFailure struct {
-	Origin            string    `json:"origin"`
-	Phase             string    `json:"phase"`
-	Code              string    `json:"code"`
-	Recoverable       bool      `json:"recoverable"`
-	PullRequestURL    string    `json:"pull_request_url"`
-	PullRequestNumber int       `json:"pull_request_number"`
-	Branch            string    `json:"branch"`
-	HeadSHA           string    `json:"head_sha"`
-	ChecksStatus      string    `json:"checks_status"`
-	RetryExhausted    bool      `json:"retry_exhausted"`
-	FailedAt          time.Time `json:"failed_at"`
-}
-
-// PullRequestChecksRecovery records one operator-confirmed attempt to return
-// an externally repaired head to the existing Pull Request lifecycle. Worker
-// attempts, continuations, run history, and leases are deliberately separate.
-type PullRequestChecksRecovery struct {
-	ID             string                                      `json:"id"`
-	Status         issuedomain.PullRequestChecksRecoveryStatus `json:"status"`
-	Generation     int                                         `json:"generation"`
-	ConfirmedAt    time.Time                                   `json:"confirmed_at"`
-	PreviousReason string                                      `json:"previous_reason"`
-	OldHeadSHA     string                                      `json:"old_head_sha"`
-	NewHeadSHA     string                                      `json:"new_head_sha"`
-	ChecksStatus   string                                      `json:"checks_status"`
-}
-
 // WorkerWorkspace is immutable provenance captured before the first worker
 // spawn. Continuations must reproduce every field before a backend is invoked.
 type WorkerWorkspace struct {
@@ -281,47 +203,6 @@ type WorkerWorkspace struct {
 	CapturedAt   time.Time `json:"captured_at"`
 }
 
-// AnsweredWorkspaceRecovery is the audit fence for the one legacy boundary
-// where a needs-input continuation reacquired its lease before workspace
-// provenance was introduced, then failed solely because Workspace was absent.
-// It is deliberately separate from EnvironmentResume.
-type AnsweredWorkspaceRecovery struct {
-	ID                   string                                      `json:"id"`
-	Status               issuedomain.AnsweredWorkspaceRecoveryStatus `json:"status"`
-	ConfirmedAt          time.Time                                   `json:"confirmed_at"`
-	OperatorConfirmed    bool                                        `json:"operator_confirmed"`
-	OldProvenanceMissing bool                                        `json:"old_provenance_missing"`
-	RequestID            string                                      `json:"request_id"`
-	ResourceParkID       string                                      `json:"resource_park_id"`
-	AnswerSHA256         string                                      `json:"answer_sha256"`
-	HeadSHA              string                                      `json:"head_sha"`
-	WorktreeSHA256       string                                      `json:"worktree_sha256"`
-	ExpectedWorkspace    WorkerWorkspace                             `json:"expected_workspace"`
-	ActualWorkspace      WorkerWorkspace                             `json:"actual_workspace"`
-	ValidatorChecks      map[string]bool                             `json:"validator_checks"`
-	OldOwner             LeaseOwner                                  `json:"old_owner"`
-	NewOwner             LeaseOwner                                  `json:"new_owner"`
-}
-
-// WorkspaceProvenanceRecovery records an operator-confirmed, validation-only
-// backfill of immutable workspace identity for a stopped legacy terminal
-// record. It deliberately does not authorize a lifecycle transition, acquire
-// a lease, or mutate GitHub state.
-type WorkspaceProvenanceRecovery struct {
-	ID                   string                                        `json:"id"`
-	Status               issuedomain.WorkspaceProvenanceRecoveryStatus `json:"status"`
-	ConfirmedAt          time.Time                                     `json:"confirmed_at"`
-	OperatorConfirmed    bool                                          `json:"operator_confirmed"`
-	OldProvenanceMissing bool                                          `json:"old_provenance_missing"`
-	PreviousStatus       issuedomain.Status                            `json:"previous_status"`
-	RunID                string                                        `json:"run_id"`
-	HeadSHA              string                                        `json:"head_sha"`
-	WorktreeSHA256       string                                        `json:"worktree_sha256"`
-	ExpectedWorkspace    WorkerWorkspace                               `json:"expected_workspace"`
-	ActualWorkspace      WorkerWorkspace                               `json:"actual_workspace"`
-	ValidatorChecks      map[string]bool                               `json:"validator_checks"`
-}
-
 // CapturedAt is audit metadata and is deliberately not part of workspace
 // identity comparison.
 func (w WorkerWorkspace) Matches(path, branch, repoID, repository string, repositoryID int64, gitCommonDir, mainCheckout string) bool {
@@ -330,76 +211,43 @@ func (w WorkerWorkspace) Matches(path, branch, repoID, repository string, reposi
 		w.GitCommonDir == gitCommonDir && w.MainCheckout == mainCheckout
 }
 
-// MergedPullRequestAdoption records an operator-confirmed association between
-// a terminal Issue and the single merged Pull Request for its saved branch.
-// It exists only for publication that happened outside the supervisor after a
-// worker stopped, and is never used to infer or adopt an open Pull Request.
-type MergedPullRequestAdoption struct {
-	ID                string                                      `json:"id"`
-	Status            issuedomain.MergedPullRequestAdoptionStatus `json:"status"`
-	Generation        int                                         `json:"generation"`
-	ConfirmedAt       time.Time                                   `json:"confirmed_at"`
-	AdoptedAt         time.Time                                   `json:"adopted_at"`
-	PreviousStatus    issuedomain.Status                          `json:"previous_status"`
-	PreviousReason    string                                      `json:"previous_reason"`
-	PullRequestURL    string                                      `json:"pull_request_url"`
-	PullRequestNumber int                                         `json:"pull_request_number"`
-	Branch            string                                      `json:"branch"`
-	HeadSHA           string                                      `json:"head_sha"`
-	MergeSHA          string                                      `json:"merge_sha"`
-	BaseBranch        string                                      `json:"base_branch"`
-}
-
 type Issue struct {
-	Number                    int                          `json:"number"`
-	Title                     string                       `json:"title"`
-	Status                    issuedomain.Status           `json:"status"`
-	RunID                     string                       `json:"run_id,omitempty"`
-	LeaseGeneration           uint64                       `json:"lease_generation,omitempty"`
-	Lease                     *ExecutionLease              `json:"execution_lease,omitempty"`
-	ResourcePark              *ContinuationCheckpoint      `json:"continuation_checkpoint,omitempty"`
-	Suspension                *Suspension                  `json:"suspension,omitempty"`
-	DeclaredResources         []string                     `json:"declared_resources,omitempty"`
-	ActualResources           []string                     `json:"actual_resources,omitempty"`
-	PublicationAudit          *publication.Audit           `json:"publication_audit,omitempty"`
-	Branch                    string                       `json:"branch,omitempty"`
-	Worktree                  string                       `json:"worktree,omitempty"`
-	Workspace                 *WorkerWorkspace             `json:"workspace,omitempty"`
-	Attempts                  int                          `json:"attempts"`
-	Continuations             int                          `json:"continuations"`
-	ExecutionProfile          string                       `json:"execution_profile,omitempty"`
-	CapabilityRequirements    *capability.Requirements     `json:"capability_requirements,omitempty"`
-	WorkerCapabilities        *capability.Provider         `json:"worker_capabilities,omitempty"`
-	SessionID                 string                       `json:"session_id,omitempty"`
-	Session                   *WorkerSession               `json:"session,omitempty"`
-	WorkerIdentity            WorkerIdentity               `json:"worker_identity,omitempty"`
-	WorkerPID                 int                          `json:"worker_pid,omitempty"`
-	WorkerPGID                int                          `json:"worker_pgid,omitempty"`
-	PullRequestURL            string                       `json:"pull_request_url,omitempty"`
-	PullRequestNumber         int                          `json:"pull_request_number,omitempty"`
-	HeadSHA                   string                       `json:"head_sha,omitempty"`
-	ReviewDecision            string                       `json:"review_decision,omitempty"`
-	PullRequestMerged         bool                         `json:"pull_request_merged,omitempty"`
-	GitHubSync                issuedomain.GitHubSync       `json:"github_sync,omitempty"`
-	FailureKind               string                       `json:"failure_kind,omitempty"`
-	LastError                 string                       `json:"last_error,omitempty"`
-	RetryAfter                *time.Time                   `json:"retry_after,omitempty"`
-	Answers                   []AnswerRecord               `json:"answers,omitempty"`
-	ConflictRecovery          *ConflictRecovery            `json:"conflict_recovery,omitempty"`
-	BlockedCause              *BlockedCause                `json:"blocked_cause,omitempty"`
-	EnvironmentResume         *EnvironmentResume           `json:"environment_resume,omitempty"`
-	AnsweredWorkspaceRecovery *AnsweredWorkspaceRecovery   `json:"answered_workspace_recovery,omitempty"`
-	WorkspaceRecovery         *WorkspaceProvenanceRecovery `json:"workspace_provenance_recovery,omitempty"`
-
-	PublicationFailure *publication.FailureProvenance `json:"publication_failure,omitempty"`
-
-	PublicationRecovery *PublicationRecovery `json:"publication_recovery,omitempty"`
-
-	PullRequestChecksFailure  *PullRequestChecksFailure  `json:"pull_request_checks_failure,omitempty"`
-	PullRequestChecksRecovery *PullRequestChecksRecovery `json:"pull_request_checks_recovery,omitempty"`
-	MergedPullRequestAdoption *MergedPullRequestAdoption `json:"merged_pull_request_adoption,omitempty"`
-
-	UpdatedAt time.Time `json:"updated_at"`
+	Number                 int                      `json:"number"`
+	Title                  string                   `json:"title"`
+	Status                 issuedomain.Status       `json:"status"`
+	RunID                  string                   `json:"run_id,omitempty"`
+	LeaseGeneration        uint64                   `json:"lease_generation,omitempty"`
+	Lease                  *ExecutionLease          `json:"execution_lease,omitempty"`
+	ResourcePark           *ContinuationCheckpoint  `json:"continuation_checkpoint,omitempty"`
+	Suspension             *Suspension              `json:"suspension,omitempty"`
+	DeclaredResources      []string                 `json:"declared_resources,omitempty"`
+	ActualResources        []string                 `json:"actual_resources,omitempty"`
+	PublicationAudit       *publication.Audit       `json:"publication_audit,omitempty"`
+	Branch                 string                   `json:"branch,omitempty"`
+	Worktree               string                   `json:"worktree,omitempty"`
+	Workspace              *WorkerWorkspace         `json:"workspace,omitempty"`
+	Attempts               int                      `json:"attempts"`
+	Continuations          int                      `json:"continuations"`
+	ExecutionProfile       string                   `json:"execution_profile,omitempty"`
+	CapabilityRequirements *capability.Requirements `json:"capability_requirements,omitempty"`
+	WorkerCapabilities     *capability.Provider     `json:"worker_capabilities,omitempty"`
+	SessionID              string                   `json:"session_id,omitempty"`
+	Session                *WorkerSession           `json:"session,omitempty"`
+	WorkerIdentity         WorkerIdentity           `json:"worker_identity,omitempty"`
+	WorkerPID              int                      `json:"worker_pid,omitempty"`
+	WorkerPGID             int                      `json:"worker_pgid,omitempty"`
+	PullRequestURL         string                   `json:"pull_request_url,omitempty"`
+	PullRequestNumber      int                      `json:"pull_request_number,omitempty"`
+	HeadSHA                string                   `json:"head_sha,omitempty"`
+	ReviewDecision         string                   `json:"review_decision,omitempty"`
+	PullRequestMerged      bool                     `json:"pull_request_merged,omitempty"`
+	GitHubSync             issuedomain.GitHubSync   `json:"github_sync,omitempty"`
+	FailureKind            string                   `json:"failure_kind,omitempty"`
+	LastError              string                   `json:"last_error,omitempty"`
+	RetryAfter             *time.Time               `json:"retry_after,omitempty"`
+	Answers                []AnswerRecord           `json:"answers,omitempty"`
+	ConflictRecovery       *ConflictRecovery        `json:"conflict_recovery,omitempty"`
+	UpdatedAt              time.Time                `json:"updated_at"`
 }
 
 type Option struct {
@@ -442,6 +290,49 @@ type Snapshot struct {
 	Issues                  map[string]*Issue   `json:"issues"`
 	PendingRequests         map[string]*Request `json:"pending_requests"`
 	Recovery                *Recovery           `json:"recovery,omitempty"`
+}
+
+// UnmarshalJSON rejects scenario-specific recovery state when it is already
+// labeled as schema v5. Only the v4 migration decoder may interpret those
+// fields; silently discarding them here could resume without their evidence.
+func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
+	var envelope struct {
+		Version int                                   `json:"version"`
+		Issues  map[string]map[string]json.RawMessage `json:"issues"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	if envelope.Version == CurrentVersion {
+		for number, issue := range envelope.Issues {
+			for _, field := range []string{
+				"blocked_cause", "environment_resume", "answered_workspace_recovery",
+				"workspace_provenance_recovery", "publication_failure", "publication_recovery",
+				"pull_request_checks_failure", "pull_request_checks_recovery", "merged_pull_request_adoption",
+			} {
+				if _, exists := issue[field]; exists {
+					return fmt.Errorf("Issue %s uses removed v5 field %q; migrate the original v4 input instead", number, field)
+				}
+			}
+			var status string
+			_ = json.Unmarshal(issue["status"], &status)
+			if status == "environment_resume_pending" || status == "publication_recovery_pending" || status == "pull_request_checks_recovery_pending" {
+				return fmt.Errorf("Issue %s uses removed v5 status %q", number, status)
+			}
+			var sync string
+			_ = json.Unmarshal(issue["github_sync"], &sync)
+			if sync == "environment_resume" || sync == "answered_workspace_recovery" || sync == "publication_recovery" || sync == "pull_request_checks_recovery" {
+				return fmt.Errorf("Issue %s uses removed v5 GitHub sync %q", number, sync)
+			}
+		}
+	}
+	type snapshotAlias Snapshot
+	var decoded snapshotAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*snapshot = Snapshot(decoded)
+	return nil
 }
 
 type Event struct {
@@ -511,7 +402,7 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	normalizeSnapshot(&snapshot)
-	normalizeLifecycleBoundaries(&snapshot, time.Now().UTC())
+	finalizeLifecycleBoundaries(&snapshot, time.Now().UTC())
 	if err := snapshot.Validate(); err != nil {
 		return Snapshot{}, fmt.Errorf("validate snapshot before event %q: %w", eventType, err)
 	}
@@ -727,11 +618,6 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			return "answer_claim_waiting", true
 		}
 	}
-	for _, issue := range s.Issues {
-		if RecoverablePullRequestChecksFailure(issue) && issue.Lease != nil {
-			return "recoverable_checks_failure", true
-		}
-	}
 	if s.Supervisor.State == SupervisorStateBlocked || s.Supervisor.State == SupervisorStateStopped {
 		return string(s.Supervisor.State), true
 	}
@@ -747,19 +633,6 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 		return "idle", true
 	}
 	return "", false
-}
-
-func RecoverablePullRequestChecksFailure(issue *Issue) bool {
-	if issue == nil {
-		return false
-	}
-	value := issue.PullRequestChecksFailure
-	return issue.Status == issuedomain.StatusFailed && issue.FailureKind == "issue" && !issue.PullRequestMerged && value != nil && value.Recoverable && value.RetryExhausted &&
-		value.Origin == ChecksFailureOriginPullRequest && value.Phase == ChecksFailurePhaseRequired &&
-		value.Code == ChecksFailureCodeRetryExhausted && value.ChecksStatus == "failure" &&
-		value.PullRequestURL != "" && value.PullRequestURL == issue.PullRequestURL &&
-		value.PullRequestNumber > 0 && value.PullRequestNumber == issue.PullRequestNumber &&
-		value.Branch != "" && value.Branch == issue.Branch && value.HeadSHA != ""
 }
 
 func NewID(prefix string) string {

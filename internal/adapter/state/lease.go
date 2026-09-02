@@ -1,6 +1,8 @@
 package state
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"reflect"
 	"sort"
@@ -15,8 +17,7 @@ import (
 const RepositoryResource = "repo:*"
 
 const (
-	ResourceParkKindEnvironmentBlock = "environment_block"
-	ResourceParkKindNeedsInput       = "needs_input"
+	ResourceParkKindNeedsInput = "needs_input"
 )
 
 // LeaseConflictError identifies an admission conflict without weakening the
@@ -215,11 +216,9 @@ func ReleaseIssueLease(issue *Issue, owner LeaseOwner) error {
 	return nil
 }
 
-// ParkIssueLease removes a typed environment block from active resource
-// admission while preserving the complete reservation and owner generation.
-// The caller must perform this in the same Store.Update transaction that
-// records the block.
-func ParkIssueLease(issue *Issue, owner LeaseOwner, parkID string, parkedAt time.Time) error {
+// CaptureContinuationLease removes an Issue from active admission while
+// preserving the complete reservation and owner generation in its checkpoint.
+func CaptureContinuationLease(issue *Issue, owner LeaseOwner, parkID string, parkedAt time.Time) error {
 	if issue == nil || issue.Lease == nil {
 		return fmt.Errorf("lease is no longer active")
 	}
@@ -231,11 +230,11 @@ func ParkIssueLease(issue *Issue, owner LeaseOwner, parkID string, parkedAt time
 	copy.ResolvedResources = append([]string(nil), issue.Lease.ResolvedResources...)
 	copy.ActualResources = append([]string(nil), issue.Lease.ActualResources...)
 	canonicalizeCheckpointLease(&copy)
-	issue.ResourcePark = &ResourceLeasePark{
+	issue.ResourcePark = &ContinuationCheckpoint{
 		ID: parkID, Status: issuedomain.ResourceParkStatusParked, OriginalLease: copy, ParkedAt: parkedAt.UTC(),
 		RunID: issue.RunID, Workspace: cloneWorkspace(issue.Workspace), Session: cloneSession(issue.Session),
 		HeadSHA: issue.HeadSHA, PullRequestURL: issue.PullRequestURL, PullRequestNumber: issue.PullRequestNumber,
-		Stage: issue.Status,
+		Stage: issuedomain.ContinuationStageForStatus(issue.Status),
 	}
 	issue.Lease = nil
 	return nil
@@ -439,41 +438,6 @@ func validateResourceLeases(snapshot Snapshot) error {
 			if err := issue.GitHubSync.Validate(); err != nil {
 				return fmt.Errorf("Issue #%d lifecycle: %w", issue.Number, err)
 			}
-			if issue.EnvironmentResume != nil {
-				if err := issue.EnvironmentResume.Status.Validate(); err != nil {
-					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
-				}
-			}
-			if issue.PullRequestChecksRecovery != nil {
-				if err := issue.PullRequestChecksRecovery.Status.Validate(); err != nil {
-					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
-				}
-			}
-			if issue.AnsweredWorkspaceRecovery != nil {
-				if err := issue.AnsweredWorkspaceRecovery.Status.Validate(); err != nil {
-					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
-				}
-			}
-			if issue.WorkspaceRecovery != nil {
-				if err := issue.WorkspaceRecovery.Status.Validate(); err != nil {
-					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
-				}
-			}
-			if issue.MergedPullRequestAdoption != nil {
-				if err := issue.MergedPullRequestAdoption.Status.Validate(); err != nil {
-					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
-				}
-			}
-			if issue.PublicationRecovery != nil {
-				if err := issue.PublicationRecovery.Status.Validate(); err != nil {
-					return fmt.Errorf("Issue #%d: %w", issue.Number, err)
-				}
-				for _, attempt := range issue.PublicationRecovery.History {
-					if err := attempt.Status.Validate(); err != nil {
-						return fmt.Errorf("Issue #%d publication attempt %d: %w", issue.Number, attempt.Number, err)
-					}
-				}
-			}
 			if issue.ConflictRecovery != nil {
 				for _, attempt := range issue.ConflictRecovery.History {
 					if err := attempt.Status.Validate(); err != nil {
@@ -507,12 +471,25 @@ func validateResourceLeases(snapshot Snapshot) error {
 			canonicalSuspension := issue.Suspension != nil && issue.Suspension.CheckpointID == park.ID &&
 				park.RunID == issue.RunID
 			if canonicalSuspension {
+				if park.WorktreeSHA256 != "" && !validSHA256(park.WorktreeSHA256) {
+					return fmt.Errorf("Issue #%d continuation checkpoint worktree digest is invalid", issue.Number)
+				}
+				if park.ResultSHA256 != "" && !validSHA256(park.ResultSHA256) {
+					return fmt.Errorf("Issue #%d continuation checkpoint result digest is invalid", issue.Number)
+				}
+				if park.Kind != "" && park.Kind != ResourceParkKindNeedsInput {
+					return fmt.Errorf("Issue #%d canonical continuation checkpoint kind %q is invalid", issue.Number, park.Kind)
+				}
 				if park.Stage.Validate() != nil {
-					return fmt.Errorf("Issue #%d canonical continuation checkpoint is inconsistent", issue.Number)
+					return fmt.Errorf("Issue #%d canonical continuation checkpoint stage %q is invalid", issue.Number, park.Stage)
 				}
 				if issue.Suspension.Status == issuedomain.SuspensionActive || issue.Suspension.Status == issuedomain.SuspensionQuarantined {
 					if issue.Lease != nil || park.Status != issuedomain.ResourceParkStatusParked {
 						return fmt.Errorf("Issue #%d active suspension retains execution capacity", issue.Number)
+					}
+					if !reflect.DeepEqual(park.Workspace, issue.Workspace) || park.HeadSHA != issue.HeadSHA ||
+						park.PullRequestURL != issue.PullRequestURL || park.PullRequestNumber != issue.PullRequestNumber {
+						return fmt.Errorf("Issue #%d active suspension differs from its continuation checkpoint", issue.Number)
 					}
 				} else if issue.Suspension.Resolution == issuedomain.ResolutionResume || issue.Suspension.Resolution == issuedomain.ResolutionRetryStage {
 					resumed := park.Status == issuedomain.ResourceParkStatusResuming || park.Status == issuedomain.ResourceParkStatusResumed
@@ -525,7 +502,7 @@ func validateResourceLeases(snapshot Snapshot) error {
 			if park.Status != issuedomain.ResourceParkStatusParked && park.Status != issuedomain.ResourceParkStatusResuming && park.Status != issuedomain.ResourceParkStatusResumed {
 				return fmt.Errorf("Issue #%d has invalid resource park status %q", issue.Number, park.Status)
 			}
-			if park.Kind != "" && park.Kind != ResourceParkKindEnvironmentBlock && park.Kind != ResourceParkKindNeedsInput {
+			if park.Kind != "" && park.Kind != ResourceParkKindNeedsInput {
 				return fmt.Errorf("Issue #%d has unknown resource park kind %q", issue.Number, park.Kind)
 			}
 			if park.Kind == ResourceParkKindNeedsInput {
@@ -613,4 +590,9 @@ func validateResourceLeases(snapshot Snapshot) error {
 		active = append(active, issue)
 	}
 	return nil
+}
+
+func validSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
 }

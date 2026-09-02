@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	CurrentVersion       = 2
+	CurrentVersion       = 3
 	MinimumVersion       = 1
 	CurrentSchemaVersion = 5
 	MigrationFromSchema  = 4
@@ -62,6 +62,10 @@ func Current() Contract {
 				Migration:        MigrationPolicy{Code: "RENAME_ACTIVE_EXECUTION_LEASE", Kind: "migrate"}},
 			{Path: "issues[].continuation_checkpoint", Class: Optional, Introduced: 2,
 				Migration: MigrationPolicy{Code: "FOLD_LEGACY_RECOVERY_TO_CHECKPOINT", Kind: "migrate"}},
+			{Path: "issues[].continuation_checkpoint.stage", Class: Optional, Introduced: 3,
+				Migration: MigrationPolicy{Code: "NORMALIZE_CONTINUATION_STAGE", Kind: "migrate"}},
+			{Path: "issues[].continuation_checkpoint.evidence", Class: Optional, Introduced: 3,
+				Migration: MigrationPolicy{Code: "PRESERVE_CONTINUATION_EVIDENCE", Kind: "preserve"}},
 			{Path: "issues[].suspension", Class: Optional, Introduced: 2,
 				Migration: MigrationPolicy{Code: "FOLD_TERMINAL_RECOVERY_TO_SUSPENSION", Kind: "migrate"}},
 			{Path: "issues[].session", Class: Optional, Introduced: 1,

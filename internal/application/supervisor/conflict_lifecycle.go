@@ -437,14 +437,14 @@ func finishConflictAttempt(item *state.Issue, status issuedomain.ConflictAttempt
 func conflictFailureDetail(repoPath string, current state.Issue, reason string) string {
 	recovery := current.ConflictRecovery
 	if recovery == nil {
-		return fmt.Sprintf("%s. Recommended recovery: inspect status and run agent-loop retry --repo %q --issue %d after repairing the worktree.", reason, repoPath, current.Number)
+		return fmt.Sprintf("%s. Recommended recovery: inspect agent-loop issue plan --repo %q --issue %d and select retry-stage after repairing the worktree.", reason, repoPath, current.Number)
 	}
 	baseHistory := make([]string, 0, len(recovery.History))
 	for _, attempt := range recovery.History {
 		baseHistory = append(baseHistory, attempt.BaseSHA)
 	}
 	baseHistory = append(baseHistory, recovery.TargetBaseSHA)
-	return fmt.Sprintf("%s. Attempts: %d; base SHA history: %s; conflict files: %s; last reason: %s. Recommended recovery: inspect the saved worktree and run agent-loop retry --repo %q --issue %d.",
+	return fmt.Sprintf("%s. Attempts: %d; base SHA history: %s; conflict files: %s; last reason: %s. Recommended recovery: inspect the saved worktree and run agent-loop issue resolve --repo %q --issue %d --action retry-stage.",
 		reason, recovery.Attempts, strings.Join(uniqueStrings(baseHistory), ", "), strings.Join(recovery.ConflictFiles, ", "), recovery.LastReason, repoPath, current.Number)
 }
 

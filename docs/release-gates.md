@@ -36,7 +36,7 @@ gh release upload 'candidate-v0.8.0-<workflow-run-id>' \
   '/absolute/evidence-directory/production-state-report.json'
 ```
 
-scriptはproductionの`doctor --json`と`status --json`だけを使用し、credentialless contract前後でstate revision、Issue、lease owner/generation、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`、doctor成功も必須である。`production-state-isolation`はreportのrelease commitとcandidate binary SHA-256を照合してattestする。`candidate-integrity`はcandidate prereleaseからbinaryを1回取得し、canonical candidateとのbyte一致とattestationを即時検査する。immutable artifactの再取得だけを目的とした時間待機は行わない。
+scriptはproductionの`doctor --json`と`status --json`だけを使用し、credentialless contract前後でstate revision、Issue、lease owner/generation、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`を必須とする。supervisor稼働中はdoctor成功を要求し、保守のため意図的に停止中なら`SUPERVISOR_STOPPED`だけを許容して`active_workers=0`を要求する。その他のdoctor failureは停止中でもfail closedである。`production-state-isolation`はreportのrelease commitとcandidate binary SHA-256を照合してattestする。`candidate-integrity`はcandidate prereleaseからbinaryを1回取得し、canonical candidateとのbyte一致とattestationを即時検査する。immutable artifactの再取得だけを目的とした時間待機は行わない。
 
 このrepositoryは単一maintainer運用のため、外部collaboratorや自己承認不能なrequired reviewerをrelease authorityにしない。`High-risk review gate`は変更headに結び付いたmachine-readable reviewについて全check成功・finding 0件を必須とする。`promotion-evidence`はCLI surface、offline lifecycle、production非変更、candidate integrityとdigestを即時再検証する。`production` Environmentはstable公開jobだけに付与し、wait timerは`0`とする。通常releaseのstable tagに加え、修正版workflowを実行するdefault branchを許可し、後者では入力tagとpeeled commitの一致をworkflow内でfail closedに検証する。未解決conversationはmain rulesetで引き続きmergeを拒否する。
 

@@ -2,6 +2,7 @@ package state
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -12,13 +13,9 @@ import (
 )
 
 const (
-	invalidIssueStatus                       issuedomain.Status                            = "invalid-test-status"
-	invalidGitHubSync                        issuedomain.GitHubSync                        = "invalid-test-github-sync"
-	invalidEnvironmentResumeStatus           issuedomain.EnvironmentResumeStatus           = "invalid-test-environment-resume"
-	invalidPublicationRecoveryStatus         issuedomain.PublicationRecoveryStatus         = "invalid-test-publication-recovery"
-	invalidConflictAttemptStatus             issuedomain.ConflictAttemptStatus             = "invalid-test-conflict-attempt"
-	invalidPullRequestChecksRecoveryStatus   issuedomain.PullRequestChecksRecoveryStatus   = "invalid-test-checks-recovery"
-	invalidWorkspaceProvenanceRecoveryStatus issuedomain.WorkspaceProvenanceRecoveryStatus = "invalid-test-workspace-recovery"
+	invalidIssueStatus           issuedomain.Status                = "invalid-test-status"
+	invalidGitHubSync            issuedomain.GitHubSync            = "invalid-test-github-sync"
+	invalidConflictAttemptStatus issuedomain.ConflictAttemptStatus = "invalid-test-conflict-attempt"
 )
 
 func validSnapshotForInvariantTest() Snapshot {
@@ -28,6 +25,52 @@ func validSnapshotForInvariantTest() Snapshot {
 		RepoID: "repo-deadbeef", RepoPath: "/tmp/repo",
 		Supervisor: Supervisor{State: SupervisorStateStopped, UpdatedAt: now},
 		Issues:     map[string]*Issue{"1": {Number: 1}}, PendingRequests: map[string]*Request{},
+	}
+}
+
+func TestV5DecodeRejectsRemovedRecoveryAxes(t *testing.T) {
+	base, err := json.Marshal(validSnapshotForInvariantTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "blocked cause", mutate: func(issue map[string]any) { issue["blocked_cause"] = map[string]any{} }},
+		{name: "environment resume", mutate: func(issue map[string]any) { issue["environment_resume"] = map[string]any{} }},
+		{name: "answered workspace", mutate: func(issue map[string]any) { issue["answered_workspace_recovery"] = map[string]any{} }},
+		{name: "workspace provenance", mutate: func(issue map[string]any) { issue["workspace_provenance_recovery"] = map[string]any{} }},
+		{name: "publication failure", mutate: func(issue map[string]any) { issue["publication_failure"] = map[string]any{} }},
+		{name: "publication recovery", mutate: func(issue map[string]any) { issue["publication_recovery"] = map[string]any{} }},
+		{name: "checks failure", mutate: func(issue map[string]any) { issue["pull_request_checks_failure"] = map[string]any{} }},
+		{name: "checks recovery", mutate: func(issue map[string]any) { issue["pull_request_checks_recovery"] = map[string]any{} }},
+		{name: "merged Pull Request adoption", mutate: func(issue map[string]any) { issue["merged_pull_request_adoption"] = map[string]any{} }},
+		{name: "environment status", mutate: func(issue map[string]any) { issue["status"] = "environment_resume_pending" }},
+		{name: "publication status", mutate: func(issue map[string]any) { issue["status"] = "publication_recovery_pending" }},
+		{name: "checks status", mutate: func(issue map[string]any) { issue["status"] = "pull_request_checks_recovery_pending" }},
+		{name: "environment sync", mutate: func(issue map[string]any) { issue["github_sync"] = "environment_resume" }},
+		{name: "answered sync", mutate: func(issue map[string]any) { issue["github_sync"] = "answered_workspace_recovery" }},
+		{name: "publication sync", mutate: func(issue map[string]any) { issue["github_sync"] = "publication_recovery" }},
+		{name: "checks sync", mutate: func(issue map[string]any) { issue["github_sync"] = "pull_request_checks_recovery" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var object map[string]any
+			if err := json.Unmarshal(base, &object); err != nil {
+				t.Fatal(err)
+			}
+			issue := object["issues"].(map[string]any)["1"].(map[string]any)
+			test.mutate(issue)
+			data, err := json.Marshal(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded Snapshot
+			if err := json.Unmarshal(data, &decoded); err == nil {
+				t.Fatal("removed v5 recovery axis was accepted")
+			}
+		})
 	}
 }
 
@@ -51,7 +94,7 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 			issue.Status, issue.RunID, issue.LeaseGeneration = issuedomain.StatusBlocked, "run_1", 1
 			lease := ResourceLease{Owner: LeaseOwner{RunID: "run_1", Generation: 1}, Slot: 0, ResolvedResources: []string{"state"}, ReservedAt: now}
 			issue.Lease = &lease
-			issue.ResourcePark = &ResourceLeasePark{ID: "park_1", Status: issuedomain.ResourceParkStatusParked, OriginalLease: lease, ParkedAt: now}
+			issue.ResourcePark = &ContinuationCheckpoint{ID: "park_1", Status: issuedomain.ResourceParkStatusParked, OriginalLease: lease, ParkedAt: now}
 		}},
 		{name: "worker slot conflict", mutate: func(snapshot *Snapshot) {
 			for number := 1; number <= 2; number++ {
@@ -84,24 +127,8 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 			issue.Worktree, issue.Branch = "/tmp/issue-1", "codex/issue-1"
 			issue.Workspace = &WorkerWorkspace{Path: "/tmp/other", Branch: issue.Branch, RepoID: snapshot.RepoID, Repository: "owner/repo", GitCommonDir: "/tmp/repo/.git", MainCheckout: "/tmp/repo", CapturedAt: now}
 		}},
-		{name: "recovery substate", mutate: func(snapshot *Snapshot) {
-			issue := snapshot.Issues["1"]
-			issue.Status, issue.GitHubSync = issuedomain.StatusPublicationRecovery, issuedomain.GitHubSyncPublicationRecovery
-		}},
-		{name: "publication recovery vocabulary", mutate: func(snapshot *Snapshot) {
-			snapshot.Issues["1"].PublicationRecovery = &PublicationRecovery{Status: invalidPublicationRecoveryStatus}
-		}},
-		{name: "checks recovery vocabulary", mutate: func(snapshot *Snapshot) {
-			snapshot.Issues["1"].PullRequestChecksRecovery = &PullRequestChecksRecovery{Status: invalidPullRequestChecksRecoveryStatus}
-		}},
 		{name: "conflict recovery vocabulary", mutate: func(snapshot *Snapshot) {
 			snapshot.Issues["1"].ConflictRecovery = &ConflictRecovery{History: []ConflictAttempt{{Number: 1, Status: invalidConflictAttemptStatus}}}
-		}},
-		{name: "environment recovery vocabulary", mutate: func(snapshot *Snapshot) {
-			snapshot.Issues["1"].EnvironmentResume = &EnvironmentResume{Status: invalidEnvironmentResumeStatus}
-		}},
-		{name: "workspace recovery vocabulary", mutate: func(snapshot *Snapshot) {
-			snapshot.Issues["1"].WorkspaceRecovery = &WorkspaceProvenanceRecovery{Status: invalidWorkspaceProvenanceRecoveryStatus}
 		}},
 		{name: "worker process lifecycle", mutate: func(snapshot *Snapshot) {
 			issue := snapshot.Issues["1"]

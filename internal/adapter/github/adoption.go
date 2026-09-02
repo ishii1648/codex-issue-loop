@@ -8,11 +8,11 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
-// MergedPullRequestAdoptionExpectation is the immutable boundary used while
+// MergedPullRequestExpectation is the immutable boundary used while
 // associating a terminal Issue with publication that happened outside the
 // supervisor. Empty Pull Request identity fields are populated by the initial
 // validation; non-empty fields fence every later synchronization retry.
-type MergedPullRequestAdoptionExpectation struct {
+type MergedPullRequestExpectation struct {
 	IssueNumber       int
 	PreviousStatus    issuedomain.Status
 	Branch            string
@@ -24,11 +24,11 @@ type MergedPullRequestAdoptionExpectation struct {
 	AllowDone         bool
 }
 
-// ValidateMergedPullRequestAdoption accepts only the single merged Pull
+// ValidateMergedPullRequest accepts only the single merged Pull
 // Request for the saved branch and only a supervisor-owned terminal label (or
 // the idempotent done state after a durable adoption). It never accepts an
 // open Pull Request or removes manual/security exclusions.
-func ValidateMergedPullRequestAdoption(cfg config.Config, remote RemoteState, expected MergedPullRequestAdoptionExpectation) (PullRequest, error) {
+func ValidateMergedPullRequest(cfg config.Config, remote RemoteState, expected MergedPullRequestExpectation) (PullRequest, error) {
 	if expected.IssueNumber <= 0 || expected.Branch == "" || expected.BaseBranch == "" || expected.HeadSHA == "" {
 		return PullRequest{}, fmt.Errorf("merged Pull Request adoption expectation is incomplete")
 	}

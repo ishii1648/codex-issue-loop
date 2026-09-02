@@ -5,6 +5,7 @@ import "fmt"
 type ResolutionAction string
 
 const (
+	ResolutionNone       ResolutionAction = ""
 	ResolutionResume     ResolutionAction = "resume"
 	ResolutionRetryStage ResolutionAction = "retry-stage"
 	ResolutionAdoptPR    ResolutionAction = "adopt-pr"
@@ -20,7 +21,7 @@ func (a ResolutionAction) Validate() error {
 	}
 }
 
-func ResolveSuspension(from Status, action ResolutionAction, checkpointStage Status) (Transition, error) {
+func ResolveSuspension(from Status, action ResolutionAction, checkpointStage ContinuationStage) (Transition, error) {
 	if err := action.Validate(); err != nil {
 		return Transition{}, err
 	}
@@ -31,12 +32,15 @@ func ResolveSuspension(from Status, action ResolutionAction, checkpointStage Sta
 	case ResolutionResume:
 		return NewTransition("resolve_suspension_resume", from, StatusResumePending)
 	case ResolutionRetryStage:
-		target := checkpointStage
-		switch target {
-		case StatusAwaitingChecks, StatusAwaitingMerge, StatusResolvingConflict,
-			StatusPublicationRecovery, StatusChecksRecovery:
+		target := StatusResumePending
+		switch checkpointStage {
+		case ContinuationStageChecks:
+			target = StatusAwaitingChecks
+		case ContinuationStageConflict:
+			target = StatusResolvingConflict
+		case ContinuationStageResume, ContinuationStagePublish:
 		default:
-			target = StatusResumePending
+			return Transition{}, fmt.Errorf("cannot retry unknown continuation stage %q", checkpointStage)
 		}
 		return NewTransition("resolve_suspension_retry_stage", from, target)
 	case ResolutionAdoptPR:

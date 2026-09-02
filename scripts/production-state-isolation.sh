@@ -29,7 +29,9 @@ snapshot_production() {
   destination=$1
   doctor_path="$temporary_root/doctor.json"
   status_path="$temporary_root/status.json"
-  "$production_binary" doctor --repo "$production_repo" --json >"$doctor_path"
+  if ! "$production_binary" doctor --repo "$production_repo" --json >"$doctor_path"; then
+    : # A deliberately stopped supervisor is accepted below only when it is the sole diagnostic failure.
+  fi
   "$production_binary" status --repo "$production_repo" --json >"$status_path"
   jq -n --slurpfile doctor "$doctor_path" --slurpfile status "$status_path" '
     {
@@ -51,8 +53,9 @@ snapshot_production() {
       doctor_ok: $doctor[0].ok,
       failed_diagnostic_codes: [$doctor[0].diagnostics[] | select(.ok | not) | .code] | sort
     }
+    | .doctor_safe = (.doctor_ok or (.supervisor_state == "stopped" and .active_workers == 0 and .failed_diagnostic_codes == ["SUPERVISOR_STOPPED"]))
   ' >"$destination"
-  jq -e '.doctor_schema_version == 1 and .doctor_ok == true and (.failed_diagnostic_codes | length) == 0 and .worker_limit == 1 and .active_workers <= 1' "$destination" >/dev/null
+  jq -e '.doctor_schema_version == 1 and .doctor_safe == true and .worker_limit == 1 and .active_workers <= 1' "$destination" >/dev/null
 }
 
 snapshot_production "$temporary_root/production-before.json"
@@ -89,5 +92,5 @@ jq -n \
 jq -e '
   .production_state_accessed == true and .production_state_changes == 0 and
   .production_before == .production_after and .production_before.worker_limit == 1 and
-  .production_before.active_workers <= 1 and .production_before.doctor_ok == true
+  .production_before.active_workers <= 1 and .production_before.doctor_safe == true
 ' "$artifact_dir/production-state-report.json" >/dev/null

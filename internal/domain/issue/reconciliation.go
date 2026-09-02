@@ -7,21 +7,17 @@ import (
 )
 
 type ReconciliationState struct {
-	Number                    int
-	Status                    Status
-	LastError                 string
-	Branch                    string
-	PullRequest               string
-	GitHubSync                GitHubSync
-	RetryAt                   *time.Time
-	WorkerPID                 int
-	WorkerPGID                int
-	PullRequestMerged         bool
-	WorktreeSaved             bool
-	BlockedOrigin             string
-	BlockedKind               string
-	BlockedResumable          bool
-	PublicationRecoveryStatus PublicationRecoveryStatus
+	Number            int
+	Status            Status
+	LastError         string
+	Branch            string
+	PullRequest       string
+	GitHubSync        GitHubSync
+	RetryAt           *time.Time
+	WorkerPID         int
+	WorkerPGID        int
+	PullRequestMerged bool
+	WorktreeSaved     bool
 }
 
 type ReconciliationPullRequest struct {
@@ -183,22 +179,14 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 	// GitHub terminal and exclusion labels are shared operator state. Preserve
 	// explicit recovery handshakes, otherwise converge or block deterministically.
 	if observed.Excluded {
-		workerSafety := current.Status == StatusBlocked && current.BlockedOrigin == "supervisor" && current.BlockedKind == "worker_workspace" && !current.BlockedResumable
-		workerEnvironment := current.Status == StatusBlocked && current.BlockedOrigin == "worker" && current.BlockedKind == "environment" && current.BlockedResumable
 		switch {
 		case current.GitHubSync == GitHubSyncIssueResolution && !current.Status.Terminal():
 			decision.Reason = "Issue resolution is waiting for GitHub label synchronization"
 			return decision
-		case workerSafety && observed.OnlyBlockedExclusion:
+		case current.Status == StatusBlocked && observed.OnlyBlockedExclusion && !observed.ManualExclusion:
 			decision.Status, decision.WorkerPID, decision.RetryAt, decision.GitHubSync = StatusBlocked, 0, nil, GitHubSyncNone
-			decision.Reason = "supervisor-owned worker workspace safety block preserved"
+			decision.Reason = "automation-owned blocked state preserved"
 			return decision
-		case workerEnvironment && observed.OnlyBlockedExclusion:
-			decision.Status, decision.WorkerPID, decision.RetryAt, decision.GitHubSync = StatusBlocked, 0, nil, GitHubSyncNone
-			decision.Reason = "supervisor-owned worker environment block provenance preserved"
-			return decision
-		case current.GitHubSync == GitHubSyncEnvironmentResume && current.Status == StatusEnvironmentResumePending:
-			decision.Reason = "explicit environment resume is waiting for GitHub label synchronization"
 		case current.GitHubSync == GitHubSyncConflictRetry && current.Status == StatusResolvingConflict:
 			decision.Reason = "explicit conflict retry is waiting for GitHub label synchronization"
 		case current.GitHubSync == GitHubSyncBlocked:
@@ -217,33 +205,7 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 			decision.Reason = "Issue resolution is waiting for GitHub label synchronization"
 			return decision
 		}
-		if current.GitHubSync == GitHubSyncPullRequestChecksRecovery && current.Status == StatusChecksRecovery {
-			decision.Reason = "explicit Pull Request checks recovery is waiting for GitHub label synchronization"
-			return decision
-		}
-		if current.GitHubSync == GitHubSyncPublicationRecovery && current.Status == StatusPublicationRecovery {
-			decision.Reason = "explicit publication recovery is waiting for GitHub label synchronization"
-			return decision
-		}
-		if current.PublicationRecoveryStatus != PublicationRecoveryStatusUnset {
-			for _, pr := range observed.PullRequests {
-				if pr.Merged {
-					decision.Status, decision.LastError, decision.PullRequest = StatusCompleted, "", pr.URL
-					decision.PullRequestMerged, decision.WorkerPID, decision.RetryAt, decision.GitHubSync = true, 0, nil, GitHubSyncDone
-					decision.Reason = "merged recovered Pull Request discovered"
-					return decision
-				}
-			}
-		}
 		decision.Status, decision.WorkerPID, decision.RetryAt = StatusFailed, 0, nil
-		if current.PublicationRecoveryStatus == PublicationRecoveryStatusFailed && decision.PullRequest == "" {
-			for _, pr := range observed.PullRequests {
-				if !pr.Merged && strings.EqualFold(pr.State, "open") {
-					decision.PullRequest = pr.URL
-					break
-				}
-			}
-		}
 		if current.GitHubSync == GitHubSyncFailed && !observed.FailedMarker {
 			decision.GitHubSync = GitHubSyncFailed
 		} else {
@@ -356,18 +318,6 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		decision.Reason = "recorded answer remains pending for resume"
 	case StatusAnswerClaimWaiting:
 		decision.Reason = "recorded answer is waiting for its parked resource claim"
-	case StatusEnvironmentResumePending:
-		decision.Reason = "operator-confirmed environment resume remains pending in the saved worktree"
-	case StatusPublicationRecovery:
-		decision.Reason = "operator-confirmed publication recovery remains pending in the saved worktree"
-		if !observed.Running {
-			decision.GitHubSync = GitHubSyncPublicationRecovery
-		}
-	case StatusChecksRecovery:
-		decision.Reason = "operator-confirmed Pull Request checks recovery remains pending in the saved worktree"
-		if !observed.Running {
-			decision.GitHubSync = GitHubSyncPullRequestChecksRecovery
-		}
 	case StatusNeedsInput:
 		decision.Reason = "unanswered request remains sticky"
 		if !observed.NeedsInput {

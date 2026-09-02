@@ -150,14 +150,14 @@ func (model *lifecycleModel) run(sequence string) {
 	case "environment-block-resume":
 		model.activeLeases, model.parked, model.status = 0, true, issuedomain.StatusBlocked
 		model.event()
-		model.parked, model.activeLeases, model.status = false, 1, issuedomain.StatusEnvironmentResumePending
+		model.parked, model.activeLeases, model.status = false, 1, issuedomain.StatusResumePending
 		model.generation++
 		model.event()
 	case "publication-recovery":
-		model.status = issuedomain.StatusPublicationRecovery
+		model.status = issuedomain.StatusResumePending
 		model.event()
 	case "checks-recovery":
-		model.status = issuedomain.StatusChecksRecovery
+		model.status = issuedomain.StatusAwaitingChecks
 		model.event()
 	case "conflict-publication":
 		model.status = issuedomain.StatusResolvingConflict

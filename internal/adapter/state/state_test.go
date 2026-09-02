@@ -225,7 +225,11 @@ func abandonLeaseForTest(store Store, issueNumber int, owner LeaseOwner) error {
 			return transitionErr
 		}
 		item.LastError = "test execution abandoned"
-		return ApplyIssueTransition(item, transition)
+		if err := ApplyIssueTransition(item, transition); err != nil {
+			return err
+		}
+		item.ResourcePark.WorktreeSHA256 = strings.Repeat("0", 64)
+		return nil
 	})
 	return err
 }
@@ -351,8 +355,10 @@ func TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration(t *testing.T) {
 		setTestWorkspace(snapshot, issue)
 		issue.SessionID = "session-314"
 		issue.Answers = []AnswerRecord{{RequestID: "req-314", Answer: "continue"}}
-		issue.BlockedCause = &BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "public network unavailable", BlockedAt: parkedAt}
-		return ParkIssueLease(issue, owner, "park_314", parkedAt)
+		if err := CaptureContinuationLease(issue, owner, "park_314", parkedAt); err != nil {
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -372,7 +378,7 @@ func TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parked resource still blocked the following queue: %v", err)
 	}
-	if _, err := store.Update("environment_resume_requested", 314, owner.RunID, nil, func(snapshot *Snapshot) error {
+	if _, err := store.Update("continuation_resume_requested", 314, owner.RunID, nil, func(snapshot *Snapshot) error {
 		_, resumeErr := ResumeParkedLease(snapshot, 314, "park_314", 1, parkedAt.Add(2*time.Minute))
 		return resumeErr
 	}); err == nil || !strings.Contains(err.Error(), "Issue #448") {
@@ -382,11 +388,11 @@ func TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	var resumedOwner LeaseOwner
-	resumed, err := store.Update("environment_resume_requested", 314, owner.RunID, nil, func(snapshot *Snapshot) error {
+	resumed, err := store.Update("continuation_resume_requested", 314, owner.RunID, nil, func(snapshot *Snapshot) error {
 		var resumeErr error
 		resumedOwner, resumeErr = ResumeParkedLease(snapshot, 314, "park_314", 0, parkedAt.Add(3*time.Minute))
 		if resumeErr == nil {
-			snapshot.Issues["314"].Status = issuedomain.StatusEnvironmentResumePending
+			snapshot.Issues["314"].Status = issuedomain.StatusResumePending
 		}
 		return resumeErr
 	})
@@ -415,7 +421,7 @@ func TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner(t *testing.T) {
 		issue := snapshot.Issues["1"]
 		issue.Status = issuedomain.StatusBlocked
 		setTestWorkspace(snapshot, issue)
-		return ParkIssueLease(issue, owner, "park_1", now.Add(time.Minute))
+		return CaptureContinuationLease(issue, owner, "park_1", now.Add(time.Minute))
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -429,11 +435,11 @@ func TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner(t *testing.T) {
 			defer wait.Done()
 			<-start
 			var got LeaseOwner
-			_, updateErr := store.Update("environment_resume_requested", 1, owner.RunID, nil, func(snapshot *Snapshot) error {
+			_, updateErr := store.Update("continuation_resume_requested", 1, owner.RunID, nil, func(snapshot *Snapshot) error {
 				var resumeErr error
 				got, resumeErr = ResumeParkedLease(snapshot, 1, "park_1", 0, now.Add(2*time.Minute))
 				if resumeErr == nil {
-					snapshot.Issues["1"].Status = issuedomain.StatusEnvironmentResumePending
+					snapshot.Issues["1"].Status = issuedomain.StatusResumePending
 				}
 				return resumeErr
 			})
@@ -483,12 +489,12 @@ func TestResumedResourceParkAllowsRetryLeaseTransferAndRelease(t *testing.T) {
 		issue := snapshot.Issues["146"]
 		issue.Status = issuedomain.StatusBlocked
 		setTestWorkspace(snapshot, issue)
-		return ParkIssueLease(issue, originalOwner, "park_146", now.Add(time.Minute))
+		return CaptureContinuationLease(issue, originalOwner, "park_146", now.Add(time.Minute))
 	}); err != nil {
 		t.Fatal(err)
 	}
 	var resumeOwner LeaseOwner
-	if _, err := store.Update("environment_resume_started", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
+	if _, err := store.Update("continuation_started", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
 		var resumeErr error
 		resumeOwner, resumeErr = ResumeParkedLease(snapshot, 146, "park_146", 0, now.Add(2*time.Minute))
 		if resumeErr != nil {
@@ -555,12 +561,12 @@ func TestFaultConcurrentResumedParkRetryTransferCreatesOneFencedOwner(t *testing
 		issue := snapshot.Issues["146"]
 		issue.Status = issuedomain.StatusBlocked
 		setTestWorkspace(snapshot, issue)
-		return ParkIssueLease(issue, originalOwner, "park_146", now.Add(time.Minute))
+		return CaptureContinuationLease(issue, originalOwner, "park_146", now.Add(time.Minute))
 	}); err != nil {
 		t.Fatal(err)
 	}
 	var resumeOwner LeaseOwner
-	if _, err := store.Update("environment_resume_started", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
+	if _, err := store.Update("continuation_started", 146, originalOwner.RunID, nil, func(snapshot *Snapshot) error {
 		var resumeErr error
 		resumeOwner, resumeErr = ResumeParkedLease(snapshot, 146, "park_146", 0, now.Add(2*time.Minute))
 		if resumeErr != nil {
@@ -623,7 +629,7 @@ func TestResourceParkValidationFailsClosed(t *testing.T) {
 	now := time.Date(2026, 8, 17, 11, 0, 0, 0, time.UTC)
 	valid := Issue{
 		Number: 1, Status: issuedomain.StatusBlocked, RunID: "run_1", LeaseGeneration: 1,
-		ResourcePark: &ResourceLeasePark{
+		ResourcePark: &ContinuationCheckpoint{
 			ID: "park_1", Status: issuedomain.ResourceParkStatusParked, ParkedAt: now,
 			OriginalLease: ResourceLease{Owner: LeaseOwner{RunID: "run_1", Generation: 1}, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{"scheduler"}, ReservedAt: now},
 		},
@@ -662,7 +668,7 @@ func TestResumedResourceParkValidationFailsClosed(t *testing.T) {
 		Lease: &ResourceLease{
 			Owner: resumeOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{"scheduler"}, ReservedAt: now.Add(2 * time.Minute),
 		},
-		ResourcePark: &ResourceLeasePark{
+		ResourcePark: &ContinuationCheckpoint{
 			ID: "park_1", Status: issuedomain.ResourceParkStatusResumed, ParkedAt: now, ResumedAt: now.Add(2 * time.Minute), ResumeOwner: &resumeOwner,
 			OriginalLease: ResourceLease{Owner: originalOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{"scheduler"}, ReservedAt: now},
 		},
@@ -728,7 +734,7 @@ func TestResumedNeedsInputParkAllowsFencedConflictLeaseTransfer(t *testing.T) {
 		Lease: &ResourceLease{
 			Owner: conflictOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{RepositoryResource}, ReservedAt: now.Add(3 * time.Minute),
 		},
-		ResourcePark: &ResourceLeasePark{
+		ResourcePark: &ContinuationCheckpoint{
 			ID: request.ResourceParkID, Kind: ResourceParkKindNeedsInput, RequestID: request.ID, Status: issuedomain.ResourceParkStatusResumed,
 			OriginalLease: ResourceLease{Owner: originalOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{RepositoryResource}, ReservedAt: now},
 			ParkedAt:      now.Add(time.Minute), ResumedAt: now.Add(2 * time.Minute), ResumeOwner: &resumeOwner,
@@ -760,7 +766,7 @@ func TestNeedsInputParkProvenanceMismatchesFailClosed(t *testing.T) {
 			Lease: &ResourceLease{
 				Owner: conflictOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{RepositoryResource}, ReservedAt: now.Add(3 * time.Minute),
 			},
-			ResourcePark: &ResourceLeasePark{
+			ResourcePark: &ContinuationCheckpoint{
 				ID: request.ResourceParkID, Kind: ResourceParkKindNeedsInput, RequestID: request.ID, Status: issuedomain.ResourceParkStatusResumed,
 				OriginalLease: ResourceLease{Owner: originalOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{RepositoryResource}, ReservedAt: now},
 				ParkedAt:      now.Add(time.Minute), ResumedAt: now.Add(2 * time.Minute), ResumeOwner: &resumeOwner,
@@ -804,7 +810,7 @@ func TestActiveNeedsInputParkRemainsBoundToCurrentRun(t *testing.T) {
 			request := &Request{ID: "req_1", IssueNumber: 1, RunID: originalOwner.RunID, ResourceParkID: "park_1", ReleasedOwner: &originalOwner, Status: issuedomain.RequestStatusAnswered}
 			issue := &Issue{
 				Number: 1, Status: issuedomain.StatusResumePending, RunID: originalOwner.RunID, LeaseGeneration: originalOwner.Generation,
-				ResourcePark: &ResourceLeasePark{
+				ResourcePark: &ContinuationCheckpoint{
 					ID: request.ResourceParkID, Kind: ResourceParkKindNeedsInput, RequestID: request.ID, Status: status,
 					OriginalLease: ResourceLease{Owner: originalOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{"scheduler"}, ReservedAt: now}, ParkedAt: now.Add(time.Minute),
 				},
@@ -988,28 +994,6 @@ func TestAttentionReportsOneBlockedIssueWhileAnotherWorkerIsActive(t *testing.T)
 	}
 	if reason, ok := snapshot.Attention(true); !ok || reason != "blocked" {
 		t.Fatalf("until-idle reason=%q ok=%v", reason, ok)
-	}
-}
-
-func TestAttentionReportsRecoverableChecksFailureThatRetainsLease(t *testing.T) {
-	snapshot := Snapshot{Issues: map[string]*Issue{
-		"7": {
-			Number: 7, Status: issuedomain.StatusFailed, FailureKind: "issue", Branch: "codex/issue-7-checks",
-			PullRequestURL: "https://example.test/pr/7", PullRequestNumber: 7,
-			Lease: &ResourceLease{Owner: LeaseOwner{RunID: "run_7", Generation: 1}},
-			PullRequestChecksFailure: &PullRequestChecksFailure{
-				Origin: ChecksFailureOriginPullRequest, Phase: ChecksFailurePhaseRequired,
-				Code: ChecksFailureCodeRetryExhausted, Recoverable: true, RetryExhausted: true,
-				PullRequestURL: "https://example.test/pr/7", PullRequestNumber: 7, Branch: "codex/issue-7-checks", HeadSHA: "old-head", ChecksStatus: "failure",
-			},
-		},
-	}}
-	if reason, ok := snapshot.Attention(false); !ok || reason != "recoverable_checks_failure" {
-		t.Fatalf("reason=%q ok=%v", reason, ok)
-	}
-	snapshot.Issues["7"].Lease = nil
-	if reason, ok := snapshot.Attention(false); ok {
-		t.Fatalf("lease-free failure incorrectly blocked watch: reason=%q", reason)
 	}
 }
 

@@ -134,6 +134,5 @@ func crossedWorkerExecutionBoundary(issue *Issue) bool {
 	if issue.Workspace != nil || issue.Worktree != "" || issue.Branch != "" || issue.SessionID != "" || issue.Session != nil || issue.Attempts > 0 || issue.Continuations > 0 {
 		return true
 	}
-	return issue.PublicationAudit != nil || issue.PublicationFailure != nil || issue.PublicationRecovery != nil ||
-		issue.PullRequestChecksFailure != nil || issue.PullRequestChecksRecovery != nil || issue.ConflictRecovery != nil || issue.EnvironmentResume != nil
+	return issue.PublicationAudit != nil || issue.ConflictRecovery != nil || issue.ResourcePark != nil || issue.Suspension != nil
 }

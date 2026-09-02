@@ -90,7 +90,6 @@ esac
 		issue.Branch = "main"
 		issue.FailureKind = "issue"
 		issue.LastError = "worker blocked: private environment detail"
-		issue.BlockedCause = &state.BlockedCause{Origin: "worker", Kind: "environment", Resumable: true, Reason: "private environment detail", BlockedAt: time.Now().UTC()}
 		return nil
 	})
 	if err != nil {

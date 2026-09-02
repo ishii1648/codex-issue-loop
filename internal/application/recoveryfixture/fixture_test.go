@@ -183,11 +183,18 @@ func TestZeitreise442FullHistoryFixtureRetainsEveryLegacyMismatch(t *testing.T) 
 			t.Fatalf("%s must remain explicit null: %s", key, rawIssue[key])
 		}
 	}
-	if issue.SessionID != "" || issue.Session != nil || issue.EnvironmentResume == nil {
-		t.Fatalf("session/resume provenance changed: %+v", issue)
+	var legacyResume struct {
+		ID          string    `json:"id"`
+		ConfirmedAt time.Time `json:"confirmed_at"`
+	}
+	if err := json.Unmarshal(rawIssue["environment_resume"], &legacyResume); err != nil || legacyResume.ID == "" || legacyResume.ConfirmedAt.IsZero() {
+		t.Fatalf("legacy resume provenance changed: %+v err=%v", legacyResume, err)
+	}
+	if issue.SessionID != "" || issue.Session != nil {
+		t.Fatalf("session provenance changed: %+v", issue)
 	}
 	request := replay.Events[21]
-	if delay := request.Timestamp.Sub(issue.EnvironmentResume.ConfirmedAt); delay != 28*time.Millisecond+433*time.Microsecond {
+	if delay := request.Timestamp.Sub(legacyResume.ConfirmedAt); delay != 28*time.Millisecond+433*time.Microsecond {
 		t.Fatalf("resume writer timestamp relation changed: %s", delay)
 	}
 	for index := 15; index <= 20; index++ {
@@ -211,7 +218,7 @@ func TestZeitreise442FullHistoryFixtureRetainsEveryLegacyMismatch(t *testing.T) 
 			t.Fatalf("event %d unpublished remote values changed", index)
 		}
 	}
-	resumeMarker := "<!-- codex-issue-loop:environment-resume:" + issue.EnvironmentResume.ID + " -->"
+	resumeMarker := "<!-- codex-issue-loop:environment-resume:" + legacyResume.ID + " -->"
 	resumeMarkers, failureMarkers := 0, 0
 	for _, comment := range replay.Remote.Issue.Comments {
 		resumeMarkers += strings.Count(comment, resumeMarker)

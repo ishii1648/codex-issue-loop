@@ -181,8 +181,8 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-044**: draft Pull RequestのCI結果をモデル呼び出しなしで監視し、すべて成功した場合だけReady for reviewへ移すこと。CI失敗時は同じworktreeと失敗理由をworkerへ渡して再試行すること。
 - **FR-045**: 対象リポジトリのmanifestでauto mergeを選択でき、既定は無効とすること。有効時はbase branchへの追随とCI再確認を行い、conflict時は既存worktree・branch・Pull Requestを維持した永続的な自動復旧を開始すること。
 - **FR-045-A**: conflict recoveryはimmutableなbase SHA、競合file、試行履歴を永続化し、workerへIssue・元PR差分・base追加commit・競合内容・検証要件を渡すこと。workerはGit公開操作を行わず、supervisorが未解消entry、marker、base SHA、path scope、検証結果を確認して通常pushすること。
-- **FR-045-B**: `blocked`はbase単位の復旧budget超過または非回復障害の最終escalationに限定し、明示的な`agent-loop retry --repo <path> --issue <number>`でdurable stateとGitHubを監査付きで再同期できること。
-- **FR-045-C**: worker起因の環境`blocked`だけを、operatorの前提解消確認とactive process不在、run/worktree/branch/resource/PR整合性検査後に、明示的なIssue番号を持つ別CLI操作で同一成果物から再開できること。conflict、手動/security block、running/completed/closed-without-mergeは拒否すること。
+- **FR-045-B**: terminal `blocked` / `failed`はhard leaseを保持せず、`issue plan`と`issue resolve --action retry-stage`がcanonical snapshotと現在のprocess/git/GitHubを再検証してdurable stateとGitHubを監査付きで同期できること。
+- **FR-045-C**: 継続可能なworkerまたはlifecycle stageはgeneric checkpointへ同一成果物とauthorityを保存し、operator選択後に`issue resolve --action resume|retry-stage|adopt-pr|cancel`で解決できること。ambiguous、manual/security、active worker、inconsistent worktree/PRは副作用なく拒否すること。
 - **FR-046**: Issueを完了扱いにし、設定に応じてcloseするのは対応Pull Requestのmergeを確認した後とすること。
 
 ### 6.6 監視と質問
