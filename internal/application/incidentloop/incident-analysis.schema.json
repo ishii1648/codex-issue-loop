@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["version", "episode_id", "classification", "confidence", "summary", "cause_hypothesis", "counter_evidence", "additional_investigation", "recommend_issue", "evidence"],
   "properties": {
-    "version": {"const": 1},
+    "version": {"type": "integer", "const": 1},
     "episode_id": {"type": "string", "pattern": "^inc-[a-f0-9]{20}$"},
     "classification": {"enum": ["expected_transient", "degraded", "operator_attention", "suspected_bug", "confirmed_bug", "unknown"]},
     "confidence": {"enum": ["low", "medium", "high"]},

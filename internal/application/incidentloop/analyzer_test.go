@@ -2,6 +2,7 @@ package incidentloop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,20 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCodexAnalysisSchemaDeclaresTypeForConstProperties(t *testing.T) {
+	var schema struct {
+		Properties map[string]map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal(incidentAnalysisSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	for name, property := range schema.Properties {
+		if _, hasConst := property["const"]; hasConst && property["type"] == nil {
+			t.Errorf("property %q uses const without type", name)
+		}
+	}
+}
 
 func TestCommandAnalyzerRejectsMalformedJSONAndBoundsTimeout(t *testing.T) {
 	bundle := EvidenceBundle{Version: SchemaVersion, EpisodeID: "inc-test", Fingerprint: strings.Repeat("a", 64), Repository: "owner/repo", PrimaryClassification: "unknown", Confidence: "low", SignalIDs: []string{}, Evidence: []EvidenceRef{}}
