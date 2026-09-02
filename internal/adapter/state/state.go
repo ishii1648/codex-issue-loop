@@ -239,6 +239,7 @@ type Issue struct {
 	PullRequestURL         string                   `json:"pull_request_url,omitempty"`
 	PullRequestNumber      int                      `json:"pull_request_number,omitempty"`
 	HeadSHA                string                   `json:"head_sha,omitempty"`
+	ReviewDecision         string                   `json:"review_decision,omitempty"`
 	PullRequestMerged      bool                     `json:"pull_request_merged,omitempty"`
 	GitHubSync             issuedomain.GitHubSync   `json:"github_sync,omitempty"`
 	FailureKind            string                   `json:"failure_kind,omitempty"`

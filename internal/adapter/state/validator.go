@@ -103,6 +103,11 @@ func validateIssueAggregate(issue *Issue) error {
 	if issue.PullRequestMerged && (issue.PullRequestNumber == 0 || issue.PullRequestURL == "" || issue.HeadSHA == "") {
 		return fmt.Errorf("merged Pull Request identity is incomplete")
 	}
+	switch issue.ReviewDecision {
+	case "", "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED":
+	default:
+		return fmt.Errorf("unsupported Pull Request review decision %q", issue.ReviewDecision)
+	}
 	if issue.RetryAfter != nil && issue.RetryAfter.IsZero() {
 		return fmt.Errorf("retry deadline is zero")
 	}

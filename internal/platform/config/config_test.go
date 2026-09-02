@@ -64,9 +64,45 @@ github:
 	if cfg.Logs.RotateBytes != 16*1024*1024 || cfg.Logs.Generations != 7 || cfg.Logs.WorkerRunMaxCount != 100 {
 		t.Fatalf("unexpected log defaults: %+v", cfg.Logs)
 	}
+	if cfg.IncidentAutomation.Enabled || !cfg.IncidentAutomation.DryRun || cfg.IncidentAutomation.Interval.Duration != 15*time.Minute ||
+		cfg.IncidentAutomation.AnalyzerTimeout.Duration != 10*time.Minute || cfg.IncidentAutomation.MaxAnalysisAttempts != 3 || cfg.IncidentAutomation.RetryBackoff.Duration != time.Minute || cfg.IncidentAutomation.MaxEpisodeItems != 128 || cfg.IncidentAutomation.DegradationThreshold.Duration != 2*time.Minute {
+		t.Fatalf("unexpected incident automation defaults: %+v", cfg.IncidentAutomation)
+	}
 	if cfg.Worktrees.CompletedMaxAge.Duration != 7*24*time.Hour || cfg.Worktrees.FailedMaxAge.Duration != 30*24*time.Hour ||
 		cfg.Worktrees.BlockedMaxAge.Duration != 0 || cfg.Worktrees.NeedsInputMaxAge.Duration != 0 {
 		t.Fatalf("unexpected worktree retention defaults: %+v", cfg.Worktrees)
+	}
+}
+
+func TestIncidentAutomationConfigurationIsBoundedAndCodexOnly(t *testing.T) {
+	dir := writeConfig(t, `version: 4
+github:
+  repo: owner/repo
+incident_automation:
+  enabled: true
+  dry_run: false
+  interval: 5m
+  analyzer_timeout: 2m
+  max_analysis_attempts: 2
+  retry_backoff: 30s
+  max_episode_items: 64
+  degradation_threshold: 30s
+`)
+	cfg, err := Load(dir)
+	if err != nil || !cfg.IncidentAutomation.Enabled || cfg.IncidentAutomation.DryRun || cfg.IncidentAutomation.Interval.Duration != 5*time.Minute {
+		t.Fatalf("incident_automation=%+v err=%v", cfg.IncidentAutomation, err)
+	}
+	for _, body := range []string{
+		"worker:\n  backend: claude-code\nincident_automation:\n  enabled: true",
+		"incident_automation:\n  interval: 30s",
+		"incident_automation:\n  max_analysis_attempts: 0",
+		"incident_automation:\n  max_episode_items: 129",
+		"incident_automation:\n  degradation_threshold: 500ms",
+	} {
+		dir = writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\n"+body+"\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "incident_automation") {
+			t.Fatalf("invalid incident automation accepted: %q err=%v", body, err)
+		}
 	}
 }
 

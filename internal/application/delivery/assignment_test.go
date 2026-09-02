@@ -553,6 +553,94 @@ func TestAssignmentRetryRollbackValidatesRetainedTransactionAndClearsFence(t *te
 	}
 }
 
+func TestAssignmentRetryCompletesExactRollbackFailedTarget(t *testing.T) {
+	l, configPath, entries, _ := assignmentFixture(t)
+	runner := &releaseRunner{}
+	controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: runner}
+	if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := cfg.Assignments[entries[0].RepoID]
+	candidate, err := (Verifier{GH: "gh", Runner: runner, CacheDir: RuntimePaths(l.Root).Cache, ExpectedVersion: "v1.2.3"}).Check(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := SlotRef(l, candidate.Manifest.Version, candidate.Manifest.Commit, candidate.Digest)
+	if err := StageSlot(l, desired, filepath.Join(candidate.Dir, BinaryAsset)); err != nil {
+		t.Fatal(err)
+	}
+	manager := launchd.Manager{Layout: l, Launchctl: entries[0].Commands["launchctl"]}
+	if err := manager.WritePlist(entries[0], current.Slot); err != nil {
+		t.Fatal(err)
+	}
+	tx := AssignmentTransaction{
+		RepositoryID: entries[0].RepoID, Operation: AssignmentOperationApply, Phase: AssignmentRollbackFailed,
+		ExpectedGeneration: 1, TargetGeneration: 2, Current: current.AssignmentRef, Desired: desired,
+		Result: "rollback_failed", Reason: "injected health failure", StartedAt: time.Now().UTC(),
+	}
+	if err := SaveAssignmentTransaction(l.DeliveryAssignmentTransactionPath(entries[0].RepoID), tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entries[0].RepoID), Maintenance{Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := controller.Retry(context.Background(), entries[0].RepoPath, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Result != "succeeded" || report.Assignment.AssignmentRef != desired || report.Assignment.Generation != 2 {
+		t.Fatalf("report=%+v", report)
+	}
+	tx, err = LoadAssignmentTransaction(l.DeliveryAssignmentTransactionPath(entries[0].RepoID))
+	if err != nil || tx.Phase != AssignmentSucceeded {
+		t.Fatalf("transaction=%+v err=%v", tx, err)
+	}
+	if _, err := os.Stat(l.DeliveryAssignmentFencePath(entries[0].RepoID)); !os.IsNotExist(err) {
+		t.Fatalf("successful retry retained fence: %v", err)
+	}
+}
+
+func TestAssignmentRetryRejectsMismatchedRetainedFence(t *testing.T) {
+	l, configPath, entries, _ := assignmentFixture(t)
+	runner := &releaseRunner{}
+	controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: runner}
+	if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := LoadConfig(configPath)
+	current := cfg.Assignments[entries[0].RepoID]
+	candidate, err := (Verifier{GH: "gh", Runner: runner, CacheDir: RuntimePaths(l.Root).Cache, ExpectedVersion: "v1.2.3"}).Check(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := SlotRef(l, candidate.Manifest.Version, candidate.Manifest.Commit, candidate.Digest)
+	if err := StageSlot(l, desired, filepath.Join(candidate.Dir, BinaryAsset)); err != nil {
+		t.Fatal(err)
+	}
+	tx := AssignmentTransaction{
+		RepositoryID: entries[0].RepoID, Operation: AssignmentOperationApply, Phase: AssignmentRollbackFailed,
+		ExpectedGeneration: 1, TargetGeneration: 2, Current: current.AssignmentRef, Desired: desired,
+		Result: "rollback_failed", Reason: "injected health failure", StartedAt: time.Now().UTC(),
+	}
+	if err := SaveAssignmentTransaction(l.DeliveryAssignmentTransactionPath(entries[0].RepoID), tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entries[0].RepoID), Maintenance{Generation: "assignment-999", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Retry(context.Background(), entries[0].RepoPath, 1); err == nil || !strings.Contains(err.Error(), "fence does not match") {
+		t.Fatalf("retry error=%v", err)
+	}
+	tx, err = LoadAssignmentTransaction(l.DeliveryAssignmentTransactionPath(entries[0].RepoID))
+	if err != nil || tx.Phase != AssignmentRollbackFailed {
+		t.Fatalf("transaction changed after rejection: %+v err=%v", tx, err)
+	}
+}
+
 func TestAssignmentResumesCrashAfterConfigCommit(t *testing.T) {
 	l, configPath, entries, _ := assignmentFixture(t)
 	runner := &releaseRunner{}
@@ -591,7 +679,7 @@ func TestAssignmentResumesCrashAfterConfigCommit(t *testing.T) {
 	if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entries[0].RepoID), Maintenance{Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	report, err := controller.switchTo(context.Background(), entries[0].RepoPath, desired, 1, false)
+	report, err := controller.switchTo(context.Background(), entries[0].RepoPath, desired, 1, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,7 +778,7 @@ func TestAssignmentResumesInterruptedRollback(t *testing.T) {
 	if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entries[0].RepoID), Maintenance{Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.switchTo(context.Background(), entries[0].RepoPath, desired, 1, false); err == nil || !strings.Contains(err.Error(), "rolled back") {
+	if _, err := controller.switchTo(context.Background(), entries[0].RepoPath, desired, 1, false, false); err == nil || !strings.Contains(err.Error(), "rolled back") {
 		t.Fatalf("resume error=%v", err)
 	}
 	program, err := manager.Program(entries[0])

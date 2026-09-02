@@ -38,6 +38,7 @@ type PullRequest struct {
 	BaseRefName      string
 	MergeStateStatus string
 	ChecksStatus     string
+	ReviewDecision   string
 	HeadSHA          string
 	MergeSHA         string
 	MergeCommitSHA   string
@@ -206,7 +207,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 	// Reconciliation only distinguishes zero, one, or multiple Pull Requests.
 	// Fetching two is sufficient to detect the unsafe multiple-PR case and
 	// avoids requesting 100 expensive statusCheckRollup nodes every poll.
-	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "number,url,state,isDraft,mergedAt,headRefName,baseRefName,headRefOid,mergeCommit,headRepository,headRepositoryOwner,mergeStateStatus,statusCheckRollup").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "pr", "list", "--repo", cfg.GitHub.Repo, "--state", "all", "--head", branch, "--limit", "2", "--json", "number,url,state,isDraft,mergedAt,headRefName,baseRefName,headRefOid,mergeCommit,headRepository,headRepositoryOwner,mergeStateStatus,reviewDecision,statusCheckRollup").CombinedOutput()
 	if err != nil {
 		return RemoteState{}, c.commandError(ctx, path, fmt.Sprintf("inspect Pull Requests for branch %s", branch), err, out)
 	}
@@ -224,6 +225,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 		} `json:"mergeCommit"`
 		PullRequestHeadRepository
 		MergeStateStatus  string        `json:"mergeStateStatus"`
+		ReviewDecision    string        `json:"reviewDecision"`
 		StatusCheckRollup []checkRollup `json:"statusCheckRollup"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
@@ -241,6 +243,7 @@ func (c CLI) Inspect(ctx context.Context, cfg config.Config, number int, branch 
 			HeadSHA:          item.HeadRefOID,
 			MergeStateStatus: item.MergeStateStatus,
 			ChecksStatus:     pullRequestChecksStatus(item.MergeStateStatus, item.StatusCheckRollup),
+			ReviewDecision:   item.ReviewDecision,
 			MergeSHA:         mergeCommitSHA,
 			MergeCommitSHA:   mergeCommitSHA,
 			HeadRepository:   item.PullRequestHeadRepository.FullName(),

@@ -60,8 +60,23 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 		}
 		current.HeadSHA = selected.HeadSHA
 	}
+	if current.ReviewDecision != selected.ReviewDecision {
+		_, err := l.Store.Update("pull_request_review_observed", current.Number, current.RunID, map[string]string{"review_decision": selected.ReviewDecision}, func(s *state.Snapshot) error {
+			item := s.Issues[strconv.Itoa(current.Number)]
+			item.ReviewDecision = selected.ReviewDecision
+			item.UpdatedAt = l.now()
+			return nil
+		})
+		if err != nil {
+			return failure.Wrap(failure.Supervisor, "persist Pull Request review decision", err)
+		}
+		current.ReviewDecision = selected.ReviewDecision
+	}
 	if !strings.EqualFold(selected.State, "open") {
 		return l.blockPullRequestLifecycle(ctx, current, selected.URL, "Pull Request was closed without merge")
+	}
+	if selected.ReviewDecision == "CHANGES_REQUESTED" || selected.ReviewDecision == "REVIEW_REQUIRED" {
+		return l.schedulePullRequestPoll(current, "waiting for required review to pass")
 	}
 	inspection, inspectErr := l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
 	if inspectErr != nil {

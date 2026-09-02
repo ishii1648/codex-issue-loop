@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "codex-issue-loop incident signal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "timestamp", "repository", "correlation_id", "kind", "name", "component", "phase", "outcome_code", "reason_code"],
+  "properties": {
+    "version": {"const": 1},
+    "id": {"$ref": "#/$defs/id"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+$"},
+    "correlation_id": {"$ref": "#/$defs/id"},
+    "issue_number": {"type": "integer", "minimum": 1},
+    "run_id": {"$ref": "#/$defs/id"},
+    "cycle_id": {"$ref": "#/$defs/id"},
+    "episode_id": {"$ref": "#/$defs/id"},
+    "incident_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "kind": {"enum": ["event", "status", "log"]},
+    "name": {"enum": ["scheduler_cycle", "external_attempt_completed", "progress", "retry_episode", "failure_classified", "runtime_identity", "operation_duration", "host_diagnostic", "evidence_coverage", "lifecycle_outcome"]},
+    "component": {"enum": ["scheduler", "github", "worker", "supervisor", "review", "ci", "publication", "recovery", "host", "retention", "analysis"]},
+    "phase": {"enum": ["poll", "dispatch", "execute", "analyze", "issue", "checks", "review", "merge", "recovery", "startup", "shutdown", "retention"]},
+    "outcome_code": {"enum": ["started", "succeeded", "failed", "retrying", "blocked", "pending", "observed", "resolved", "reopened", "noop", "rejected", "rate_limited", "canceled"]},
+    "reason_code": {"$ref": "#/$defs/id"},
+    "trigger": {"enum": ["startup", "poll_timer", "retry_timer", "worker_finished", "webhook", "fsnotify", "manual", "schedule"]},
+    "scheduled_deadline": {"type": "string", "format": "date-time"},
+    "attempt_allowed": {"type": "boolean"},
+    "coalesced_wake_count": {"type": "integer", "minimum": 0},
+    "provider": {"type": "string"}, "operation_code": {"type": "string"}, "rate_limit_resource": {"type": "string"}, "reset_at": {"type": "string", "format": "date-time"},
+    "scope_kind": {"type": "string"}, "scope_hash": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1}, "retry_at": {"type": "string", "format": "date-time"}, "terminal_outcome": {"type": "string"},
+    "progress_kind": {"type": "string"}, "next_expected_at": {"type": "string", "format": "date-time"}, "active_scope_count": {"type": "integer", "minimum": 0},
+    "failure_kind": {"enum": ["none", "transient", "issue", "supervisor", "operator", "product"]}, "failure_code": {"type": "string"}, "resumable": {"type": "boolean"},
+    "release_version": {"type": "string"}, "commit_sha": {"type": "string"}, "state_schema": {"type": "integer", "minimum": 1}, "semantic_contract_version": {"type": "integer", "minimum": 1},
+    "elapsed_ms": {"type": "integer", "minimum": 0}, "deadline_remaining_ms": {"type": "integer"}, "event_sequence": {"type": "integer", "minimum": 1},
+    "source_kind": {"type": "string"}, "oldest_at": {"type": "string", "format": "date-time"}, "newest_at": {"type": "string", "format": "date-time"}, "record_count": {"type": "integer", "minimum": 0}, "retention_policy": {"type": "string"}, "last_compaction_at": {"type": "string", "format": "date-time"},
+    "lifecycle_stage": {"enum": ["worker_started", "worker_failed", "pull_request_created", "checks_passed", "checks_failed", "review_passed", "review_failed", "merged", "issue_closed", "reopened", "recovery_completed"]},
+    "invariant_violation": {"type": "boolean"}, "independent_run": {"type": "boolean"}, "product_fix_merged": {"type": "boolean"}, "request_amplification": {"type": "boolean"}, "progress_stalled": {"type": "boolean"}, "human_action_required": {"type": "boolean"}, "threshold_exceeded": {"type": "boolean"},
+    "evidence": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/evidence"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "evidence": {"type": "object", "additionalProperties": false, "required": ["source", "ref"], "properties": {"source": {"$ref": "#/$defs/id"}, "ref": {"type": "string", "minLength": 1, "maxLength": 1024}}}
+  }
+}

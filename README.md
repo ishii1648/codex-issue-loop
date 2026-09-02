@@ -191,6 +191,8 @@ Issueが必要とするnetwork、browser/CDP、download、外部時刻前提は[
 
 短い間隔で`status`を繰り返さず、入力や復旧操作が必要になるまで1回のblocking `watch`で待機します。Codex Desktopではrepositoryごとに専用chatをpinし、質問通知とActivityの回答待ちを通常の発見経路にします。セットアップ、回答、切断・再起動後の再接続、複数repositoryの分離は[Codex Desktop監視task運用](docs/codex-desktop-monitoring.md)を参照してください。Codex Remoteからの監視方法は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)を参照してください。
 
+保存済みeventからのincident分類、read-only AI分析、重複防止付きIssue生成は既定で無効かつdry-runです。有効化、単発分析、状態確認、circuit recoveryは[Incident自動対応runbook](docs/incident-automation.md)を参照してください。
+
 ### 3. 質問へ回答する
 
 `watch`または`status`が返したrequest IDを変えずに回答します。回答に秘密値を含めないでください。

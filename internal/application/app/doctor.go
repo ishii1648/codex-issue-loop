@@ -117,6 +117,9 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 			}
 		}
 	}
+	if *assignmentHealth {
+		diagnostics = allowStoppedAssignmentHealth(diagnostics)
+	}
 
 	result := doctorResult{SchemaVersion: doctorSchemaVersion, OK: diagnosticsOK(diagnostics), GeneratedAt: time.Now().UTC(), Diagnostics: diagnostics}
 	if err := a.writeDoctorResult(*jsonOut, result); err != nil {
@@ -126,6 +129,19 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 		return exitError{1, fmt.Errorf("doctor found failing diagnostics")}
 	}
 	return nil
+}
+
+func allowStoppedAssignmentHealth(diagnostics []diagnostic) []diagnostic {
+	for i := range diagnostics {
+		if diagnostics[i].Code != "SUPERVISOR_STOPPED" {
+			continue
+		}
+		diagnostics[i].Code = "SUPERVISOR_STOPPED_ASSIGNMENT_HEALTH"
+		diagnostics[i].OK = true
+		diagnostics[i].Summary = "停止中repositoryのassignment runtimeを検証しました"
+		diagnostics[i].Remediations = nil
+	}
+	return diagnostics
 }
 
 func diagnoseSchemas(l layout.Layout) ([]diagnostic, bool) {

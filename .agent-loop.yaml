@@ -38,6 +38,16 @@ formatters:
 completion:
   auto_merge: false
 
+incident_automation:
+  enabled: true
+  dry_run: true
+  interval: 15m
+  analyzer_timeout: 10m
+  max_analysis_attempts: 3
+  retry_backoff: 1m
+  max_episode_items: 128
+  degradation_threshold: 2m
+
 # Cloudflare Tunnel構成はdocs/mac-mini-runbook.mdを参照する。
 # secret fileはrepository外の固定pathへowner-onlyで配置する。
 webhook:

@@ -1,4 +1,4 @@
-.PHONY: build test fault-test conformance-test test-race vet vuln-check fmt-check schema-check tidy-check release-check ci clean
+.PHONY: build test fault-test conformance-test incident-e2e test-race vet vuln-check fmt-check schema-check tidy-check release-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -17,6 +17,9 @@ fault-test:
 
 conformance-test:
 	$(GO) test ./internal/application/conformance -count=1
+
+incident-e2e:
+	CGO_ENABLED=0 $(GO) test ./internal/application/incidentloop -count=1
 
 test-race:
 	@if [ "$$($(GO) env GOHOSTOS)" = darwin ]; then \

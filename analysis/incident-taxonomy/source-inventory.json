@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "retrieved_at": "2026-09-02T01:29:50Z",
+  "sources": [
+    {
+      "id": "active-events",
+      "kind": "events_jsonl",
+      "period_start": "2026-08-18T14:38:30.053827Z",
+      "period_end": "2026-09-01T19:55:20.941055Z",
+      "count": 1048,
+      "unit": "events",
+      "query": "jq over managed_repo_data_dir/events.jsonl; count, min/max timestamp and sequence, event type, typed fields only",
+      "gaps": ["sequence 44023 is an archive checkpoint overlap", "no events after sequence 45070 at retrieval time"],
+      "constraints": ["owner-only runtime file", "raw payload is not copied", "11 distinct issue numbers"]
+    },
+    {
+      "id": "archived-events",
+      "kind": "events_jsonl_gzip",
+      "period_start": "2026-08-16T10:15:07.936888Z",
+      "period_end": "2026-08-18T14:33:16.709947Z",
+      "count": 44023,
+      "unit": "events",
+      "query": "gzip -dc managed archive | jq; count, timestamp, sequence, event type and typed fields only",
+      "gaps": ["runtime before sequence 1 is unavailable", "archive end and active checkpoint overlap at sequence 44023"],
+      "constraints": ["one retained gzip generation", "raw reason/error text is excluded", "45 distinct issue numbers"]
+    },
+    {
+      "id": "state-snapshot",
+      "kind": "state_json",
+      "period_start": null,
+      "period_end": "2026-09-01T19:55:20.941055Z",
+      "count": 53,
+      "unit": "issues",
+      "query": "jq typed status and PR reference fields from managed state.json",
+      "gaps": ["snapshot has no independent start timestamp", "terminal Issues outside retained state are absent"],
+      "constraints": ["revision 45070", "49 completed and 4 blocked", "raw snapshot is not copied"]
+    },
+    {
+      "id": "supervisor-logs",
+      "kind": "rotated_log",
+      "period_start": "2026-08-16T13:20:15Z",
+      "period_end": "2026-08-18T11:02:34Z",
+      "count": 27990,
+      "unit": "lines_in_primary_archive",
+      "query": "line count, distinct line count, first/last parsed prefix and maximum exact repetition",
+      "gaps": ["active supervisor.log was empty", "archives do not cover the full event period"],
+      "constraints": ["26901 distinct lines", "maximum exact repetition 249", "raw lines are excluded"]
+    },
+    {
+      "id": "launchd-stderr",
+      "kind": "launchd_log",
+      "period_start": null,
+      "period_end": null,
+      "count": 58,
+      "unit": "lines",
+      "query": "line count, distinct line count and repetition count without message export",
+      "gaps": ["lines have no timestamp", "cannot deterministically join to an incident window"],
+      "constraints": ["15 distinct lines", "maximum exact repetition 42", "launchd stdout was empty"]
+    },
+    {
+      "id": "worker-runs",
+      "kind": "worker_run_metadata",
+      "period_start": "2026-08-16T10:25:24Z",
+      "period_end": "2026-08-19T17:39:23Z",
+      "count": 60,
+      "unit": "run_directories",
+      "query": "directory and file metadata only; codex.jsonl size and mtime, result file presence",
+      "gaps": ["run directories do not cover the latter half of active events", "retention policy is not encoded per run"],
+      "constraints": ["codex.jsonl aggregate size 33684823 bytes", "worker transcript content is excluded"]
+    },
+    {
+      "id": "github-issues",
+      "kind": "github_issue",
+      "period_start": "2026-08-15T11:13:12Z",
+      "period_end": "2026-09-01T05:25:56Z",
+      "count": 90,
+      "unit": "issues",
+      "query": "gh issue list --state all --limit 200 --json number,title,state,createdAt,closedAt,url,labels",
+      "gaps": ["no repository issue history before the first Issue", "closure reason is not consistently available"],
+      "constraints": ["82 closed and 8 open", "34 bug-labelled", "Issue body is used only for documented cause and acceptance evidence"]
+    },
+    {
+      "id": "github-pull-requests",
+      "kind": "github_pull_request",
+      "period_start": "2026-08-15T09:47:28Z",
+      "period_end": "2026-09-02T01:25:20Z",
+      "count": 123,
+      "unit": "pull_requests",
+      "query": "gh pr list --state all --limit 200 --json number,title,state,mergedAt,mergeCommit,statusCheckRollup",
+      "gaps": ["historical check reruns may be overwritten or expired"],
+      "constraints": ["116 merged, 6 open, 1 closed-unmerged", "one retained FAILURE check on PR 98"]
+    },
+    {
+      "id": "github-reviews",
+      "kind": "github_pr_review",
+      "period_start": "2026-08-15T09:47:28Z",
+      "period_end": "2026-09-02T01:25:20Z",
+      "count": 0,
+      "unit": "reviews",
+      "query": "GitHub GraphQL pullRequests(first:100, after:cursor) { reviews { totalCount } }",
+      "gaps": ["review comments outside PullRequestReview are not counted"],
+      "constraints": ["all 123 PR review totalCount values were zero"]
+    },
+    {
+      "id": "git-commits",
+      "kind": "git_history",
+      "period_start": "2026-08-15T08:24:22Z",
+      "period_end": "2026-09-02T01:29:23Z",
+      "count": 291,
+      "unit": "commits",
+      "query": "git log --all --date=iso-strict with commit SHA, author date and subject",
+      "gaps": ["only commits reachable from local refs at retrieval time"],
+      "constraints": ["commit bodies are not copied", "merge SHA is joined through GitHub PR metadata"]
+    }
+  ]
+}

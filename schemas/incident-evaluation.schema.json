@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ishii1648/codex-issue-loop/schemas/incident-evaluation.schema.json",
+  "title": "codex-issue-loop offline incident evaluation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "corpus_version", "rules_version", "incident_total", "classified", "unknown", "by_classification", "confirmed_bug", "expected_transient", "rule_conflicts", "mismatches", "insufficient_evidence", "resolvable_with_observability", "results"],
+  "properties": {
+    "version": {"const": 1},
+    "corpus_version": {"const": 1},
+    "rules_version": {"const": 1},
+    "incident_total": {"type": "integer", "minimum": 0},
+    "classified": {"type": "integer", "minimum": 0},
+    "unknown": {"type": "integer", "minimum": 0},
+    "by_classification": {"type": "object"},
+    "confirmed_bug": {"$ref": "#/$defs/metrics"},
+    "expected_transient": {"$ref": "#/$defs/metrics"},
+    "rule_conflicts": {"type": "array", "items": {"type": "string"}},
+    "mismatches": {"type": "array", "items": {"type": "object"}},
+    "insufficient_evidence": {"type": "array", "items": {"type": "string"}},
+    "resolvable_with_observability": {"type": "array", "items": {"type": "string"}},
+    "results": {"type": "array", "items": {"type": "object"}}
+  },
+  "$defs": {
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ground_truth", "predicted", "true_positive", "false_positive", "false_negative", "unassessable"],
+      "properties": {
+        "ground_truth": {"type": "integer", "minimum": 0},
+        "predicted": {"type": "integer", "minimum": 0},
+        "true_positive": {"type": "integer", "minimum": 0},
+        "false_positive": {"type": "integer", "minimum": 0},
+        "false_negative": {"type": "integer", "minimum": 0},
+        "unassessable": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

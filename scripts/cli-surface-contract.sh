@@ -40,7 +40,7 @@ REQUIRED_OPTIONS='--prerelease --target --title --notes' require_options gh rele
 REQUIRED_OPTIONS='--pattern --dir --clobber' require_options gh release download
 REQUIRED_OPTIONS='--repo' require_options gh attestation verify
 
-REQUIRED_OPTIONS='--json --output-schema --output-last-message --sandbox --cd' require_options codex exec
+REQUIRED_OPTIONS='--json --output-schema --output-last-message --sandbox --cd --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules' require_options codex exec
 resume_help=$(codex exec --cd . resume --help)
 for option in --json --output-schema --output-last-message; do
   printf '%s\n' "$resume_help" | grep -Fq -- "$option"

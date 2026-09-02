@@ -8,7 +8,7 @@
 
 | CLI | minimum supported | 実環境で確認したversion | 必須capability |
 | --- | --- | --- | --- |
-| Codex CLI | 0.136.0 | 0.136.0、0.147.0 / macOS arm64 | `codex exec`の`--json`、`--output-schema`、`--output-last-message`、`--sandbox`、`--cd` |
+| Codex CLI | 0.136.0 | 0.136.0、0.147.0 / macOS arm64 | `codex exec`の`--json`、`--output-schema`、`--output-last-message`、`--sandbox`、`--cd`、`--skip-git-repo-check`、`--ephemeral`、`--ignore-user-config`、`--ignore-rules` |
 | Claude Code | 2.1.119 | fake runtime conformance | print mode、stream JSON、JSON Schema、resume、model、effort、`dontAsk`、OS sandbox hard-fail設定 |
 | OpenCode | 1.1.1 | fake Server API conformance | loopback `serve`、session/message/abort API、JSON Schema output、provider/model、variant、inline permission policy |
 | GitHub CLI | 2.69.0 | 2.69.0 / macOS arm64 | Issue listの`--json`、`--limit`、`--label`、`--assignee`、`--milestone`、label追加・削除、comment追加 |

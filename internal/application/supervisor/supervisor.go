@@ -21,6 +21,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
+	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
@@ -52,21 +53,25 @@ type ProcessInspector interface {
 }
 
 type Loop struct {
-	Config          config.Config
-	Store           state.Store
-	GitHub          gh.Client
-	Worktrees       WorktreeManager
-	Worker          worker.Runner
-	WorkerIdentity  worker.Identity
-	Publisher       Publisher
-	Conflicts       ConflictResolver
-	Processes       ProcessInspector
-	Clock           Clock
-	SchedulerTimers SchedulerTimerSource
-	RateLimits      ratelimit.Store
-	Random          RandomSource
-	Logger          *log.Logger
-	DiskAvailable   func(string) (uint64, error)
+	Config             config.Config
+	Store              state.Store
+	GitHub             gh.Client
+	Worktrees          WorktreeManager
+	Worker             worker.Runner
+	WorkerIdentity     worker.Identity
+	Publisher          Publisher
+	Conflicts          ConflictResolver
+	Processes          ProcessInspector
+	Clock              Clock
+	SchedulerTimers    SchedulerTimerSource
+	RateLimits         ratelimit.Store
+	Random             RandomSource
+	Logger             *log.Logger
+	DiskAvailable      func(string) (uint64, error)
+	IncidentSignals    incidentSignalRecorder
+	IncidentAutomation incidentAutomationRunner
+	ReleaseVersion     string
+	ReleaseCommit      string
 	// Delivery fences stop new lifecycle dispatch while allowing active workers
 	// to reach their normal durable checkpoint without signals. The host fence
 	// coordinates legacy all-repository delivery; the repository fence isolates
@@ -149,8 +154,19 @@ func (l *Loop) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := l.recordRuntimeIdentity(); err != nil {
+		return failure.Wrap(failure.Supervisor, "record runtime identity signal", err)
+	}
+	if watchErr != nil {
+		if err := l.recordIncidentSignal(incidentloop.Signal{
+			Kind: "event", Name: "host_diagnostic", Component: "host", Phase: "startup",
+			OutcomeCode: "observed", ReasonCode: "fsnotify_unavailable", FailureKind: "supervisor", FailureCode: "fsnotify_unavailable", Resumable: true,
+		}); err != nil {
+			return failure.Wrap(failure.Supervisor, "record host diagnostic signal", err)
+		}
+	}
 
-	return l.runScheduler(ctx, watcher)
+	return l.runWithIncidentAutomation(ctx, func(runCtx context.Context) error { return l.runScheduler(runCtx, watcher) })
 }
 
 func (l *Loop) maintenanceRequested() bool {

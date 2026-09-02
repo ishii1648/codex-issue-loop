@@ -1178,6 +1178,41 @@ func TestPullRequestChecksGateReadyAndOptionalMerge(t *testing.T) {
 	}
 }
 
+func TestRequiredReviewGatesMergeUntilApproved(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	loop.Config.Completion.AutoMerge = true
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", MergeStateStatus: "CLEAN", ChecksStatus: "success", ReviewDecision: "REVIEW_REQUIRED"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].ReviewDecision != "REVIEW_REQUIRED" || github.readyPullRequest || github.mergedPullRequest {
+		t.Fatalf("review gate issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+	_, err := loop.Store.Update("test_review_due", 1, "", nil, func(s *state.Snapshot) error {
+		s.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote.PullRequests[0].ReviewDecision = "APPROVED"
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ = loop.Store.Load()
+	if snapshot.Issues["1"].ReviewDecision != "APPROVED" || !github.readyPullRequest || !github.mergedPullRequest {
+		t.Fatalf("approved review issue=%+v github=%+v", snapshot.Issues["1"], github)
+	}
+}
+
 func TestFailedPullRequestChecksReturnWorkerToRetry(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
 	loop, github := testLoop(t, result)

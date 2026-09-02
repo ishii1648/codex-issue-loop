@@ -1,0 +1,353 @@
+{
+  "version": 1,
+  "primary_classifications": [
+    "expected_transient",
+    "degraded",
+    "operator_attention",
+    "suspected_bug",
+    "confirmed_bug",
+    "unknown"
+  ],
+  "classifications": [
+    {
+      "name": "expected_transient",
+      "definition": "一時的な外部失敗で、backoff境界と進捗不変条件を守って自動復旧した状態。",
+      "entry_condition": "typed transientが観測され、deadline前の再試行、増幅、進捗停止がない。",
+      "exit_condition": "同じoperation scopeのsuccessful domain eventを観測する。",
+      "persistence_threshold": "連続4回以下。5回目または設定済みdeadline違反で除外する。",
+      "severity": "info",
+      "required_evidence": ["typed failure kind", "retry_at", "successful domain event", "operation scope"],
+      "exclusions": ["invariant violation", "request amplification", "progress stalled", "operator action required"],
+      "retry_relation": "backoffに従うretryを許容し、成功cycleだけでcounterをresetする。",
+      "operator_action": "不要。再発率だけを集計する。",
+      "ai_handoff": "同一fingerprintが閾値を超えるか、除外条件へ入った場合だけ渡す。",
+      "issue_condition": "単発では起票しない。複数windowで閾値超過またはinvariant違反を立証した場合だけ候補化する。",
+      "fingerprint_fields": ["scope", "normalized_failure_code", "operation"],
+      "representative_incidents": ["cil-20260816-supervisor-transient-413"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "degraded",
+      "definition": "処理は終端していないか復旧可能だが、retry・進捗・要求量の運用閾値を超えた状態。",
+      "entry_condition": "persistence threshold超過、request amplification、またはprogress marker停止のいずれか。",
+      "exit_condition": "successful domain event後に新しいwindowで閾値内へ戻る。",
+      "persistence_threshold": "supervisor transient 5回、retry deadline超過、またはprogress markerが期待intervalの2倍を超えて停止。",
+      "severity": "warning",
+      "required_evidence": ["monotonic duration or ordered sequence", "operation scope", "threshold value"],
+      "exclusions": ["human actionが解除条件", "corroborated product fixがあるinvariant violation"],
+      "retry_relation": "retryは継続できるが、正常なtransientとして抑制しない。",
+      "operator_action": "statusと外部依存を確認し、閾値超過が継続する場合だけ介入する。",
+      "ai_handoff": "entry時にsanitized episodeを渡す。",
+      "issue_condition": "同一fingerprintが独立windowで再現し、環境要因を除外できた場合に起票候補とする。",
+      "fingerprint_fields": ["scope", "normalized_failure_code", "threshold_kind", "build_version"],
+      "representative_incidents": ["cil-20260816-issue90-retry-delay"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "operator_attention",
+      "definition": "自動遷移だけでは解除できず、回答、権限、環境修復、または明示的recoveryを要する状態。",
+      "entry_condition": "sticky request、typed non-resumable block、supervisor_blocked、または明示的operator recovery requirement。",
+      "exit_condition": "回答または認可済みrecovery後にdurable stateと外部stateが収束する。",
+      "persistence_threshold": "sticky状態は即時。transient exhaustion由来は5回到達時。",
+      "severity": "action_required",
+      "required_evidence": ["typed blocked cause or request id", "durable status", "remediation contract"],
+      "exclusions": ["自動復旧済みtransient", "merged fixで立証済みのbug incident"],
+      "retry_relation": "自動retryを停止し、明示的解除まで状態を保持する。",
+      "operator_action": "reason codeに対応するanswer、credential/config修復、またはfail-closed recoveryを行う。",
+      "ai_handoff": "安全なremediation候補の要約だけを渡し、破壊的操作は自動化しない。",
+      "issue_condition": "operator介入自体では起票せず、同一原因の再発または製品不変条件違反を追加立証した場合だけ起票候補とする。",
+      "fingerprint_fields": ["scope", "blocked_origin", "blocked_kind", "normalized_reason_code"],
+      "representative_incidents": ["cil-20260819-supervisor-blocked-44930", "cil-github-issue-183"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "suspected_bug",
+      "definition": "製品不変条件違反が複数の独立runで再現するが、原因codeまたはmerged fixによる裏付けがまだない状態。",
+      "entry_condition": "documented invariant violationとindependent reproductionがあり、corroborated product fixがない。",
+      "exit_condition": "原因が否定され別分類へ移るか、修正と回帰testがmergeされconfirmed_bugになる。",
+      "persistence_threshold": "異なるrun/buildまたは再起動をまたぐ2回以上の再現。",
+      "severity": "warning",
+      "required_evidence": ["invariant identifier", "two independent reproductions", "version and scope"],
+      "exclusions": ["単一error文字列", "単一blocked event", "環境原因が立証済み"],
+      "retry_relation": "retry成功だけでは疑いを解除しない。",
+      "operator_action": "最小再現とversion差を採取し、raw dataを公開しない。",
+      "ai_handoff": "再現sequenceと反証可能な仮説を渡す。",
+      "issue_condition": "重複fingerprintがなく、再現と期待不変条件を本文に含められる場合に起票候補とする。",
+      "fingerprint_fields": ["invariant_id", "normalized_failure_code", "component"],
+      "representative_incidents": ["none-in-current-corpus"],
+      "deterministic_with_current_signals": false
+    },
+    {
+      "name": "confirmed_bug",
+      "definition": "製品不変条件違反が、原因code、回帰test、またはmerged product fixで独立に裏付けられた状態。",
+      "entry_condition": "documented invariant violationかつcorroborated merged product fix。",
+      "exit_condition": "incident自体は終端しても分類を保持し、fix versionと再発有無を追跡する。",
+      "persistence_threshold": "corroborationがあれば単発でも可。error/label単独では不可。",
+      "severity": "bug",
+      "required_evidence": ["invariant violation", "Issue or test", "merged PR", "merge commit"],
+      "exclusions": ["bug labelだけ", "unmerged PRだけ", "typed transientだけ"],
+      "retry_relation": "runtime failure_kindとは独立。transient retry stormもbugになり得る。",
+      "operator_action": "fix versionへ更新し、同一fingerprintの再発を確認する。",
+      "ai_handoff": "原因、fix、回帰test、影響windowを渡す。",
+      "issue_condition": "既存Issue/PRがなければ、redacted evidenceとacceptance criteriaを付けて起票候補とする。",
+      "fingerprint_fields": ["invariant_id", "component", "normalized_failure_code", "root_cause_code"],
+      "representative_incidents": ["cil-github-issue-102", "cil-github-issue-124", "cil-github-issue-162"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "unknown",
+      "definition": "一次分類に必要な時系列、scope、成功証拠、原因、またはground truthが不足する状態。",
+      "entry_condition": "優先規則のどれも必要証拠を満たさない。",
+      "exit_condition": "missing_evidenceに列挙したsignalが得られ、他分類の条件を満たす。",
+      "persistence_threshold": "時間では自動昇格しない。証拠不足を保持する。",
+      "severity": "undetermined",
+      "required_evidence": ["missing_evidence reason", "source limitation", "candidate observability signal"],
+      "exclusions": ["推測による分類", "labelだけのground truth"],
+      "retry_relation": "retry回数だけで別分類へ移さない。",
+      "operator_action": "不足signalを安全に取得できるか判断する。",
+      "ai_handoff": "missing evidenceと可能な反証を明示して渡す。",
+      "issue_condition": "unknown自体では起票しない。観測機能の不足が複数incidentへ影響する場合はobservability Issue候補にする。",
+      "fingerprint_fields": ["scope", "known_event_types", "missing_signal_set"],
+      "representative_incidents": ["cil-github-issue-168", "cil-github-issue-171", "cil-github-pr-98"],
+      "deterministic_with_current_signals": true
+    }
+  ],
+  "error_states": [
+    {
+      "name": "transient_retrying",
+      "definition": "typed transientのbackoff待ち。",
+      "entry_condition": "retry_scheduledとfuture retry_at。",
+      "exit_condition": "successful domain eventまたは5回目のfailure。",
+      "persistence_threshold": "連続4回まで。",
+      "severity": "info",
+      "required_evidence": ["failure_kind", "retry_at", "consecutive_failures"],
+      "exclusions": ["deadline bypass"],
+      "retry_relation": "exponential backoffを継続。",
+      "operator_action": "なし。",
+      "ai_handoff": "閾値内では渡さない。",
+      "issue_condition": "単独では起票しない。",
+      "fingerprint_fields": ["scope", "failure_code", "operation"],
+      "representative_incidents": ["cil-20260816-supervisor-transient-413"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "retry_exhausted",
+      "definition": "許容した連続retry回数へ到達した状態。",
+      "entry_condition": "supervisorは5回、workerは設定上限へ到達。",
+      "exit_condition": "明示的recoveryまたは新しいrun generation。",
+      "persistence_threshold": "到達時に即時。",
+      "severity": "action_required",
+      "required_evidence": ["counter", "configured limit", "terminal event"],
+      "exclusions": ["counter resetを成功eventで立証"],
+      "retry_relation": "自動retryを停止。",
+      "operator_action": "typed reasonに従う。",
+      "ai_handoff": "episode全体を渡す。",
+      "issue_condition": "独立再発または不変条件違反で候補化。",
+      "fingerprint_fields": ["scope", "failure_code", "limit"],
+      "representative_incidents": ["cil-20260819-supervisor-blocked-44930"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "retry_deadline_bypass",
+      "definition": "保存済みretry_atより前に同一scopeの再試行が始まる状態。",
+      "entry_condition": "next attempt timestamp < prior retry_at。",
+      "exit_condition": "build更新後、複数deadlineで違反0。",
+      "persistence_threshold": "1組でinvariant violation、反復で高severity。",
+      "severity": "bug_candidate",
+      "required_evidence": ["ordered sequence", "retry_at", "scope", "build version"],
+      "exclusions": ["異なるscope", "clock不整合"],
+      "retry_relation": "retry機構自体の違反。",
+      "operator_action": "quota保護のため該当buildを停止または更新。",
+      "ai_handoff": "違反組数と最初/最後のsequenceを渡す。",
+      "issue_condition": "再現とversionを立証し、重複がなければ候補化。",
+      "fingerprint_fields": ["scope", "scheduler_trigger", "build_version"],
+      "representative_incidents": ["cil-github-issue-102"],
+      "deterministic_with_current_signals": false
+    },
+    {
+      "name": "supervisor_blocked",
+      "definition": "repository全体の自動処理を停止するsticky状態。",
+      "entry_condition": "typed supervisor failureまたはtransient exhaustion。",
+      "exit_condition": "原因修復と明示的restart/recovery。",
+      "persistence_threshold": "supervisor failureは即時、transientは5回。",
+      "severity": "action_required",
+      "required_evidence": ["supervisor status", "failure kind", "blocked event"],
+      "exclusions": ["issue-local block"],
+      "retry_relation": "全体retryを停止。",
+      "operator_action": "doctor/statusとrunbookを確認。",
+      "ai_handoff": "redacted causeと影響queueを渡す。",
+      "issue_condition": "原因が製品側と裏付けられた場合だけ候補化。",
+      "fingerprint_fields": ["repo", "failure_kind", "reason_code"],
+      "representative_incidents": ["cil-20260819-supervisor-blocked-44930"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "issue_blocked_or_failed",
+      "definition": "単一Issueが自動継続できない終端またはsticky状態。",
+      "entry_condition": "issue_blockedまたはissue_failed。",
+      "exit_condition": "typed recovery、supersede、または完了。",
+      "persistence_threshold": "event発生時。",
+      "severity": "issue_local",
+      "required_evidence": ["issue number", "run id", "failure kind", "terminal event"],
+      "exclusions": ["event名だけでbug認定"],
+      "retry_relation": "retry exhaustionを含み得る。",
+      "operator_action": "cause別runbookを選択。",
+      "ai_handoff": "同一runのevent chainを渡す。",
+      "issue_condition": "既存Issue自身へ重複起票しない。",
+      "fingerprint_fields": ["issue", "run", "failure_kind", "reason_code"],
+      "representative_incidents": ["cil-github-issue-146"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "workspace_rejected",
+      "definition": "worker cwd/worktree provenanceが実行境界で拒否された状態。",
+      "entry_condition": "worker_workspace_rejected。",
+      "exit_condition": "正しいworkspace provenanceで新generationを開始。",
+      "persistence_threshold": "1回でfail closed。",
+      "severity": "action_required",
+      "required_evidence": ["worktree identity", "expected cwd", "run generation"],
+      "exclusions": ["path本文の公開"],
+      "retry_relation": "同じworkspaceの盲目的retryを禁止。",
+      "operator_action": "workspace recoveryを実施。",
+      "ai_handoff": "hash化したidentityだけを渡す。",
+      "issue_condition": "異なるrunで再現し製品原因がある場合だけ候補化。",
+      "fingerprint_fields": ["workspace_check_code", "backend", "build_version"],
+      "representative_incidents": ["cil-github-issue-183"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "publication_integrity_failure",
+      "definition": "PR repository/branch/SHA等のfail-closed検証に失敗した状態。",
+      "entry_condition": "typed publication mismatch。",
+      "exit_condition": "identity整合または限定recovery成功。",
+      "persistence_threshold": "1回でpublication停止。",
+      "severity": "action_required",
+      "required_evidence": ["normalized mismatch code", "PR identity", "saved identity"],
+      "exclusions": ["raw remote URL credential"],
+      "retry_relation": "同一identityの盲目的retryを禁止。",
+      "operator_action": "identityをread-only検証。",
+      "ai_handoff": "field-level mismatchだけを渡す。",
+      "issue_condition": "正常PRの誤拒否を再現できれば候補化。",
+      "fingerprint_fields": ["mismatch_code", "component", "build_version"],
+      "representative_incidents": ["cil-github-issue-162"],
+      "deterministic_with_current_signals": true
+    },
+    {
+      "name": "recovery_stalled",
+      "definition": "recovery要求後に期待する次のdurable transitionへ進まない状態。",
+      "entry_condition": "recovery requestedから期待intervalを超えてprogress markerなし。",
+      "exit_condition": "recovery succeeded/rejectedのtyped terminal event。",
+      "persistence_threshold": "期待intervalの2倍またはrestart後も同一state。",
+      "severity": "warning",
+      "required_evidence": ["recovery id", "expected next state", "monotonic duration"],
+      "exclusions": ["外部time gateを明示"],
+      "retry_relation": "recovery retryとは別episodeで追跡。",
+      "operator_action": "recovery explainを確認。",
+      "ai_handoff": "最後のprogress predicateを渡す。",
+      "issue_condition": "同じpredicateで独立再現すれば候補化。",
+      "fingerprint_fields": ["recovery_kind", "last_predicate", "build_version"],
+      "representative_incidents": ["cil-github-issue-164"],
+      "deterministic_with_current_signals": false
+    },
+    {
+      "name": "input_waiting",
+      "definition": "durable requestへの回答待ち。errorではない。",
+      "entry_condition": "unanswered request idとneeds_input status。",
+      "exit_condition": "同じrequest idへのvalid answer。",
+      "persistence_threshold": "sticky、時間でfailedへ移さない。",
+      "severity": "action_required",
+      "required_evidence": ["request id", "question type", "allowed answer contract"],
+      "exclusions": ["error classificationへの変換"],
+      "retry_relation": "回答前retryなし。",
+      "operator_action": "選択肢または許可されたfree textで回答。",
+      "ai_handoff": "質問payloadだけを提示。",
+      "issue_condition": "起票しない。",
+      "fingerprint_fields": ["issue", "run", "request_type"],
+      "representative_incidents": ["cil-github-issue-3"],
+      "deterministic_with_current_signals": true
+    }
+  ],
+  "rules": [
+    {
+      "id": "confirmed-product-bug",
+      "priority": 10,
+      "classification": "confirmed_bug",
+      "description": "Invariant violation corroborated by a merged product fix.",
+      "all": [
+        {"field": "documented_invariant_violation", "op": "eq", "value": true},
+        {"field": "corroborated_product_fix", "op": "eq", "value": true}
+      ]
+    },
+    {
+      "id": "repeated-invariant-violation",
+      "priority": 20,
+      "classification": "suspected_bug",
+      "description": "Repeated invariant violation without a corroborating fix.",
+      "all": [
+        {"field": "documented_invariant_violation", "op": "eq", "value": true},
+        {"field": "corroborated_product_fix", "op": "eq", "value": false},
+        {"field": "repeated_independent_runs", "op": "eq", "value": true}
+      ]
+    },
+    {
+      "id": "explicit-operator-action",
+      "priority": 30,
+      "classification": "operator_attention",
+      "description": "A durable condition explicitly requires human action.",
+      "all": [
+        {"field": "human_action_required", "op": "eq", "value": true}
+      ]
+    },
+    {
+      "id": "request-amplification",
+      "priority": 40,
+      "classification": "degraded",
+      "description": "Request volume is amplified relative to the scheduled work.",
+      "all": [
+        {"field": "request_amplification", "op": "eq", "value": true}
+      ]
+    },
+    {
+      "id": "persistence-threshold-exceeded",
+      "priority": 41,
+      "classification": "degraded",
+      "description": "A documented persistence threshold was exceeded.",
+      "all": [
+        {"field": "persistence_threshold_exceeded", "op": "eq", "value": true}
+      ]
+    },
+    {
+      "id": "progress-stalled",
+      "priority": 42,
+      "classification": "degraded",
+      "description": "No progress marker arrived within the expected interval.",
+      "all": [
+        {"field": "progress_stalled", "op": "eq", "value": true}
+      ]
+    },
+    {
+      "id": "bounded-transient-recovery",
+      "priority": 50,
+      "classification": "expected_transient",
+      "description": "A bounded typed transient respected backoff and recovered through a domain event.",
+      "all": [
+        {"field": "typed_transient", "op": "eq", "value": true},
+        {"field": "retry_deadline_respected", "op": "eq", "value": true},
+        {"field": "consecutive_failures", "op": "lte", "value": 4},
+        {"field": "successful_domain_event", "op": "eq", "value": true},
+        {"field": "request_amplification", "op": "eq", "value": false},
+        {"field": "progress_stalled", "op": "eq", "value": false},
+        {"field": "human_action_required", "op": "eq", "value": false},
+        {"field": "persistence_threshold_exceeded", "op": "eq", "value": false},
+        {"field": "documented_invariant_violation", "op": "eq", "value": false}
+      ]
+    },
+    {
+      "id": "insufficient-evidence",
+      "priority": 999,
+      "classification": "unknown",
+      "description": "No higher-priority rule has sufficient evidence.",
+      "always": true
+    }
+  ]
+}
