@@ -104,6 +104,10 @@ func (a App) Run(ctx context.Context, args []string) int {
 		}
 		return 0
 	}
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		a.usage()
+		return 0
+	}
 	// init is deliberately handled before Layout.Ensure so a preview does not
 	// create agent-loop directories or change user-owned files.
 	if args[0] == "init" {
@@ -205,9 +209,6 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.supervise(ctx, l, args)
 	case "broker":
 		return a.runBroker(ctx, l, args)
-	case "help", "--help", "-h":
-		a.usage()
-		return nil
 	default:
 		return exitError{2, fmt.Errorf("unknown command %q", command)}
 	}

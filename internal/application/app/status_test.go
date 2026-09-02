@@ -28,7 +28,7 @@ func TestStatusSummarizesMultipleWorkersResourcesAndRequests(t *testing.T) {
 			"4": {Number: 4, RunID: "run_4", Status: issuedomain.StatusNeedsInput},
 			"5": {
 				Number: 5, RunID: "run_5", Status: issuedomain.StatusBlocked, LeaseGeneration: 1,
-				ResourcePark: &state.ResourceLeasePark{
+				ResourcePark: &state.ContinuationCheckpoint{
 					ID: "park_5", Status: issuedomain.ResourceParkStatusParked, ParkedAt: now,
 					OriginalLease: state.ResourceLease{Owner: state.LeaseOwner{RunID: "run_5", Generation: 1}, Slot: 2, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now},
 				},

@@ -17,20 +17,27 @@ func ApplyIssueTransition(item *Issue, transition issuedomain.Transition) error 
 	if err := transition.ValidateCommit(item.Status); err != nil {
 		return err
 	}
-	if transition.To.Terminal() && transition.To != issuedomain.StatusCompleted && item.Lease != nil {
-		lease := *item.Lease
-		lease.DeclaredResources = append([]string(nil), item.Lease.DeclaredResources...)
-		lease.ResolvedResources = append([]string(nil), item.Lease.ResolvedResources...)
-		lease.ActualResources = append([]string(nil), item.Lease.ActualResources...)
-		captureContinuationCheckpoint(item, lease, item.UpdatedAt)
+	if transition.To.Terminal() && item.Lease != nil {
+		if transition.To != issuedomain.StatusCompleted {
+			lease := *item.Lease
+			lease.DeclaredResources = append([]string(nil), item.Lease.DeclaredResources...)
+			lease.ResolvedResources = append([]string(nil), item.Lease.ResolvedResources...)
+			lease.ActualResources = append([]string(nil), item.Lease.ActualResources...)
+			captureContinuationCheckpoint(item, lease, item.UpdatedAt)
+		}
+		item.Lease = nil
 	}
 	if transition.To.Terminal() && !transition.From.Terminal() && item.Suspension != nil && item.Suspension.Status == issuedomain.SuspensionResolved {
 		item.Suspension = nil
 	}
 	item.Status = transition.To
 	if transition.To == issuedomain.StatusCompleted {
-		item.ResourcePark = nil
-		item.Suspension = nil
+		pendingAdoptionSync := item.GitHubSync == issuedomain.GitHubSyncDone && item.Suspension != nil &&
+			item.Suspension.Status == issuedomain.SuspensionResolved && item.Suspension.Resolution == issuedomain.ResolutionAdoptPR
+		if !pendingAdoptionSync {
+			item.ResourcePark = nil
+			item.Suspension = nil
+		}
 	}
 	return nil
 }

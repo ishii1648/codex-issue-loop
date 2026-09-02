@@ -99,13 +99,6 @@ func (c *rateLimitedGitHub) MarkConflictRetry(ctx context.Context, cfg config.Co
 	return c.delegate.MarkConflictRetry(ctx, cfg, number, recoveryID)
 }
 
-func (c *rateLimitedGitHub) MarkPullRequestChecksRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
-	if err := c.before(); err != nil {
-		return err
-	}
-	return c.delegate.MarkPullRequestChecksRecovery(ctx, cfg, number, recoveryID)
-}
-
 func (c *rateLimitedGitHub) ReadyPullRequest(ctx context.Context, cfg config.Config, url string) error {
 	if err := c.before(); err != nil {
 		return err
@@ -125,19 +118,6 @@ func (c *rateLimitedGitHub) MergePullRequest(ctx context.Context, cfg config.Con
 		return err
 	}
 	return c.delegate.MergePullRequest(ctx, cfg, url)
-}
-
-func (c *rateLimitedGitHub) MarkEnvironmentResume(ctx context.Context, cfg config.Config, number int, resumeID string) error {
-	if err := c.before(); err != nil {
-		return err
-	}
-	resumer, ok := c.delegate.(interface {
-		MarkEnvironmentResume(context.Context, config.Config, int, string) error
-	})
-	if !ok {
-		return fmt.Errorf("GitHub client does not support environment resume")
-	}
-	return resumer.MarkEnvironmentResume(ctx, cfg, number, resumeID)
 }
 
 func (l *Loop) enableRateLimitGate() {

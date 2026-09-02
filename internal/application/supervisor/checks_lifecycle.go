@@ -173,11 +173,15 @@ func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, p
 		item.Session = nil
 		item.HeadSHA = pr.HeadSHA
 		item.PullRequestNumber = pr.Number
-		item.PullRequestChecksFailure = &state.PullRequestChecksFailure{
-			Origin: state.ChecksFailureOriginPullRequest, Phase: state.ChecksFailurePhaseRequired,
-			Code: state.ChecksFailureCodeRetryExhausted, Recoverable: true,
-			PullRequestURL: pr.URL, PullRequestNumber: pr.Number, Branch: pr.HeadRefName,
-			HeadSHA: pr.HeadSHA, ChecksStatus: "failure", RetryExhausted: true, FailedAt: now,
+		if item.ResourcePark == nil {
+			return fmt.Errorf("Issue #%d checks exhaustion did not capture a continuation checkpoint", current.Number)
+		}
+		item.ResourcePark.HeadSHA = pr.HeadSHA
+		item.ResourcePark.PullRequestURL = pr.URL
+		item.ResourcePark.PullRequestNumber = pr.Number
+		item.ResourcePark.Evidence = &state.ContinuationEvidence{
+			Origin: "pull_request_lifecycle", Phase: "required_checks",
+			Code: "checks_retry_exhausted", Status: "failure", ObservedAt: now,
 		}
 		item.UpdatedAt = now
 		return nil
@@ -202,10 +206,10 @@ func (l *Loop) blockPullRequestLifecycle(ctx context.Context, current state.Issu
 		"reason": reason, "pull_request_url": prURL,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
+		item.PullRequestURL = prURL
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.PullRequestURL = prURL
 		item.LastError = decision.LastError
 		item.FailureKind = decision.FailureKind
 		item.GitHubSync = decision.GitHubSync

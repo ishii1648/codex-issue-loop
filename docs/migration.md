@@ -1,8 +1,8 @@
 # 永続state schema / semantic migration runbook
 
-現行artifactのstorage schemaはv5、semantic contractはv2である。storageはv4からv5へのforward migrationをサポートする。binaryの`version --json`、install manifest、`migrate --json`はstorage schemaのcurrent/migration-fromとsemantic contractのcurrent/minimumを表示する。
+現行artifactのstorage schemaはv5、semantic contractはv3である。storageはv4からv5へのforward migrationと、v5 semantic v2からv3へのin-schema migrationをサポートする。binaryの`version --json`、install manifest、`migrate --json`はstorage schemaのcurrent/migration-fromとsemantic contractのcurrent/minimumを表示する。
 
-contract v2はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。`issues[].workspace`と実行statusの`issues[].execution_lease`を検査し、terminal capacityと中断provenanceを`ExecutionLease`、`ContinuationCheckpoint`、`Suspension`へ分離する。宣言、対象status、validator、migration ruleは`internal/domain/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
+contract v3はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。`issues[].workspace`と実行statusの`issues[].execution_lease`を検査し、terminal capacityと中断provenanceを`ExecutionLease`、`ContinuationCheckpoint`、`Suspension`へ分離する。v2からはgeneric checkpointのstageだけを`resume|publish|checks|conflict`へ正規化し、evidenceとsuspensionを保持する。宣言、対象status、validator、migration ruleは`internal/domain/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
 
 ## Read-only preview
 

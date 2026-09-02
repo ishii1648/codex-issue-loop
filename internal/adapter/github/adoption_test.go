@@ -8,11 +8,11 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
-func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
+func TestValidateMergedPullRequestFailsClosed(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
 	mergedAt := time.Now().UTC()
-	expected := MergedPullRequestAdoptionExpectation{
+	expected := MergedPullRequestExpectation{
 		IssueNumber: 7, PreviousStatus: issuedomain.StatusBlocked, Branch: "codex/issue-7-test",
 		BaseBranch: "main", HeadSHA: "head-7",
 	}
@@ -61,12 +61,12 @@ func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			remote := clone()
 			test.mutate(&remote)
-			if _, err := ValidateMergedPullRequestAdoption(cfg, remote, expected); err == nil {
+			if _, err := ValidateMergedPullRequest(cfg, remote, expected); err == nil {
 				t.Fatal("unsafe merged Pull Request adoption was accepted")
 			}
 		})
 	}
-	pr, err := ValidateMergedPullRequestAdoption(cfg, baseline, expected)
+	pr, err := ValidateMergedPullRequest(cfg, baseline, expected)
 	if err != nil || pr.Number != 11 {
 		t.Fatalf("valid merged Pull Request was rejected: pr=%+v err=%v", pr, err)
 	}
@@ -76,11 +76,11 @@ func TestValidateMergedPullRequestAdoptionFailsClosed(t *testing.T) {
 	expected.PullRequestURL = pr.URL
 	expected.PullRequestNumber = pr.Number
 	expected.MergeCommitSHA = pr.MergeCommitSHA
-	if _, err := ValidateMergedPullRequestAdoption(cfg, done, expected); err != nil {
+	if _, err := ValidateMergedPullRequest(cfg, done, expected); err != nil {
 		t.Fatalf("idempotent done synchronization was rejected: %v", err)
 	}
 	done.Issue.Labels = append(done.Issue.Labels, cfg.GitHub.FailedLabel)
-	if _, err := ValidateMergedPullRequestAdoption(cfg, done, expected); err == nil {
+	if _, err := ValidateMergedPullRequest(cfg, done, expected); err == nil {
 		t.Fatal("ambiguous done/failed synchronization was accepted")
 	}
 }

@@ -65,7 +65,6 @@ type Client interface {
 	MarkFailed(context.Context, config.Config, int, string, bool) error
 	MarkRunning(context.Context, config.Config, int) error
 	MarkConflictRetry(context.Context, config.Config, int, string) error
-	MarkPullRequestChecksRecovery(context.Context, config.Config, int, string) error
 	ReadyPullRequest(context.Context, config.Config, string) error
 	UpdatePullRequest(context.Context, config.Config, string) error
 	MergePullRequest(context.Context, config.Config, string) error
@@ -475,66 +474,6 @@ func (c CLI) MarkConflictRetry(ctx context.Context, cfg config.Config, number in
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:conflict-retry:%s -->", recoveryID)
 	body := marker + "\nPull Request conflict recovery was explicitly resumed using durable state."
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
-}
-
-// MarkEnvironmentResume removes only supervisor-owned terminal labels. Manual
-// exclusions such as do-not-automate are never removed by this operation.
-func (c CLI) MarkEnvironmentResume(ctx context.Context, cfg config.Config, number int, resumeID string) error {
-	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
-	for _, label := range cfg.GitHub.ExcludeLabels {
-		if strings.EqualFold(label, "blocked") {
-			remove = append(remove, label)
-		}
-	}
-	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
-		return err
-	}
-	marker := fmt.Sprintf("<!-- codex-issue-loop:environment-resume:%s -->", resumeID)
-	body := marker + "\nEnvironment-blocked worker execution was explicitly resumed using the existing worktree and durable state."
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
-}
-
-// MarkAnsweredWorkspaceRecovery resumes only the operator-confirmed legacy
-// needs-input/missing-Workspace chain. Its dedicated marker keeps this path
-// distinguishable from environment and ordinary answer continuation recovery.
-func (c CLI) MarkAnsweredWorkspaceRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
-	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
-	for _, label := range cfg.GitHub.ExcludeLabels {
-		if strings.EqualFold(label, "blocked") {
-			remove = append(remove, label)
-		}
-	}
-	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
-		return err
-	}
-	marker := fmt.Sprintf("<!-- codex-issue-loop:answered-workspace-recovery:%s -->", recoveryID)
-	body := marker + "\nThe exact answered needs-input continuation was explicitly recovered after validating its retained workspace and lease chain."
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
-}
-
-// MarkPublicationRecovery removes only non-exclusion supervisor state labels.
-// In particular, a concurrently added blocked/do-not-automate label is never
-// removed. The operation is idempotent through labels and the durable marker.
-func (c CLI) MarkPublicationRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
-	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
-	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
-		return err
-	}
-	marker := fmt.Sprintf("<!-- codex-issue-loop:publication-recovery:%s -->", recoveryID)
-	body := marker + "\nPre-publication failure recovery was explicitly resumed using the existing worktree and durable state."
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
-}
-
-// MarkPullRequestChecksRecovery returns only supervisor-owned failed state to
-// running. Manual/security exclusion labels are intentionally never removed.
-func (c CLI) MarkPullRequestChecksRecovery(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
-	remove := []string{cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel}
-	if err := c.editLabels(ctx, cfg.GitHub.Repo, number, []string{cfg.GitHub.RunningLabel}, remove); err != nil {
-		return err
-	}
-	marker := fmt.Sprintf("<!-- codex-issue-loop:checks-recovery:%s -->", recoveryID)
-	body := marker + "\nExternally repaired Pull Request checks were explicitly returned to the existing lifecycle."
 	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
 }
 

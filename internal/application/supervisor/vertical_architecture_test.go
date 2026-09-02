@@ -24,13 +24,14 @@ func TestVerticalLifecycleFilesBoundOrchestrationSize(t *testing.T) {
 	verticalFiles := []string{
 		"internal/application/supervisor/worker_execution.go",
 		"internal/application/supervisor/publication_lifecycle.go",
+		"internal/application/supervisor/continuation_stage.go",
 		"internal/application/supervisor/checks_lifecycle.go",
 		"internal/application/supervisor/conflict_lifecycle.go",
 		"internal/application/supervisor/github_sync_lifecycle.go",
 		"internal/application/app/installation.go",
 		"internal/application/app/operator_control.go",
 		"internal/application/app/operator_attention.go",
-		"internal/application/app/operator_recovery.go",
+		"internal/application/app/issue_resolution.go",
 	}
 	for path, limit := range mainFiles {
 		assertLineLimit(t, filepath.Join(root, path), limit)
@@ -41,7 +42,6 @@ func TestVerticalLifecycleFilesBoundOrchestrationSize(t *testing.T) {
 
 	exceptions := map[string]string{
 		"internal/application/supervisor/supervisor.go:processExisting": "one observation is converted to one domain decision before a single lifecycle dispatch switch",
-		"internal/application/app/operator_recovery.go:resumeBlocked":   "legacy recovery validates one exact event, GitHub, lease, workspace, and transaction chain without exposing partial mutation helpers",
 	}
 	for path := range mainFiles {
 		assertFunctionLimits(t, root, path, exceptions)
@@ -92,11 +92,12 @@ func TestVerticalLifecyclesOwnDecisionPersistenceAndEffects(t *testing.T) {
 	root := filepath.Clean(filepath.Join(filepath.Dir(current), "..", "..", ".."))
 	required := map[string][]string{
 		"internal/application/supervisor/worker_execution.go":      {"issuedomain.", "l.Store.Update(", "l.runWorker(", "l.GitHub."},
-		"internal/application/supervisor/publication_lifecycle.go": {"publication.", "l.Store.Update(", "l.Publisher.", "l.GitHub.Inspect("},
+		"internal/application/supervisor/publication_lifecycle.go": {"publication.", "l.Store.Update("},
+		"internal/application/supervisor/continuation_stage.go":    {"issuedomain.", "l.Store.Update(", "l.Publisher.", "l.GitHub.Inspect("},
 		"internal/application/supervisor/checks_lifecycle.go":      {"issuedomain.", "l.Store.Update(", "l.GitHub.", "l.inspectIssue("},
 		"internal/application/supervisor/conflict_lifecycle.go":    {"conflict.", "l.Store.Update(", "l.Conflicts.", "l.runWorker("},
 		"internal/application/supervisor/github_sync_lifecycle.go": {"state.", "l.Store.Update(", "l.GitHub."},
-		"internal/application/app/operator_recovery.go":            {"issuedomain.", "store.Update(", "client."},
+		"internal/application/app/issue_resolution.go":             {"issuedomain.", "planned.store.Update(", "client."},
 	}
 	for path, markers := range required {
 		data, err := os.ReadFile(filepath.Join(root, path))

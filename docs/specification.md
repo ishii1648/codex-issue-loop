@@ -357,15 +357,7 @@ agent-loop answer --request-id req_... --message-file -
 
 通常workerの`needs_input`は`input_requested` transactionでrequest provenanceと元lease全体を`resource_park`へ移し、GitHub needs-inputを維持したままadmissionから外す。回答済みclaim待機はresource/slotが空くまでschedulerのworker dispatch対象にせず、解放event後に同じrequest/run/parkを再検証して`resume_pending`へ進める。manual/security、PR conflict、publication監査、active worker、複数request、未知のlegacy stateはfail closedとする。continuationは保存workspaceと新lease owner generationをspawn直前に再検証する。
 
-### 6.6 retry
-
-```sh
-agent-loop retry --repo /absolute/path/to/repository --issue 123 --json
-```
-
-対象Issueが非activeな`blocked`で、原因がPR conflictであることを確認する。保存済みworktree、branch、open PRの対応をGitHubとGitで検査し、整合する場合だけ試行budgetを明示的に再開する。先にdurable stateへ`conflict_recovery_retry_requested`とGitHub同期intentを書き、blocked labelの除去、running label、idempotency marker付きcommentを同期する。無関係なblocked原因、missing branch/PR、別branchのPRは拒否し、新しいbranch/PRやforce pushは作らない。
-
-### 6.7 issue plan / issue resolve
+### 6.6 issue plan / issue resolve
 
 ```sh
 agent-loop issue plan --repo /absolute/path/to/repository --issue 123 --json
@@ -375,101 +367,19 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action cancel --json
 ```
 
-`issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`と、現在のprocess、managed worktree、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。
+`issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`と、現在のprocess、managed worktree、content SHA-256、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。`resume`とpublicationの`retry-stage`は保存時と現在のworktree HEAD・content SHA-256・base ancestryが一致しなければ拒否し、checksの`retry-stage`はcleanかつfully pushedなlocal/remote/PR HEAD一致を要求する。
 
 `issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`は保存checkpointから空slot・resource競合を再検査し、generationを一度だけ進めてExecutionLeaseを取得する。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずpending requestをcanceledへ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
 
 ambiguousなIssueはその`suspension`だけをquarantineする。terminal `blocked` / `failed`はPID/PGIDとExecutionLeaseを保持せず、他Issueのadmissionを妨げない。durable state、label、checkpointを手編集して判定を通してはならない。
 
-### 6.8 legacy v4 recovery（migration入力のみ）
+### 6.7 legacy v4 recovery（migration入力のみ）
 
-以下の旧scenario別仕様はv4 migration fixtureの解釈にだけ残す。v5 CLIには登録せず、operatorは§6.7の共通commandを使う。
+旧scenario別field、status、sync、substateはv4 raw fixtureをgeneric `ContinuationCheckpoint` / `Suspension` / `ContinuationEvidence`へ変換するmigration decoder内だけで解釈する。旧commandはCLIへ登録せず、v5 snapshotに旧fieldまたは旧lifecycle語彙があれば自動修復せずfail closedとする。
 
-#### retired: resume-blocked
+migrationはevent件数や順序から実行authorityを合成しない。保存済みexecution lease、workspace、session、result digest、Pull Request identityなどcanonical snapshot内の証拠だけをfoldし、不足・矛盾するIssueはそのIssueだけをquarantineして`cancel`以外を不許可にする。移行後のoperator操作は§6.6のgeneric commandだけを使う。
 
-```sh
-agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --confirm-prerequisite-resolved --json
-agent-loop resume-blocked --repo /absolute/path/to/repository --issue 123 --dry-run --json
-```
-
-`blocked_cause`がworker起因のenvironmentかつresumableであるIssueだけを対象とする。導入前のstateは、`failure_kind=issue`とsupervisor生成の厳密な`worker blocked: ...` errorに加え、durable history上で同一Issue・同一runの`issue_blocked`の直後のsequenceに`github_state_synced(state=blocked)`がある場合だけlegacy worker blockとして扱う。v0.6.9でfixture化された`issue: worker blocked: ...`も後方互換表現として明示的に許可するが、その他の部分一致は認めない。`issue_blocked` eventのtimestampとerror内の元reasonをtyped `blocked_cause`へ正規化する。旧startup reconciliationが直後に残した、同じrunかつ`previous_status=blocked`、`status=blocked`、reasonがmanual blocked label誤分類と完全一致する`startup_reconciled`と、そのchainをtyped化した既知の`startup_reconciled`だけは許容する。startupが既にtyped化したstateは、保存済み`blocked_cause`のorigin/kind/resumable/reason/blocked_atが復元値と完全一致する場合だけ同じlegacy recovery candidateとして扱う。event chainの欠損、複数候補、別run、sequence gap・順序不正、payload不一致、typed cause不一致、空時刻、security/manual provenance、その他の後続Issue eventはfail closedとする。
-
-新しいtyped worker environment blockは、worker resultを保存してPID/PGIDを0へした後、`issue_blocked` transaction内でactive leaseを`resource_park.original_lease`へ移す。park ID、元owner generation、slot、declared/resolved/actual resources、base SHA、reservation timestampを保持する一方、`issue.lease`は空にしてadmission競合から外す。run ID、worktree、branch、dirty changes、backend session、Goal、answers、attempt/continuation、blocked cause/reason/timeは変更せず、GitHubは`blocked`へ同期する。GitHub同期途中で停止した場合は同じ`github_sync=blocked`から再実行し、parkを作り直さない。導入前から存在する同期済みtyped blockも、startup reconciliationがsupervisor-owned `blocked`だけ、open PRなし、保存PID/PGIDなしを確認できた場合だけ自動parkする。
-
-startup reconciliationは上記chainが成立し、現在のGitHub exclusionがsupervisor-owned `blocked` labelだけである場合に限り正規化する。`do-not-automate`等の別exclusionが併存する場合やGitHub `blocked` labelがない場合はmanual exclusionとして扱い、resumable provenanceを生成しない。`resume-blocked`も同じdurable history検証器を使い、markerだけのlegacy stateを認めない。typed化前のstartupがleaseを失わせた場合は、同一runの単一`lease_reserved`に保存された非空の`base_sha`と、その後の`worker_started`に保存されたworktree/branchが現在値と一致するときだけ、最小の`repo:*`を保守的に再予約する。現在のconfigured baseやHEADから欠損SHAを推測せず、他のleaseと競合すれば拒否する。通常のtyped worker blockは、このlegacy chainとtyped causeの完全一致がなければmissing leaseを補わない。
-
-park済みblockはoperatorの明示確認、active process不在、pending request不在、同じrun/worktree/branch/session、GitHub open Issueとblocked label、保存PR、original base SHAのHEAD祖先性、dirty/unpushed状態を検査する。`environment_resume_requested` transactionは同じstate revisionとpark ID/元owner/claimを再確認し、全active leaseとのresource競合と`queue.concurrency`内の空slotを検査する。競合中は相手Issue番号を返し、相手leaseを解放・移譲しない。成功時は`lease_generation`を単調増加し、新ownerを`resource_park.resume_owner`、active lease、event payloadへ同時保存する。GitHub同期中の`environment_resume_pending`もslotを占有するため、同じslotの別workerを開始しない。dirty changes、session、回答、resource metadataを保持し、durable stateの保存後にblocked label除去、running label、resume ID付き冪等commentを同期する。同期途中で停止しても同じresume ID/ownerへ収束し、重複lease、worker、commentを作らない。
-
-workspace provenance導入前のenvironment blockで`Workspace`だけが欠損している場合は、同じ明示確認付き`resume-blocked`だけが保存worktreeを回復対象にできる。CLIはworker spawnと同じ`ValidateLaunch`を使い、canonical path、managed root、symlink component不在、Git top-level、保存branch、設定repositoryと同じGit common dir、registered main checkoutとの非同一性を再検証する。既存`Workspace`がある場合はpath、branch、repo ID、GitHub repository identity、Git common dir、main checkoutの完全一致を要求し、不一致を補正しない。欠損時は検証から作った`Workspace`と`environment_resume_pending` transition、lease再取得を単一`environment_resume_requested` transactionへ保存する。そのeventの`workspace_recovery`には旧provenance欠損、operator confirmation、expected/actual path・branch・repository identity・Git common dir・main checkout・validator checksを記録する。dirty/staged/untracked内容やHEADには触れず、mainが先行していてもrebase、reset、差分移植を行わない。
-
-既に`environment_resume_pending`へ遷移したのに`Workspace`が欠けるstateは、旧処理の部分完了か改変かを一意に判定できないためfail closedとし、別transactionでbackfillしない。startup/periodic reconciliationも欠損provenanceを生成しない。validator後にstate revision、worker PID/PGID、request、lease/park、run/worktree/branch、既存provenanceのいずれかが変化した場合はtransactionを拒否する。成功transaction後の再実行は保存済みprovenanceを同じvalidatorで再検証して同じresume ID/lease ownerへ収束し、generationやworker spawnを二重化しない。
-
-ただしv0.6.14で明示resumeした後、spawn前validatorの`Workspace`欠損だけで停止したrecordは限定例外とする。#150で対象にしたpark由来の`environment_resume.status=requested|github_synced`形式に加え、実際のlegacy lease recovery形式はcurrent `environment_resume.status=running`、resource parkなし、active leaseあり、`session_id/session=null`である。後者を認めるauthorityはerror文字列ではなく、同一Issue/runの単一`lease_reserved`（original generation 1、同じslot/base SHA）→`issue_claimed`→保存worktree/branchと`identity.backend/runtime_version`だけを持つ初回`worker_started`→`pid/pgid`だけのprocess eventとpreflight/retry/continuationを2 continuation分exact orderで反復→legacy `issue_blocked`→blocked同期→既知のmanual誤分類reconciliation 5件→typed provenance reconciliation 1件→`environment_resume_requested`→resume IDなしの`github_state_synced(state=environment_resume)`→同じresume IDありの同期→`worker_started(mode=environment_block_resume)`→全境界check成功を含む`worker_workspace_rejected`→blocked同期、という全27件の順序付きdurable chain全体である。6 reconciliationは後世のresource park fieldを持たず`pull_requests=null`で、前半4件には`RemoteHead/RemoteConsistent`がなく後半2件だけにあり、全件の`worktree.Head`が実行時に再検証した同一dirty HEADと一致しなければならない。original leaseの`base_sha`はpublication baseとして別に検証し、このHEADとは一致しない。request payloadは既知write patternどおり`legacy_worker_block=true`、`legacy_lease_recovered=true`、resource parkなし、`lease_owner` / `lease_slot`なしでなければならない。省略されたowner/slotはcurrent generation 2のfenced leaseとoriginal generation 1 eventから一意に立証し、回復transactionだけがgeneration 3へ進める。
-
-この限定例外も通常のmissing-provenance recoveryと同じ`ValidateLaunch`、GitHubのsupervisor-owned `blocked` label、同じresume marker exactly 2件、failure marker exactly 2件、完全一致検査、欠損時だけのatomic backfill、`workspace_recovery`監査payloadを使う。別resume IDは認めず、failure commentはoriginal worker block reasonとworkspace rejection reasonを各1件、reason digest由来の固有markerを含む既知本文で保持しなければならない。park由来形式は既存ownerを保持する一方、legacy lease recovery形式はcurrent ownerをauthorityとして同じrun/slot/resourcesを新しいgenerationへ1回だけfenceし、Workspace、`environment_resume_pending`、ownerを単一transactionへ保存する。既存resume ID、run/worktree/branch、original/current base SHAは変えない。full 27-event形式では欠損sessionをevent、run log、filesystem、Codex threadから推測・backfillせず、同じworktree/branchを渡した新規worker sessionを開始し、そこで新しく得たprovenanceだけを保存する。short/typed/通常形式のsession検証は緩和しない。current supervisor safety causeは監査payloadへ保存し、検証済み`EnvironmentResume.PreviousReason`をworker-origin / environment / resumable causeへ復元する。並行実行はstate revisionで一方だけがcommitし、GitHub同期境界のrestart/retryは保存Workspaceと新ownerを再検証するidempotent pathへ収束する。workerにはsupervisor validator errorではなく同じ`PreviousReason`を渡し、dirty/staged/untracked差分とHEADを変更しない。status、legacy owner/slot欠損、2段階同期のいずれかだけを単独で一般許可せず、chainの欠損・重複・順序不正・supersede・cross-run、resume ID、SHA、slot/generation、worktree/branch/session、GitHub marker/reasonの不一致はstate・label・worktreeを変更せず拒否する。
-
-startup/periodic reconciliationはinspectionに使ったIssue snapshotと更新transaction内の最新Issueが一致する場合だけ判定を適用し、途中で変化した場合は再inspectionする。`environment_resume_pending`かつ`github_sync=environment_resume`では旧blocked labelを手動exclusionとして扱わず、leaseを保持する。旧実装の競合で`status=blocked`、`environment_resume.status=requested|github_synced`となった場合は、`resume-blocked`が同じresume ID、保存済み`base_sha`、worktree/branch/run、GitHub Issue/PR/label/comment、process/requestを再検証し、leaseを`repo:*`として競合なしに再予約できる場合だけ`environment_resume_recovered`で復旧する。保存済みSHAをstateまたは保持event historyから回復できない場合は、現在のbaseを推測せず拒否する。
-
-PR conflict、手動exclusion、security block、failed、上記markerのないlegacy block、running/completed、closed Issue、active worker、pending request、missing/inconsistent worktree・branch・PR、改変または未知のpark provenanceを拒否する。`retry`と`resume-blocked`は交換可能ではなく、state fileやsupervisor-owned labelの手編集を復旧手順にしない。後続Issueでbaseが進んでもoriginal base SHAとdirty worktreeは保持し、publication auditと通常のPR conflict recoveryへ接続する。
-
-`--dry-run --json`（または`explain-recovery --operation resume-blocked`）はschema version、stable predicate code、`pass`/`fail`/`unknown`、redactedなexpected/actual evidence summary、evidence source、fixability、remediationを返す。event count、payload shape、session、marker、timestamp、lease、worktree、branch/remote、GitHub Issue/PR/comment markerを安全に全件評価し、最初の不一致では停止しない。mutating pathは同じpredicate evaluatorとrefusal codeを使う。診断中はstate/eventをrepairせず、GitHubはread endpointだけを使用する。
-
-### 6.8 recover-answered-workspace
-
-```sh
-agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 123 --dry-run --json
-agent-loop recover-answered-workspace --repo /absolute/path/to/repository --issue 123 --confirm-exact-chain --json
-```
-
-対象は、provenance導入前の同一runに `lease_reserved(generation 1)`、`issue_claimed`、保存worktree/branchの初回`worker_started`、有効なPID/PGID、preflight、通常`input_requested`とneeds-input GitHub同期、同一requestの単一`answer_recorded`による同一slot/resources/baseのgeneration 2再取得、`worker_started(mode=user_answer_resume)`、全local boundary check成功かつ`saved workspace provenance is missing`だけの`worker_workspace_rejected`、blocked GitHub同期がexact orderで各1件存在する11-event chainに限定する。current stateは同じrun/session/request/answer/park、active generation 2 lease、`resource_park.status=resumed`、PID/PGID不在、pending request不在、`blocked_cause=supervisor/worker_workspace/non-resumable`でなければならない。`Workspace`はnull、または11 events直後のexactly one `workspace_provenance_recovered`と一致する`workspace_provenance_recovery.status=verified`に限る。後者は同じrun/status/worktree/branch/repository/HEAD/content fingerprint/validatorとoperator confirmationをevent・audit・現在のfilesystem間で完全照合する。
-
-previewとconfirmはいずれもworker spawnと同じ`ValidateLaunch`でcanonical path、managed root、symlink component不在、Git top-level、保存branch、Git common dir、configured repository identity、registered main checkoutとの非同一性を再検証する。さらに保存baseが同repositoryのcommitであること、HEADとtracked/staged/untracked fingerprint、open/no-PR GitHub Issue、supervisor-owned blocked label、request marker、blocked reason由来failure markerのcardinalityを検査する。
-
-confirmはoperator confirmation、old provenance missing、expected/actual workspace identity、validator checks、answer digest、HEAD/content digest、old/new ownerを`answered_workspace_recovery_requested`へ保存する。同じdurable transactionで、欠損時だけ検証から生成した`Workspace`をbackfillし、verified provenanceがある場合はそのidentityとcapture metadataを保持したまま、leaseを同じrunのgeneration 2から3へfenceし、`resume_pending`と専用GitHub同期intentへ遷移する。answer/request/park/session、attempt/continuation、run/worktree/branch/base、generic recovery audit、dirty/staged/untracked内容、HEADは変更しない。専用GitHub marker同期後は通常の回答continuationが同じsession/worktreeで起動する。
-
-missing/duplicate/reordered/superseded/cross-run event、別request/park/session/branch/repository/base/lease、generation/slot/resource mismatch、未証明または不一致の既存Workspace、別HEAD/fingerprint/validator error、active worker、pending request、manual/security label、closed Issue、PR、marker mismatchは副作用なく拒否する。startupでsilent backfillせず、通常のenvironment recoveryやerror文字列だけでは許可しない。transaction、GitHub同期、並行CLI、supervisor restartの再実行は保存recovery IDとgeneration 3へ収束し、fence、spawn、commentを二重化しない。
-
-### 6.9 recover-workspace
-
-```sh
-agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --dry-run --json
-agent-loop recover-workspace --repo /absolute/path/to/repository --issue 123 --confirm-verified-workspace --json
-```
-
-`recover-workspace`は、実行境界を越えたlegacy `blocked` / `failed` recordのmissing `Workspace`だけを検証してbackfillする。対象はfully synchronizedな保存run/worktree/branch、active PID/PGIDなし、pending requestなし、open GitHub Issue、durable statusと一致するsupervisorの`blocked`または`failed` lifecycle labelだけを持つrecordに限定する。保存PRがある場合はsame-repositoryのopen PRがちょうど1件で、URL、head/base branch、remote/local HEADが一致しなければならない。PRが保存されていない場合は同branchのPRが存在してはならない。
-
-初回worker spawnと同じ`ValidateLaunch`でcanonical path、managed root、symlink不在、Git top-level、branch、Git common dir、repository ID、main checkoutとの非同一性を検証し、worktree content digestとHEADを監査する。成功transactionは`workspace`、`workspace_provenance_recovery`、`workspace_provenance_recovered` eventだけを追加し、status、run、lease、resource park、session、retry accounting、GitHub、worktreeを変更しない。再実行は保存Workspaceと監査record、現在のHEAD/content digestを照合してstate revisionを増やさない。
-
-これは実行再開のauthorityを与えるコマンドではない。exact answered missing-workspace lifecycle candidateのpreviewは`eligible=false`、`lifecycle_candidate=answered_missing_workspace`、専用command remediationを返し、generic confirmを拒否する。`resume-blocked`、`retry`、`recover-checks`、`recover-publication`、`recover-answered-workspace`のpredicateを緩和せず、各lifecycle transitionは引き続き専用コマンドまたはsupervisorが判断する。
-
-### 6.10 recover-checks
-
-```sh
-agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --confirm-external-fix --json
-agent-loop recover-checks --repo /absolute/path/to/repository --issue 123 --dry-run --json
-```
-
-保存済みPRのrequired checksがfailureとなりworker retry budgetを使い切ったterminal `failed`だけを対象にする。失敗時のPR URL・number・branch・head SHAとretry exhaustionをimmutableなtyped provenanceへ保存し、`status --json`と`watch`はretained leaseでqueueを塞いでいる復旧可能状態を`recoverable_checks_failure`として通知する。
-
-v0.6.20が作成した限定legacy recordでは、conflict publication、同headのchecks failure、repair worker completion、`repository=`が空のpublisher `pull_request_mismatch`、publication retry、別lease generationのfinal retry exhaustion、failed sync、同一open PRを観測する1件以上のterminal reconciliationが同じdurable event historyに一意かつ順序どおり存在する場合だけtyped provenanceを再構成する。event欠落・重複・順序不整合、cross-run/generation、PR URL・number・branch・base・head不一致、fork、別publisher failure、active conflict recoveryは副作用なく拒否する。
-
-operatorが同じPR branchへ外部commitをpushした後、run、managed worktree、branch、configured repositoryをhead repositoryとするopen PR、retained fenced lease、active process不在、pending request不在、cleanかつfully pushedなlocal/remote head、GitHub failed label、manual/security exclusion不在を再検証する。新headが失敗時headと同じ場合やchecksがfailureのままなら再開しない。pendingまたはsuccessではgeneration、confirmation時刻、old/new head SHA、checks結果とGitHub同期intentを先にdurable state/eventへ保存し、failed labelをrunningへ変えて冪等markerを残す。
-
-同期後は同じbranch/PRの`awaiting_checks`へ戻し、通常のDraft解除、auto merge、done/close、merge確認後のlease releaseを再利用する。worker attempts、continuations、run historyをresetせず、新branch、PR、push、worker実行を作らない。GitHub同期途中の停止・再起動は保存intentをauthoritative Issue/PR/head/checksと再照合してから同じmarkerへ収束する。closed-without-merge、head/branch/PR不一致、dirty/unpushed worktree、active worker、pending request、manual/security exclusionはstateとlabelを変更せずfail closedとする。
-
-### 6.11 adopt-merged-pr
-
-```sh
-agent-loop adopt-merged-pr --repo /absolute/path/to/repository --issue 123 --confirm-merged-pr-adoption --json
-```
-
-保存済みPR URLが空のterminal `blocked`または`failed`で、operatorが保存branchから作成したPRをすでにmergeした場合だけを対象にする。run ID、managed worktree、local/remote branchとhead、clean/fully pushed状態、retained leaseのowner generation・resource・base SHA、baseからheadへの履歴、active PID/PGID不在、pending request不在を検証する。GitHubではsupervisor-owned terminal markerと対応label、target repo、head repository、保存branch、configured base、head SHA、merged state、merge commit SHAを検証し、PRが0件または複数なら拒否する。
-
-検証後はadoption ID、generation、confirmation/adoption時刻、PR URL/number、head SHA、merge SHA、base branch、GitHub同期intentをdurable event/stateへ保存する同じtransactionで`completed`へ遷移し、fenced leaseを解放する。attempt、continuation、session、Goal、回答、worktree、branch、worker historyは変更しない。GitHub同期途中で停止した場合は同じコマンドを再実行し、authoritative PRを再検証して同じadoptionへ冪等に収束する。並行稼働中の旧supervisorが未知のoptional snapshot fieldを落とした場合も、一意なadoption/sync event、completed snapshot、GitHub、worktreeを再検証してmetadataだけを復元し、lease releaseやadoption generationを繰り返さない。
-
-open/closed-unmerged PR、別repo/branch/base/head、dirty/unpushed worktree、active worker、pending request、running/completed state、missing/inconsistent lease、manual/security exclusion、supervisor markerのないterminal stateは変更せずfail closedとする。コマンドはbranch、commit、push、PR、mergeを新規作成せず、state fileやlabelの手編集を代替手順にしない。
-
-### 6.12 recover-quarantined-snapshot
+### 6.8 recover-quarantined-snapshot
 
 ```sh
 agent-loop recover-quarantined-snapshot --repo /absolute/path/to/repository --backup /exact/recovery/backup --dry-run --json
@@ -480,7 +390,7 @@ aggregate validator導入前の`completed + pull_request_merged` recordがPR URL
 
 `--dry-run`とconfirmはいずれもGitHubのmerged PR一覧をread-onlyで取得し、各recordの保存URL・branch・configured base・head repositoryが一意なmerged PRと一致することを検証する。GitHubのPR numberと最終head SHAをauthoritative値として補完し、旧headが途中値ならbefore/afterをreportとeventへ残す。applyは元quarantine backupを変更せず、現在のrecovery markerも別のmanaged backupへ保存し、`legacy_merged_identity_quarantine_recovered` eventを追加した整合snapshot/event chainへ置換する。Issue status、run、attempt/continuation、session、回答、worktree、lease、GitHub labelは変更しない。これは汎用破損復旧ではなく、running LaunchAgent、open/fork/別branch PR、URL/number不一致、追加invariant違反、別backupでは副作用なくfail closedとする。
 
-### 6.13 終了コード
+### 6.9 終了コード
 
 | code | 意味 |
 | --- | --- |
@@ -547,7 +457,7 @@ starting ──► polling ◄──────────────┐
 
 running ──fatal/nonrecoverable──► blocked
 resolving_conflict ──budget超過/nonrecoverable──► blocked
-failed(typed pre-publication) ──operator確認──► publication_recovery_pending ──publish成功──► awaiting_checks
+blocked/failed ──generic resolution──► resume_pending / awaiting_checks / resolving_conflict
 ```
 
 `needs_input` はIssue単位の状態であり、`continue_after_needs_input: true` の場合、supervisor全体は別Issueのpollingを続けてよい。ただし同一worktreeは回答まで変更しない。
@@ -561,7 +471,6 @@ failed(typed pre-publication) ──operator確認──► publication_recovery
 - `awaiting_checks`
 - `awaiting_merge`
 - `resolving_conflict`
-- `publication_recovery_pending`
 - `completed`
 - `failed`
 - `blocked`
@@ -823,16 +732,11 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `answer_recorded`
 - `retry_scheduled`
 - `publication_retry_scheduled`
-- `environment_resume_requested`
-- `environment_resume_recovered`
-- `answered_workspace_recovery_requested`
+- `issue_resolution_requested`
+- `issue_resolution_synchronized`
 - `publication_failed`
-- `publication_recovery_requested`
-- `publication_recovery_attempt_started`
-- `publication_recovery_attempt_resumed`
-- `publication_recovery_attempt_failed`
-- `publication_recovery_refused`
-- `publication_recovery_succeeded`
+- `continuation_stage_started`
+- `continuation_stage_completed`
 - `issue_completed`
 - `issue_failed`
 - `github_state_synced`
@@ -858,13 +762,13 @@ transactionなしでsnapshotとevent logが食い違う場合、途中に壊れ�
 
 ### 12.4 永続schema migration
 
-config、registry、state、active event log、prepared transactionの現行storage schemaはv5、state semantic contractはv2とする。release artifactは`state_schema_current=5`、`state_schema_migration_from=4`、`semantic_contract_current=2`、`semantic_contract_minimum=1`を`version --json`とinstall manifestへ埋め込む。v3以下、v6以上、未知semantic versionは自動変換しない。
+config、registry、state、active event log、prepared transactionの現行storage schemaはv5、state semantic contractはv3とする。release artifactは`state_schema_current=5`、`state_schema_migration_from=4`、`semantic_contract_current=3`、`semantic_contract_minimum=1`を`version --json`とinstall manifestへ埋め込む。storage v3以下、v6以上、semantic minimum未満またはcurrent超過は自動変換しない。
 
-semantic contractはfieldをoptional、observational、execution-required provenanceへ分類するversioned sourceである。同じ宣言からruntime validator、migration preview、CI ruleを導出する。execution-required fieldの追加にdeterministic migrationまたはstable non-migratable codeと運用手順がなければrelease checkを失敗させる。現v2では`issues[].workspace`と実行statusの`issues[].execution_lease`を検証する。
+semantic contractはfieldをoptional、observational、execution-required provenanceへ分類するversioned sourceである。同じ宣言からruntime validator、migration preview、CI ruleを導出する。execution-required fieldの追加にdeterministic migrationまたはstable non-migratable codeと運用手順がなければrelease checkを失敗させる。現v3では`issues[].workspace`と実行statusの`issues[].execution_lease`を検証し、checkpoint stageを`resume|publish|checks|conflict`へ固定する。
 
 `migrate --json`はsupported v4 stateへ新validatorをread-onlyで適用し、Issueごとのmigratable/non-migratable、stable code、理由、ruleをJSONで返す。scenario別recovery fieldをcanonical snapshotだけからcheckpoint/suspensionへfoldし、ambiguousなIssueだけをquarantineする。
 
-v4→v5かつsemantic v1→v2 migrationは次の順序で行う。
+v4→v5かつsemantic v1→v3、またはv5 semantic v2→v3 migrationは次の順序で行う。v2→v3はgeneric checkpoint stageだけを正規化し、suspension/evidenceをbyte-equivalentな意味で保持する。
 
 1. 全登録LaunchAgentが停止中であることを確認する
 2. config、registry、state、active event、transactionをchecksum付きmigration backupへcopyする

@@ -47,6 +47,61 @@ func migrateV5StateObject(object map[string]json.RawMessage, migratedAt time.Tim
 	return nil
 }
 
+// normalizeV5SemanticStateObject performs the only in-schema semantic v2 to
+// v3 rewrite. Scenario-specific v5 fields remain rejected by Snapshot decoding;
+// only generic checkpoint wire values created by the v4 migration are changed.
+func normalizeV5SemanticStateObject(object map[string]json.RawMessage) error {
+	var issues map[string]json.RawMessage
+	if err := json.Unmarshal(object["issues"], &issues); err != nil {
+		return fmt.Errorf("decode semantic migration Issues: %w", err)
+	}
+	for key, raw := range issues {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return fmt.Errorf("decode semantic migration Issue %s: %w", key, err)
+		}
+		checkpoint := item["continuation_checkpoint"]
+		if len(checkpoint) == 0 || string(checkpoint) == "null" {
+			continue
+		}
+		var value map[string]json.RawMessage
+		if err := json.Unmarshal(checkpoint, &value); err != nil {
+			return fmt.Errorf("decode semantic migration Issue %s checkpoint: %w", key, err)
+		}
+		stage, err := normalizeContinuationStage(rawString(value["stage"]))
+		if err != nil {
+			return fmt.Errorf("Issue %s: %w", key, err)
+		}
+		value["stage"] = mustRaw(stage)
+		switch kind := rawString(value["kind"]); kind {
+		case "", "needs_input":
+		case "environment_block":
+			delete(value, "kind")
+		default:
+			return fmt.Errorf("Issue %s: unknown continuation checkpoint kind %q", key, kind)
+		}
+		item["continuation_checkpoint"] = mustMarshal(value)
+		issues[key] = mustMarshal(item)
+	}
+	object["issues"] = mustMarshal(issues)
+	return nil
+}
+
+func normalizeContinuationStage(stage string) (string, error) {
+	switch stage {
+	case "resume", "resume_pending", "environment_resume_pending":
+		return "resume", nil
+	case "publish", "publication_recovery_pending":
+		return "publish", nil
+	case "checks", "pull_request_checks_recovery_pending", "awaiting_checks", "awaiting_merge":
+		return "checks", nil
+	case "conflict", "resolving_conflict":
+		return "conflict", nil
+	default:
+		return "", fmt.Errorf("unknown continuation checkpoint stage %q", stage)
+	}
+}
+
 func migrateV5Issue(key string, issue map[string]json.RawMessage, migratedAt time.Time) error {
 	status := rawString(issue["status"])
 	originalStatus := status
@@ -60,6 +115,10 @@ func migrateV5Issue(key string, issue map[string]json.RawMessage, migratedAt tim
 	if legacyScenario {
 		status = "blocked"
 		issue["status"] = mustRaw(status)
+	}
+	switch rawString(issue["github_sync"]) {
+	case "environment_resume", "publication_recovery", "pull_request_checks_recovery", "answered_workspace_recovery":
+		delete(issue, "github_sync")
 	}
 	terminal := status == "blocked" || status == "failed" || status == "completed"
 	missingLease := legacyExecutionStatus(status) && (len(lease) == 0 || string(lease) == "null")
@@ -115,6 +174,53 @@ func migrateV5Issue(key string, issue map[string]json.RawMessage, migratedAt tim
 		copyRaw(value, "pull_request_number", issue)
 		checkpoint = mustMarshal(value)
 	}
+	if len(checkpoint) > 0 && string(checkpoint) != "null" {
+		var value map[string]json.RawMessage
+		if err := json.Unmarshal(checkpoint, &value); err != nil {
+			return fmt.Errorf("decode migrated Issue %s continuation metadata: %w", key, err)
+		}
+		if raw := issue["answered_workspace_recovery"]; len(raw) > 0 && string(raw) != "null" {
+			var answered struct {
+				RequestID      string `json:"request_id"`
+				ResourceParkID string `json:"resource_park_id"`
+			}
+			if err := json.Unmarshal(raw, &answered); err != nil {
+				return fmt.Errorf("decode migrated Issue %s answered checkpoint: %w", key, err)
+			}
+			if answered.RequestID != "" {
+				value["kind"] = mustRaw("needs_input")
+				value["request_id"] = mustRaw(answered.RequestID)
+			}
+			if rawString(value["id"]) == "" && answered.ResourceParkID != "" {
+				value["id"] = mustRaw(answered.ResourceParkID)
+			}
+		}
+		for _, field := range []string{"publication_failure", "pull_request_checks_failure"} {
+			raw := issue[field]
+			if len(raw) == 0 || string(raw) == "null" {
+				continue
+			}
+			var failure struct {
+				Origin   string    `json:"origin"`
+				Phase    string    `json:"phase"`
+				Code     string    `json:"code"`
+				Status   string    `json:"checks_status"`
+				FailedAt time.Time `json:"failed_at"`
+			}
+			if err := json.Unmarshal(raw, &failure); err != nil {
+				return fmt.Errorf("decode migrated Issue %s failure evidence: %w", key, err)
+			}
+			if failure.Status == "" {
+				failure.Status = "failure"
+			}
+			value["evidence"] = mustMarshal(map[string]any{
+				"origin": failure.Origin, "phase": failure.Phase, "code": failure.Code,
+				"status": failure.Status, "observed_at": failure.FailedAt,
+			})
+			break
+		}
+		checkpoint = mustMarshal(value)
+	}
 
 	if terminal {
 		delete(issue, "execution_lease")
@@ -140,7 +246,7 @@ func migrateV5Issue(key string, issue map[string]json.RawMessage, migratedAt tim
 			checkpointID = value.ID
 		}
 		issue["suspension"] = mustMarshal(map[string]any{
-			"id": "suspension_migrated_" + key, "status": suspensionStatus, "reason_code": reasonCode,
+			"id": "suspension_migrated_" + key, "origin": legacySuspensionOrigin(issue), "status": suspensionStatus, "reason_code": reasonCode,
 			"recoverability": recoverability, "reason": reason, "missing_evidence": missing,
 			"allowed_actions": actions, "checkpoint_id": checkpointID, "suspended_at": migratedAt,
 		})
@@ -151,20 +257,32 @@ func migrateV5Issue(key string, issue map[string]json.RawMessage, migratedAt tim
 	return nil
 }
 
+func legacySuspensionOrigin(issue map[string]json.RawMessage) string {
+	if raw := issue["blocked_cause"]; len(raw) > 0 && string(raw) != "null" {
+		var cause struct {
+			Origin string `json:"origin"`
+		}
+		if json.Unmarshal(raw, &cause) == nil && cause.Origin != "" {
+			return cause.Origin
+		}
+	}
+	return "migration"
+}
+
 func legacyCheckpointStage(issue map[string]json.RawMessage, originalStatus string) string {
 	if raw := issue["publication_failure"]; len(raw) > 0 && string(raw) != "null" {
-		return "publication_recovery_pending"
+		return "publish"
 	}
 	if raw := issue["pull_request_checks_failure"]; len(raw) > 0 && string(raw) != "null" {
-		return "pull_request_checks_recovery_pending"
+		return "checks"
 	}
 	if rawString(issue["pull_request_url"]) != "" {
-		return "awaiting_checks"
+		return "checks"
 	}
-	if originalStatus != "" && originalStatus != "blocked" && originalStatus != "failed" && originalStatus != "completed" {
-		return originalStatus
+	if originalStatus == "resolving_conflict" {
+		return "conflict"
 	}
-	return "resume_pending"
+	return "resume"
 }
 
 func legacySuspension(issue map[string]json.RawMessage, forceQuarantine bool) (string, string, string, []string, []string) {

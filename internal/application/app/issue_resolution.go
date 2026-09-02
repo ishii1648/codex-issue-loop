@@ -3,10 +3,12 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
@@ -41,22 +44,27 @@ type issuePlanReport struct {
 }
 
 type issuePlanningContext struct {
-	ghPath     string
-	cfg        config.Config
-	store      state.Store
-	snapshot   state.Snapshot
-	issue      *state.Issue
-	remote     gh.RemoteState
-	remoteErr  error
-	launch     worktree.LaunchValidation
-	launchErr  error
-	inspection worktree.Inspection
-	inspectErr error
-	baseOK     bool
-	baseErr    error
-	workerLive bool
-	pending    []string
-	report     issuePlanReport
+	ghPath            string
+	cfg               config.Config
+	store             state.Store
+	snapshot          state.Snapshot
+	issue             *state.Issue
+	remote            gh.RemoteState
+	remoteErr         error
+	launch            worktree.LaunchValidation
+	launchErr         error
+	inspection        worktree.Inspection
+	inspectErr        error
+	worktreeSHA256    string
+	worktreeDigestErr error
+	baseOK            bool
+	baseErr           error
+	workerLive        bool
+	pending           []string
+	resultSummary     string
+	resultSHA256      string
+	resultErr         error
+	report            issuePlanReport
 }
 
 func (a App) issueCommand(ctx context.Context, l layout.Layout, args []string) error {
@@ -140,10 +148,24 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 	if launchErr == nil && launch.Valid {
 		inspection, inspectErr = manager.Inspect(ctx, cfg, item.Worktree, item.Branch)
 	}
+	worktreeSHA256, worktreeDigestErr := "", error(nil)
+	if inspectErr == nil && inspection.Valid {
+		worktreeSHA256, worktreeDigestErr = manager.ContentDigest(ctx, item.Worktree)
+	}
 	baseOK, baseErr := checkpointBaseAncestor(ctx, entry.Commands["git"], item, inspection)
 	remote, remoteErr := (gh.CLI{Path: entry.Commands["gh"], Secrets: cfg.RedactionValues()}).Inspect(ctx, cfg, number, item.Branch)
 	pending := pendingRequestIDs(snapshot, number)
-	actions := plannedIssueActions(cfg, item, workerLive, launch, launchErr, inspection, inspectErr, baseOK, baseErr, pending, remote, remoteErr)
+	resultSummary, resultSHA256, resultErr := "", "", error(nil)
+	if item.ResourcePark != nil && item.ResourcePark.Stage == issuedomain.ContinuationStagePublish {
+		result, encoded, loadErr := worker.LoadLatestCompletedResult(filepath.Join(store.Dir, "runs", item.RunID))
+		if loadErr != nil {
+			resultErr = loadErr
+		} else {
+			resultSummary = result.Summary
+			resultSHA256 = fmt.Sprintf("%x", sha256.Sum256(encoded))
+		}
+	}
+	actions := plannedIssueActions(cfg, item, workerLive, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, pending, remote, remoteErr, resultErr)
 	after, readErr := os.ReadFile(store.StatePath())
 	readOnly := readErr == nil && bytes.Equal(before, after)
 	report := issuePlanReport{
@@ -155,20 +177,27 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 			"git_valid": inspectErr == nil && inspection.Valid,
 			"git_error": errorText(inspectErr), "git_head": inspection.Head, "git_remote_head": inspection.RemoteHead,
 			"git_dirty": inspection.Dirty, "git_unpushed": inspection.UnpushedCommits,
-			"checkpoint_base_ancestor": baseOK, "checkpoint_base_error": errorText(baseErr),
+			"worktree_sha256": worktreeSHA256, "worktree_digest_error": errorText(worktreeDigestErr),
+			"checkpoint_worktree_sha256": checkpointWorktreeSHA256(item),
+			"checkpoint_base_ancestor":   baseOK, "checkpoint_base_error": errorText(baseErr),
 			"github_error": errorText(remoteErr), "open_pull_requests": countOpenPullRequests(remote.PullRequests),
-			"pending_request_ids": pending,
+			"pending_request_ids":       pending,
+			"publication_result_sha256": resultSHA256,
+			"publication_result_error":  errorText(resultErr),
 		},
 		Actions: actions, ReadOnly: readOnly,
 	}
 	return issuePlanningContext{ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, issue: item,
 		remote: remote, remoteErr: remoteErr, launch: launch, launchErr: launchErr,
-		inspection: inspection, inspectErr: inspectErr, baseOK: baseOK, baseErr: baseErr,
-		workerLive: workerLive, pending: pending, report: report}, nil
+		inspection: inspection, inspectErr: inspectErr, worktreeSHA256: worktreeSHA256, worktreeDigestErr: worktreeDigestErr,
+		baseOK: baseOK, baseErr: baseErr,
+		workerLive: workerLive, pending: pending, resultSummary: resultSummary, resultSHA256: resultSHA256, resultErr: resultErr, report: report}, nil
 }
 
 func plannedIssueActions(cfg config.Config, item *state.Issue, workerLive bool, launch worktree.LaunchValidation, launchErr error,
-	inspection worktree.Inspection, inspectErr error, baseOK bool, baseErr error, pending []string, remote gh.RemoteState, remoteErr error,
+	inspection worktree.Inspection, inspectErr error, worktreeSHA256 string, worktreeDigestErr error,
+	baseOK bool, baseErr error, pending []string, remote gh.RemoteState, remoteErr error,
+	resultErr error,
 ) []issueActionPlan {
 	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionResume, issuedomain.ResolutionRetryStage, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel}
 	result := make([]issueActionPlan, 0, len(actions))
@@ -202,11 +231,33 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, workerLive bool, 
 			if inspectErr != nil || !inspection.Valid || inspection.Branch != item.Branch {
 				reasons = append(reasons, "git worktree observation failed")
 			}
+			if baseErr != nil || !baseOK {
+				reasons = append(reasons, "checkpoint base is not an ancestor of the worktree head")
+			}
+			if item.ResourcePark != nil && (item.ResourcePark.Stage == issuedomain.ContinuationStageResume || item.ResourcePark.Stage == issuedomain.ContinuationStagePublish) {
+				if item.ResourcePark.HeadSHA == "" || inspection.Head != item.ResourcePark.HeadSHA {
+					reasons = append(reasons, "worktree head differs from the continuation checkpoint")
+				}
+				if item.ResourcePark.WorktreeSHA256 == "" || worktreeDigestErr != nil || worktreeSHA256 != item.ResourcePark.WorktreeSHA256 {
+					reasons = append(reasons, "worktree content differs from the continuation checkpoint")
+				}
+			}
 			if remoteErr != nil || !strings.EqualFold(remote.Issue.State, "open") {
 				reasons = append(reasons, "GitHub Issue is not observably open")
 			}
 			if !pullRequestsMatchCheckpoint(item, remote.PullRequests) {
 				reasons = append(reasons, "Pull Request observation differs from checkpoint")
+			}
+			if action == issuedomain.ResolutionRetryStage && item.ResourcePark != nil && item.ResourcePark.Stage == issuedomain.ContinuationStageChecks {
+				pullRequest, ok := matchingOpenPullRequest(item, remote.PullRequests)
+				if !ok || inspection.Dirty || inspection.UnpushedCommits || !inspection.LocalBranchExists || !inspection.RemoteBranchExists ||
+					inspection.Head == "" || inspection.Head != inspection.RemoteHead || inspection.Head != pullRequest.HeadSHA ||
+					(pullRequest.ChecksStatus != "pending" && pullRequest.ChecksStatus != "success") {
+					reasons = append(reasons, "repaired Pull Request head is not cleanly reproducible or checks are not runnable")
+				}
+			}
+			if action == issuedomain.ResolutionRetryStage && item.ResourcePark != nil && item.ResourcePark.Stage == issuedomain.ContinuationStagePublish && resultErr != nil {
+				reasons = append(reasons, "saved completed worker result is unavailable")
 			}
 		case issuedomain.ResolutionAdoptPR:
 			if remoteErr != nil {
@@ -230,6 +281,13 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, workerLive bool, 
 		result = append(result, issueActionPlan{Action: action, Eligible: len(reasons) == 0, Reasons: reasons})
 	}
 	return result
+}
+
+func checkpointWorktreeSHA256(item *state.Issue) string {
+	if item == nil || item.ResourcePark == nil {
+		return ""
+	}
+	return item.ResourcePark.WorktreeSHA256
 }
 
 func availableExecutionSlot(snapshot *state.Snapshot, limit, preferred, issueNumber int) (int, bool) {
@@ -297,6 +355,27 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	if !eligible {
 		return exitError{4, fmt.Errorf("Issue #%d action %s is not eligible: %s", *number, action, strings.Join(reasons, "; "))}
 	}
+	revalidated, err := a.buildIssuePlan(ctx, l, *repo, *number)
+	if err != nil {
+		return err
+	}
+	revalidatedEligible := false
+	for _, candidate := range revalidated.report.Actions {
+		if candidate.Action == action {
+			revalidatedEligible = candidate.Eligible
+			break
+		}
+	}
+	if revalidated.snapshot.StateRevision != planned.snapshot.StateRevision || !revalidatedEligible {
+		return exitError{4, fmt.Errorf("Issue #%d observations changed after planning", *number)}
+	}
+	planned = revalidated
+	if action == issuedomain.ResolutionRetryStage && planned.issue.ResourcePark != nil && planned.issue.ResourcePark.Stage == issuedomain.ContinuationStagePublish {
+		result, encoded, loadErr := worker.LoadLatestCompletedResult(filepath.Join(planned.store.Dir, "runs", planned.issue.RunID))
+		if loadErr != nil || result.Summary != planned.resultSummary || fmt.Sprintf("%x", sha256.Sum256(encoded)) != planned.resultSHA256 {
+			return exitError{4, fmt.Errorf("Issue #%d saved completed worker result changed after planning", *number)}
+		}
+	}
 	now := time.Now().UTC()
 	mergedPR, hasMergedPR := mergedPullRequestForIssue(planned.issue, planned.remote.PullRequests)
 	payload := map[string]any{
@@ -307,10 +386,14 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 		"git_valid":              planned.inspectErr == nil && planned.inspection.Valid,
 		"git_head":               planned.inspection.Head, "git_remote_head": planned.inspection.RemoteHead,
 		"git_dirty": planned.inspection.Dirty, "git_unpushed": planned.inspection.UnpushedCommits,
+		"worktree_sha256":          planned.worktreeSHA256,
 		"checkpoint_base_ancestor": planned.baseOK,
 		"github_observed":          planned.remoteErr == nil, "github_issue_state": planned.remote.Issue.State,
 		"open_pull_requests":  countOpenPullRequests(planned.remote.PullRequests),
 		"pending_request_ids": append([]string(nil), planned.pending...),
+	}
+	if action == issuedomain.ResolutionRetryStage && planned.issue.ResourcePark != nil && planned.issue.ResourcePark.Stage == issuedomain.ContinuationStagePublish {
+		payload["publication_result_sha256"] = planned.resultSHA256
 	}
 	if action == issuedomain.ResolutionAdoptPR && hasMergedPR {
 		payload["adopted_pull_request"] = map[string]any{
@@ -329,6 +412,13 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 				return fmt.Errorf("Issue #%d suspension changed after planning", *number)
 			}
 			if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
+				if action == issuedomain.ResolutionRetryStage && item.ResourcePark.Stage == issuedomain.ContinuationStagePublish {
+					if planned.resultErr != nil || planned.resultSummary == "" || planned.resultSHA256 == "" {
+						return fmt.Errorf("Issue #%d saved completed worker result changed after planning", *number)
+					}
+					item.ResourcePark.Summary = planned.resultSummary
+					item.ResourcePark.ResultSHA256 = planned.resultSHA256
+				}
 				slot, ok := availableExecutionSlot(snapshot, planned.cfg.Queue.Concurrency, item.ResourcePark.OriginalLease.Slot, item.Number)
 				if !ok {
 					return fmt.Errorf("Issue #%d has no available worker slot", *number)
@@ -343,13 +433,20 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 				if err := state.ApplyIssueTransition(item, transition); err != nil {
 					return err
 				}
+				if action == issuedomain.ResolutionRetryStage && item.ResourcePark.Stage == issuedomain.ContinuationStageChecks {
+					pullRequest, ok := matchingOpenPullRequest(item, planned.remote.PullRequests)
+					if !ok || pullRequest.HeadSHA != planned.inspection.Head {
+						return fmt.Errorf("Issue #%d repaired Pull Request changed after planning", *number)
+					}
+					item.HeadSHA = pullRequest.HeadSHA
+					item.PullRequestNumber = pullRequest.Number
+				}
 				item.GitHubSync = issuedomain.GitHubSyncIssueResolution
-				item.BlockedCause = nil
 			} else if action == issuedomain.ResolutionAdoptPR {
 				if !hasMergedPR {
 					return fmt.Errorf("Issue #%d matching merged Pull Request changed after planning", *number)
 				}
-				transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.StatusUnset)
+				transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.ContinuationStageNone)
 				if transitionErr != nil {
 					return transitionErr
 				}
@@ -357,12 +454,15 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 				item.PullRequestNumber = mergedPR.Number
 				item.HeadSHA = mergedPR.HeadSHA
 				item.PullRequestMerged = true
+				item.Suspension.Status = issuedomain.SuspensionResolved
+				item.Suspension.Resolution = action
+				item.Suspension.ResolvedAt = now
+				item.GitHubSync = issuedomain.GitHubSyncDone
 				if err := state.ApplyIssueTransition(item, transition); err != nil {
 					return err
 				}
-				item.GitHubSync = issuedomain.GitHubSyncDone
 			} else {
-				transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.StatusUnset)
+				transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.ContinuationStageNone)
 				if transitionErr != nil {
 					return transitionErr
 				}
@@ -481,6 +581,10 @@ func (a App) synchronizeIssueResolution(ctx context.Context, planned issuePlanni
 			return fmt.Errorf("Issue #%d resolution synchronization changed", number)
 		}
 		item.GitHubSync = issuedomain.GitHubSyncNone
+		if action == issuedomain.ResolutionAdoptPR {
+			item.ResourcePark = nil
+			item.Suspension = nil
+		}
 		return nil
 	})
 	return err
@@ -505,6 +609,20 @@ func pullRequestsMatchCheckpoint(item *state.Issue, pullRequests []gh.PullReques
 		}
 	}
 	return false
+}
+
+func matchingOpenPullRequest(item *state.Issue, pullRequests []gh.PullRequest) (gh.PullRequest, bool) {
+	matches := make([]gh.PullRequest, 0, 1)
+	for _, pullRequest := range pullRequests {
+		if strings.EqualFold(pullRequest.State, "open") && pullRequest.MergedAt == nil &&
+			pullRequest.URL == item.PullRequestURL && (item.PullRequestNumber == 0 || pullRequest.Number == item.PullRequestNumber) && pullRequest.HeadRefName == item.Branch {
+			matches = append(matches, pullRequest)
+		}
+	}
+	if len(matches) != 1 {
+		return gh.PullRequest{}, false
+	}
+	return matches[0], true
 }
 
 func countOpenPullRequests(values []gh.PullRequest) int {
