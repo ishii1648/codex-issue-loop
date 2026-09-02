@@ -113,6 +113,9 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 		{name: "Pull Request number and URL", mutate: func(snapshot *Snapshot) {
 			snapshot.Issues["1"].PullRequestNumber = 1
 		}},
+		{name: "Pull Request review decision", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].ReviewDecision = "DISMISSED"
+		}},
 		{name: "retry and attempt counters", mutate: func(snapshot *Snapshot) {
 			snapshot.Issues["1"].Attempts = -1
 		}},
@@ -144,6 +147,16 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 				t.Fatal("invalid aggregate was accepted")
 			}
 		})
+	}
+}
+
+func TestSnapshotValidateAcceptsSupportedPullRequestReviewDecisions(t *testing.T) {
+	for _, decision := range []string{"", "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"} {
+		snapshot := validSnapshotForInvariantTest()
+		snapshot.Issues["1"].ReviewDecision = decision
+		if err := snapshot.Validate(); err != nil {
+			t.Fatalf("decision=%q err=%v", decision, err)
+		}
 	}
 }
 
