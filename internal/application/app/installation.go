@@ -15,6 +15,7 @@ import (
 
 	assets "github.com/ishii1648/codex-issue-loop"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	schema "github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
@@ -571,9 +572,39 @@ func rewritePlists(l layout.Layout) error {
 		return err
 	}
 	binary := filepath.Join(l.BinDir, "agent-loop")
+	repositoryBinaries := map[string]string{}
+	deliveryConfigPath, err := delivery.ResolveConfigPath("")
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Lstat(deliveryConfigPath); statErr == nil {
+		assignmentConfig, loadErr := delivery.LoadConfig(deliveryConfigPath)
+		if loadErr != nil {
+			if _, legacyErr := delivery.LoadLegacyConfig(deliveryConfigPath); legacyErr != nil {
+				return loadErr
+			}
+		} else {
+			for repoID := range registered.Repos {
+				assignment, ok := assignmentConfig.Assignments[repoID]
+				if !ok {
+					return fmt.Errorf("registered repository %s has no delivery assignment", repoID)
+				}
+				if err := delivery.VerifySlot(assignment.AssignmentRef); err != nil {
+					return fmt.Errorf("verify repository %s assignment: %w", repoID, err)
+				}
+				repositoryBinaries[repoID] = assignment.Slot
+			}
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
 	brokerWritten := false
 	for _, entry := range registered.Repos {
-		if err := (launchd.Manager{Layout: l}).WritePlist(entry, binary); err != nil {
+		repositoryBinary := binary
+		if assigned, ok := repositoryBinaries[entry.RepoID]; ok {
+			repositoryBinary = assigned
+		}
+		if err := (launchd.Manager{Layout: l}).WritePlist(entry, repositoryBinary); err != nil {
 			return err
 		}
 		cfg, err := config.Load(entry.RepoPath)
