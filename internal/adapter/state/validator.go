@@ -245,6 +245,12 @@ func validateRequestAggregate(snapshot Snapshot, id string, request *Request) er
 		}
 	}
 	if request.ResourceParkID != "" {
+		historicalCompletedRequest := issue.Status == issuedomain.StatusCompleted && issue.ResourcePark == nil &&
+			request.Status == issuedomain.RequestStatusAnswered && request.ReleasedOwner != nil &&
+			request.RunID != "" && request.ReleasedOwner.RunID == request.RunID
+		if historicalCompletedRequest {
+			return nil
+		}
 		if issue.ResourcePark == nil || issue.ResourcePark.ID != request.ResourceParkID || issue.ResourcePark.RequestID != request.ID {
 			issueParkID, parkRequestID := "", ""
 			if issue.ResourcePark != nil {
