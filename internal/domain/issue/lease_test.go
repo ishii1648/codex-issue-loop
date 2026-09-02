@@ -11,8 +11,8 @@ func TestDecideLease(t *testing.T) {
 	}{
 		{"completed", StatusCompleted, true, true, ReleaseLease},
 		{"failed without pull request", StatusFailed, false, false, ReleaseLease},
-		{"blocked worker boundary", StatusBlocked, false, true, RetainLease},
-		{"failed pull request", StatusFailed, true, false, RetainLease},
+		{"blocked worker boundary", StatusBlocked, false, true, ReleaseLease},
+		{"failed pull request", StatusFailed, true, false, ReleaseLease},
 		{"running", StatusRunning, false, false, RetainLease},
 	}
 	for _, tt := range tests {
