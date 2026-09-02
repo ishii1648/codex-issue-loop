@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "corpus_version": 1,
+  "rules_version": 1,
+  "incident_total": 16,
+  "classified": 13,
+  "unknown": 3,
+  "by_classification": {
+    "confirmed_bug": 9,
+    "degraded": 1,
+    "expected_transient": 1,
+    "operator_attention": 2,
+    "suspected_bug": 0,
+    "unknown": 3
+  },
+  "confirmed_bug": {
+    "ground_truth": 9,
+    "predicted": 9,
+    "true_positive": 9,
+    "false_positive": 0,
+    "false_negative": 0,
+    "unassessable": 3
+  },
+  "expected_transient": {
+    "ground_truth": 1,
+    "predicted": 1,
+    "true_positive": 1,
+    "false_positive": 0,
+    "false_negative": 0,
+    "unassessable": 3
+  },
+  "rule_conflicts": [],
+  "mismatches": [],
+  "insufficient_evidence": [
+    "cil-github-issue-168",
+    "cil-github-issue-171",
+    "cil-github-pr-98"
+  ],
+  "resolvable_with_observability": [
+    "cil-github-issue-168",
+    "cil-github-issue-171",
+    "cil-github-pr-98"
+  ],
+  "results": [
+    {
+      "incident_id": "cil-github-issue-3",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-92",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug",
+        "explicit-operator-action",
+        "persistence-threshold-exceeded",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-102",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug",
+        "explicit-operator-action",
+        "request-amplification",
+        "persistence-threshold-exceeded",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-124",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug",
+        "explicit-operator-action",
+        "request-amplification",
+        "persistence-threshold-exceeded",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-134",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug",
+        "explicit-operator-action",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-146",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug",
+        "explicit-operator-action",
+        "persistence-threshold-exceeded",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-162",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug",
+        "explicit-operator-action",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-164",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug",
+        "explicit-operator-action",
+        "persistence-threshold-exceeded",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-169",
+      "ground_truth": "confirmed_bug",
+      "classification": "confirmed_bug",
+      "matched_rules": [
+        "confirmed-product-bug"
+      ]
+    },
+    {
+      "incident_id": "cil-20260816-supervisor-transient-413",
+      "ground_truth": "expected_transient",
+      "classification": "expected_transient",
+      "matched_rules": [
+        "bounded-transient-recovery"
+      ]
+    },
+    {
+      "incident_id": "cil-20260816-issue90-retry-delay",
+      "ground_truth": "degraded",
+      "classification": "degraded",
+      "matched_rules": [
+        "persistence-threshold-exceeded",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-20260819-supervisor-blocked-44930",
+      "ground_truth": "operator_attention",
+      "classification": "operator_attention",
+      "matched_rules": [
+        "explicit-operator-action",
+        "persistence-threshold-exceeded",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-183",
+      "ground_truth": "operator_attention",
+      "classification": "operator_attention",
+      "matched_rules": [
+        "explicit-operator-action",
+        "persistence-threshold-exceeded",
+        "progress-stalled"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-168",
+      "ground_truth": "unknown",
+      "classification": "unknown",
+      "matched_rules": [
+        "insufficient-evidence"
+      ]
+    },
+    {
+      "incident_id": "cil-github-issue-171",
+      "ground_truth": "unknown",
+      "classification": "unknown",
+      "matched_rules": [
+        "insufficient-evidence"
+      ]
+    },
+    {
+      "incident_id": "cil-github-pr-98",
+      "ground_truth": "unknown",
+      "classification": "unknown",
+      "matched_rules": [
+        "insufficient-evidence"
+      ]
+    }
+  ]
+}

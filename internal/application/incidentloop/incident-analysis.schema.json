@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "codex-issue-loop AI incident analysis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "episode_id", "classification", "confidence", "summary", "cause_hypothesis", "counter_evidence", "additional_investigation", "recommend_issue", "evidence"],
+  "properties": {
+    "version": {"const": 1},
+    "episode_id": {"type": "string", "pattern": "^inc-[a-f0-9]{20}$"},
+    "classification": {"enum": ["expected_transient", "degraded", "operator_attention", "suspected_bug", "confirmed_bug", "unknown"]},
+    "confidence": {"enum": ["low", "medium", "high"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "cause_hypothesis": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "counter_evidence": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 1024}},
+    "additional_investigation": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 1024}},
+    "recommend_issue": {"type": "boolean"},
+    "evidence": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["source", "ref"], "properties": {"source": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}, "ref": {"type": "string", "minLength": 1, "maxLength": 1024}}}}
+  }
+}

@@ -34,6 +34,18 @@ completion:
   # true: CI成功後にsquash mergeまで実行する。
   auto_merge: false
 
+# Disabled by default. Start with dry_run and inspect `agent-loop incident
+# status --repo . --json` before allowing GitHub Issue creation.
+incident_automation:
+  enabled: false
+  dry_run: true
+  interval: 15m
+  analyzer_timeout: 10m
+  max_analysis_attempts: 3
+  retry_backoff: 1m
+  max_episode_items: 128
+  degradation_threshold: 2m
+
 # Explicit fallback is polling. See docs/mac-mini-runbook.md before opting in.
 # Switch to webhook only after the reverse proxy and the GitHub webhook are both
 # ready. While deliveries cannot reach the broker, the only remaining detection

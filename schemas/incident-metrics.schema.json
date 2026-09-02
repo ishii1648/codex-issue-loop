@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "codex-issue-loop bounded incident metrics",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "updated_at", "signals_by_name", "outcomes", "classifications", "issues", "analysis_attempts", "durations_ms", "open_episodes", "circuit_open"],
+  "properties": {
+    "version": {"const": 1}, "updated_at": {"type": "string", "format": "date-time"},
+    "signals_by_name": {"$ref": "#/$defs/counters"}, "outcomes": {"$ref": "#/$defs/counters"}, "classifications": {"$ref": "#/$defs/counters"}, "issues": {"$ref": "#/$defs/counters"}, "analysis_attempts": {"$ref": "#/$defs/counters"},
+    "durations_ms": {"type": "object", "additionalProperties": {"type": "object", "additionalProperties": false, "required": ["count", "sum", "max"], "properties": {"count": {"type": "integer", "minimum": 0}, "sum": {"type": "integer", "minimum": 0}, "max": {"type": "integer", "minimum": 0}}}},
+    "open_episodes": {"type": "integer", "minimum": 0}, "circuit_open": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {"counters": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}}
+}

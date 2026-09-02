@@ -360,6 +360,36 @@ func TestInstallAndRegister(t *testing.T) {
 	}
 }
 
+func TestIncidentStatusReportsDisabledDryRunHealthWithoutNetwork(t *testing.T) {
+	repo, l := testEnvironment(t)
+	cfg, err := config.Load(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (registry.Store{Path: l.RegistryPath}).Add(cfg); err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	code := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"incident", "status", "--repo", repo, "--json"})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	var status struct {
+		Version int  `json:"version"`
+		Enabled bool `json:"enabled"`
+		DryRun  bool `json:"dry_run"`
+		State   struct {
+			Version int `json:"version"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Version != 1 || status.State.Version != 1 || status.Enabled || !status.DryRun {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
 func mustConfig(t *testing.T, repo string) config.Config {
 	t.Helper()
 	cfg, err := config.Load(repo)
