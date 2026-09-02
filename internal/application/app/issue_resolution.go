@@ -232,6 +232,28 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, workerLive bool, 
 	return result
 }
 
+func availableExecutionSlot(snapshot *state.Snapshot, limit, preferred, issueNumber int) (int, bool) {
+	if limit < 1 {
+		limit = 1
+	}
+	used := map[int]bool{}
+	for _, other := range snapshot.Issues {
+		if other == nil || other.Number == issueNumber || other.Lease == nil || !other.Status.OccupiesWorkerSlot() {
+			continue
+		}
+		used[other.Lease.Slot] = true
+	}
+	if preferred >= 0 && preferred < limit && !used[preferred] {
+		return preferred, true
+	}
+	for slot := 0; slot < limit; slot++ {
+		if !used[slot] {
+			return slot, true
+		}
+	}
+	return -1, false
+}
+
 func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("issue resolve", flag.ContinueOnError)
 	repo := fs.String("repo", "", "repository path")
@@ -307,7 +329,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 				return fmt.Errorf("Issue #%d suspension changed after planning", *number)
 			}
 			if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
-				slot, ok := availableLeaseSlot(snapshot, planned.cfg.Queue.Concurrency, item.ResourcePark.OriginalLease.Slot, item.Number)
+				slot, ok := availableExecutionSlot(snapshot, planned.cfg.Queue.Concurrency, item.ResourcePark.OriginalLease.Slot, item.Number)
 				if !ok {
 					return fmt.Errorf("Issue #%d has no available worker slot", *number)
 				}

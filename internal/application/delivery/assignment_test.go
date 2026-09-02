@@ -332,6 +332,7 @@ esac
 
 func TestAssignmentHealthFailureRollsBackOnlyTarget(t *testing.T) {
 	l, configPath, entries, _ := assignmentFixture(t)
+	makeAssignmentEntryRunning(t, l, entries, 0)
 	runner := &releaseRunner{failFirstDoctor: true}
 	controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: runner}
 	if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
@@ -393,7 +394,7 @@ func (r *legacyAssignmentRunner) Run(ctx context.Context, name string, args ...s
 	return r.releaseRunner.Run(ctx, name, args...)
 }
 
-func TestAssignmentRollbackUsesLegacyCompatibleDoctor(t *testing.T) {
+func TestStoppedAssignmentRollbackDoesNotExecuteLegacyDoctor(t *testing.T) {
 	l, configPath, entries, _ := assignmentFixture(t)
 	controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: &releaseRunner{}}
 	if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
@@ -416,7 +417,7 @@ func TestAssignmentRollbackUsesLegacyCompatibleDoctor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Assignment.Version != "v1.2.2" || report.Assignment.Generation != 3 || runner.legacyDoctorCalls != 1 {
+	if report.Assignment.Version != "v1.2.2" || report.Assignment.Generation != 3 || runner.legacyDoctorCalls != 0 {
 		t.Fatalf("report=%+v legacy_doctor_calls=%d", report, runner.legacyDoctorCalls)
 	}
 }
@@ -432,6 +433,7 @@ func (r *assignmentFaultRunner) Run(ctx context.Context, name string, args ...st
 
 func TestAssignmentRollbackFailureRetainsRepositoryFence(t *testing.T) {
 	l, configPath, entries, _ := assignmentFixture(t)
+	makeAssignmentEntryRunning(t, l, entries, 0)
 	controller := AssignmentController{Layout: l, ConfigPath: configPath}
 	if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
 		t.Fatal(err)
@@ -461,6 +463,93 @@ func TestAssignmentRollbackFailureRetainsRepositoryFence(t *testing.T) {
 	cfg, _ = LoadConfig(configPath)
 	if cfg.Assignments[entries[0].RepoID].Generation != 1 {
 		t.Fatal("rollback failure committed the desired assignment")
+	}
+}
+
+func makeAssignmentEntryRunning(t *testing.T, l layout.Layout, entries []registry.Entry, index int) {
+	t.Helper()
+	stateDir := filepath.Join(t.TempDir(), "launchctl-state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_ASSIGNMENT_LAUNCHCTL_STATE", stateDir)
+	launchctl := filepath.Join(filepath.Dir(stateDir), "launchctl-running")
+	script := `#!/bin/sh
+state_dir=$FAKE_ASSIGNMENT_LAUNCHCTL_STATE
+case "$1" in
+  print) label=${2##*/}; [ -f "$state_dir/$label" ] || exit 1; printf 'state = running\npid = 9001\n' ;;
+  bootout) label=${2##*/}; rm -f "$state_dir/$label" ;;
+  bootstrap) label=$(basename "$3" .plist); : > "$state_dir/$label" ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries[index].Commands["launchctl"] = launchctl
+	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered.Repos[entries[index].RepoID] = entries[index]
+	if err := fsutil.WriteJSON(l.RegistryPath, registered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, l.Label(entries[index].RepoID)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: l.RepoDir(entries[index].RepoID), RepoID: entries[index].RepoID, RepoPath: entries[index].RepoPath}
+	if _, err := store.Update("fixture_maintenance", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = state.SupervisorStateMaintenance
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAssignmentRetryRollbackValidatesRetainedTransactionAndClearsFence(t *testing.T) {
+	l, configPath, entries, _ := assignmentFixture(t)
+	controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: &releaseRunner{}}
+	if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := cfg.Assignments[entries[0].RepoID]
+	candidate, err := (Verifier{GH: "gh", Runner: controller.Runner, CacheDir: RuntimePaths(l.Root).Cache, ExpectedVersion: "v1.2.3"}).Check(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := SlotRef(l, candidate.Manifest.Version, candidate.Manifest.Commit, candidate.Digest)
+	if err := StageSlot(l, desired, filepath.Join(candidate.Dir, BinaryAsset)); err != nil {
+		t.Fatal(err)
+	}
+	manager := launchd.Manager{Layout: l, Launchctl: entries[0].Commands["launchctl"]}
+	if err := manager.WritePlist(entries[0], current.Slot); err != nil {
+		t.Fatal(err)
+	}
+	tx := AssignmentTransaction{RepositoryID: entries[0].RepoID, Operation: AssignmentOperationApply, Phase: AssignmentRollbackFailed, ExpectedGeneration: current.Generation, TargetGeneration: current.Generation + 1, Current: current.AssignmentRef, Desired: desired, WasLoaded: false, Result: "rollback_failed", Reason: "fixture", StartedAt: time.Now().UTC()}
+	if err := SaveAssignmentTransaction(l.DeliveryAssignmentTransactionPath(entries[0].RepoID), tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entries[0].RepoID), Maintenance{Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := controller.RetryRollback(context.Background(), entries[0].RepoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Result != "rolled_back" || report.Assignment.AssignmentRef != current.AssignmentRef {
+		t.Fatalf("report=%+v", report)
+	}
+	tx, err = LoadAssignmentTransaction(l.DeliveryAssignmentTransactionPath(entries[0].RepoID))
+	if err != nil || tx.Phase != AssignmentRolledBack || tx.Result != "rolled_back" {
+		t.Fatalf("transaction=%+v err=%v", tx, err)
+	}
+	if _, err := os.Stat(l.DeliveryAssignmentFencePath(entries[0].RepoID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retained fence was not cleared: %v", err)
 	}
 }
 

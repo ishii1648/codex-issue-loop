@@ -56,6 +56,11 @@ func migrateV5Issue(key string, issue map[string]json.RawMessage, migratedAt tim
 	delete(issue, "lease")
 	delete(issue, "resource_park")
 
+	legacyScenario := legacyScenarioRecoveryStatus(status)
+	if legacyScenario {
+		status = "blocked"
+		issue["status"] = mustRaw(status)
+	}
 	terminal := status == "blocked" || status == "failed" || status == "completed"
 	missingLease := legacyExecutionStatus(status) && (len(lease) == 0 || string(lease) == "null")
 	missingWorkspace := legacyWorkspaceStatus(status) && legacyCrossedExecutionBoundary(issue) &&
@@ -223,6 +228,15 @@ func legacySuspension(issue map[string]json.RawMessage, forceQuarantine bool) (s
 func legacyExecutionStatus(status string) bool {
 	switch status {
 	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyScenarioRecoveryStatus(status string) bool {
+	switch status {
+	case "environment_resume_pending", "publication_recovery_pending", "pull_request_checks_recovery_pending":
 		return true
 	default:
 		return false

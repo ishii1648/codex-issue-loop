@@ -166,6 +166,14 @@ func TestDeliveryRetryRollbackRequiresExplicitConfirmation(t *testing.T) {
 	}
 }
 
+func TestDeliveryAssignmentRetryRollbackRequiresExplicitConfirmation(t *testing.T) {
+	var output bytes.Buffer
+	err := (App{Out: &output, Err: &output}).delivery(context.Background(), layout.Layout{Root: t.TempDir()}, []string{"assignment", "retry-rollback", "--repo", "/tmp/repo", "--json"})
+	if err == nil || !strings.Contains(err.Error(), "--confirm-retained-fence") {
+		t.Fatalf("err=%v output=%s", err, output.String())
+	}
+}
+
 func TestDeliveryConfigureApplyWritesPrivateDefaultConfigAndSingleLaunchAgent(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")

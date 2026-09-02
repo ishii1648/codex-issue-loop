@@ -52,6 +52,16 @@ rollback先はconfigに記録されたpreviousだけである。
 
 rollbackもgenerationを1増やす。成功後のpreviousはrollback前versionになるため、同じartifactの再適用を新しいpreviewから行える。
 
+rollback自体が失敗してrepository fenceを保持した場合、transaction、current assignment、generation、fence identity、LaunchAgent loaded状態がすべて一致するときだけtyped retryを使う。
+
+```sh
+"$operator_binary" delivery assignment retry-rollback \
+  --repo /absolute/path/to/repository \
+  --confirm-retained-fence --json
+```
+
+停止中repositoryは旧assigned binaryのdoctorを起動しない。operator binaryがexact slot、plist、unloaded状態、schema対応済みcanonical snapshotとworker不在を検査する。成功時だけtransactionを`rolled_back`へ進めてfenceを解除し、不一致なら変更せずfail closedとする。
+
 ## Evidence
 
 段階展開では対象外repositoryについて、切替前後の次を保存する。

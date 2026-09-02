@@ -291,7 +291,7 @@ jobs:
               .candidate_tag == $candidate_tag and .candidate_binary_sha256 == $digest and
               .production_state_accessed == true and .production_state_changes == 0 and
               .production_before == .production_after and .production_before.worker_limit == 1 and
-              .production_before.active_workers <= 1 and .production_before.doctor_ok == true and
+              .production_before.active_workers <= 1 and .production_before.doctor_safe == true and
               .offline_contract.mode == "credentialless-offline" and
               .offline_contract.credentials.canary_github_token == false and
               .offline_contract.credentials.openai_api_key == false and
@@ -391,7 +391,7 @@ jobs:
           ' evidence/contracts/offline-contract-report.json >/dev/null
           jq -e --arg digest "$digest" --arg commit "$RELEASE_COMMIT" '
             .schema_version == 1 and .release_commit == $commit and .candidate_binary_sha256 == $digest and
-            .production_state_changes == 0 and .production_before == .production_after and .production_before.doctor_ok == true
+            .production_state_changes == 0 and .production_before == .production_after and .production_before.doctor_safe == true
           ' evidence/production/production-state-report.json >/dev/null
           jq -e --arg digest "$digest" '
             .schema_version == 1 and .expected_sha256 == $digest and .actual_sha256 == $digest and

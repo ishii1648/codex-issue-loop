@@ -16,10 +16,16 @@ const evidenceCommit = "0123456789abcdef0123456789abcdef01234567"
 
 func TestProductionStateIsolationRunsCredentiallessContractBetweenSnapshots(t *testing.T) {
 	for _, test := range []struct {
-		name     string
-		mismatch bool
-		wantOK   bool
-	}{{name: "identical", wantOK: true}, {name: "revision changed", mismatch: true}} {
+		name       string
+		mismatch   bool
+		doctorMode string
+		wantOK     bool
+	}{
+		{name: "identical", wantOK: true},
+		{name: "intentionally stopped", doctorMode: "stopped", wantOK: true},
+		{name: "stopped with unrelated failure", doctorMode: "stopped-corrupt"},
+		{name: "revision changed", mismatch: true},
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			ambientHome := filepath.Join(root, "ambient-home")
@@ -32,6 +38,14 @@ func TestProductionStateIsolationRunsCredentiallessContractBetweenSnapshots(t *t
 			}
 			productionBinary := writeExecutable(t, root, "production-agent-loop", `#!/bin/sh
 if [ "$1" = doctor ]; then
+  if [ "${DOCTOR_MODE:-}" = stopped ]; then
+    printf '%s\n' '{"schema_version":1,"ok":false,"diagnostics":[{"code":"SUPERVISOR_STOPPED","ok":false}]}'
+    exit 1
+  fi
+  if [ "${DOCTOR_MODE:-}" = stopped-corrupt ]; then
+    printf '%s\n' '{"schema_version":1,"ok":false,"diagnostics":[{"code":"SUPERVISOR_STOPPED","ok":false},{"code":"STATE_CORRUPT","ok":false}]}'
+    exit 1
+  fi
   printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}'
   exit
 fi
@@ -41,7 +55,9 @@ count=$((count + 1))
 printf '%s\n' "$count" >"$COUNT_PATH"
 revision=7
 if [ "${MISMATCH:-0}" = 1 ] && [ "$count" -gt 1 ]; then revision=8; fi
-printf '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"repo_id":"production-id","state_revision":%s,"supervisor":{"state":"idle"},"issues":{}}}\n' "$revision"
+supervisor=idle
+case "${DOCTOR_MODE:-}" in stopped*) supervisor=stopped ;; esac
+printf '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"repo_id":"production-id","state_revision":%s,"supervisor":{"state":"%s"},"issues":{}}}\n' "$revision" "$supervisor"
 `)
 			candidate := writeExecutable(t, root, "candidate", "#!/bin/sh\nexit 0\n")
 			fakeContract := writeExecutable(t, root, "offline-contract", `#!/bin/sh
@@ -65,6 +81,7 @@ printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","home_isolate
 				"CANDIDATE_TAG=candidate-v0.8.0-123",
 				"OFFLINE_CONTRACT_SCRIPT="+fakeContract,
 				"COUNT_PATH="+filepath.Join(root, "count"),
+				"DOCTOR_MODE="+test.doctorMode,
 			)
 			if test.mismatch {
 				cmd.Env = append(cmd.Env, "MISMATCH=1")
@@ -334,6 +351,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		`required_evidence:["cli-surface","offline-contract","production-isolation","candidate-integrity"]`,
 		`subject-path: promotion-evidence.json`,
 		`.assignment_protocol == 1`,
+		`.production_before.doctor_safe == true`,
 		`.rollout_mode == "per-repository-stable-assignment"`,
 		`.rollback_drill.typed_rollback == true`,
 	} {
