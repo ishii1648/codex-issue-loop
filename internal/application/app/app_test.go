@@ -414,7 +414,7 @@ func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
 	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
@@ -705,7 +705,7 @@ esac
 	}
 }
 
-func TestStartQuarantinesLegacySemanticStateBeforeLaunchdMutation(t *testing.T) {
+func TestStartRejectsLegacySemanticStateWithoutQuarantineOrLaunchdMutation(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -732,12 +732,106 @@ func TestStartQuarantinesLegacySemanticStateBeforeLaunchdMutation(t *testing.T) 
 	snapshot.SemanticContractVersion = 0
 	writeJSONFixture(t, store.StatePath(), snapshot)
 	err = (App{Out: io.Discard, Err: io.Discard}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"})
-	if err == nil || !strings.Contains(err.Error(), "recovery-blocked") || !strings.Contains(err.Error(), "semantic contract version") {
+	if err == nil || !strings.Contains(err.Error(), "semantic contract version") {
 		t.Fatalf("legacy semantic state was not rejected: %v", err)
 	}
-	blocked, loadErr := store.Load()
-	if loadErr != nil || blocked.Recovery == nil || blocked.Recovery.Status != state.RecoveryStateBlocked || blocked.Recovery.BackupDir == "" {
-		t.Fatalf("semantic quarantine did not preserve a recovery backup: snapshot=%+v err=%v", blocked, loadErr)
+	data, readErr := os.ReadFile(store.StatePath())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var unchanged state.Snapshot
+	if err := json.Unmarshal(data, &unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.SemanticContractVersion != 0 || unchanged.StateRevision != snapshot.StateRevision || unchanged.Recovery != nil {
+		t.Fatalf("semantic mismatch changed durable state: %+v", unchanged)
+	}
+	if _, statErr := os.Stat(filepath.Join(store.Dir, "recovery")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("semantic mismatch created recovery backup: %v", statErr)
+	}
+}
+
+func TestRecoverSemanticQuarantineRequiresAndRestoresExactRecordedBackup(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.Commands["launchctl"] = "/usr/bin/false"
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("checkpoint", 0, "", nil, func(*state.Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	stateData, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original state.Snapshot
+	if err := json.Unmarshal(stateData, &original); err != nil {
+		t.Fatal(err)
+	}
+	original.SemanticContractVersion--
+	backup := filepath.Join(store.Dir, "recovery", "exact")
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFixture(t, filepath.Join(backup, "state.json"), original)
+	eventsData, err := os.ReadFile(store.EventsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "events.jsonl"), eventsData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	reason := fmt.Sprintf("snapshot semantic contract version %d does not match %d", original.SemanticContractVersion, original.SemanticContractVersion+1)
+	marker := state.Snapshot{Version: state.CurrentVersion, SemanticContractVersion: original.SemanticContractVersion + 1,
+		RepoID: entry.RepoID, RepoPath: entry.RepoPath, StateRevision: 1,
+		Supervisor: state.Supervisor{State: state.SupervisorStateBlocked, UpdatedAt: now,
+			Message: fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", reason, backup)},
+		Issues: map[string]*state.Issue{}, PendingRequests: map[string]*state.Request{},
+		Recovery: &state.Recovery{Status: state.RecoveryStateBlocked, Reason: reason, BackupDir: backup, DetectedAt: now}}
+	writeJSONFixture(t, store.StatePath(), marker)
+	payload, _ := json.Marshal(map[string]string{"reason": reason, "backup_dir": backup})
+	event, _ := json.Marshal(state.Event{Version: state.CurrentVersion, EventID: "evt_marker", Sequence: 1, Timestamp: now,
+		RepoID: entry.RepoID, Type: "recovery_blocked", Payload: payload})
+	if err := os.WriteFile(store.EventsPath(), append(event, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a := App{Out: &out, Err: io.Discard}
+	if err := a.recoverSemanticQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", filepath.Join(store.Dir, "recovery", "wrong"), "--dry-run", "--json"}); err == nil {
+		t.Fatal("unrecorded backup was accepted")
+	}
+	if err := a.recoverSemanticQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--dry-run", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var preview semanticMismatchRecoveryReport
+	if err := json.Unmarshal(out.Bytes(), &preview); err != nil || !preview.Eligible || preview.Applied || preview.RestoredRevision != original.StateRevision {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	out.Reset()
+	if err := a.recoverSemanticQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--confirm-exact-backup", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var applied semanticMismatchRecoveryReport
+	if err := json.Unmarshal(out.Bytes(), &applied); err != nil || !applied.Applied || applied.RecoveryMarkerBackup == "" {
+		t.Fatalf("applied=%+v err=%v", applied, err)
+	}
+	restoredData, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored state.Snapshot
+	if err := json.Unmarshal(restoredData, &restored); err != nil || restored.StateRevision != original.StateRevision || restored.SemanticContractVersion != original.SemanticContractVersion {
+		t.Fatalf("restored=%+v err=%v", restored, err)
 	}
 }
 

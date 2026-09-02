@@ -334,6 +334,17 @@ retry中の新validator readが、旧`completed + pull_request_merged` recordの
 
 LaunchAgent非稼働、`eligible=true`、`github_verified=true`、mutation scope、全repairsをoperatorが確認した場合だけ、`--dry-run`を`--confirm-legacy-merged-identities`へ置き換える。成功後は`doctor`を実行し、同じdelivery backupで`retry-rollback`を再実行する。追加invariant違反、別repo/fork/open PR、URL/branch/number不一致、exact backup不一致では使用しない。
 
+semantic contract更新前後のbinaryでreadした結果、version mismatchだけを理由とするrevision 1 recovery markerが既に作られている場合は、markerが記録するbackupを1段ずつ指定する。別backupやstate fileをcopyしない。
+
+```sh
+/absolute/verified/agent-loop_Darwin_arm64 recover-semantic-quarantine \
+  --repo /absolute/path/to/repository \
+  --backup '/exact/managed/recovery-backup' \
+  --dry-run --json
+```
+
+unloaded、worker/lease/pending request 0、exact mismatch reason、digest、revision、Issue件数、`next_backup`を確認してから`--dry-run`を`--confirm-exact-backup`へ置き換える。元snapshotへ戻ったら新binaryの`status`や`doctor`を先に実行せず、全repositoryを停止して`migrate --json` / `migrate --apply --json`を実行する。
+
 初回導入とrelease前の実Mac E2Eでは、test repositoryと検証済みstable releaseを使い、次を記録する。
 
 1. login後にdelivery LaunchAgentがstable releaseを検出する。

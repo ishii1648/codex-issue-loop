@@ -1160,6 +1160,59 @@ func TestUnsupportedSchemaVersionIsRejectedWithoutQuarantine(t *testing.T) {
 	}
 }
 
+func TestUnsupportedSemanticContractVersionIsRejectedWithoutQuarantine(t *testing.T) {
+	store := newStore(t)
+	if _, err := store.Update("completed", 7, "run_7", nil, func(snapshot *Snapshot) error {
+		snapshot.Issues["7"] = &Issue{Number: 7, Status: issuedomain.StatusCompleted, RunID: "run_7", Attempts: 1}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.SemanticContractVersion--
+	modified, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(modified, &object); err != nil {
+		t.Fatal(err)
+	}
+	issues := object["issues"].(map[string]any)
+	issue := issues["7"].(map[string]any)
+	issue["publication_failure"] = map[string]any{"code": "legacy"}
+	modified, err = json.MarshalIndent(object, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified = append(modified, '\n')
+	if err := os.WriteFile(store.StatePath(), modified, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(); err == nil {
+		t.Fatal("unsupported semantic contract was accepted")
+	} else {
+		var versionErr SemanticContractVersionError
+		if !errors.As(err, &versionErr) {
+			t.Fatalf("error=%T %v", err, err)
+		}
+	}
+	after, err := os.ReadFile(store.StatePath())
+	if err != nil || !bytes.Equal(after, modified) {
+		t.Fatalf("unsupported state was modified: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir, "recovery")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsupported state was quarantined: %v", err)
+	}
+}
+
 func TestValidIDRejectsRunDirectoryTraversal(t *testing.T) {
 	if !ValidID("run_abc-123", "run_") {
 		t.Fatal("valid run ID was rejected")

@@ -390,7 +390,18 @@ aggregate validator導入前の`completed + pull_request_merged` recordがPR URL
 
 `--dry-run`とconfirmはいずれもGitHubのmerged PR一覧をread-onlyで取得し、各recordの保存URL・branch・configured base・head repositoryが一意なmerged PRと一致することを検証する。GitHubのPR numberと最終head SHAをauthoritative値として補完し、旧headが途中値ならbefore/afterをreportとeventへ残す。applyは元quarantine backupを変更せず、現在のrecovery markerも別のmanaged backupへ保存し、`legacy_merged_identity_quarantine_recovered` eventを追加した整合snapshot/event chainへ置換する。Issue status、run、attempt/continuation、session、回答、worktree、lease、GitHub labelは変更しない。これは汎用破損復旧ではなく、running LaunchAgent、open/fork/別branch PR、URL/number不一致、追加invariant違反、別backupでは副作用なくfail closedとする。
 
-### 6.9 終了コード
+### 6.9 recover-semantic-quarantine
+
+semantic contractのversion不一致はschema migration待ちであり、`status`、`doctor`、`start`を含む通常のreadでstate/eventをquarantineしない。既に旧releaseがこの不一致を破損としてquarantineした場合だけ、停止中repositoryで次を使う。
+
+```sh
+agent-loop recover-semantic-quarantine --repo /absolute/path/to/repository --backup /exact/recovery/backup --dry-run --json
+agent-loop recover-semantic-quarantine --repo /absolute/path/to/repository --backup /exact/recovery/backup --confirm-exact-backup --json
+```
+
+CLIはcurrent revision 1 marker、単一`recovery_blocked` event、exactなversion mismatch reason、marker payload、managed recovery root内の記録済みbackup、state/event digestとsequence、repository identity、prepared transaction不在、LaunchAgent unloaded、worker/lease/pending request不在を検証する。backupが別のsemantic recovery markerなら1段だけ戻して`next_backup`を返し、元snapshotなら既知のmigration元contractと停止状態を要求する。元backupを変更せずcurrent markerとcompleted journalを別backupへ保存し、state/eventをbyte-exactに復元する。復元後は通常commandを実行せず、全repositoryを停止したまま`migrate --json`と`migrate --apply --json`を行う。
+
+### 6.10 終了コード
 
 | code | 意味 |
 | --- | --- |
@@ -756,9 +767,9 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 
 改行前で停止したevent log末尾は、最後の完全なeventとsnapshot revisionが一致する場合に限り切り詰め、`event_log_tail_truncated` を記録する。prepared transactionが残っている場合は、そのtransactionを正本としてeventとsnapshotのcommitを完了する。
 
-transactionなしでsnapshotとevent logが食い違う場合、途中に壊れたeventがある場合、またはsnapshotを復元できない場合は自動推測しない。既存の `state.json`、`events.jsonl`、`state.txn.json` をrepository state directory配下の `recovery/` へ隔離し、元の理由とbackup pathを含む `recovery_blocked` 状態を新しいsnapshotへ保存する。blocked状態では通常の状態更新とIssue処理を拒否し、backupを保持したまま手動復旧を待つ。
+transactionなしでsnapshotとevent logが食い違う場合、途中に壊れたeventがある場合、またはsnapshotを復元できない場合は自動推測しない。既存の `state.json`、`events.jsonl`、`state.txn.json` をrepository state directory配下の `recovery/` へ隔離し、元の理由とbackup pathを含む `recovery_blocked` 状態を新しいsnapshotへ保存する。blocked状態では通常の状態更新とIssue処理を拒否し、backupを保持したまま手動復旧を待つ。storage schemaまたはsemantic contractのversion不一致はtyped compatibility errorとして返し、read時にquarantineしない。
 
-唯一のtyped例外は§6.12のlegacy merged identity quarantine recoveryである。exact recovery marker、元snapshot/event、GitHub authoritative PR identityを再検証し、元backupとmarker backupを双方保持できる場合だけoperator確認付きで復元する。それ以外のquarantine reasonへ同commandを流用しない。
+復元を許可するtyped例外は§6.8のlegacy merged identity recoveryと§6.9のsemantic mismatch recoveryだけである。各commandは自身のexact reason以外へ流用せず、managed backup、marker、state/event chain、停止状態を再検証する。
 
 ### 12.4 永続schema migration
 

@@ -9,6 +9,15 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 )
 
+type SemanticContractVersionError struct {
+	Version int
+	Current int
+}
+
+func (e SemanticContractVersionError) Error() string {
+	return fmt.Sprintf("snapshot semantic contract version %d does not match %d", e.Version, e.Current)
+}
+
 // Validate is the aggregate fail-closed boundary for every durable snapshot.
 // Callers must run it before committing a snapshot and after completing any
 // recovery, migration, or fixture reconstruction.
@@ -17,7 +26,7 @@ func (snapshot Snapshot) Validate() error {
 		return SchemaVersionError{Kind: "state", Version: snapshot.Version}
 	}
 	if snapshot.SemanticContractVersion != statecontract.CurrentVersion {
-		return fmt.Errorf("snapshot semantic contract version %d does not match %d", snapshot.SemanticContractVersion, statecontract.CurrentVersion)
+		return SemanticContractVersionError{Version: snapshot.SemanticContractVersion, Current: statecontract.CurrentVersion}
 	}
 	if strings.TrimSpace(snapshot.RepoID) == "" || strings.TrimSpace(snapshot.RepoPath) == "" {
 		return fmt.Errorf("snapshot repository identity is incomplete")
