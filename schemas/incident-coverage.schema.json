@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ishii1648/codex-issue-loop/schemas/incident-coverage.schema.json",
+  "title": "codex-issue-loop GitHub bug ground-truth coverage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "population", "total", "corroborated_with_merged_fix", "unknown", "records", "additional_non_bug_label_ground_truth"],
+  "properties": {
+    "version": {"const": 1},
+    "population": {"type": "string", "minLength": 1},
+    "total": {"const": 34},
+    "corroborated_with_merged_fix": {"type": "integer", "minimum": 0},
+    "unknown": {"type": "integer", "minimum": 0},
+    "records": {"type": "array", "minItems": 34, "maxItems": 34, "items": {"$ref": "#/$defs/record"}},
+    "additional_non_bug_label_ground_truth": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/record"}}
+  },
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue", "pull_request", "merge_commit", "incident_id"],
+      "properties": {
+        "issue": {"type": "integer", "minimum": 1},
+        "pull_request": {"type": ["integer", "null"], "minimum": 1},
+        "merge_commit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "disposition": {"enum": ["included", "corroborated_not_sampled", "unknown_included"]},
+        "incident_id": {"type": ["string", "null"]},
+        "reason": {"type": "string"}
+      }
+    }
+  }
+}

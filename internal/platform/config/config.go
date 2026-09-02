@@ -36,21 +36,22 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type Config struct {
-	Version          int              `yaml:"version" json:"version"`
-	GitHub           GitHub           `yaml:"github" json:"github"`
-	Queue            Queue            `yaml:"queue" json:"queue"`
-	Resources        Resources        `yaml:"resources" json:"resources"`
-	Worker           Worker           `yaml:"worker" json:"worker"`
-	Watch            Watch            `yaml:"watch" json:"watch"`
-	Git              Git              `yaml:"git" json:"git"`
-	Formatters       Formatters       `yaml:"formatters" json:"formatters"`
-	Completion       Completion       `yaml:"completion" json:"completion"`
-	ConflictRecovery ConflictRecovery `yaml:"conflict_recovery" json:"conflict_recovery"`
-	Worktrees        Worktrees        `yaml:"worktrees" json:"worktrees"`
-	Logs             Logs             `yaml:"logs" json:"logs"`
-	Security         Security         `yaml:"security" json:"security"`
-	Webhook          Webhook          `yaml:"webhook" json:"webhook"`
-	RepoPath         string           `yaml:"-" json:"repo_path"`
+	Version            int                `yaml:"version" json:"version"`
+	GitHub             GitHub             `yaml:"github" json:"github"`
+	Queue              Queue              `yaml:"queue" json:"queue"`
+	Resources          Resources          `yaml:"resources" json:"resources"`
+	Worker             Worker             `yaml:"worker" json:"worker"`
+	Watch              Watch              `yaml:"watch" json:"watch"`
+	Git                Git                `yaml:"git" json:"git"`
+	Formatters         Formatters         `yaml:"formatters" json:"formatters"`
+	Completion         Completion         `yaml:"completion" json:"completion"`
+	ConflictRecovery   ConflictRecovery   `yaml:"conflict_recovery" json:"conflict_recovery"`
+	Worktrees          Worktrees          `yaml:"worktrees" json:"worktrees"`
+	Logs               Logs               `yaml:"logs" json:"logs"`
+	Security           Security           `yaml:"security" json:"security"`
+	Webhook            Webhook            `yaml:"webhook" json:"webhook"`
+	IncidentAutomation IncidentAutomation `yaml:"incident_automation" json:"incident_automation"`
+	RepoPath           string             `yaml:"-" json:"repo_path"`
 }
 
 type GitHub struct {
@@ -221,6 +222,17 @@ type Security struct {
 	RedactEnv []string `yaml:"redact_env" json:"redact_env,omitempty"`
 }
 
+type IncidentAutomation struct {
+	Enabled              bool     `yaml:"enabled" json:"enabled"`
+	DryRun               bool     `yaml:"dry_run" json:"dry_run"`
+	Interval             Duration `yaml:"interval" json:"interval"`
+	AnalyzerTimeout      Duration `yaml:"analyzer_timeout" json:"analyzer_timeout"`
+	MaxAnalysisAttempts  int      `yaml:"max_analysis_attempts" json:"max_analysis_attempts"`
+	RetryBackoff         Duration `yaml:"retry_backoff" json:"retry_backoff"`
+	MaxEpisodeItems      int      `yaml:"max_episode_items" json:"max_episode_items"`
+	DegradationThreshold Duration `yaml:"degradation_threshold" json:"degradation_threshold"`
+}
+
 // Webhook is deliberately opt-in. A repository remains on the legacy polling
 // path until mode is explicitly set to "webhook".
 type Webhook struct {
@@ -311,6 +323,10 @@ func Defaults() Config {
 			SafetySweepInterval: Duration{15 * time.Minute}, SafetySweepJitter: 0.10,
 			MaxBodyBytes: 2 * 1024 * 1024, ReadTimeout: Duration{10 * time.Second},
 			ReadHeaderTimeout: Duration{5 * time.Second}, IdleTimeout: Duration{30 * time.Second}, MaxConcurrent: 16,
+		},
+		IncidentAutomation: IncidentAutomation{
+			DryRun: true, Interval: Duration{15 * time.Minute}, AnalyzerTimeout: Duration{10 * time.Minute},
+			MaxAnalysisAttempts: 3, RetryBackoff: Duration{time.Minute}, MaxEpisodeItems: 128, DegradationThreshold: Duration{2 * time.Minute},
 		},
 	}
 }
@@ -452,6 +468,18 @@ func (c Config) Validate() error {
 	}
 	if c.Logs.WorkerRunMaxAge.Duration <= 0 || c.Logs.WorkerRunMaxCount < 1 {
 		return fmt.Errorf("logs worker run retention requires positive worker_run_max_age and worker_run_max_count >= 1")
+	}
+	if c.IncidentAutomation.Interval.Duration < time.Minute || c.IncidentAutomation.AnalyzerTimeout.Duration <= 0 || c.IncidentAutomation.MaxAnalysisAttempts < 1 || c.IncidentAutomation.RetryBackoff.Duration <= 0 {
+		return fmt.Errorf("incident_automation requires interval >= 1m, positive analyzer_timeout/retry_backoff, and max_analysis_attempts >= 1")
+	}
+	if c.IncidentAutomation.MaxEpisodeItems < 16 || c.IncidentAutomation.MaxEpisodeItems > 128 {
+		return fmt.Errorf("incident_automation.max_episode_items must be between 16 and 128")
+	}
+	if c.IncidentAutomation.DegradationThreshold.Duration < time.Second {
+		return fmt.Errorf("incident_automation.degradation_threshold must be at least 1s")
+	}
+	if c.IncidentAutomation.Enabled && c.Worker.Backend != "codex" {
+		return fmt.Errorf("incident_automation currently requires worker.backend=codex for schema-constrained read-only analysis")
 	}
 	if c.Worktrees.CompletedMaxAge.Duration < 0 || c.Worktrees.FailedMaxAge.Duration < 0 ||
 		c.Worktrees.BlockedMaxAge.Duration < 0 || c.Worktrees.NeedsInputMaxAge.Duration < 0 {

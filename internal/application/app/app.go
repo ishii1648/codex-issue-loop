@@ -205,6 +205,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.supervise(ctx, l, args)
 	case "broker":
 		return a.runBroker(ctx, l, args)
+	case "incident":
+		return a.incident(ctx, l, args)
 	case "help", "--help", "-h":
 		a.usage()
 		return nil
@@ -241,6 +243,7 @@ Commands:
   doctor        Validate dependencies, auth, config, and registration
   delivery      Configure and operate the host-level Release delivery controller
   bootstrap-labels  Preview or create required GitHub labels
+  incident      Analyze incidents, show status, seed a dedicated canary, or retry an open circuit
   run           Run the supervisor (used by launchd)`)
 	// broker is intentionally omitted from the primary operator workflow; it is
 	// the shared LaunchAgent entrypoint managed by register/start/unregister.
@@ -412,6 +415,13 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		Logger:                         log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
 		MaintenanceFencePath:           filepath.Join(l.DeliveryDir(), "maintenance.json"),
 		RepositoryMaintenanceFencePath: l.DeliveryAssignmentFencePath(entry.RepoID),
+		ReleaseVersion:                 Version,
+		ReleaseCommit:                  Commit,
+	}
+	if cfg.IncidentAutomation.Enabled {
+		automation, incidentStore := newIncidentAutomation(l, entry.RepoID, cfg, store, workerPath, entry.Commands["gh"], secrets, logPolicy)
+		loop.IncidentSignals = incidentStore
+		loop.IncidentAutomation = automation
 	}
 	err = loop.Run(ctx)
 	var blocked supervisor.BlockedError

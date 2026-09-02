@@ -19,6 +19,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
+	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
@@ -36,6 +37,24 @@ type countingGitHub struct {
 	listCalls int
 	called    chan struct{}
 	empty     bool
+}
+
+type recordingIncidentSignals struct {
+	mu      sync.Mutex
+	signals []incidentloop.Signal
+}
+
+func (r *recordingIncidentSignals) Record(signal incidentloop.Signal) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.signals = append(r.signals, signal)
+	return nil
+}
+
+func (r *recordingIncidentSignals) snapshot() []incidentloop.Signal {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]incidentloop.Signal(nil), r.signals...)
 }
 
 type startupRateLimitGitHub struct {
@@ -170,6 +189,43 @@ func waitForTimers(t *testing.T, created <-chan struct{}, count int) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("timed out waiting for scheduler timer")
 		}
+	}
+}
+
+func TestSchedulerCycleAndGitHubAttemptShareRuntimeRunID(t *testing.T) {
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	client := &countingGitHub{fakeGitHub: fake, called: make(chan struct{}, 1), empty: true}
+	loop.GitHub = client
+	recorder := &recordingIncidentSignals{}
+	loop.IncidentSignals = recorder
+	created := make(chan struct{}, 4)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	select {
+	case <-client.called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial GitHub poll did not complete")
+	}
+	waitForTimers(t, created, 1)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var cycle, attempt *incidentloop.Signal
+	for _, signal := range recorder.snapshot() {
+		current := signal
+		switch signal.Name {
+		case "scheduler_cycle":
+			cycle = &current
+		case "external_attempt_completed":
+			attempt = &current
+		}
+	}
+	if cycle == nil || attempt == nil || cycle.RunID == "" || cycle.RunID != attempt.RunID || cycle.CycleID != attempt.CycleID {
+		t.Fatalf("scheduler signal correlation is incomplete: cycle=%+v attempt=%+v", cycle, attempt)
 	}
 }
 

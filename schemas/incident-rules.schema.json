@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ishii1648/codex-issue-loop/schemas/incident-rules.schema.json",
+  "title": "codex-issue-loop incident classification rules",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "primary_classifications", "classifications", "error_states", "rules"],
+  "properties": {
+    "version": {"const": 1},
+    "primary_classifications": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/classification"}, "uniqueItems": true},
+    "classifications": {"type": "array", "minItems": 6, "items": {"$ref": "#/$defs/definition"}},
+    "error_states": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/definition"}},
+    "rules": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/rule"}}
+  },
+  "$defs": {
+    "classification": {"enum": ["expected_transient", "degraded", "operator_attention", "suspected_bug", "confirmed_bug", "unknown"]},
+    "nonEmptyStrings": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "definition", "entry_condition", "exit_condition", "persistence_threshold", "severity", "required_evidence", "exclusions", "retry_relation", "operator_action", "ai_handoff", "issue_condition", "fingerprint_fields", "representative_incidents", "deterministic_with_current_signals"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "definition": {"type": "string", "minLength": 1},
+        "entry_condition": {"type": "string", "minLength": 1},
+        "exit_condition": {"type": "string", "minLength": 1},
+        "persistence_threshold": {"type": "string", "minLength": 1},
+        "severity": {"type": "string", "minLength": 1},
+        "required_evidence": {"$ref": "#/$defs/nonEmptyStrings"},
+        "exclusions": {"$ref": "#/$defs/nonEmptyStrings"},
+        "retry_relation": {"type": "string", "minLength": 1},
+        "operator_action": {"type": "string", "minLength": 1},
+        "ai_handoff": {"type": "string", "minLength": 1},
+        "issue_condition": {"type": "string", "minLength": 1},
+        "fingerprint_fields": {"$ref": "#/$defs/nonEmptyStrings"},
+        "representative_incidents": {"$ref": "#/$defs/nonEmptyStrings"},
+        "deterministic_with_current_signals": {"type": "boolean"}
+      }
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": {"type": "string", "minLength": 1},
+        "op": {"enum": ["eq", "lte", "gte"]},
+        "value": {"type": ["boolean", "number"]}
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "priority", "classification", "description"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "priority": {"type": "integer", "minimum": 0},
+        "classification": {"$ref": "#/$defs/classification"},
+        "description": {"type": "string", "minLength": 1},
+        "always": {"type": "boolean"},
+        "all": {"type": "array", "items": {"$ref": "#/$defs/predicate"}}
+      }
+    }
+  }
+}

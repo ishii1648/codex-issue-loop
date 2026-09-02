@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "codex-issue-loop AI incident analysis",
+  "description": "Runtime schema embedded by the incidentloop package.",
+  "$ref": "../internal/application/incidentloop/incident-analysis.schema.json"
+}
