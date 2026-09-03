@@ -4,6 +4,8 @@
 
 `codex-issue-loop` は、常時稼働する Mac mini 上で GitHub Issue を順番に取得し、Issue が存在する限り Codex CLI のワーカーを繰り返し実行する仕組みである。Mac miniは実行ホストであり、Issueの作成主体ではない。
 
+claim、lease、attention、publicationなど、本書とコードで使う中核用語は[用語集](glossary.md)に集約する。詳細な振る舞いと不変条件は、用語集から参照する各正本文書に従う。
+
 ユーザーはスマートフォンから監視taskを主な操作入口として利用できる。
 
 - **監視task**: ループの起動・停止・状態確認・質問への回答
