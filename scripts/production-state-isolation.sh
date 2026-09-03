@@ -20,6 +20,8 @@ esac
 
 repo_root=$(git rev-parse --show-toplevel)
 offline_contract=${OFFLINE_CONTRACT_SCRIPT:-$repo_root/scripts/offline-release-contract.sh}
+host_gomodcache=$(go env GOMODCACHE)
+host_gocache=$(go env GOCACHE)
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-production-isolation.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
 offline_home="$temporary_root/offline-home"
@@ -61,6 +63,8 @@ snapshot_production() {
 
 snapshot_production "$temporary_root/production-before.json"
 HOME="$offline_home" \
+  GOMODCACHE="$host_gomodcache" \
+  GOCACHE="$host_gocache" \
   CANDIDATE_BINARY="$candidate_binary" \
   CONTRACT_ARTIFACT_DIR="$temporary_root/offline-contract" \
   "$offline_contract"
