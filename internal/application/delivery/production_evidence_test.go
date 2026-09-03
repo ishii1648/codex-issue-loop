@@ -523,6 +523,15 @@ func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 			t.Fatalf("%s does not fail closed when a forbidden credential is present", path)
 		}
 	}
+	productionIsolation, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts/production-state-isolation.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`host_gomodcache=$(go env GOMODCACHE)`, `host_gocache=$(go env GOCACHE)`, `GOMODCACHE="$host_gomodcache"`, `GOCACHE="$host_gocache"`} {
+		if !strings.Contains(string(productionIsolation), required) {
+			t.Fatalf("production isolation does not preserve the primed Go cache through HOME isolation: missing %q", required)
+		}
+	}
 }
 
 func TestHighRiskReviewUsesMachineVerifiableEvidence(t *testing.T) {
