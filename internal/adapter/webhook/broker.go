@@ -390,7 +390,7 @@ func composeSweepIssues(pages map[int]SweepPageState) map[int]gh.Issue {
 
 func (b *Broker) sweepDelivery(registration Registration, number int, action string, now time.Time) Delivery {
 	return Delivery{
-		Version: InboxVersion, DeliveryID: fmt.Sprintf("sweep-%d-%d-%s", now.UnixNano(), number, action),
+		Version: InboxVersion, DeliveryID: fmt.Sprintf("sweep-%d-%s", number, action),
 		Event: "issues", Action: action, RepoID: registration.Entry.RepoID,
 		RepositoryID: registration.Config.GitHub.RepositoryID, Repository: registration.Config.GitHub.Repo,
 		IssueNumber: number, AcceptedAt: now,

@@ -75,16 +75,13 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 		}
 		brokerState.LastSuccessfulSafetySweep = sweep.LastSuccessful
 		brokerState.NotModified304 = sweep.NotModified304
-		if mailboxEntries, mailboxErr := os.ReadDir(webhook.MailboxDir(l.RepoDir(entry.RepoID))); mailboxErr == nil {
-			for _, mailboxEntry := range mailboxEntries {
-				if !mailboxEntry.IsDir() && strings.HasSuffix(mailboxEntry.Name(), ".json") {
-					brokerState.QueueDepth++
-				}
-			}
-		} else if !errors.Is(mailboxErr, os.ErrNotExist) {
+		deliveries, mailboxErr := webhook.ReadMailbox(l.RepoDir(entry.RepoID))
+		if mailboxErr != nil {
 			return mailboxErr
 		}
-		result.Broker = &brokerStatus{Launchd: brokerLaunchd, State: brokerState, Sweep: sweep}
+		brokerState.QueueDepth = len(deliveries)
+		result.Broker = &brokerStatus{Launchd: brokerLaunchd, State: brokerState, Sweep: sweep,
+			Queue: assessQueueHealth(time.Now().UTC(), cfg.Watch.ReconcileInterval.Duration, snapshot, sweep, deliveries)}
 	}
 	return a.output(jsonOut, result)
 }

@@ -57,16 +57,17 @@ make test-race
 | supervisor kill後の永続状態再利用 | `TestFaultSupervisorRestartResumesWithDurableAnswers` |
 | GitHub label/comment同期の途中停止 | `TestFaultPartialLabelCommentSyncCanBeRetried`、`TestFaultGitHubSyncPartialFailureIsRetried` |
 | merged PR adoptionのdone同期前停止とsupervisor再起動 | `TestRestartCompletesRequestedMergedPullRequestAdoption` |
-| environment resume保存とstartup/periodic reconciliationの競合 | `TestFaultStartupReconciliationDoesNotOverwriteConcurrentEnvironmentResume`、`TestFaultWebhookReconciliationDoesNotOverwriteConcurrentEnvironmentResume` |
-| park resumeのresource/slot raceと二重owner防止 | `TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
-| answered missing-Workspace exact chainのtransaction/GitHub faultと並行fence | `TestFaultRecoverAnsweredWorkspaceRetriesGitHubBoundaryWithoutRefencing`、`TestRecoverAnsweredWorkspaceParallelInvocationsFenceOnce` |
-| checks retry exhaustion後の外部head修正・fail-closed復旧・merge時lease解放 | `TestRecoverChecksReusesExternallyFixedBranchAndIsIdempotent`、`TestRecoverChecksAuthoritativeStateValidationFailsClosed`、`TestPullRequestChecksRecoveryResumesSamePRAndReleasesLeaseOnlyAfterMerge` |
+| generic checkpoint保存とstartup reconciliation | `TestTerminalTransitionParksGenericCheckpointWithoutRecoveryInspection`、`TestStartupReconciliationParksExistingNeedsInputLease` |
+| checkpoint resumeのresource/slot raceと二重owner防止 | `TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
+| answered continuationの同一worktree・claim再取得 | `TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce`、`TestIssueResolveResumeRejectsChangedWorktreeAndCheckpointBase` |
+| checks失敗のgeneric evidence・checkpoint stage再試行 | `TestPullRequestChecksFailureUsesGenericContinuationEvidence`、`TestIssueResolveRetryStageReturnsToCheckpointStage` |
 | push後に未記録のPR | `TestFaultStartupReconciliationPersistsDiscoveredPullRequest` |
 | registry add/resolve/remove | `TestFaultRegistryAddResolveRemoveAndAmbiguity` |
 | atomic fileとmarshal失敗 | `TestFaultAtomicWriteReplacesContentAndPreservesMode`、`TestFaultJSONMarshalFailureDoesNotCreateDestination` |
 | layout isolationとpermission | `TestFaultLayoutUsesIsolatedRootsAndPrivateDirectories` |
 | GitHub CLI response破損 | `TestFaultGitHubAdapterRejectsMalformedResponse` |
 | queue strategy・tie-break・pagination後sort | `TestOrderIssuesSupportsCreatedAtAndPriorityWithStableTieBreaks`、`TestListReadyOrdersAfterCollectingPaginatedFixture`、`TestSelectReadyAppliesChangedOrderOnlyToUnclaimedIssues` |
+| Webhook通知欠落・mailbox boundedness・stalled ready診断 | `TestWebhookSchedulerReconcilesMailboxWithoutFsnotify`、`TestSafetySweepCoalescesRepeatedReadyCollectionIntent`、`TestQueueHealthFailsAfterTwoLocalReconciliationIntervalsUntilIssueIsDurable` |
 | GitHubラベルのpreview・冪等作成・部分成功 | `TestBootstrapLabelsPreviewsCreatesAndPreservesExistingMetadata`、`TestBootstrapLabelsIsIdempotentWhenEveryLabelExists`、`TestFaultBootstrapLabelsReportsPartialSuccessAndCanBeRerun` |
 | doctorの安定code・認証・sleep・state・停止理由 | `TestDoctorOutputHasStableSchemaCodesAndSafeRemediations`、`TestFaultDoctorHostAuthAndSleepFixturesHaveUniqueCodes`、`TestFaultDoctorDetectsCorruptStateWithoutModifyingIt`、`TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog` |
 | 回復不能なsnapshot/event不整合 | `TestFaultRevisionMismatchIsQuarantined`、`TestFaultCorruptSnapshotIsQuarantined` |

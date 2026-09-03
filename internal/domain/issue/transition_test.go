@@ -70,7 +70,6 @@ func TestRecoveryTransitions(t *testing.T) {
 		{name: "resume answer", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusResumePending) }, to: StatusResumePending},
 		{name: "wait for answer resources", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusAnswerClaimWaiting) }, to: StatusAnswerClaimWaiting},
 		{name: "retry conflict", make: func() (Transition, error) { return RetryConflict(StatusBlocked) }, to: StatusResolvingConflict},
-		{name: "recover workspace", make: func() (Transition, error) { return RecoverAnsweredWorkspace(StatusBlocked) }, to: StatusResumePending},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -1,11 +1,17 @@
 package migration
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 )
 
 var legacyRecoveryFields = []string{
@@ -18,6 +24,49 @@ var legacyRecoveryFields = []string{
 	"pull_request_checks_failure",
 	"pull_request_checks_recovery",
 	"merged_pull_request_adoption",
+}
+
+// DecodePreviousSnapshot is the only in-memory boundary that accepts a v4
+// snapshot. Callers receive a validated v5 aggregate; runtime state decoding
+// never interprets legacy fields directly.
+func DecodePreviousSnapshot(data []byte, migratedAt time.Time) (state.Snapshot, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var object map[string]json.RawMessage
+	if err := decoder.Decode(&object); err != nil {
+		return state.Snapshot{}, fmt.Errorf("decode v4 snapshot: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return state.Snapshot{}, fmt.Errorf("decode v4 snapshot trailing data")
+	}
+	var version int
+	if err := json.Unmarshal(object["version"], &version); err != nil || version != schemaversion.Previous {
+		return state.Snapshot{}, fmt.Errorf("migration decoder requires schema v%d, got %d", schemaversion.Previous, version)
+	}
+	if migratedAt.IsZero() {
+		return state.Snapshot{}, fmt.Errorf("migration timestamp is required")
+	}
+	if err := normalizeMigratedSessions(object); err != nil {
+		return state.Snapshot{}, err
+	}
+	if err := migrateV5StateObject(object, migratedAt.UTC()); err != nil {
+		return state.Snapshot{}, err
+	}
+	object["version"] = json.RawMessage(fmt.Sprint(schemaversion.Current))
+	object["semantic_contract_version"] = json.RawMessage(fmt.Sprint(statecontract.CurrentVersion))
+	delete(object, "notifications")
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return state.Snapshot{}, err
+	}
+	var snapshot state.Snapshot
+	if err := json.Unmarshal(encoded, &snapshot); err != nil {
+		return state.Snapshot{}, fmt.Errorf("decode migrated v5 snapshot: %w", err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		return state.Snapshot{}, fmt.Errorf("validate migrated v5 snapshot: %w", err)
+	}
+	return snapshot, nil
 }
 
 func migrateV5StateObject(object map[string]json.RawMessage, migratedAt time.Time) error {

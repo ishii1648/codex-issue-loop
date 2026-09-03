@@ -9,6 +9,7 @@ binary=${CANDIDATE_BINARY:?CANDIDATE_BINARY is required}
 artifact_dir=${CONTRACT_ARTIFACT_DIR:?CONTRACT_ARTIFACT_DIR is required}
 workspace=${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel)}
 go_toolchain=${GOTOOLCHAIN:-go1.25.13}
+operator_home=${HOME:?HOME is required}
 [ -x "$binary" ]
 [ -z "${CANARY_GITHUB_TOKEN:-}" ]
 [ -z "${OPENAI_API_KEY:-}" ]
@@ -35,7 +36,7 @@ state_root="$temporary_root/agent-loop-home"
 stub_state="$temporary_root/stub-state"
 stub_bin="$temporary_root/bin"
 launch_root="$temporary_root/launchagents"
-mkdir -p "$repo_path" "$state_root/bin" "$stub_state" "$stub_bin" "$launch_root" "$artifact_dir"
+mkdir -p "$repo_path" "$state_root/bin" "$stub_state" "$stub_bin" "$launch_root" "$artifact_dir" "$temporary_root/home"
 
 GOTOOLCHAIN=${GOTOOLCHAIN:-go1.25.13} go build -trimpath -o "$stub_bin/offline-contract-stub" ./cmd/offline-contract-stub
 ln -s offline-contract-stub "$stub_bin/gh"
@@ -64,6 +65,7 @@ git --git-dir "$remote_path" symbolic-ref HEAD refs/heads/main
 
 export OFFLINE_CONTRACT_STATE="$stub_state"
 export OFFLINE_CONTRACT_REMOTE="$remote_path"
+export HOME="$temporary_root/home"
 export AGENT_LOOP_HOME="$state_root"
 export AGENT_LOOP_LAUNCH_AGENTS_DIR="$launch_root"
 export GH_CONFIG_DIR="$temporary_root/gh-config"
@@ -165,11 +167,11 @@ jq -e '
 ' "$temporary_root/stub-summary.json" >/dev/null
 
 transaction_crash_recovery=0
-GOTOOLCHAIN="$go_toolchain" go test ./internal/application/conformance \
+HOME="$operator_home" GOTOOLCHAIN="$go_toolchain" go test ./internal/application/conformance \
   -run '^TestFaultDurableTransactionFiveCrashBoundaries$' -count=1 >"$temporary_root/transaction-replay.log"
 transaction_crash_recovery=1
 webhook_fixture_replay=0
-GOTOOLCHAIN="$go_toolchain" go test ./internal/adapter/webhook ./internal/application/supervisor \
+HOME="$operator_home" GOTOOLCHAIN="$go_toolchain" go test ./internal/adapter/webhook ./internal/application/supervisor \
   -run '^(TestSharedBrokerSafetySweepPaginatesAndWarmsWith304|TestWebhookMailboxClaimsReadyIssueWithoutQueuePolling|TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion)$' \
   -count=1 >"$temporary_root/webhook-replay.log"
 webhook_fixture_replay=1

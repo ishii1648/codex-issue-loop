@@ -13,6 +13,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 )
 
@@ -105,9 +106,10 @@ func (l *Loop) processPublicationCheckpoint(ctx context.Context, current state.I
 	if len(declared) == 0 {
 		declared = append(declared, checkpoint.OriginalLease.DeclaredResources...)
 	}
+	effective := append([]string(nil), current.Lease.ResolvedResources...)
 	l.publicationMu.Lock()
 	published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, remote.Issue, current.Worktree, current.Branch, current.PullRequestURL,
-		checkpoint.Summary, checkpoint.OriginalLease.BaseSHA, declared)
+		checkpoint.Summary, checkpoint.OriginalLease.BaseSHA, publication.ResourceScope{Declared: declared, Effective: effective})
 	l.publicationMu.Unlock()
 	_, auditErr := l.Store.Update("publication_checkpoint_audited", current.Number, current.RunID, audit, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]

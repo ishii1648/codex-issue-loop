@@ -60,5 +60,17 @@ func EnqueueMailbox(repoStateDir string, delivery Delivery) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return fsutil.WriteJSON(filepath.Join(dir, delivery.DeliveryID+".json"), delivery, 0o600)
+	path := filepath.Join(dir, delivery.DeliveryID+".json")
+	if data, err := os.ReadFile(path); err == nil {
+		var existing Delivery
+		if json.Unmarshal(data, &existing) == nil && existing.DeliveryID == delivery.DeliveryID &&
+			existing.RepoID == delivery.RepoID && existing.IssueNumber == delivery.IssueNumber &&
+			existing.PullRequestNumber == delivery.PullRequestNumber && existing.Event == delivery.Event && existing.Action == delivery.Action {
+			return nil
+		}
+		return errors.New("mailbox delivery ID collision")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return fsutil.WriteJSON(path, delivery, 0o600)
 }

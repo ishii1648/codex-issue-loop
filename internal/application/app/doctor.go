@@ -447,6 +447,34 @@ func diagnoseWebhook(ctx context.Context, l layout.Layout, entry registry.Entry,
 			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_LISTENER_MISMATCH", "repository", entry.RepoID, "Webhook listener addressが設定と一致しません", fmt.Sprintf("status=%s config=%s", brokerState.ListenerAddress, cfg.Webhook.ListenerAddress), instruction("共有brokerを再起動して最新設定を読み込んでください")))
 		}
 	}
+	sweep, sweepErr := webhook.LoadSweepState(l.RepoDir(entry.RepoID))
+	deliveries, mailboxErr := webhook.ReadMailbox(l.RepoDir(entry.RepoID))
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
+	snapshot, snapshotErr := store.ReadCanonicalSnapshot()
+	interval := cfg.Webhook.SafetySweepInterval.Duration
+	if interval <= 0 {
+		interval = 15 * time.Minute
+	}
+	if sweepErr != nil || sweep.LastSuccessful.IsZero() || time.Since(sweep.LastSuccessful) > 2*interval {
+		detail := errorText(sweepErr)
+		if sweepErr == nil {
+			detail = "last_successful=" + sweep.LastSuccessful.Format(time.RFC3339)
+		}
+		diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_SAFETY_SWEEP_STALE", "repository", entry.RepoID, "ready Issueの定期reconciliationが更新されていません", detail, instruction("brokerのGitHub accessとsafety sweep logを確認してください")))
+	} else {
+		diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_SAFETY_SWEEP_FRESH", "repository", entry.RepoID, "ready Issueの定期reconciliationは更新されています", sweep.LastSuccessful.Format(time.RFC3339)))
+	}
+	if mailboxErr != nil || snapshotErr != nil {
+		diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_QUEUE_HEALTH_UNAVAILABLE", "repository", entry.RepoID, "実装queueの進行状態を判定できません", fmt.Sprintf("mailbox=%v snapshot=%v", mailboxErr, snapshotErr), instruction("mailboxとcanonical stateのread errorを確認してください")))
+	} else {
+		health := assessQueueHealth(time.Now().UTC(), cfg.Watch.ReconcileInterval.Duration, snapshot, sweep, deliveries)
+		detail := fmt.Sprintf("code=%s ready=%v stalled=%v mailbox=%d distinct_targets=%d", health.Code, health.ReadyIssues, health.StalledIssues, health.MailboxDepth, health.DistinctTargets)
+		if health.OK {
+			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_QUEUE_PROGRESSING", "repository", entry.RepoID, "実装queueはboundedで進行可能です", detail))
+		} else {
+			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_QUEUE_STALLED", "repository", entry.RepoID, "ready Issueが2 safety sweep interval以内にclaimされていません", detail, instruction("status --jsonのbroker.queue_healthと阻害中のactive leaseを確認してください")))
+		}
+	}
 	source := cfg.Webhook.SecretSource
 	switch {
 	case source.Env != "":

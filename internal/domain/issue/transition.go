@@ -146,10 +146,6 @@ func RetryConflict(from Status) (Transition, error) {
 	return newAllowedTransition("retry_conflict", from, StatusResolvingConflict, StatusBlocked)
 }
 
-func RecoverAnsweredWorkspace(from Status) (Transition, error) {
-	return newAllowedTransition("recover_answered_workspace", from, StatusResumePending, StatusBlocked)
-}
-
 func ConfirmClaim(from Status) (Transition, error) {
 	return newAllowedTransition("confirm_claim", from, StatusClaimed, StatusClaiming)
 }

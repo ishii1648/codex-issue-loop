@@ -83,8 +83,8 @@ func TestBlessedProductionFixturesReplay100Percent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("replay fixture %s: %v", fields[1], err)
 		}
-		if replay.Snapshot.Version != bundle.Manifest.SourceSchemaVersion || len(replay.Snapshot.Issues) != 1 || len(replay.Events) != bundle.Completeness.EventCount {
-			t.Fatalf("replay fixture %s changed captured cardinality or schema", fields[1])
+		if replay.Snapshot.Version != state.CurrentVersion || len(replay.Snapshot.Issues) != 1 || len(replay.Events) != bundle.Completeness.EventCount {
+			t.Fatalf("replay fixture %s did not cross the canonical migration boundary", fields[1])
 		}
 		replayed++
 	}

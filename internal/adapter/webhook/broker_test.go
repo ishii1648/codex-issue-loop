@@ -293,6 +293,43 @@ func TestSharedBrokerSafetySweepPersists304(t *testing.T) {
 	}
 }
 
+func TestSafetySweepCoalescesRepeatedReadyCollectionIntent(t *testing.T) {
+	b, _ := testBroker(t)
+	registration := b.Registrations[0]
+	repoDir := filepath.Join(b.Root, "repos", registration.Entry.RepoID)
+	client := &fakePagedSweepClient{pages: map[int]gh.ConditionalQueueResult{
+		1: sweepPage(sweepIssues(1, 1), `"ready"`),
+	}}
+	b.SweepClient = func(Registration) gh.PagedConditionalQueueClient { return client }
+	if _, err := b.sweepOnce(context.Background(), registration); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.sweepOnce(context.Background(), registration); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := ReadMailbox(repoDir)
+	if err != nil || len(deliveries) != 1 || deliveries[0].DeliveryID != "sweep-1-reconciled" {
+		t.Fatalf("deliveries=%v err=%v", deliveries, err)
+	}
+}
+
+func TestMailboxRedeliveryRetainsOriginalAcceptanceTime(t *testing.T) {
+	dir := t.TempDir()
+	first := Delivery{Version: 1, DeliveryID: "same", RepoID: "repo", Event: "issues", Action: "reconciled", IssueNumber: 42, AcceptedAt: time.Unix(1, 0).UTC()}
+	second := first
+	second.AcceptedAt = time.Unix(2, 0).UTC()
+	if err := EnqueueMailbox(dir, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnqueueMailbox(dir, second); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := ReadMailbox(dir)
+	if err != nil || len(deliveries) != 1 || !deliveries[0].AcceptedAt.Equal(first.AcceptedAt) {
+		t.Fatalf("deliveries=%+v err=%v", deliveries, err)
+	}
+}
+
 func TestTwoRepositorySafetySweepsStayWithinConfiguredRateAcrossFakeHour(t *testing.T) {
 	base := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
 	clock := &fakeSweepClock{now: base}

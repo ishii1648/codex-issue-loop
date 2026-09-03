@@ -32,6 +32,14 @@ type Audit struct {
 	Reason            string         `json:"reason,omitempty"`
 }
 
+// ResourceScope keeps the labels observed at admission separate from the
+// effective fail-closed claim used by the scheduler. A fallback such as
+// repo:* must authorize publication without rewriting the original audit.
+type ResourceScope struct {
+	Declared  []string
+	Effective []string
+}
+
 const (
 	FailureOriginPublisher        = "publisher"
 	FailurePhasePublication       = "publication"
@@ -87,12 +95,13 @@ func ClassifyFailure(err error, now time.Time) FailureProvenance {
 }
 
 type ClaimMismatchError struct {
-	Declared []string
-	Actual   []string
+	Declared  []string
+	Effective []string
+	Actual    []string
 }
 
 func (e ClaimMismatchError) Error() string {
-	return fmt.Sprintf("%s: actual resources %v are not covered by declared resources %v", ReasonResourceClaimMismatch, e.Actual, e.Declared)
+	return fmt.Sprintf("%s: actual resources %v are not covered by effective resources %v (declared %v)", ReasonResourceClaimMismatch, e.Actual, e.Effective, e.Declared)
 }
 
 // FormatterError is safe to persist. Detail contains only a bounded, redacted

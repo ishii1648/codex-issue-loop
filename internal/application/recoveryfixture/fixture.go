@@ -23,6 +23,7 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
+	"github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
@@ -124,27 +125,11 @@ func (bundle Bundle) Replay() (Replay, error) {
 	if err := Validate(bundle); err != nil {
 		return Replay{}, err
 	}
-	result := Replay{
-		Snapshot: state.Snapshot{
-			Version: bundle.Manifest.SourceSchemaVersion, RepoID: bundle.Capture.Durable.RepoID,
-			RepoPath: bundle.Capture.Durable.RepoPath, StateRevision: bundle.Capture.Durable.StateRevision,
-			Issues: map[string]*state.Issue{}, PendingRequests: map[string]*state.Request{},
-		},
-		Worktree: bundle.Capture.Worktree,
-		Remote:   bundle.Capture.Remote,
-	}
-	var issue state.Issue
-	if err := strictDecode(bundle.Capture.Durable.Issue, &issue); err != nil {
+	snapshot, err := migratedFixtureSnapshot(bundle)
+	if err != nil {
 		return Replay{}, err
 	}
-	result.Snapshot.Issues[strconv.Itoa(issue.Number)] = &issue
-	for _, raw := range bundle.Capture.Durable.PendingRequests {
-		var request state.Request
-		if err := strictDecode(raw, &request); err != nil {
-			return Replay{}, err
-		}
-		result.Snapshot.PendingRequests[request.ID] = &request
-	}
+	result := Replay{Snapshot: snapshot, Worktree: bundle.Capture.Worktree, Remote: bundle.Capture.Remote}
 	for _, raw := range bundle.Capture.Events {
 		var event state.Event
 		if err := strictDecode(raw, &event); err != nil {
@@ -261,25 +246,27 @@ func Validate(bundle Bundle) error {
 			return errors.New("recovery fixture contains an undocumented omission")
 		}
 	}
-	var issue state.Issue
-	if err := strictDecode(bundle.Capture.Durable.Issue, &issue); err != nil {
+	var identity struct {
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal(bundle.Capture.Durable.Issue, &identity); err != nil {
 		return fmt.Errorf("decode durable Issue: %w", err)
 	}
-	if issue.Number != bundle.Manifest.IssueNumber {
-		return fmt.Errorf("durable Issue number %d does not match manifest %d", issue.Number, bundle.Manifest.IssueNumber)
+	if identity.Number != bundle.Manifest.IssueNumber {
+		return fmt.Errorf("durable Issue number %d does not match manifest %d", identity.Number, bundle.Manifest.IssueNumber)
 	}
 	requestIDs := map[string]bool{}
 	for index, raw := range bundle.Capture.Durable.PendingRequests {
 		var request state.Request
-		if err := strictDecode(raw, &request); err != nil || request.IssueNumber != issue.Number || request.ID == "" || requestIDs[request.ID] {
+		if err := strictDecode(raw, &request); err != nil || request.IssueNumber != identity.Number || request.ID == "" || requestIDs[request.ID] {
 			return fmt.Errorf("pending request %d is invalid or belongs to another Issue", index)
 		}
 		requestIDs[request.ID] = true
 	}
-	if err := validateReconstructedSnapshot(bundle, issue); err != nil {
+	if _, err := migratedFixtureSnapshot(bundle); err != nil {
 		return err
 	}
-	if bundle.Capture.Remote.Issue.Number != issue.Number {
+	if bundle.Capture.Remote.Issue.Number != identity.Number {
 		return errors.New("remote Issue identity does not match durable state")
 	}
 	want, err := summarize(bundle)
@@ -299,37 +286,44 @@ func Validate(bundle Bundle) error {
 	return nil
 }
 
-func validateReconstructedSnapshot(bundle Bundle, issue state.Issue) error {
-	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion-1 && issue.Status.Terminal() {
-		// Previous-schema fixtures retain the execution lease that v5 migration
-		// must split. Remove only that known incompatibility while validating the
-		// rest of the captured aggregate; runtime loading never takes this path.
-		issue.Lease = nil
-	}
-	snapshot := state.Snapshot{
-		Version: state.CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion,
-		RepoID: bundle.Capture.Durable.RepoID, RepoPath: bundle.Capture.Durable.RepoPath,
-		StateRevision: bundle.Capture.Durable.StateRevision,
-		Supervisor:    state.Supervisor{State: state.SupervisorStateStopped, UpdatedAt: bundle.Manifest.CapturedAt},
-		Issues:        map[string]*state.Issue{strconv.Itoa(issue.Number): &issue}, PendingRequests: map[string]*state.Request{},
-	}
+func migratedFixtureSnapshot(bundle Bundle) (state.Snapshot, error) {
+	pending := make(map[string]json.RawMessage, len(bundle.Capture.Durable.PendingRequests))
 	for _, raw := range bundle.Capture.Durable.PendingRequests {
-		var request state.Request
-		if err := strictDecode(raw, &request); err != nil {
-			return err
+		var identity struct {
+			ID string `json:"id"`
 		}
-		snapshot.PendingRequests[request.ID] = &request
+		if err := json.Unmarshal(raw, &identity); err != nil || identity.ID == "" {
+			return state.Snapshot{}, fmt.Errorf("decode pending request identity: %w", err)
+		}
+		pending[identity.ID] = raw
 	}
-	err := snapshot.Validate()
-	if err == nil {
-		return nil
+	raw := map[string]any{
+		"version":                   bundle.Manifest.SourceSchemaVersion,
+		"semantic_contract_version": statecontract.CurrentVersion,
+		"repo_id":                   bundle.Capture.Durable.RepoID, "repo_path": bundle.Capture.Durable.RepoPath,
+		"state_revision":   bundle.Capture.Durable.StateRevision,
+		"supervisor":       map[string]any{"state": "stopped", "updated_at": bundle.Manifest.CapturedAt},
+		"issues":           map[string]json.RawMessage{strconv.Itoa(bundle.Manifest.IssueNumber): bundle.Capture.Durable.Issue},
+		"pending_requests": pending,
 	}
-	var compatibility state.SemanticCompatibilityError
-	if !errors.As(err, &compatibility) || len(compatibility.Violations) != 1 ||
-		compatibility.Violations[0].Code != state.SemanticCodeWorkspaceProvenanceMissing {
-		return fmt.Errorf("reconstructed production snapshot violates aggregate invariants: %w", err)
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return state.Snapshot{}, err
 	}
-	return nil
+	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion-1 {
+		return migration.DecodePreviousSnapshot(encoded, bundle.Manifest.CapturedAt)
+	}
+	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion {
+		var snapshot state.Snapshot
+		if err := json.Unmarshal(encoded, &snapshot); err != nil {
+			return state.Snapshot{}, fmt.Errorf("decode current recovery fixture: %w", err)
+		}
+		if err := snapshot.Validate(); err != nil {
+			return state.Snapshot{}, fmt.Errorf("validate current recovery fixture: %w", err)
+		}
+		return snapshot, nil
+	}
+	return state.Snapshot{}, fmt.Errorf("unsupported recovery fixture source schema %d", bundle.Manifest.SourceSchemaVersion)
 }
 
 func strictDecode(data []byte, target any) error {
