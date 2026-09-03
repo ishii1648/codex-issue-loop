@@ -103,6 +103,17 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 	if err != nil {
 		return l.blockSupervisor(failure.Wrap(failure.Supervisor, "load scheduler state", err), failure.Supervisor, 1)
 	}
+	if current.Supervisor.State == state.SupervisorStateStarting {
+		if _, err := l.Store.Update("supervisor_running", 0, "", nil, func(snapshot *state.Snapshot) error {
+			if snapshot.Supervisor.State == state.SupervisorStateStarting {
+				snapshot.Supervisor.State = state.SupervisorStateRunning
+				snapshot.Supervisor.Message = ""
+			}
+			return nil
+		}); err != nil {
+			return l.blockSupervisor(failure.Wrap(failure.Supervisor, "mark scheduler running", err), failure.Supervisor, 1)
+		}
+	}
 	concurrency := l.Config.Queue.Concurrency
 	if concurrency < 1 {
 		concurrency = 1
