@@ -16,7 +16,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/application/observe"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
@@ -55,15 +54,6 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 		return err
 	}
 	result := buildStatus(launchStatus, snapshot, cfg.Queue.Concurrency)
-	result.CapabilityAdmission = &capabilityAdmissionStatus{
-		ContractVersion: capability.ContractVersion, Profiles: cfg.WorkerCapabilityProfiles(),
-		Predicate: "all required capability fields must be satisfied by the selected effective worker profile",
-		MismatchCodes: []string{
-			capability.CodeMetadataMissing, capability.CodeMetadataInvalid, capability.CodeProfileUnknown,
-			capability.CodeNetworkMismatch, capability.CodeBrowserCDPMismatch, capability.CodeDownloadMismatch,
-			capability.CodeExternalTimeMismatch,
-		},
-	}
 	if cfg.Webhook.Enabled() {
 		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
 		brokerLaunchd, statusErr := manager.BrokerStatus(ctx)

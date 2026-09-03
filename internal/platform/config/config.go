@@ -14,7 +14,6 @@ import (
 	"unicode"
 
 	"github.com/ishii1648/codex-issue-loop/internal/domain/admission"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 	"gopkg.in/yaml.v3"
 )
@@ -116,18 +115,7 @@ type CommandNetwork struct {
 }
 
 type Profile struct {
-	MaxContinuations int               `yaml:"max_continuations" json:"max_continuations"`
-	Capabilities     ProfileCapability `yaml:"capabilities" json:"capabilities"`
-}
-
-// ProfileCapability is a non-secret allowlist for a worker profile. Network
-// is additionally bounded by command_network; browser/CDP and download are
-// only effective on a launch route that can actually provide them.
-type ProfileCapability struct {
-	Network          string `yaml:"network" json:"network"`
-	BrowserCDP       bool   `yaml:"browser_cdp" json:"browser_cdp"`
-	Download         bool   `yaml:"download" json:"download"`
-	ExternalTimeGate bool   `yaml:"external_time_gate" json:"external_time_gate"`
+	MaxContinuations int `yaml:"max_continuations" json:"max_continuations"`
 }
 
 type Watch struct {
@@ -290,8 +278,8 @@ func Defaults() Config {
 			TimeoutGrace:     Duration{30 * time.Second},
 			AmbiguousProfile: "extended",
 			Profiles: map[string]Profile{
-				"standard": {MaxContinuations: 0, Capabilities: ProfileCapability{Network: capability.NetworkNone}},
-				"extended": {MaxContinuations: 3, Capabilities: ProfileCapability{Network: capability.NetworkNone}},
+				"standard": {MaxContinuations: 0},
+				"extended": {MaxContinuations: 3},
 			},
 		},
 		Watch: Watch{
@@ -503,14 +491,9 @@ func (c Config) Validate() error {
 	if _, ok := c.Worker.Profiles["extended"]; !ok {
 		return fmt.Errorf("worker.profiles.extended is required")
 	}
-	for name, profile := range c.Worker.Profiles {
+	for name := range c.Worker.Profiles {
 		if name != "standard" && name != "extended" {
 			return fmt.Errorf("worker.profiles contains unsupported profile %q", name)
-		}
-		switch profile.Capabilities.Network {
-		case "", capability.NetworkNone, capability.NetworkLocalhost, capability.NetworkPublic:
-		default:
-			return fmt.Errorf("worker.profiles.%s.capabilities.network must be none, localhost, or public", name)
 		}
 	}
 	if c.Watch.ReconcileJitter < 0 || c.Watch.ReconcileJitter > 1 {
@@ -654,56 +637,7 @@ func (c Config) AdmissionSettings() admission.Settings {
 	return admission.Settings{
 		Concurrency: c.Queue.Concurrency, MetadataVersion: c.Resources.MetadataVersion,
 		Definitions: definitions, Legacy: len(definitions) == 0,
-		CapabilityProfiles: c.WorkerCapabilityProfiles(),
 	}
-}
-
-// WorkerCapabilityProfiles derives the safe capability envelope from both the
-// configured profile and the launch route assembled by the built-in adapter.
-// A profile may intentionally under-advertise a route, but can never gain a
-// capability merely by claiming it in YAML.
-func (c Config) WorkerCapabilityProfiles() map[string]capability.Provider {
-	result := map[string]capability.Provider{}
-	for _, name := range []string{"standard", "extended"} {
-		profile, ok := c.Worker.Profiles[name]
-		if !ok {
-			continue
-		}
-		launched := c.WorkerLaunchCapabilities(name)
-		network := profile.Capabilities.Network
-		if network == "" {
-			network = launched.Network
-		}
-		if !networkWithin(network, launched.Network) {
-			network = capability.NetworkNone
-		}
-		result[name] = capability.Provider{
-			Version: capability.ContractVersion, Profile: name, Network: network,
-			BrowserCDP:       profile.Capabilities.BrowserCDP && launched.BrowserCDP,
-			Download:         profile.Capabilities.Download && launched.Download,
-			ExternalTimeGate: profile.Capabilities.ExternalTimeGate,
-		}
-	}
-	return result
-}
-
-func (c Config) WorkerLaunchCapabilities(profile string) capability.Provider {
-	network := capability.NetworkNone
-	if c.Worker.CommandNetwork.LocalhostOnly() {
-		network = capability.NetworkLocalhost
-	}
-	return capability.Provider{
-		Version: capability.ContractVersion, Profile: profile, Network: network,
-		BrowserCDP: network == capability.NetworkLocalhost,
-		Download:   network == capability.NetworkLocalhost,
-	}
-}
-
-func networkWithin(requested, launched string) bool {
-	if requested == launched || requested == capability.NetworkNone {
-		return true
-	}
-	return requested == capability.NetworkLocalhost && launched == capability.NetworkPublic
 }
 
 // EffectiveCommand never expands the configured value through a shell.

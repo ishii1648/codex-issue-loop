@@ -113,15 +113,6 @@ func (s Status) RequiresExecutionLease() bool {
 	return s.OccupiesWorkerSlot()
 }
 
-func (s Status) RequiresCapabilityRecheck() bool {
-	switch s {
-	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending, StatusRetryWait:
-		return true
-	default:
-		return false
-	}
-}
-
 func (s Status) TerminalForWebhook() bool {
 	return s.Terminal() || s == StatusNeedsInput
 }

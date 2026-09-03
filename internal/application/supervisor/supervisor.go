@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +22,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/admission"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
@@ -398,22 +396,18 @@ func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue
 	}
 	issue = latest
 	// Re-evaluate the authoritative body immediately before the first durable
-	// write. A metadata edit between queue collection and dispatch must not
-	// reserve a lease or mutate GitHub under stale capability assumptions.
+	// write. A metadata or resource-label edit between queue collection and
+	// dispatch must not reserve a lease or mutate GitHub under stale claims.
 	evaluation, err := admission.EvaluateCandidate(l.Config.AdmissionSettings(), admission.Candidate{
 		Number: issue.Number, CreatedAt: issue.CreatedAt, Labels: issue.Labels, Body: issue.Body,
 	})
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "evaluate refreshed Issue admission", err)
 	}
-	if !evaluation.Capability.Compatible {
-		return nil
-	}
 	now := l.now()
 	_, _, err = l.Store.ReserveLease(state.LeaseReservation{
 		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: slot,
 		DeclaredResources: evaluation.DeclaredResources, ResolvedResources: evaluation.Resources, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
-		CapabilityRequirements: evaluation.Capability.Requirements, WorkerCapabilities: evaluation.Capability.Provided,
 	})
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "persist claim start", err)
@@ -467,17 +461,6 @@ func localBaseSHA(ctx context.Context, cfg config.Config) string {
 }
 
 func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
-	if current.CapabilityRequirements != nil && current.Status.RequiresCapabilityRecheck() {
-		capabilityEvaluation := capability.EvaluateRequirement(current.CapabilityRequirements, l.Config.WorkerCapabilityProfiles())
-		if !capabilityEvaluation.Compatible {
-			codes := make([]string, 0, len(capabilityEvaluation.Mismatches))
-			for _, mismatch := range capabilityEvaluation.Mismatches {
-				codes = append(codes, mismatch.Code)
-			}
-			sort.Strings(codes)
-			return failure.Wrap(failure.Issue, "revalidate persisted Issue capability", fmt.Errorf("%s", strings.Join(codes, ",")))
-		}
-	}
 	if current.GitHubSync.Pending() {
 		return l.syncGitHub(ctx, current)
 	}

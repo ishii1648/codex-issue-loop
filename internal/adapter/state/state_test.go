@@ -160,6 +160,48 @@ func TestLegacyGoalSnapshotIsIgnoredWithoutLosingContinuationState(t *testing.T)
 	}
 }
 
+func TestLegacyIssueCapabilityFieldsAreIgnoredWithoutLosingState(t *testing.T) {
+	store := newStore(t)
+	snapshot := store.emptySnapshot()
+	snapshot.Issues["7"] = &Issue{
+		Number: 7, Title: "legacy capability run", Status: issuedomain.StatusCompleted,
+		RunID: "run_7", Attempts: 2, ExecutionProfile: "extended",
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	issue := legacy["issues"].(map[string]any)["7"].(map[string]any)
+	issue["capability_requirements"] = map[string]any{"version": 1, "profile": "standard", "network": "public"}
+	issue["worker_capabilities"] = map[string]any{"version": 1, "profile": "standard", "network": "none"}
+	if err := fsutil.WriteJSON(store.StatePath(), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("legacy capability fields made state unreadable: %v", err)
+	}
+	item := loaded.Issues["7"]
+	if item == nil || item.Title != "legacy capability run" || item.Status != issuedomain.StatusCompleted || item.RunID != "run_7" || item.Attempts != 2 || item.ExecutionProfile != "extended" {
+		t.Fatalf("legacy capability load lost state: %+v", item)
+	}
+	if _, err := store.Update("legacy_capability_fields_ignored", 7, "run_7", nil, func(*Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte("capability_requirements")) || bytes.Contains(persisted, []byte("worker_capabilities")) {
+		t.Fatalf("obsolete capability fields survived the next state write: %s", persisted)
+	}
+}
+
 func TestLeaseReservationSurvivesRestartAndFencesStaleOwners(t *testing.T) {
 	store := newStore(t)
 	reservedAt := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)

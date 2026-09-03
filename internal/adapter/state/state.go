@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
@@ -213,42 +212,40 @@ func (w WorkerWorkspace) Matches(path, branch, repoID, repository string, reposi
 }
 
 type Issue struct {
-	Number                 int                      `json:"number"`
-	Title                  string                   `json:"title"`
-	Status                 issuedomain.Status       `json:"status"`
-	RunID                  string                   `json:"run_id,omitempty"`
-	LeaseGeneration        uint64                   `json:"lease_generation,omitempty"`
-	Lease                  *ExecutionLease          `json:"execution_lease,omitempty"`
-	ResourcePark           *ContinuationCheckpoint  `json:"continuation_checkpoint,omitempty"`
-	Suspension             *Suspension              `json:"suspension,omitempty"`
-	DeclaredResources      []string                 `json:"declared_resources,omitempty"`
-	ActualResources        []string                 `json:"actual_resources,omitempty"`
-	PublicationAudit       *publication.Audit       `json:"publication_audit,omitempty"`
-	Branch                 string                   `json:"branch,omitempty"`
-	Worktree               string                   `json:"worktree,omitempty"`
-	Workspace              *WorkerWorkspace         `json:"workspace,omitempty"`
-	Attempts               int                      `json:"attempts"`
-	Continuations          int                      `json:"continuations"`
-	ExecutionProfile       string                   `json:"execution_profile,omitempty"`
-	CapabilityRequirements *capability.Requirements `json:"capability_requirements,omitempty"`
-	WorkerCapabilities     *capability.Provider     `json:"worker_capabilities,omitempty"`
-	SessionID              string                   `json:"session_id,omitempty"`
-	Session                *WorkerSession           `json:"session,omitempty"`
-	WorkerIdentity         WorkerIdentity           `json:"worker_identity,omitempty"`
-	WorkerPID              int                      `json:"worker_pid,omitempty"`
-	WorkerPGID             int                      `json:"worker_pgid,omitempty"`
-	PullRequestURL         string                   `json:"pull_request_url,omitempty"`
-	PullRequestNumber      int                      `json:"pull_request_number,omitempty"`
-	HeadSHA                string                   `json:"head_sha,omitempty"`
-	ReviewDecision         string                   `json:"review_decision,omitempty"`
-	PullRequestMerged      bool                     `json:"pull_request_merged,omitempty"`
-	GitHubSync             issuedomain.GitHubSync   `json:"github_sync,omitempty"`
-	FailureKind            string                   `json:"failure_kind,omitempty"`
-	LastError              string                   `json:"last_error,omitempty"`
-	RetryAfter             *time.Time               `json:"retry_after,omitempty"`
-	Answers                []AnswerRecord           `json:"answers,omitempty"`
-	ConflictRecovery       *ConflictRecovery        `json:"conflict_recovery,omitempty"`
-	UpdatedAt              time.Time                `json:"updated_at"`
+	Number            int                     `json:"number"`
+	Title             string                  `json:"title"`
+	Status            issuedomain.Status      `json:"status"`
+	RunID             string                  `json:"run_id,omitempty"`
+	LeaseGeneration   uint64                  `json:"lease_generation,omitempty"`
+	Lease             *ExecutionLease         `json:"execution_lease,omitempty"`
+	ResourcePark      *ContinuationCheckpoint `json:"continuation_checkpoint,omitempty"`
+	Suspension        *Suspension             `json:"suspension,omitempty"`
+	DeclaredResources []string                `json:"declared_resources,omitempty"`
+	ActualResources   []string                `json:"actual_resources,omitempty"`
+	PublicationAudit  *publication.Audit      `json:"publication_audit,omitempty"`
+	Branch            string                  `json:"branch,omitempty"`
+	Worktree          string                  `json:"worktree,omitempty"`
+	Workspace         *WorkerWorkspace        `json:"workspace,omitempty"`
+	Attempts          int                     `json:"attempts"`
+	Continuations     int                     `json:"continuations"`
+	ExecutionProfile  string                  `json:"execution_profile,omitempty"`
+	SessionID         string                  `json:"session_id,omitempty"`
+	Session           *WorkerSession          `json:"session,omitempty"`
+	WorkerIdentity    WorkerIdentity          `json:"worker_identity,omitempty"`
+	WorkerPID         int                     `json:"worker_pid,omitempty"`
+	WorkerPGID        int                     `json:"worker_pgid,omitempty"`
+	PullRequestURL    string                  `json:"pull_request_url,omitempty"`
+	PullRequestNumber int                     `json:"pull_request_number,omitempty"`
+	HeadSHA           string                  `json:"head_sha,omitempty"`
+	ReviewDecision    string                  `json:"review_decision,omitempty"`
+	PullRequestMerged bool                    `json:"pull_request_merged,omitempty"`
+	GitHubSync        issuedomain.GitHubSync  `json:"github_sync,omitempty"`
+	FailureKind       string                  `json:"failure_kind,omitempty"`
+	LastError         string                  `json:"last_error,omitempty"`
+	RetryAfter        *time.Time              `json:"retry_after,omitempty"`
+	Answers           []AnswerRecord          `json:"answers,omitempty"`
+	ConflictRecovery  *ConflictRecovery       `json:"conflict_recovery,omitempty"`
+	UpdatedAt         time.Time               `json:"updated_at"`
 }
 
 type Option struct {

@@ -213,9 +213,6 @@ func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current
 	if profile == "" {
 		profile = "extended"
 	}
-	if current.CapabilityRequirements != nil {
-		profile = current.CapabilityRequirements.Profile
-	}
 	_, err := l.Store.Update("conflict_recovery_worker_completed", current.Number, current.RunID, map[string]any{
 		"status": result.Status, "summary": result.Summary, "execution_profile": profile, "tests": result.Tests,
 	}, func(s *state.Snapshot) error {

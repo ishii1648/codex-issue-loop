@@ -227,24 +227,20 @@ func TestReconcileObservationTransitions(t *testing.T) {
 
 func TestStatusOperationalPredicates(t *testing.T) {
 	tests := []struct {
-		status            Status
-		occupiesSlot      bool
-		capabilityRecheck bool
-		webhookTerminal   bool
-		webhookRoutable   bool
+		status          Status
+		occupiesSlot    bool
+		webhookTerminal bool
+		webhookRoutable bool
 	}{
-		{status: StatusClaiming, occupiesSlot: true, capabilityRecheck: true, webhookRoutable: true},
+		{status: StatusClaiming, occupiesSlot: true, webhookRoutable: true},
 		{status: StatusRunning, occupiesSlot: true, webhookRoutable: true},
-		{status: StatusRetryWait, capabilityRecheck: true, webhookRoutable: true},
+		{status: StatusRetryWait, webhookRoutable: true},
 		{status: StatusNeedsInput, webhookTerminal: true, webhookRoutable: true},
 		{status: StatusCompleted, webhookTerminal: true},
 	}
 	for _, test := range tests {
 		if got := test.status.OccupiesWorkerSlot(); got != test.occupiesSlot {
 			t.Errorf("%s OccupiesWorkerSlot=%v want %v", test.status, got, test.occupiesSlot)
-		}
-		if got := test.status.RequiresCapabilityRecheck(); got != test.capabilityRecheck {
-			t.Errorf("%s RequiresCapabilityRecheck=%v want %v", test.status, got, test.capabilityRecheck)
 		}
 		if got := test.status.TerminalForWebhook(); got != test.webhookTerminal {
 			t.Errorf("%s TerminalForWebhook=%v want %v", test.status, got, test.webhookTerminal)

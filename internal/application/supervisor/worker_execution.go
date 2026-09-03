@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
@@ -107,9 +105,6 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	}
 	if current.ExecutionProfile == "extended" {
 		profile = "extended"
-	}
-	if current.CapabilityRequirements != nil {
-		profile = current.CapabilityRequirements.Profile
 	}
 	_, err := l.Store.Update("worker_preflight_completed", issue.Number, current.RunID, map[string]string{"execution_profile": profile}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
@@ -344,9 +339,6 @@ func (l *Loop) reacquireAnsweredClaim(ctx context.Context, remoteIssue gh.Issue,
 		current.ResourcePark.Kind != state.ResourceParkKindNeedsInput || current.ResourcePark.Status != issuedomain.ResourceParkStatusParked || current.PullRequestURL != "" {
 		return nil
 	}
-	if current.CapabilityRequirements != nil && !capability.EvaluateRequirement(current.CapabilityRequirements, l.Config.WorkerCapabilityProfiles()).Compatible {
-		return nil
-	}
 	labels := labelSet(remoteIssue.Labels)
 	if !strings.EqualFold(remoteIssue.State, "open") || !labels[l.Config.GitHub.NeedsInputLabel] || labels[l.Config.GitHub.RunningLabel] ||
 		labels[l.Config.GitHub.DoneLabel] || labels[l.Config.GitHub.FailedLabel] ||
@@ -480,18 +472,6 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 		return fail(fmt.Errorf("run changed from %q to %q", expected.RunID, fresh.RunID))
 	}
 	validation.Checks["run_id"] = true
-	if fresh.CapabilityRequirements != nil {
-		capabilityEvaluation := capability.EvaluateRequirement(fresh.CapabilityRequirements, l.Config.WorkerCapabilityProfiles())
-		if !capabilityEvaluation.Compatible {
-			codes := make([]string, 0, len(capabilityEvaluation.Mismatches))
-			for _, mismatch := range capabilityEvaluation.Mismatches {
-				codes = append(codes, mismatch.Code)
-			}
-			sort.Strings(codes)
-			return fail(fmt.Errorf("worker capability predicate failed: %s", strings.Join(codes, ",")))
-		}
-		validation.Checks["worker_capabilities"] = true
-	}
 	if fresh.SessionID != expected.SessionID {
 		return fail(fmt.Errorf("session changed before spawn"))
 	}

@@ -233,21 +233,10 @@ worker:
 	}
 }
 
-func TestWorkerCapabilityProfilesAreBoundedByLaunchRoute(t *testing.T) {
-	cfg := Defaults()
-	standard := cfg.Worker.Profiles["standard"]
-	standard.Capabilities = ProfileCapability{Network: "public", BrowserCDP: true, Download: true, ExternalTimeGate: true}
-	cfg.Worker.Profiles["standard"] = standard
-	provided := cfg.WorkerCapabilityProfiles()["standard"]
-	if provided.Network != "none" || provided.BrowserCDP || provided.Download || !provided.ExternalTimeGate {
-		t.Fatalf("disabled route was overclaimed: %+v", provided)
-	}
-	cfg.Worker.CommandNetwork = CommandNetwork{Policy: "localhost-only", Proxy: true, AllowedHosts: []string{"localhost", "127.0.0.1"}}
-	standard.Capabilities = ProfileCapability{Network: "localhost", BrowserCDP: true, Download: true}
-	cfg.Worker.Profiles["standard"] = standard
-	provided = cfg.WorkerCapabilityProfiles()["standard"]
-	if provided.Network != "localhost" || !provided.BrowserCDP || !provided.Download {
-		t.Fatalf("localhost route was not derived: %+v", provided)
+func TestLoadRejectsRemovedIssueCapabilityProfileConfig(t *testing.T) {
+	dir := writeConfig(t, "version: 5\ngithub:\n  repo: owner/repo\nworker:\n  profiles:\n    standard:\n      max_continuations: 0\n      capabilities:\n        network: none\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "capabilities") {
+		t.Fatalf("removed profile capability config was accepted: %v", err)
 	}
 }
 

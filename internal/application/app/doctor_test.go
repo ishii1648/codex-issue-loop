@@ -13,30 +13,11 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/userrules"
 )
-
-func TestDoctorDetectsWorkerProfileLaunchMismatch(t *testing.T) {
-	cfg := config.Defaults()
-	profile := cfg.Worker.Profiles["extended"]
-	profile.Capabilities.Network = "public"
-	profile.Capabilities.BrowserCDP = true
-	cfg.Worker.Profiles["extended"] = profile
-	diagnostics := diagnoseWorkerProfileCapabilities(registry.Entry{RepoID: "repo-test"}, cfg)
-	found := false
-	for _, diagnostic := range diagnostics {
-		if diagnostic.Code == "WORKER_PROFILE_LAUNCH_MISMATCH" && !diagnostic.OK && strings.Contains(diagnostic.Detail, capability.CodeWorkerProfileDrift) {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("profile/launch mismatch was not diagnosed: %+v", diagnostics)
-	}
-}
 
 func TestDoctorDiagnosesGoFormatterCapability(t *testing.T) {
 	cfg := config.Defaults()
