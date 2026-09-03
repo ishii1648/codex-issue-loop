@@ -118,7 +118,7 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 	}
 	// gh paginates internally up to the requested limit. Keep this above the
 	// MVP's original 100 so large queues are not silently truncated.
-	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,createdAt,labels,assignees,milestone,author"}
+	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,createdAt,state,labels,assignees,milestone,author"}
 	// A single configured ready label can be pushed into GitHub's query
 	// without changing the local has-any-label eligibility contract. This
 	// avoids paying GraphQL node cost for every unrelated open Issue on each
@@ -159,7 +159,7 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 		}
 		issues = append(issues, NormalizeIssue(Issue{
 			Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt,
-			Labels: labels, Assignees: assignees, Milestone: milestone, AuthorLogin: item.Author.Login,
+			State: item.State, Labels: labels, Assignees: assignees, Milestone: milestone, AuthorLogin: item.Author.Login,
 			AuthorType: authorType(item.Author.IsBot),
 		}))
 	}

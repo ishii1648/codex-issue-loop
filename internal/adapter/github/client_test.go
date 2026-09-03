@@ -331,7 +331,8 @@ func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
 	for index := range items {
 		items[index] = map[string]any{
 			"number": index + 1, "title": fmt.Sprintf("Issue %d", index+1), "body": "", "url": "https://example.test/issues",
-			"labels": []map[string]string{{"name": "codex-loop:ready"}}, "assignees": []any{}, "milestone": nil,
+			"state": "OPEN", "labels": []map[string]string{{"name": "codex-loop:ready"}}, "assignees": []any{}, "milestone": nil,
+			"author": map[string]any{"login": "owner", "is_bot": false},
 		}
 	}
 	encoded, err := json.Marshal(items)
@@ -353,6 +354,9 @@ func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
 	}
 	if len(issues) != 120 || issues[0].Number != 1 || issues[119].Number != 120 {
 		t.Fatalf("unexpected queue: len=%d first=%d last=%d", len(issues), issues[0].Number, issues[len(issues)-1].Number)
+	}
+	if issues[0].State != "OPEN" || issues[0].AuthorLogin != "owner" || issues[0].AuthorType != "User" {
+		t.Fatalf("queue facts were not preserved: %+v", issues[0])
 	}
 	args, err := os.ReadFile(argsPath)
 	if err != nil {
@@ -422,7 +426,7 @@ func TestListReadyOrdersAfterCollectingPaginatedFixture(t *testing.T) {
 		}
 		items[index] = map[string]any{
 			"number": number, "title": fmt.Sprintf("Issue %d", number), "body": "", "url": "https://example.test/issues",
-			"createdAt": base.Add(time.Duration(number) * time.Minute), "labels": labels, "assignees": []any{}, "milestone": nil,
+			"createdAt": base.Add(time.Duration(number) * time.Minute), "state": "OPEN", "labels": labels, "assignees": []any{}, "milestone": nil,
 		}
 	}
 	encoded, err := json.Marshal(items)
