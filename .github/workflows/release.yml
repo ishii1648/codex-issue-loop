@@ -444,11 +444,11 @@ jobs:
           gh release create "$RELEASE_TAG" dist/candidate/* dist/contracts/*.json dist/production-state/production-state-report.json \
             --verify-tag --generate-notes --title "$RELEASE_TAG"
 
-  post-release-health:
-    name: post-release-health
+  verify-stable-release:
+    name: verify-stable-release
     needs: promote-stable
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
@@ -479,51 +479,3 @@ jobs:
           gh attestation verify dist/stable/production-state-report.json --repo "$GITHUB_REPOSITORY"
           chmod 0755 dist/stable/agent-loop_Darwin_arm64
           dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" '.version == $version and .commit == $commit and .assignment_protocol == 1'
-      - name: Require production delivery health evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          found=false
-          for attempt in $(seq 1 180); do
-            if gh release download "$RELEASE_TAG" --pattern production-health-report.json --dir dist/stable --clobber >/dev/null 2>&1; then
-              found=true
-              break
-            fi
-            sleep 30
-          done
-          test "$found" = true
-          stable_digest=$(shasum -a 256 dist/stable/agent-loop_Darwin_arm64 | awk '{print $1}')
-          jq -e --arg tag "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" --arg digest "$stable_digest" '
-            .schema_version == 2 and .release_tag == $tag and .release_commit == $commit and
-            .stable_binary_sha256 == $digest and .rollout_mode == "per-repository-stable-assignment" and
-            .rollback_drill.typed_rollback == true and .rollback_drill.same_artifact_reapplied == true and
-            .rollback_drill.preserved.state == true and .rollback_drill.preserved.issues == true and
-            .rollback_drill.preserved.leases == true and .rollback_drill.preserved.worktrees == true and
-            .rollback_drill.other_repository_unchanged.assignment == true and
-            .rollback_drill.other_repository_unchanged.pid == true and
-            .rollback_drill.other_repository_unchanged.binary == true and
-            .rollback_drill.other_repository_unchanged.state_revision == true and
-            (.repositories | length) >= 2 and all(.repositories[];
-              .assignment.version == $tag and .assignment.commit == $commit and
-              .assignment.artifact_sha256 == $digest and .runtime.digest == $digest and
-              .runtime.matches == true and .runtime.loaded == true and .runtime.running == true and
-              .transaction_phase == "succeeded" and .fence_active == false and .verified == true and
-              .doctor.schema_version == 1 and .doctor.ok == true and
-              (.doctor.failed_diagnostic_codes | length) == 0 and
-              .status.worker_limit == 1 and .status.active_workers <= 1 and .healthy == true) and
-            .soak.duration_seconds == 300 and .soak.sample_offsets_seconds == [0,60,300] and
-            (.soak.samples | length) == 3 and all(.soak.samples[]; .healthy == true) and
-            .healthy == true
-          ' dist/stable/production-health-report.json >/dev/null
-          gh release view "$RELEASE_TAG" --json assets --jq 'select((.assets|length) == 8)' >/dev/null
-      - name: Attest production health evidence
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: dist/stable/production-health-report.json
-      - uses: actions/upload-artifact@v6
-        with:
-          name: production-health-report-${{ github.sha }}
-          path: dist/stable/production-health-report.json
-          if-no-files-found: error

@@ -1,8 +1,8 @@
 # Release gates
 
-Stable Releaseはsuffixのないannotated `vMAJOR.MINOR.PATCH` tagだけを起点にし、alpha/beta/RC suffixをstableへ昇格しない。tag pushだけでは公開されない。`build-candidate`が作成したbinary、SBOM、manifest、checksumsを唯一の配布正本とし、比較用buildを配布へ使わない。
+Stable Releaseはsuffixのないannotated `vMAJOR.MINOR.PATCH` tagだけを起点にし、alpha/beta/RC suffixをstableへ昇格しない。stableが唯一の正式releaseであり、GAを別の段階として定義しない。tag pushだけでは公開されない。`build-candidate`が作成したbinary、SBOM、manifest、checksumsを唯一の配布正本とし、比較用buildを配布へ使わない。
 
-Release公開とproduction assignmentは別のtransactionである。stable公開だけではrepositoryを更新しない。production rolloutとpost-release healthは[Repository別stable delivery](per-repository-delivery.md)に従い、先行repository、typed rollback drill、同じartifactの再適用、対象外repository不変、最後の全repository収束を検証する。時間経過だけを目的とするEnvironment waitやartifact再取得waitはgateとして扱わない。
+Release公開とproduction assignmentは別のtransactionである。Release workflowはstable公開と同一artifact readbackで完了し、repositoryを更新しない。production rolloutは独立した`Repository rollout health` workflowで、先行repository、typed rollback drill、同じartifactの再適用、対象外repository不変を検証する。rollout失敗はstableを未公開・未GAへ戻さず、対象assignmentの失敗として扱う。時間経過だけを目的とするEnvironment waitやartifact再取得waitはgateとして扱わない。
 
 workflowは次の順で失敗停止する。
 
@@ -17,7 +17,7 @@ workflowは次の順で失敗停止する。
 9. `candidate-integrity`
 10. `promotion-evidence`
 11. `promote-stable`
-12. `post-release-health`
+12. `verify-stable-release`
 
 `cli-surface-contract`は実際にinstallした`gh`とpinned Codex CLIの`--version`、`--help`、`features list`だけを検査し、GitHub API呼び出しもCodex inferenceも行わない。`credentialless-isolated-canary`はlocal bare Git remote、状態付きfake `gh`、状態付きfake Codex、隔離したstate rootを使い、外部networkを閉じて実candidate binaryを起動する。claimからmerge/terminalまでと、`needs_input`から停止・answer・true resume・merge/terminalまでの2 lifecycle、supervisor起動2回、5 crash boundary、webhook fixture replay、重複副作用と残存resourceが0であることを記録する。両scriptは`CANARY_GITHUB_TOKEN`または`OPENAI_API_KEY`が設定されている場合も失敗する。
 
@@ -44,7 +44,7 @@ tag push後にworkflow自体のrelease blockerを修正した場合は、tagを�
 
 manifestのsemantic contract predicateを変更する場合は、tag作成前なら変更commitをrevertして旧predicateへ戻せる。tag作成後はtagやcandidateを移動・再利用せず、修正版workflowをdefault branchへmergeして上記`workflow_dispatch`から同じtagged sourceの全gateを再実行する。
 
-失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production health failure時はdelivery controllerのmaintenance transactionでprevious versionへrollbackし、state、lease、park、request、worktreeを手編集しない。
+失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production rollout failure時は対象repositoryをprevious versionへrollbackし、state、lease、park、request、worktreeを手編集しない。rollout failureだけを理由にRelease workflowを失敗へ戻したり、新patchを作成したりしない。
 
 stable公開後はrepository別assignmentによる段階展開とtyped rollback drillの後、production hostで5分間のhealth soakを行う。開始時、1分後、5分後に全repositoryのassignment、scoped doctor、statusを採取し、全sampleが成功してから同じstable Releaseへreportを追加する。定期LaunchAgentの実行やEnvironment timerを待つ必要はない。
 
@@ -58,6 +58,8 @@ RELEASE_COMMIT='<40-character-merge-commit>' \
 STABLE_BINARY_SHA256='<stable-binary-sha256>' \
 scripts/production-assignment-health.sh
 gh release upload 'v0.9.0' '/absolute/evidence-directory/production-health-report.json'
+gh workflow run rollout.yml --repo ishii1648/codex-issue-loop --ref main \
+  -f release_tag='v0.9.0'
 ```
 
-privateな`repositories.json`はrepository IDとlocal pathを入力するが、公開reportへpathを出力しない。`rollback-drill.json`は先行repositoryのstable→previous→同じstableというtyped操作と、state、Issue、lease、worktree、対象外repositoryのassignment/PID/binary/state revision保全を記録する。`post-release-health`は全repositoryのexact version/commit/digest、terminal transaction、fence不在、doctor成功、worker limit 1、active worker 1以下を照合してreportをattestする。reportが無い場合や不一致はskipせずrelease runを失敗させる。
+privateな`repositories.json`はrepository IDとlocal pathを入力するが、公開reportへpathを出力しない。`rollback-drill.json`は先行repositoryのstable→previous→同じstableというtyped操作と、state、Issue、lease、worktree、対象外repositoryのassignment/PID/binary/state revision保全を記録する。`Repository rollout health` workflowはreportに含まれる1件以上のrepositoryについてexact version/commit/digest、terminal transaction、fence不在、doctor成功、worker limit 1、active worker 1以下を照合してreportをattestする。reportが無い場合や不一致はrollout workflowだけを失敗させ、完了済みRelease workflowの結果を変更しない。

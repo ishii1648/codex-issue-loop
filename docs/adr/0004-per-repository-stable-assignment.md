@@ -9,7 +9,7 @@ host全体を最新Releaseへ自動更新すると、`codex-issue-loop`自身の
 
 ## Decision
 
-配布channelはsuffixなしのannotated stable Releaseだけとする。各repositoryは次のexact tupleを独立して保持する。
+配布channelはsuffixなしのannotated stable Releaseだけとし、stableとGAを同義にする。GAという別の昇格状態は持たない。各repositoryは次のexact tupleを独立して保持する。
 
 ```text
 repository ID + version + commit + artifact SHA-256
@@ -25,8 +25,8 @@ v2 configへのmigrationは全登録repositoryを現在installのexact tupleでg
 ## Consequences
 
 - repositoryごとの段階展開と対象限定rollbackが可能になる。
-- stable、LKG、GAなどの意味が重なる版名を運用しない。
+- stable以外のLKG、GAなど意味が重なる版名・昇格状態を運用しない。
+- rollout failureは対象repositoryのassignmentをrollbackするが、stable Releaseの状態は変更しない。
 - downgradeは任意version指定ではなく、記録済みpreviousへのtyped rollbackだけを許可する。
 - config、slot、tag、commit、digest、attestation、generationの不一致はfail closedになる。
 - schemaやsemantic contractがrepository間で共有stateを非互換にする変更は、従来どおり別の全停止migrationを必要とする。
-
