@@ -41,6 +41,10 @@ func TestProductionStateIsolationRunsCredentiallessContractBetweenSnapshots(t *t
 			}
 			productionBinary := writeExecutable(t, root, "production-agent-loop", `#!/bin/sh
 if [ "$1" = doctor ]; then
+  case " $* " in
+    *" --assignment-health "*) ;;
+    *) printf '%s\n' 'assignment-scoped doctor flag is required' >&2; exit 9 ;;
+  esac
   if [ "${DOCTOR_MODE:-}" = stopped ]; then
     printf '%s\n' '{"schema_version":1,"ok":false,"diagnostics":[{"code":"SUPERVISOR_STOPPED","ok":false}]}'
     exit 1
@@ -559,6 +563,9 @@ func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 		if !strings.Contains(string(productionIsolation), required) {
 			t.Fatalf("production isolation does not preserve the primed Go cache through HOME isolation: missing %q", required)
 		}
+	}
+	if !strings.Contains(string(productionIsolation), `doctor --repo "$production_repo" --assignment-health --json`) {
+		t.Fatal("production isolation does not use assignment-scoped doctor")
 	}
 	for _, path := range []string{"scripts/offline-release-contract.sh", "scripts/production-state-isolation.sh", "scripts/production-assignment-health.sh", "scripts/production-release-health.sh"} {
 		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))

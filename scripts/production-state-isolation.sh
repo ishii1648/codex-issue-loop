@@ -32,7 +32,7 @@ snapshot_production() {
   destination=$1
   doctor_path="$temporary_root/doctor.json"
   status_path="$temporary_root/status.json"
-  if ! "$production_binary" doctor --repo "$production_repo" --json >"$doctor_path"; then
+  if ! "$production_binary" doctor --repo "$production_repo" --assignment-health --json >"$doctor_path"; then
     : # A deliberately stopped supervisor is accepted below only when it is the sole diagnostic failure.
   fi
   "$production_binary" status --repo "$production_repo" --json >"$status_path"

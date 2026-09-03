@@ -25,7 +25,7 @@ GitHub-hosted runnerはproduction stateへ到達できないため、hosted cana
 
 ```sh
 PRODUCTION_REPOSITORY_PATH='/absolute/production/repository' \
-PRODUCTION_AGENT_LOOP_BINARY='/absolute/installed/agent-loop' \
+PRODUCTION_AGENT_LOOP_BINARY='/absolute/assigned-runtime/agent-loop' \
 CANDIDATE_BINARY='/absolute/candidate/agent-loop_Darwin_arm64' \
 CONTRACT_ARTIFACT_DIR='/absolute/evidence-directory' \
 RELEASE_TAG='v0.8.0' \
@@ -36,7 +36,7 @@ gh release upload 'candidate-v0.8.0-<workflow-run-id>' \
   '/absolute/evidence-directory/production-state-report.json'
 ```
 
-scriptはproductionの`doctor --json`と`status --json`だけを使用し、credentialless contract前後でstate revision、Issue、root active execution、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`を必須とする。supervisor稼働中はdoctor成功を要求し、保守のため意図的に停止中なら`SUPERVISOR_STOPPED`だけを許容して`active_workers=0`を要求する。その他のdoctor failureは停止中でもfail closedである。
+scriptはproduction assignment runtimeの`doctor --assignment-health --json`と`status --json`だけを使用し、global operator installとは分離して、credentialless contract前後でstate revision、Issue、root active execution、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`を必須とする。supervisor稼働中はdoctor成功を要求し、保守のため意図的に停止中なら`SUPERVISOR_STOPPED`だけを許容して`active_workers=0`を要求する。その他のdoctor failureは停止中でもfail closedである。
 
 raw snapshotとoffline contractはmode `0600`の`production-state-private-evidence.json`へ保存し、公開Releaseへuploadしない。公開する`production-state-report.json`はcandidate SHA-256、変更数0、安全条件のboolean、private evidenceのSHA-256 commitmentだけを含むredacted summaryとする。repository ID、state revision、Issue数、Issue番号、active execution、run ID、pending requestの内容、filesystem pathを公開payloadへ含めない。`production-state-isolation`はこのsummaryのrelease commitとcandidate binary SHA-256を照合してattestする。`candidate-integrity`はcandidate prereleaseからbinaryを1回取得し、canonical candidateとのbyte一致とattestationを即時検査する。immutable artifactの再取得だけを目的とした時間待機は行わない。
 
