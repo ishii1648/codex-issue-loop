@@ -203,8 +203,8 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				s.pollAt = time.Time{}
 			}
 		}
-		var pollTimer, retryTimer SchedulerTimer
-		var pollTimerC, retryTimerC <-chan time.Time
+		var pollTimer, retryTimer, reconciliationTimer SchedulerTimer
+		var pollTimerC, retryTimerC, reconciliationTimerC <-chan time.Time
 		if !s.pollAt.IsZero() {
 			pollTimer = l.newSchedulerTimer(until(l.now(), s.pollAt))
 			pollTimerC = pollTimer.C()
@@ -213,12 +213,16 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 			retryTimer = l.newSchedulerTimer(delay)
 			retryTimerC = retryTimer.C()
 		}
+		if l.Config.Webhook.Enabled() {
+			delay := l.jitter(l.Config.Watch.ReconcileInterval.Duration, l.Config.Watch.ReconcileJitter, 0)
+			reconciliationTimer = l.newSchedulerTimer(delay)
+			reconciliationTimerC = reconciliationTimer.C()
+		}
 	waitForWake:
 		for {
 			select {
 			case <-ctx.Done():
-				stopSchedulerTimer(pollTimer)
-				stopSchedulerTimer(retryTimer)
+				stopSchedulerTimers(pollTimer, retryTimer, reconciliationTimer)
 				s.cancelAndDrain()
 				_, _ = l.Store.Update("supervisor_stopped", 0, "", map[string]string{"reason": ctx.Err().Error()}, func(snapshot *state.Snapshot) error {
 					snapshot.Supervisor.State = state.SupervisorStateStopped
@@ -228,8 +232,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				})
 				return nil
 			case event := <-s.events:
-				stopSchedulerTimer(pollTimer)
-				stopSchedulerTimer(retryTimer)
+				stopSchedulerTimers(pollTimer, retryTimer, reconciliationTimer)
 				if eventErr := s.handleEvent(event); eventErr != nil {
 					if fatal := s.handleCycleError(eventErr); fatal != nil {
 						s.cancelAndDrain()
@@ -245,7 +248,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				trigger = "worker_finished"
 				break waitForWake
 			case <-pollTimerC:
-				stopSchedulerTimer(retryTimer)
+				stopSchedulerTimers(retryTimer, reconciliationTimer)
 				if l.Config.Webhook.Enabled() {
 					// Webhook schedulers have no periodic GitHub queue timer. A non-zero
 					// pollAt in this mode is only a shared supervisor cooldown deadline.
@@ -257,8 +260,12 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				trigger = "poll_timer"
 				break waitForWake
 			case <-retryTimerC:
-				stopSchedulerTimer(pollTimer)
+				stopSchedulerTimers(pollTimer, reconciliationTimer)
 				trigger = "retry_timer"
+				break waitForWake
+			case <-reconciliationTimerC:
+				stopSchedulerTimers(pollTimer, retryTimer)
+				trigger = "reconciliation_timer"
 				break waitForWake
 			case event, ok := <-watchEvents:
 				if !ok {
@@ -269,8 +276,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				if filepath.Dir(event.Name) != webhook.MailboxDir(l.Store.Dir) && base != "state.json" && base != "events.jsonl" && base != "delivery-maintenance.wake" {
 					continue
 				}
-				stopSchedulerTimer(pollTimer)
-				stopSchedulerTimer(retryTimer)
+				stopSchedulerTimers(pollTimer, retryTimer, reconciliationTimer)
 				watchEvents, watchErrors, coalescedWakeCount = coalesceWatchEventsCount(watchEvents, watchErrors)
 				if !l.Config.Webhook.Enabled() {
 					pollCandidates = s.hasFreeSlot()
@@ -294,6 +300,12 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 func stopSchedulerTimer(timer SchedulerTimer) {
 	if timer != nil {
 		timer.Stop()
+	}
+}
+
+func stopSchedulerTimers(timers ...SchedulerTimer) {
+	for _, timer := range timers {
+		stopSchedulerTimer(timer)
 	}
 }
 
@@ -698,8 +710,11 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		}
 		if gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
 			candidates = append(candidates, candidate)
+			processed[number] = true
 			// Keep the delivery until the durable local Issue exists. A crash
 			// between admission and lease reservation can then replay safely.
+			// Older deliveries for the same Issue are acknowledged because this
+			// newest intent is sufficient to repeat the authoritative read.
 		} else {
 			acknowledged = append(acknowledged, delivery)
 			processed[number] = true

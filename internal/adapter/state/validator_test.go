@@ -38,6 +38,11 @@ func TestV5DecodeRejectsRemovedRecoveryAxes(t *testing.T) {
 		mutate func(map[string]any)
 	}{
 		{name: "blocked cause", mutate: func(issue map[string]any) { issue["blocked_cause"] = map[string]any{} }},
+		{name: "legacy lease", mutate: func(issue map[string]any) { issue["lease"] = map[string]any{} }},
+		{name: "legacy resource park", mutate: func(issue map[string]any) { issue["resource_park"] = map[string]any{} }},
+		{name: "legacy checkpoint lease", mutate: func(issue map[string]any) {
+			issue["continuation_checkpoint"] = map[string]any{"original_lease": map[string]any{}}
+		}},
 		{name: "environment resume", mutate: func(issue map[string]any) { issue["environment_resume"] = map[string]any{} }},
 		{name: "answered workspace", mutate: func(issue map[string]any) { issue["answered_workspace_recovery"] = map[string]any{} }},
 		{name: "workspace provenance", mutate: func(issue map[string]any) { issue["workspace_provenance_recovery"] = map[string]any{} }},

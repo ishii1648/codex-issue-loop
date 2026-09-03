@@ -17,6 +17,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
@@ -503,7 +504,11 @@ func TestStartupReconciliationParksExistingNeedsInputLease(t *testing.T) {
 		item.Worktree = loop.Config.RepoPath
 		item.Workspace = fixtureWorkspace(loop, loop.Config.RepoPath, branch)
 		item.SessionID = "session-input"
-		snapshot.PendingRequests["req_input"] = &state.Request{ID: "req_input", IssueNumber: 1, Question: "Continue?", Status: issuedomain.RequestStatusPending, CreatedAt: now.Add(-time.Minute)}
+		item.PublicationAudit = &publication.Audit{Reason: publication.ReasonResourceClaimMismatch}
+		snapshot.PendingRequests["req_input"] = &state.Request{
+			ID: "req_input", IssueNumber: 1, Question: "Continue?", ResumeStatus: issuedomain.StatusResumePending,
+			Status: issuedomain.RequestStatusPending, CreatedAt: now.Add(-time.Minute),
+		}
 		return nil
 	})
 	if err != nil {
@@ -523,7 +528,10 @@ func TestStartupReconciliationParksExistingNeedsInputLease(t *testing.T) {
 	if item.Status != issuedomain.StatusNeedsInput || item.Lease != nil || item.ResourcePark == nil || item.ResourcePark.Kind != state.ResourceParkKindNeedsInput || item.ResourcePark.RequestID != request.ID || item.ResourcePark.OriginalLease.Owner != owner {
 		t.Fatalf("needs-input lease was not parked: item=%+v request=%+v", item, request)
 	}
-	if request.RunID != item.RunID || request.ResourceParkID != item.ResourcePark.ID || request.ReleasedOwner == nil || *request.ReleasedOwner != owner || item.SessionID != "session-input" || item.Worktree != loop.Config.RepoPath || item.Branch != branch {
+	if request.RunID != item.RunID || request.ResumeStatus != issuedomain.StatusUnset || request.ResourceParkID != item.ResourcePark.ID ||
+		request.ReleasedOwner == nil || *request.ReleasedOwner != owner || item.ResourcePark.Evidence == nil ||
+		item.ResourcePark.Evidence.Code != publication.ReasonResourceClaimMismatch || item.SessionID != "session-input" ||
+		item.Worktree != loop.Config.RepoPath || item.Branch != branch {
 		t.Fatalf("startup park changed request/continuation provenance: item=%+v request=%+v", item, request)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
@@ -113,7 +114,8 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			request := singlePendingRequest(latest, number)
 			parkInputLease := current.Status == issuedomain.StatusNeedsInput && current.GitHubSync == issuedomain.GitHubSyncNone && current.Lease != nil && current.ResourcePark == nil &&
 				current.PullRequestURL == "" && current.WorkerPID == 0 && current.WorkerPGID == 0 && decision.status == issuedomain.StatusNeedsInput &&
-				decision.githubSync == issuedomain.GitHubSyncNone && decision.pullRequest == "" && request != nil && request.ResumeStatus == issuedomain.StatusUnset && current.ConflictRecovery == nil
+				decision.githubSync == issuedomain.GitHubSyncNone && decision.pullRequest == "" && request != nil &&
+				(request.ResumeStatus == issuedomain.StatusUnset || request.ResumeStatus == issuedomain.StatusResumePending) && current.ConflictRecovery == nil
 			parkReconciledLease := parkInputLease
 			parkID := ""
 			parkedAt := time.Time{}
@@ -150,6 +152,14 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 						latestRequest.RunID = item.RunID
 						latestRequest.ResourceParkID = parkID
 						latestRequest.ReleasedOwner = &owner
+						latestRequest.ResumeStatus = issuedomain.StatusUnset
+						if item.PublicationAudit != nil && item.PublicationAudit.Reason == publication.ReasonResourceClaimMismatch {
+							item.ResourcePark.Stage = issuedomain.ContinuationStageResume
+							item.ResourcePark.Evidence = &state.ContinuationEvidence{
+								Origin: "startup_reconciliation", Phase: "resource_audit", Code: publication.ReasonResourceClaimMismatch,
+								Status: string(issuedomain.StatusNeedsInput), ObservedAt: parkedAt,
+							}
+						}
 					}
 				}
 				if err := state.ApplyIssueTransition(item, lifecycleTransition); err != nil {

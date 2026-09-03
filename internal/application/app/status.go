@@ -55,6 +55,7 @@ type brokerStatus struct {
 	Launchd launchd.Status     `json:"launchd"`
 	State   webhook.Status     `json:"state"`
 	Sweep   webhook.SweepState `json:"repository_safety_sweep"`
+	Queue   queueHealth        `json:"queue_health"`
 }
 
 type workerPoolStatus struct {

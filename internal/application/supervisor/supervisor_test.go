@@ -316,10 +316,11 @@ func fixtureWorkspace(loop *Loop, path, branch string) *state.WorkerWorkspace {
 }
 
 type fakePublisher struct {
-	called bool
-	result worker.GitResult
-	audit  publication.Audit
-	err    error
+	called    bool
+	resources publication.ResourceScope
+	result    worker.GitResult
+	audit     publication.Audit
+	err       error
 }
 
 type fakeConflictResolver struct {
@@ -341,17 +342,18 @@ func (f *fakeConflictResolver) Publish(context.Context, config.Config, gh.Issue,
 	return f.published, f.publishErr
 }
 
-func (f *fakePublisher) Publish(_ context.Context, _ config.Config, _ gh.Issue, _, _, _, _, baseSHA string, declared []string) (worker.GitResult, publication.Audit, error) {
+func (f *fakePublisher) Publish(_ context.Context, _ config.Config, _ gh.Issue, _, _, _, _, baseSHA string, resources publication.ResourceScope) (worker.GitResult, publication.Audit, error) {
 	f.called = true
+	f.resources = resources
 	audit := f.audit
 	if audit.BaseSHA == "" {
 		audit.BaseSHA = baseSHA
 	}
 	if audit.DeclaredResources == nil {
-		audit.DeclaredResources = declared
+		audit.DeclaredResources = resources.Declared
 	}
 	if audit.ActualResources == nil {
-		audit.ActualResources = declared
+		audit.ActualResources = resources.Effective
 	}
 	return f.result, audit, f.err
 }
@@ -931,6 +933,7 @@ func TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges(t *testing.T
 func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done"}
 	loop, github := testLoop(t, result)
+	loop.Config.Resources.Definitions = []config.ResourceDefinition{{Name: "docs", Paths: []string{"docs/**"}}}
 	publisher := &fakePublisher{result: worker.GitResult{
 		Branch: "codex/issue-1-test", Commit: "abc", PullRequestURL: "https://example.test/pr/1",
 	}}
@@ -940,6 +943,9 @@ func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
 	}
 	if !publisher.called || github.done {
 		t.Fatalf("publisher called=%v github done=%v", publisher.called, github.done)
+	}
+	if len(publisher.resources.Declared) != 0 || !reflect.DeepEqual(publisher.resources.Effective, []string{state.RepositoryResource}) {
+		t.Fatalf("publication did not retain the admission fallback: %+v", publisher.resources)
 	}
 	snapshot, err := loop.Store.Load()
 	if err != nil {
@@ -964,7 +970,7 @@ func TestResourceClaimMismatchPersistsAuditAndRefusesPublicationIntoNeedsInput(t
 			ChangedPaths: []string{"docs/architecture.md"}, DeclaredResources: []string{"git"},
 			ActualResources: []string{"docs"}, Reason: publication.ReasonResourceClaimMismatch,
 		},
-		err: publication.ClaimMismatchError{Declared: []string{"git"}, Actual: []string{"docs"}},
+		err: publication.ClaimMismatchError{Declared: []string{"git"}, Effective: []string{"git"}, Actual: []string{"docs"}},
 	}
 	loop.Publisher = publisher
 	if _, err := loop.RunOnce(context.Background()); err != nil {
@@ -975,8 +981,16 @@ func TestResourceClaimMismatchPersistsAuditAndRefusesPublicationIntoNeedsInput(t
 		t.Fatal(err)
 	}
 	issue := snapshot.Issues["1"]
-	if issue.Status != issuedomain.StatusNeedsInput || issue.Lease == nil || strings.Join(issue.DeclaredResources, ",") != "git" || strings.Join(issue.ActualResources, ",") != "docs" || len(snapshot.PendingRequests) != 1 {
+	if issue.Status != issuedomain.StatusNeedsInput || issue.Lease != nil || issue.ResourcePark == nil ||
+		issue.ResourcePark.Stage != issuedomain.ContinuationStageResume || issue.ResourcePark.Evidence == nil ||
+		issue.ResourcePark.Evidence.Code != publication.ReasonResourceClaimMismatch ||
+		strings.Join(issue.DeclaredResources, ",") != "git" || strings.Join(issue.ActualResources, ",") != "docs" || len(snapshot.PendingRequests) != 1 {
 		t.Fatalf("issue=%+v requests=%+v", issue, snapshot.PendingRequests)
+	}
+	for _, request := range snapshot.PendingRequests {
+		if request.ResumeStatus != issuedomain.StatusUnset || request.ResourceParkID != issue.ResourcePark.ID || request.ReleasedOwner == nil {
+			t.Fatalf("resource correction did not use generic continuation: %+v", request)
+		}
 	}
 	if !github.needsInput || issue.PullRequestURL != "" {
 		t.Fatalf("publication was not safely refused: issue=%+v github=%+v", issue, github)

@@ -226,9 +226,11 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-083**: 複数hostのworkerはGitHubへ直接公開せず、durable publication intentを介してfenced publication gatewayだけがbranch、comment、Pull Requestを更新すること。
 - **FR-084**: status/watchは複数hostのownership、Issue状態、attentionをcoordinatorから集約し、event取りこぼしをreconciliationで修復すること。
 - **FR-085**: distributed modeの有効化前にbackend conformance、credential、backup、partition、publication takeoverをdoctorまたは運用検証で確認すること。
-- **FR-086**: 単一hostのresource claimは`claiming`からPR merge確認まで永続化すること。retry、CI待ち、open PRとpublication/PR conflictの`needs_input`はactive leaseを保持し、通常workerの`needs_input`はcontinuation provenanceを保ったparkとしてadmissionから外すこと。
+- **FR-086**: 単一hostのresource claimは`claiming`からPR merge確認まで永続化すること。retry、CI待ち、open PRはactive leaseを保持するが、発生箇所を問わず`needs_input`はcontinuation provenanceを保ったcheckpointへleaseを退避し、後続Issueのadmissionから外すこと。
 - **FR-087**: admissionは固定snapshot、正規化済み集合、queueの全順序、Issue番号tie-breakから決定し、同じsnapshotとscheduler versionに対して同じ選択結果と待機理由を返すこと。
 - **FR-088**: resource/依存metadataの導入はconfig/state schema v3への停止・backup・preview・明示applyを伴うmigrationとし、v2 Issueを自動書換えまたは暗黙に並列化しないこと。
+- **FR-089**: Webhook modeのrepository schedulerはfsnotifyをhintとして扱い、60秒のlocal reconciliationでcanonical snapshotとmailboxを再評価すること。このtimerはGitHub ready collectionを直接取得しないこと。
+- **FR-090**: statusとdoctorはsafety sweepのready collection、mailbox、canonical snapshotを照合し、ready Issueが2 local reconciliation intervalを超えて未claimの場合とmailboxが同一targetの重複で非有界化した場合を失敗として表示すること。
 
 ## 7. 非機能要件
 

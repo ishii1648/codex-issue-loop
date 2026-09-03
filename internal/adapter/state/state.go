@@ -305,12 +305,21 @@ func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
 	if envelope.Version == CurrentVersion && envelope.SemanticContractVersion == statecontract.CurrentVersion {
 		for number, issue := range envelope.Issues {
 			for _, field := range []string{
-				"blocked_cause", "environment_resume", "answered_workspace_recovery",
+				"lease", "resource_park", "blocked_cause", "environment_resume", "answered_workspace_recovery",
 				"workspace_provenance_recovery", "publication_failure", "publication_recovery",
 				"pull_request_checks_failure", "pull_request_checks_recovery", "merged_pull_request_adoption",
 			} {
 				if _, exists := issue[field]; exists {
 					return fmt.Errorf("Issue %s uses removed v5 field %q; migrate the original v4 input instead", number, field)
+				}
+			}
+			if raw := issue["continuation_checkpoint"]; len(raw) > 0 && string(raw) != "null" {
+				var checkpoint map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &checkpoint); err != nil {
+					return fmt.Errorf("decode Issue %s continuation checkpoint: %w", number, err)
+				}
+				if _, exists := checkpoint["original_lease"]; exists {
+					return fmt.Errorf("Issue %s uses removed v5 continuation field %q; migrate the original v4 input instead", number, "original_lease")
 				}
 			}
 			var status string

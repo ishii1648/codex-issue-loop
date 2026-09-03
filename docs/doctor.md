@@ -46,6 +46,9 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | `CODEX_LOCALHOST_NETWORK_PROXY_UNAVAILABLE` | 設定はlocalhost-onlyだがCodex runtimeに必須capabilityがない | loopを開始せずCodex CLIを更新し、再register後にdoctorを再実行 |
 | `FORMATTER_GO_AVAILABLE` / `FORMATTER_GO_DISABLED` | Go formatter capabilityが利用可能、または明示的に無効 | 対応不要 |
 | `LAUNCH_AGENT_MISSING` / `LAUNCH_AGENT_UNREADABLE` | plistがない、または読めない | 再register、所有者・permission確認 |
+| `WEBHOOK_SAFETY_SWEEP_STALE` | ready collectionの成功記録が2 sweep intervalを超えて更新されない | brokerのGitHub accessとsafety sweep logを確認 |
+| `WEBHOOK_QUEUE_HEALTH_UNAVAILABLE` / `WEBHOOK_QUEUE_STALLED` | mailboxまたはcanonical snapshotを読めない、ready Issueが2 local reconciliation intervalを超えて未claim、またはmailboxが非有界 | `status --json`の`broker.queue_health`とactive leaseを確認 |
+| `WEBHOOK_SAFETY_SWEEP_FRESH` / `WEBHOOK_QUEUE_PROGRESSING` | safety sweepと実装queueが観測上正常 | 対応不要 |
 | `GITHUB_REPOSITORY_INACCESSIBLE` | repository参照権限または認証不足 | `gh auth status`とtoken/GitHub App権限を確認 |
 | `GITHUB_LABELS_MISSING` | 必須label不足 | `bootstrap-labels`をpreviewし、確認後に`--apply` |
 | `STATE_MISSING` / `STATE_UNREADABLE` | durable stateがない、または読めない | 再register、所有者・permission確認 |

@@ -38,7 +38,7 @@ type WorktreeManager interface {
 }
 
 type Publisher interface {
-	Publish(context.Context, config.Config, gh.Issue, string, string, string, string, string, []string) (worker.GitResult, publication.Audit, error)
+	Publish(context.Context, config.Config, gh.Issue, string, string, string, string, string, publication.ResourceScope) (worker.GitResult, publication.Audit, error)
 }
 
 type ConflictResolver interface {

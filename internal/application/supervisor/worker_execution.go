@@ -154,14 +154,17 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		if l.Publisher != nil {
 			baseSHA := ""
 			declared := append([]string(nil), current.DeclaredResources...)
+			effective := append([]string(nil), declared...)
 			if current.Lease != nil {
 				baseSHA = current.Lease.BaseSHA
 				if len(declared) == 0 {
 					declared = append([]string(nil), current.Lease.DeclaredResources...)
 				}
+				effective = append([]string(nil), current.Lease.ResolvedResources...)
 			}
 			l.publicationMu.Lock()
-			published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, current.PullRequestURL, result.Summary, baseSHA, declared)
+			published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, current.PullRequestURL, result.Summary, baseSHA,
+				publication.ResourceScope{Declared: declared, Effective: effective})
 			l.publicationMu.Unlock()
 			_, auditErr := l.Store.Update("publication_audited", issue.Number, current.RunID, audit, func(s *state.Snapshot) error {
 				item := s.Issues[strconv.Itoa(issue.Number)]

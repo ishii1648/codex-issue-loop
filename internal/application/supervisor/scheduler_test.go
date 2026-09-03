@@ -3,7 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
-	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -20,6 +20,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
@@ -181,6 +182,19 @@ func (t inertSchedulerTimers) NewTimer(time.Duration) SchedulerTimer {
 	return inertSchedulerTimer{ch: make(chan time.Time)}
 }
 
+type manualSchedulerTimer struct{ ch chan time.Time }
+
+func (t manualSchedulerTimer) C() <-chan time.Time { return t.ch }
+func (t manualSchedulerTimer) Stop() bool          { return true }
+
+type manualSchedulerTimers struct{ created chan manualSchedulerTimer }
+
+func (t manualSchedulerTimers) NewTimer(time.Duration) SchedulerTimer {
+	timer := manualSchedulerTimer{ch: make(chan time.Time, 1)}
+	t.created <- timer
+	return timer
+}
+
 func waitForTimers(t *testing.T, created <-chan struct{}, count int) {
 	t.Helper()
 	for range count {
@@ -190,6 +204,45 @@ func waitForTimers(t *testing.T, created <-chan struct{}, count int) {
 			t.Fatal("timed out waiting for scheduler timer")
 		}
 	}
+}
+
+func TestWebhookSchedulerReconcilesMailboxWithoutFsnotify(t *testing.T) {
+	loop, baseGitHub := testLoop(t, worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", Git: &worker.GitResult{}})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.Config.Watch.ReconcileInterval.Duration = time.Minute
+	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
+	loop.GitHub = github
+	timers := make(chan manualSchedulerTimer, 4)
+	loop.SchedulerTimers = manualSchedulerTimers{created: timers}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	var timer manualSchedulerTimer
+	select {
+	case timer = <-timers:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconciliation timer was not created")
+	}
+	delivery := webhook.Delivery{Version: webhook.InboxVersion, DeliveryID: "missed-fsnotify", Event: "issues", Action: "reconciled",
+		RepoID: loop.Store.RepoID, IssueNumber: 1, AcceptedAt: time.Now().UTC()}
+	if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
+		t.Fatal(err)
+	}
+	timer.ch <- time.Now()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := loop.Store.Load()
+		if err == nil && snapshot.Issues["1"] != nil {
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("missed mailbox notification was not reconciled")
 }
 
 func TestSchedulerCycleAndGitHubAttemptShareRuntimeRunID(t *testing.T) {
@@ -656,6 +709,39 @@ func TestWebhookMailboxClaimsReadyIssueWithoutQueuePolling(t *testing.T) {
 	snapshot, err := loop.Store.Load()
 	if err != nil || snapshot.Issues["1"] == nil || snapshot.Issues["1"].Status != issuedomain.StatusAwaitingChecks {
 		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
+	}
+}
+
+func TestWebhookMailboxRetainsOnlyNewestUnadmittedIssueIntent(t *testing.T) {
+	loop, baseGitHub := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
+	loop.GitHub = github
+	now := time.Now().UTC()
+	for index := range 3 {
+		delivery := webhook.Delivery{
+			Version: webhook.InboxVersion, DeliveryID: fmt.Sprintf("delivery-%d", index), Event: "issues", Action: "reconciled",
+			RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: now.Add(time.Duration(index) * time.Second),
+		}
+		if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, acknowledged, err := s.processMailbox(context.Background(), snapshot)
+	if err != nil || len(candidates) != 1 || len(acknowledged) != 2 {
+		t.Fatalf("candidates=%v acknowledged=%v err=%v", candidates, acknowledged, err)
+	}
+	if err := webhook.AckMailbox(loop.Store.Dir, acknowledged); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := webhook.ReadMailbox(loop.Store.Dir)
+	if err != nil || len(remaining) != 1 || remaining[0].DeliveryID != "delivery-2" {
+		t.Fatalf("remaining=%v err=%v", remaining, err)
 	}
 }
 
