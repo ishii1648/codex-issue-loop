@@ -230,7 +230,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-087**: admissionは固定snapshot、正規化済み集合、queueの全順序、Issue番号tie-breakから決定し、同じsnapshotとscheduler versionに対して同じ選択結果と待機理由を返すこと。
 - **FR-088**: resource/依存metadataの導入はconfig/state schema v3への停止・backup・preview・明示applyを伴うmigrationとし、v2 Issueを自動書換えまたは暗黙に並列化しないこと。
 - **FR-089**: Webhook modeのrepository schedulerはfsnotifyをhintとして扱い、60秒のlocal reconciliationでcanonical snapshotとmailboxを再評価すること。このtimerはGitHub ready collectionを直接取得しないこと。
-- **FR-090**: statusとdoctorはsafety sweepのready collection、mailbox、canonical snapshotを照合し、ready Issueが2 local reconciliation intervalを超えて未claimの場合とmailboxが同一targetの重複で非有界化した場合を失敗として表示すること。
+- **FR-090**: statusとdoctorはsafety sweepのready collection、mailbox、canonical snapshotを照合し、ready Issueが2 local reconciliation intervalを超えて未claimの場合とmailboxが同一targetの重複で非有界化した場合を失敗として表示すること。repository assignmentのvalidなtyped maintenance fenceが存在する間だけdoctorのqueue liveness判定をdeferできるが、他の診断は必須とし、fence解除後の通常doctorとrollout healthではqueue livenessを再び必須にすること。
 
 ## 7. 非機能要件
 
