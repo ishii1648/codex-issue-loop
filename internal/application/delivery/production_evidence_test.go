@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -100,18 +101,83 @@ printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","home_isolate
 				t.Fatal(err)
 			}
 			var report struct {
-				Commit        string         `json:"release_commit"`
-				Digest        string         `json:"candidate_binary_sha256"`
-				StateAccessed bool           `json:"production_state_accessed"`
-				Before        map[string]any `json:"production_before"`
-				After         map[string]any `json:"production_after"`
-				Contract      map[string]any `json:"offline_contract"`
+				SchemaVersion       int    `json:"schema_version"`
+				PublicPayload       string `json:"public_payload"`
+				Commit              string `json:"release_commit"`
+				Digest              string `json:"candidate_binary_sha256"`
+				StateAccessed       bool   `json:"production_state_accessed"`
+				StateEqual          bool   `json:"production_state_equal"`
+				PrivateEvidenceHash string `json:"private_evidence_sha256"`
+				ProductionHealth    struct {
+					DoctorSafe               bool `json:"doctor_safe"`
+					WorkerLimitEnforced      bool `json:"worker_limit_enforced"`
+					ActiveWorkersWithinLimit bool `json:"active_workers_within_limit"`
+				} `json:"production_health"`
+				Contract struct {
+					Mode                       string `json:"mode"`
+					CredentialsAbsent          bool   `json:"credentials_absent"`
+					ExternalNetwork            bool   `json:"external_network"`
+					LifecycleSequencesComplete bool   `json:"lifecycle_sequences_complete"`
+					FinalResourcesClean        bool   `json:"final_resources_clean"`
+				} `json:"offline_contract"`
 			}
 			if err := json.Unmarshal(data, &report); err != nil {
 				t.Fatal(err)
 			}
-			if report.Commit != evidenceCommit || len(report.Digest) != 64 || !report.StateAccessed || !mapsEqual(report.Before, report.After) || report.Contract["mode"] != "credentialless-offline" || report.Contract["home_isolated"] != true {
+			var publicObject map[string]json.RawMessage
+			if err := json.Unmarshal(data, &publicObject); err != nil {
+				t.Fatal(err)
+			}
+			allowedPublicKeys := []string{
+				"schema_version", "public_payload", "release_tag", "release_commit", "candidate_tag",
+				"candidate_binary_sha256", "production_state_accessed", "production_state_changes",
+				"production_state_equal", "production_health", "offline_contract", "private_evidence_sha256",
+			}
+			if len(publicObject) != len(allowedPublicKeys) {
+				t.Fatalf("public report keys=%v", publicObject)
+			}
+			for _, key := range allowedPublicKeys {
+				if _, ok := publicObject[key]; !ok {
+					t.Fatalf("public report is missing %q: %s", key, data)
+				}
+			}
+			if report.SchemaVersion != 2 || report.PublicPayload != "redacted-summary" ||
+				report.Commit != evidenceCommit || len(report.Digest) != 64 || !report.StateAccessed || !report.StateEqual ||
+				!report.ProductionHealth.DoctorSafe || !report.ProductionHealth.WorkerLimitEnforced || !report.ProductionHealth.ActiveWorkersWithinLimit ||
+				report.Contract.Mode != "credentialless-offline" || !report.Contract.CredentialsAbsent || report.Contract.ExternalNetwork ||
+				!report.Contract.LifecycleSequencesComplete || !report.Contract.FinalResourcesClean {
 				t.Fatalf("report=%s", data)
+			}
+			for _, forbidden := range []string{"production_before", "production_after", "repo_id", "state_revision", "issue_count", "leases", "run_id", "base_sha"} {
+				if strings.Contains(string(data), `"`+forbidden+`"`) {
+					t.Fatalf("public report contains %q: %s", forbidden, data)
+				}
+			}
+			privateData, err := os.ReadFile(filepath.Join(artifactDir, "production-state-private-evidence.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			privateInfo, err := os.Stat(filepath.Join(artifactDir, "production-state-private-evidence.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if privateInfo.Mode().Perm() != 0o600 {
+				t.Fatalf("private evidence mode=%#o", privateInfo.Mode().Perm())
+			}
+			privateHash := sha256.Sum256(privateData)
+			if report.PrivateEvidenceHash != fmt.Sprintf("%x", privateHash) {
+				t.Fatalf("private evidence hash=%s want=%x", report.PrivateEvidenceHash, privateHash)
+			}
+			var privateEvidence struct {
+				Before   map[string]any `json:"production_before"`
+				After    map[string]any `json:"production_after"`
+				Contract map[string]any `json:"offline_contract"`
+			}
+			if err := json.Unmarshal(privateData, &privateEvidence); err != nil {
+				t.Fatal(err)
+			}
+			if !mapsEqual(privateEvidence.Before, privateEvidence.After) || privateEvidence.Contract["home_isolated"] != true {
+				t.Fatalf("private evidence=%s", privateData)
 			}
 		})
 	}
@@ -357,7 +423,9 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		`required_evidence:["cli-surface","offline-contract","production-isolation","candidate-integrity"]`,
 		`subject-path: promotion-evidence.json`,
 		`.assignment_protocol == 1`,
-		`.production_before.doctor_safe == true`,
+		`.public_payload == "redacted-summary"`,
+		`.production_health.doctor_safe == true`,
+		`def exact_keys($expected)`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow is missing byte-promotion evidence %q", required)
