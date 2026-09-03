@@ -55,6 +55,10 @@ func TestExportRecoveryFixtureIsReadOnlyAndImmediatelyReplayable(t *testing.T) {
 	ghPath := filepath.Join(binDir, "gh")
 	ghLog := filepath.Join(t.TempDir(), "gh.log")
 	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'gh version 2.69.0\n'
+  exit 0
+fi
 printf '%%s\n' "$*" >> %q
 case "$1 $2" in
   "issue view") printf '%%s\n' '{"number":166,"title":"private title","body":"private body","url":"https://example.test/issues/166","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"private note"}]}' ;;

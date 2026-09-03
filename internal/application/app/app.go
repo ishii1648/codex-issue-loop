@@ -366,9 +366,8 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		return fmt.Errorf("registered worker command for backend %s is missing; re-run agent-loop register --repo %q", backendID, entry.RepoPath)
 	}
 	if currentPath, resolveErr := exec.LookPath(cfg.Worker.EffectiveCommand()); resolveErr == nil {
-		absolute, _ := filepath.Abs(currentPath)
-		if absolute != workerPath {
-			return fmt.Errorf("worker command path drift detected for %s (registered=%s current=%s); re-run agent-loop register --repo %q", backendID, workerPath, absolute, entry.RepoPath)
+		if !registry.SameExecutable(currentPath, workerPath) {
+			return fmt.Errorf("worker command path drift detected for %s (registered=%s current=%s); re-run agent-loop register --repo %q", backendID, workerPath, currentPath, entry.RepoPath)
 		}
 	}
 	workerCompatibility := compat.ProbeBackend(ctx, backendID, workerPath)

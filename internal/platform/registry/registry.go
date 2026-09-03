@@ -100,16 +100,20 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		if resolveErr != nil {
 			return Entry{}, fmt.Errorf("resolve %s command %q: %w", name, command, resolveErr)
 		}
-		absolute, resolveErr := filepath.Abs(path)
-		if resolveErr != nil {
-			return Entry{}, resolveErr
-		}
+		var absolute string
 		if name == "gofmt" {
 			formatterCtx, cancelFormatter := context.WithTimeout(context.Background(), 5*time.Second)
-			absolute, resolveErr = resolveGofmt(formatterCtx, absolute)
+			absolute, resolveErr = resolveGofmt(formatterCtx, path)
 			cancelFormatter()
 			if resolveErr != nil {
 				return Entry{}, fmt.Errorf("verify gofmt capability: %w", resolveErr)
+			}
+		} else {
+			commandCtx, cancelCommand := context.WithTimeout(context.Background(), 5*time.Second)
+			absolute, resolveErr = resolveServiceCommand(commandCtx, name, path, entry.EnvironmentPath, r)
+			cancelCommand()
+			if resolveErr != nil {
+				return Entry{}, fmt.Errorf("verify %s command: %w", name, resolveErr)
 			}
 		}
 		entry.Commands[name] = absolute
@@ -130,6 +134,78 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		return Entry{}, err
 	}
 	return entry, nil
+}
+
+func resolveServiceCommand(ctx context.Context, name, discovered, environmentPath string, existing Registry) (string, error) {
+	candidate, candidateErr := canonicalExecutable(discovered)
+	if candidateErr == nil {
+		candidateErr = probeServiceCommand(ctx, name, candidate, environmentPath)
+		if candidateErr == nil {
+			return candidate, nil
+		}
+	}
+	if managed, err := resolveAquaCommand(ctx, name, environmentPath); err == nil {
+		return managed, nil
+	}
+
+	ids := make([]string, 0, len(existing.Repos))
+	for id := range existing.Repos {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		previous := existing.Repos[id].Commands[name]
+		if previous == "" {
+			continue
+		}
+		fallback, err := canonicalExecutable(previous)
+		if err != nil {
+			continue
+		}
+		if err := probeServiceCommand(ctx, name, fallback, environmentPath); err == nil {
+			return fallback, nil
+		}
+	}
+	return "", fmt.Errorf("discovered path is not self-contained in the LaunchAgent environment (%v); put a direct executable ahead of environment-dependent shims in PATH", candidateErr)
+}
+
+func resolveAquaCommand(ctx context.Context, name, environmentPath string) (string, error) {
+	aquaPath, err := exec.LookPath("aqua")
+	if err != nil {
+		return "", err
+	}
+	output, err := exec.CommandContext(ctx, aquaPath, "which", name).CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(output))
+	if value == "" || strings.ContainsAny(value, "\r\n") || !filepath.IsAbs(value) {
+		return "", fmt.Errorf("aqua which returned an invalid path")
+	}
+	candidate, err := canonicalExecutable(value)
+	if err != nil {
+		return "", err
+	}
+	if err := probeServiceCommand(ctx, name, candidate, environmentPath); err != nil {
+		return "", err
+	}
+	return candidate, nil
+}
+
+func probeServiceCommand(ctx context.Context, name, path, environmentPath string) error {
+	if name == "launchctl" {
+		return nil
+	}
+	command := exec.CommandContext(ctx, path, "--version")
+	command.Env = []string{"PATH=" + environmentPath}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		command.Env = append(command.Env, "HOME="+home)
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("runtime-equivalent version probe: %s", strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func resolveGofmt(ctx context.Context, discovered string) (string, error) {
@@ -180,6 +256,14 @@ func canonicalExecutable(path string) (string, error) {
 		return "", fmt.Errorf("command is not an executable regular file: %s", resolved)
 	}
 	return resolved, nil
+}
+
+// SameExecutable reports identity after resolving both paths to executable
+// regular files; invalid or missing paths never compare equal.
+func SameExecutable(first, second string) bool {
+	firstResolved, firstErr := canonicalExecutable(first)
+	secondResolved, secondErr := canonicalExecutable(second)
+	return firstErr == nil && secondErr == nil && firstResolved == secondResolved
 }
 
 func (s Store) Remove(repoID string) error {
