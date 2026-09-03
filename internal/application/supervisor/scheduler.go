@@ -425,6 +425,11 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	s.lastSuppressedReset = time.Time{}
 	mailboxCandidates, mailboxBatch, err := s.processMailbox(ctx, snapshot)
 	if err != nil {
+		if len(mailboxBatch) > 0 {
+			if ackErr := webhook.AckMailbox(s.loop.Store.Dir, mailboxBatch); ackErr != nil {
+				return result, failure.Wrap(failure.Supervisor, "ack safely coalesced webhook mailbox after reconciliation failure", ackErr)
+			}
+		}
 		return result, failure.Wrap(failure.Supervisor, "read webhook mailbox", err)
 	}
 	if len(mailboxBatch) > 0 {
@@ -618,42 +623,35 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 	}
 	candidates := make([]gh.Issue, 0)
 	acknowledged := make([]webhook.Delivery, 0, len(deliveries))
-	seen := map[int]bool{}
-	processed := map[int]bool{}
+	issueNumbers := make([]int, len(deliveries))
+	newestByIssue := map[int]int{}
+	for index, delivery := range deliveries {
+		number := mailboxIssueNumber(snapshot, delivery)
+		issueNumbers[index] = number
+		if number > 0 {
+			newestByIssue[number] = index
+		}
+	}
+	for index, number := range issueNumbers {
+		if number > 0 && newestByIssue[number] != index {
+			acknowledged = append(acknowledged, deliveries[index])
+		}
+	}
 	for index := len(deliveries) - 1; index >= 0; index-- {
 		delivery := deliveries[index]
-		number := delivery.IssueNumber
-		if number == 0 && delivery.PullRequestNumber != 0 {
-			for _, issue := range snapshot.Issues {
-				if issue != nil && (issue.PullRequestNumber == delivery.PullRequestNumber || strings.HasSuffix(issue.PullRequestURL, "/pull/"+fmt.Sprint(delivery.PullRequestNumber))) {
-					number = issue.Number
-					break
-				}
-			}
-		}
-		if number == 0 && delivery.HeadSHA != "" {
-			for _, issue := range snapshot.Issues {
-				if issue != nil && issue.HeadSHA == delivery.HeadSHA {
-					number = issue.Number
-					break
-				}
-			}
-		}
+		number := issueNumbers[index]
 		if number == 0 {
+			acknowledged = append(acknowledged, delivery)
 			continue
 		}
-		if seen[number] {
-			if processed[number] {
-				acknowledged = append(acknowledged, delivery)
-			}
+		if newestByIssue[number] != index {
 			continue
 		}
-		seen[number] = true
 		if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
 			if delivery.Event == "issues" && delivery.Action == "collection_exited" {
 				converged, reconcileErr := s.loop.reconcileCollectionExit(ctx, *local, delivery)
 				if reconcileErr != nil {
-					return nil, nil, reconcileErr
+					return nil, acknowledged, reconcileErr
 				}
 				if converged {
 					if job, active := s.active[number]; active && job.runID == local.RunID {
@@ -661,21 +659,20 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 					}
 				}
 				acknowledged = append(acknowledged, delivery)
-				processed[number] = true
 				continue
 			}
 			if local.Status.TerminalForWebhook() {
 				handled, reconcileErr := s.loop.reconcileTerminalWebhook(ctx, *local, delivery)
 				if reconcileErr != nil {
-					return nil, nil, reconcileErr
+					return nil, acknowledged, reconcileErr
 				}
 				if handled {
 					acknowledged = append(acknowledged, delivery)
-					processed[number] = true
 				}
 				continue
 			}
 			if !local.Status.WebhookRoutable() && !local.GitHubSync.Pending() {
+				acknowledged = append(acknowledged, delivery)
 				continue
 			}
 			_, updateErr := s.loop.Store.Update("webhook_scheduler_wake", number, local.RunID, map[string]any{
@@ -695,32 +692,51 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 				return nil
 			})
 			if updateErr != nil {
-				return nil, nil, updateErr
+				return nil, acknowledged, updateErr
 			}
 			acknowledged = append(acknowledged, delivery)
-			processed[number] = true
 			continue
 		}
 		if delivery.Event != "issues" && delivery.Event != "issue_comment" {
+			acknowledged = append(acknowledged, delivery)
 			continue
 		}
 		candidate, getErr := s.loop.getIssue(ctx, number)
 		if getErr != nil {
-			return nil, nil, getErr
+			return nil, acknowledged, getErr
 		}
 		if gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
 			candidates = append(candidates, candidate)
-			processed[number] = true
 			// Keep the delivery until the durable local Issue exists. A crash
 			// between admission and lease reservation can then replay safely.
 			// Older deliveries for the same Issue are acknowledged because this
 			// newest intent is sufficient to repeat the authoritative read.
 		} else {
 			acknowledged = append(acknowledged, delivery)
-			processed[number] = true
 		}
 	}
 	return candidates, acknowledged, nil
+}
+
+func mailboxIssueNumber(snapshot state.Snapshot, delivery webhook.Delivery) int {
+	if delivery.IssueNumber > 0 {
+		return delivery.IssueNumber
+	}
+	if delivery.PullRequestNumber != 0 {
+		for _, issue := range snapshot.Issues {
+			if issue != nil && (issue.PullRequestNumber == delivery.PullRequestNumber || strings.HasSuffix(issue.PullRequestURL, "/pull/"+fmt.Sprint(delivery.PullRequestNumber))) {
+				return issue.Number
+			}
+		}
+	}
+	if delivery.HeadSHA != "" {
+		for _, issue := range snapshot.Issues {
+			if issue != nil && issue.HeadSHA == delivery.HeadSHA {
+				return issue.Number
+			}
+		}
+	}
+	return 0
 }
 
 // dispatchTerminalPullRequestReconciliation checks at most one terminal Issue

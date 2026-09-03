@@ -28,7 +28,7 @@ var (
 	allowedPhases          = stringSet("poll", "dispatch", "execute", "analyze", "issue", "checks", "review", "merge", "recovery", "startup", "shutdown", "retention")
 	allowedOutcomes        = stringSet("started", "succeeded", "failed", "retrying", "blocked", "pending", "observed", "resolved", "reopened", "noop", "rejected", "rate_limited", "canceled")
 	allowedFailureKinds    = stringSet("none", "transient", "issue", "supervisor", "operator", "product")
-	allowedTriggers        = stringSet("startup", "poll_timer", "retry_timer", "worker_finished", "webhook", "fsnotify", "manual", "schedule")
+	allowedTriggers        = stringSet("startup", "poll_timer", "retry_timer", "reconciliation_timer", "worker_finished", "webhook", "fsnotify", "manual", "schedule")
 	allowedLifecycleStages = stringSet("worker_started", "worker_failed", "pull_request_created", "checks_passed", "checks_failed", "review_passed", "review_failed", "merged", "issue_closed", "reopened", "recovery_completed")
 	allowedOperationCodes  = stringSet("scheduler_cycle", "list_ready_issues", "incident_analysis", "issue_search", "issue_create", "issue_readback")
 	allowedClassifications = stringSet("expected_transient", "degraded", "operator_attention", "suspected_bug", "confirmed_bug", "unknown")
