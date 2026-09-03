@@ -25,7 +25,7 @@ scripts/check-release.sh
 | root pending effectによるGitHub副作用の冪等性 | publication、GitHub sync、partial failure suite |
 | 先行PR merge後も後続PRを同一intentで継続し、base履歴分岐は拒否 | `TestPublishAllowsExistingPullRequestWhenBaseBranchFastForwards`、`TestPublishRefusesExistingPullRequestWhenBaseHistoryDiverges` |
 | Go formatterはoperator環境依存shimでなくself-containedなtoolchain実体を固定 | `TestRegistryPinsToolchainGofmtWhenDiscoveredCommandNeedsUserEnvironment`、`TestGofmtCapabilityProbeDoesNotInheritOperatorEnvironment` |
-| 再登録で`gh`等がoperator環境依存shimへ退行せず、canonical実体と入口symlinkをdrift扱いしない | `TestRegistryPinsAquaManagedCommandToResolvedExecutable`、`TestRegistryKeepsSelfContainedCommandWhenDiscoveredPathNeedsOperatorEnvironment`、`TestRegistryRejectsEnvironmentDependentCommandWithoutSafeFallback`、`TestSameExecutableAcceptsSymlinkToRegisteredCanonicalPath` |
+| 再登録で`gh`等がoperator環境依存shimへ退行せず、検証済みmulticall symlinkを維持し、canonical実体と入口symlinkをdrift扱いしない | `TestRegistryPinsAquaManagedCommandToResolvedExecutable`、`TestRegistryKeepsSelfContainedCommandWhenDiscoveredPathNeedsOperatorEnvironment`、`TestRegistryPreservesRuntimeProbedMulticallSymlink`、`TestRegistryRejectsEnvironmentDependentCommandWithoutSafeFallback`、`TestSameExecutableAcceptsSymlinkToRegisteredCanonicalPath` |
 | stop/restartとorphan process回収 | process controller、scheduler cancellation、fault suite |
 | worktree provenance不一致をspawn前に拒否 | worktree validation、issue resolution suite |
 
