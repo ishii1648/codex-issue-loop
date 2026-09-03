@@ -24,6 +24,7 @@ scripts/check-release.sh
 | 作成者がtrusted ownerであるIssueだけを受理 | `internal/adapter/github/author_test.go`、`internal/domain/queue`、scheduler author verification suite |
 | root pending effectによるGitHub副作用の冪等性 | publication、GitHub sync、partial failure suite |
 | 先行PR merge後も後続PRを同一intentで継続し、base履歴分岐は拒否 | `TestPublishAllowsExistingPullRequestWhenBaseBranchFastForwards`、`TestPublishRefusesExistingPullRequestWhenBaseHistoryDiverges` |
+| Go formatterはoperator環境依存shimでなくself-containedなtoolchain実体を固定 | `TestRegistryPinsToolchainGofmtWhenDiscoveredCommandNeedsUserEnvironment`、`TestGofmtCapabilityProbeDoesNotInheritOperatorEnvironment` |
 | stop/restartとorphan process回収 | process controller、scheduler cancellation、fault suite |
 | worktree provenance不一致をspawn前に拒否 | worktree validation、issue resolution suite |
 
