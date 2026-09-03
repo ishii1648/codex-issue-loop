@@ -328,6 +328,7 @@ func ValidateBundle(dataDir string, corpus Corpus) error {
 		"incident-metrics.schema.json",
 		"incident-ai-analysis.schema.json",
 		"incident-issue-payload.schema.json",
+		"incident-decision.schema.json",
 	}
 	for _, name := range schemas {
 		path := filepath.Join("schemas", name)

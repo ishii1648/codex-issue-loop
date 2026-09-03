@@ -56,6 +56,7 @@ type RunReport struct {
 	IssueDrafts      []IssueDraft      `json:"issue_drafts"`
 	IssuesCreated    []IssueRef        `json:"issues_created"`
 	IssuesReused     []IssueRef        `json:"issues_reused"`
+	Decisions        []IssueDecision   `json:"decisions"`
 }
 
 type AnalysisFailure struct {
@@ -74,7 +75,10 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 	}
 	defer release()
 	now := p.now()
-	report := RunReport{Version: SchemaVersion, ProcessedAt: now, AnalysisFailures: []AnalysisFailure{}, IssueDrafts: []IssueDraft{}, IssuesCreated: []IssueRef{}, IssuesReused: []IssueRef{}}
+	report := RunReport{Version: SchemaVersion, ProcessedAt: now, AnalysisFailures: []AnalysisFailure{}, IssueDrafts: []IssueDraft{}, IssuesCreated: []IssueRef{}, IssuesReused: []IssueRef{}, Decisions: []IssueDecision{}}
+	if _, err := p.Store.ReadDecisions(); err != nil {
+		return report, err
+	}
 	signals, err := p.Store.ReadSignals()
 	if err != nil {
 		return report, err
@@ -114,7 +118,13 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 	var circuitSignals []Signal
 	for _, fingerprint := range fingerprints {
 		episode := state.Episodes[fingerprint]
-		if episode.State == "resolved" || episode.PrimaryClassification == "expected_transient" {
+		if episode.PrimaryClassification == "expected_transient" {
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "skipped", "expected_transient", nil))
+			state.Episodes[fingerprint] = episode
+			continue
+		}
+		if episode.State == "resolved" {
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "skipped", "episode_resolved", episode.Issue))
 			state.Episodes[fingerprint] = episode
 			continue
 		}
@@ -132,10 +142,12 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 					episode.NextAttemptAt = nil
 					report.CircuitOpened++
 					circuitSignals = append(circuitSignals, p.circuitSignal(episode, now, "ai_analysis_retry_exhausted"))
+					report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "failed", "analysis_circuit_open", nil))
 				} else {
 					next := now.Add(backoff(p.Config.BaseBackoff, episode.Attempts))
 					episode.NextAttemptAt = &next
 					report.AnalysisRetry++
+					report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "failed", "analysis_retry_scheduled", nil))
 				}
 				state.Episodes[fingerprint] = episode
 				continue
@@ -145,43 +157,78 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 			episode.NextAttemptAt = nil
 			report.Analyzed++
 		}
-		if episode.AI != nil && episode.Issue == nil && !episode.IssueCircuitOpen && (episode.IssueNextAttemptAt == nil || !episode.IssueNextAttemptAt.After(now)) && issueEligible(episode) {
-			draft, draftErr := p.issueDraft(episode)
-			if draftErr != nil {
-				return report, draftErr
+		if episode.AI == nil {
+			reason := "analysis_missing"
+			if episode.CircuitOpen {
+				reason = "analysis_circuit_open"
+			} else if episode.NextAttemptAt != nil && episode.NextAttemptAt.After(now) {
+				reason = "analysis_backoff"
 			}
-			report.IssueDrafts = append(report.IssueDrafts, draft)
-			if p.Config.DryRun {
-				metrics.Issues["dry_run"] = uint64(len(report.IssueDrafts))
-			} else {
-				ref, reused, createErr := p.ensureIssue(ctx, draft)
-				if createErr != nil {
-					episode.IssueAttempts++
-					metrics.Issues["failed"]++
-					if episode.IssueAttempts >= p.Config.MaxAttempts {
-						episode.IssueCircuitOpen = true
-						episode.IssueCircuitGeneration++
-						episode.IssueNextAttemptAt = nil
-						report.CircuitOpened++
-						circuitSignals = append(circuitSignals, p.circuitSignal(episode, now, "github_issue_retry_exhausted"))
-					} else {
-						next := now.Add(backoff(p.Config.BaseBackoff, episode.IssueAttempts))
-						episode.IssueNextAttemptAt = &next
-						report.IssueRetry++
-					}
-					state.Episodes[fingerprint] = episode
-					continue
-				}
-				episode.Issue = &ref
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "skipped", reason, nil))
+			state.Episodes[fingerprint] = episode
+			continue
+		}
+		if episode.Issue != nil {
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "skipped", "issue_already_linked", episode.Issue))
+			state.Episodes[fingerprint] = episode
+			continue
+		}
+		eligible, reason := issueEligibility(episode)
+		if !eligible {
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "skipped", reason, nil))
+			state.Episodes[fingerprint] = episode
+			continue
+		}
+		if episode.IssueCircuitOpen {
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "skipped", "issue_circuit_open", nil))
+			state.Episodes[fingerprint] = episode
+			continue
+		}
+		if episode.IssueNextAttemptAt != nil && episode.IssueNextAttemptAt.After(now) {
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "skipped", "issue_backoff", nil))
+			state.Episodes[fingerprint] = episode
+			continue
+		}
+		draft, draftErr := p.issueDraft(episode)
+		if draftErr != nil {
+			return report, draftErr
+		}
+		report.IssueDrafts = append(report.IssueDrafts, draft)
+		if p.Config.DryRun {
+			metrics.Issues["dry_run"] = uint64(len(report.IssueDrafts))
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "dry_run", "eligible_dry_run", nil))
+		} else {
+			ref, reused, createErr := p.ensureIssue(ctx, draft)
+			if createErr != nil {
 				episode.IssueAttempts++
-				episode.IssueNextAttemptAt = nil
-				if reused {
-					report.IssuesReused = append(report.IssuesReused, ref)
-					metrics.Issues["reused"]++
+				metrics.Issues["failed"]++
+				if episode.IssueAttempts >= p.Config.MaxAttempts {
+					episode.IssueCircuitOpen = true
+					episode.IssueCircuitGeneration++
+					episode.IssueNextAttemptAt = nil
+					report.CircuitOpened++
+					circuitSignals = append(circuitSignals, p.circuitSignal(episode, now, "github_issue_retry_exhausted"))
+					report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "failed", "issue_circuit_open", nil))
 				} else {
-					report.IssuesCreated = append(report.IssuesCreated, ref)
-					metrics.Issues["created"]++
+					next := now.Add(backoff(p.Config.BaseBackoff, episode.IssueAttempts))
+					episode.IssueNextAttemptAt = &next
+					report.IssueRetry++
+					report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "failed", "issue_retry_scheduled", nil))
 				}
+				state.Episodes[fingerprint] = episode
+				continue
+			}
+			episode.Issue = &ref
+			episode.IssueAttempts++
+			episode.IssueNextAttemptAt = nil
+			if reused {
+				report.IssuesReused = append(report.IssuesReused, ref)
+				metrics.Issues["reused"]++
+				report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "reused", "issue_reused", &ref))
+			} else {
+				report.IssuesCreated = append(report.IssuesCreated, ref)
+				metrics.Issues["created"]++
+				report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "created", "issue_created", &ref))
 			}
 		}
 		state.Episodes[fingerprint] = episode
@@ -198,6 +245,9 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 	metrics.UpdatedAt = now
 	state.UpdatedAt = now
 	if err := p.Store.SaveState(state, metrics); err != nil {
+		return report, err
+	}
+	if err := p.Store.AppendDecisions(report.Decisions, now); err != nil {
 		return report, err
 	}
 	if p.Config.DryRun {
@@ -295,17 +345,38 @@ func signalsForEpisode(episode Episode, signals []Signal) []Signal {
 	return result
 }
 
-func issueEligible(episode Episode) bool {
-	if episode.AI == nil || !episode.AI.RecommendIssue || episode.Confidence == "low" || episode.AI.Confidence == "low" {
-		return false
+func issueEligibility(episode Episode) (bool, string) {
+	if episode.AI == nil {
+		return false, "analysis_missing"
+	}
+	if !episode.AI.RecommendIssue {
+		return false, "ai_did_not_recommend"
+	}
+	if episode.Confidence == "low" {
+		return false, "deterministic_confidence_low"
+	}
+	if episode.AI.Confidence == "low" {
+		return false, "ai_confidence_low"
 	}
 	switch episode.PrimaryClassification {
 	case "confirmed_bug":
-		return episode.Features.DocumentedInvariantViolation && episode.Features.CorroboratedProductFix
+		if !episode.Features.DocumentedInvariantViolation {
+			return false, "documented_invariant_missing"
+		}
+		if !episode.Features.CorroboratedProductFix {
+			return false, "corroborated_product_fix_missing"
+		}
+		return true, ""
 	case "suspected_bug":
-		return episode.Features.DocumentedInvariantViolation && episode.Features.RepeatedIndependentRuns
+		if !episode.Features.DocumentedInvariantViolation {
+			return false, "documented_invariant_missing"
+		}
+		if !episode.Features.RepeatedIndependentRuns {
+			return false, "independent_reproduction_missing"
+		}
+		return true, ""
 	default:
-		return false
+		return false, "classification_not_issue_eligible"
 	}
 }
 

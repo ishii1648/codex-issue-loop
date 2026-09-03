@@ -195,6 +195,13 @@ agent-loop logs --repo /absolute/path/to/repository --stderr
 
 `logs`は保持中のgzip世代と現行`supervisor.log`を古い順に連結して表示する。`--stderr`はlaunchdが捕捉した起動失敗を同様に表示する。既定のrotation・保持値は`.agent-loop.yaml`の`logs`で変更できるが、容量reserveを小さくしすぎない。
 
+Incident起票判定は次で確認する。`decision_log`の保持期間は固定7日で、`decisions`は起票、再利用、dry-run、見送り、失敗のreason codeを返す。読み取りエラー時はfileを手編集せずautomationを停止し、[Incident自動対応runbook](incident-automation.md)のfail-closed手順に従う。
+
+```sh
+agent-loop incident status --repo /absolute/path/to/repository --json
+agent-loop incident decisions --repo /absolute/path/to/repository --json
+```
+
 ### `needs_input`
 
 これは障害ではなく、workerが安全に続行するための入力待ちである。質問、推奨案、選択肢、Issue番号、request IDを確認し、[質問へ回答](#質問へ回答)の手順で回答する。質問が不明瞭なら、秘密を渡さず追加説明を回答として記録する。

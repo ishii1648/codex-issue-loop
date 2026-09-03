@@ -39,9 +39,10 @@ incident_automation:
 agent-loop doctor --repo "$PWD" --json
 agent-loop incident status --repo "$PWD" --json
 agent-loop incident analyze-once --repo "$PWD" --json
+agent-loop incident decisions --repo "$PWD" --json
 ```
 
-`analyze-once`はautomationが無効でも実行でき、`dry_run: true`ならIssueを作成しない。出力と`issue-dry-run.json`でtitle、body、label、fingerprintを確認する。定期実行は`enabled: true`にした次回supervisor起動時から開始し、起動直後と設定intervalごとに動く。同一repositoryのprocess lockにより、重複schedulerは同時に分析・起票しない。
+`analyze-once`はautomationが無効でも実行でき、`dry_run: true`ならIssueを作成しない。出力と`issue-dry-run.json`でtitle、body、label、fingerprintを確認する。`decisions`では起票、既存Issue再利用、dry-run、見送り、失敗の判定とreason codeを時系列で確認できる。定期実行は`enabled: true`にした次回supervisor起動時から開始し、起動直後と設定intervalごとに動く。同一repositoryのprocess lockにより、重複schedulerは同時に分析・起票しない。
 
 live作成を許可するときだけ`dry_run: false`へ変更する。設定変更を反映する`register`または`restart`は通常の運用手順どおり対象と影響を確認して明示実行する。本番有効化前に次が必要である。
 
@@ -55,17 +56,23 @@ live作成を許可するときだけ`dry_run: false`へ変更する。設定変
 既定のmanaged root配下にある`repos/<repo-id>/incidents/`へ次を保存する。directoryは`0700`、fileは`0600`で作る。
 
 - `signals.jsonl`: schema version、時刻、repository、correlation ID、outcome、reason codeを持つsanitized signal
+- `decisions.jsonl`: episodeごとの起票可否、結果（`created`、`reused`、`dry_run`、`skipped`、`failed`）とbounded reason codeを持つ監査記録
 - `state.json`: episode、classification、AI結果、Issue identity、retry/circuit、fix lifecycle
 - `metrics.json`: signal/outcome/classification/Issue/analysis回数、duration、open episode、open circuitのbounded aggregate
 - `issue-dry-run.json`: 次回作成予定のIssue payload
 
 schemaは`schemas/incident-*.schema.json`にある。token、credential、raw worker transcript、raw AI transcript、user home pathは保存しない。設定済みsecretと既知markerは永続化前にredactし、高cardinality IDをmetrics keyへ使わない。
 
+`decisions.jsonl`の通常更新は既存byte列を変更しないappend-only追記である。各分析cycleは保存時刻からちょうど7日前の記録を保持し、それより古い完全なrecordだけをlock下のatomic compactionで削除する。再起動後も同じfileへ継続し、同一IDの同一内容は冪等に扱う。未知field、不正schema、重複IDの内容不一致、改行前で途切れた最終recordを検出した場合は、retentionも追記も行わずfail-closedにする。
+
 ```sh
 agent-loop incident status --repo "$PWD" --json
+agent-loop incident decisions --repo "$PWD" --json
 ```
 
-restart時は保存済みstateとactive/archive signalを読み直す。event再送、入力順、rotation後の新規lifecycle signalをdedupし、Issue identityとattemptを引き継ぐ。
+`status`の`decision_log`には保持日数、件数、最古・最新時刻が含まれる。restart時は保存済みstate、active/archive signal、判定ログを読み直す。event再送、入力順、rotation後の新規lifecycle signalをdedupし、Issue identityとattemptを引き継ぐ。
+
+判定ログの読み取りが失敗した場合は対象repositoryのautomationを止め、`decisions.jsonl`を証拠として保持して原因を調べる。欠損行を推測して削除したり、stateとの辻褄を合わせるために手編集したりしない。
 
 ## 停止と復旧
 

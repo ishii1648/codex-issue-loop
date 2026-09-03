@@ -16,7 +16,7 @@ func TestPublishedIncidentSchemasAreVersionedDraft202012Contracts(t *testing.T) 
 	root := filepath.Join("..", "..", "..")
 	for _, name := range []string{
 		"incident-signal.schema.json", "incident-state.schema.json", "incident-metrics.schema.json",
-		"incident-ai-analysis.schema.json", "incident-issue-payload.schema.json",
+		"incident-ai-analysis.schema.json", "incident-issue-payload.schema.json", "incident-decision.schema.json",
 	} {
 		data, err := os.ReadFile(filepath.Join(root, "schemas", name))
 		if err != nil {

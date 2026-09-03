@@ -327,12 +327,33 @@ func TestIncidentStatusReportsDisabledDryRunHealthWithoutNetwork(t *testing.T) {
 		State   struct {
 			Version int `json:"version"`
 		} `json:"state"`
+		DecisionLog struct {
+			RetentionDays int `json:"retention_days"`
+			RecordCount   int `json:"record_count"`
+		} `json:"decision_log"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.Version != 1 || status.State.Version != 1 || status.Enabled || !status.DryRun {
+	if status.Version != 1 || status.State.Version != 1 || status.Enabled || !status.DryRun || status.DecisionLog.RetentionDays != 7 || status.DecisionLog.RecordCount != 0 {
 		t.Fatalf("status=%+v", status)
+	}
+	out.Reset()
+	stderr.Reset()
+	code = (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"incident", "decisions", "--repo", repo, "--json"})
+	if code != 0 {
+		t.Fatalf("decisions code=%d stderr=%s", code, stderr.String())
+	}
+	var decisions struct {
+		RetentionDays int               `json:"retention_days"`
+		RecordCount   int               `json:"record_count"`
+		Records       []json.RawMessage `json:"records"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &decisions); err != nil {
+		t.Fatal(err)
+	}
+	if decisions.RetentionDays != 7 || decisions.RecordCount != 0 || decisions.Records == nil {
+		t.Fatalf("decisions=%+v", decisions)
 	}
 }
 

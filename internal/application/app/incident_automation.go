@@ -36,7 +36,7 @@ func newIncidentAutomation(l layout.Layout, repoID string, cfg config.Config, so
 
 func (a App) incident(ctx context.Context, l layout.Layout, args []string) error {
 	if len(args) == 0 {
-		return exitError{2, fmt.Errorf("incident requires analyze-once, status, seed-canary, or retry")}
+		return exitError{2, fmt.Errorf("incident requires analyze-once, status, decisions, seed-canary, or retry")}
 	}
 	command := args[0]
 	fs := flag.NewFlagSet("incident "+command, flag.ContinueOnError)
@@ -80,14 +80,52 @@ func (a App) incident(ctx context.Context, l layout.Layout, args []string) error
 		if metricsErr != nil {
 			return metricsErr
 		}
+		decisions, decisionsErr := incidentStore.ReadDecisions()
+		if decisionsErr != nil {
+			return decisionsErr
+		}
+		var oldestAt, newestAt *time.Time
+		if len(decisions) > 0 {
+			oldest, newest := decisions[0].DecidedAt, decisions[0].DecidedAt
+			for _, decision := range decisions[1:] {
+				if decision.DecidedAt.Before(oldest) {
+					oldest = decision.DecidedAt
+				}
+				if decision.DecidedAt.After(newest) {
+					newest = decision.DecidedAt
+				}
+			}
+			oldestAt, newestAt = &oldest, &newest
+		}
 		status := struct {
-			Version int                       `json:"version"`
-			Enabled bool                      `json:"enabled"`
-			DryRun  bool                      `json:"dry_run"`
-			State   incidentloop.DurableState `json:"state"`
-			Metrics incidentloop.Metrics      `json:"metrics"`
-		}{incidentloop.SchemaVersion, cfg.IncidentAutomation.Enabled, cfg.IncidentAutomation.DryRun, stateValue, metrics}
+			Version     int                       `json:"version"`
+			Enabled     bool                      `json:"enabled"`
+			DryRun      bool                      `json:"dry_run"`
+			State       incidentloop.DurableState `json:"state"`
+			Metrics     incidentloop.Metrics      `json:"metrics"`
+			DecisionLog struct {
+				RetentionDays int        `json:"retention_days"`
+				RecordCount   int        `json:"record_count"`
+				OldestAt      *time.Time `json:"oldest_at,omitempty"`
+				NewestAt      *time.Time `json:"newest_at,omitempty"`
+			} `json:"decision_log"`
+		}{Version: incidentloop.SchemaVersion, Enabled: cfg.IncidentAutomation.Enabled, DryRun: cfg.IncidentAutomation.DryRun, State: stateValue, Metrics: metrics}
+		status.DecisionLog.RetentionDays = int(incidentloop.DecisionRetention / (24 * time.Hour))
+		status.DecisionLog.RecordCount = len(decisions)
+		status.DecisionLog.OldestAt = oldestAt
+		status.DecisionLog.NewestAt = newestAt
 		return a.output(*jsonOut, status)
+	case "decisions":
+		decisions, decisionsErr := incidentStore.ReadDecisions()
+		if decisionsErr != nil {
+			return decisionsErr
+		}
+		return a.output(*jsonOut, struct {
+			Version       int                          `json:"version"`
+			RetentionDays int                          `json:"retention_days"`
+			RecordCount   int                          `json:"record_count"`
+			Records       []incidentloop.IssueDecision `json:"records"`
+		}{incidentloop.SchemaVersion, int(incidentloop.DecisionRetention / (24 * time.Hour)), len(decisions), decisions})
 	case "seed-canary":
 		if !*confirmSyntheticEvidence {
 			return exitError{2, fmt.Errorf("incident seed-canary requires --confirm-synthetic-evidence")}

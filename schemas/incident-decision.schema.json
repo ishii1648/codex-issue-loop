@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "codex-issue-loop incident Issue decision audit record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "id", "decided_at", "repository", "episode_id", "fingerprint",
+    "classification", "classification_confidence", "matched_rules", "invariant_codes",
+    "eligible", "outcome", "reason_code"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "id": {"$ref": "#/$defs/id"},
+    "decided_at": {"type": "string", "format": "date-time"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_.-]{1,100}$"},
+    "episode_id": {"type": "string", "pattern": "^inc-[a-f0-9]{20}$"},
+    "fingerprint": {"$ref": "#/$defs/fingerprint"},
+    "classification": {"enum": ["expected_transient", "degraded", "operator_attention", "suspected_bug", "confirmed_bug", "unknown"]},
+    "classification_confidence": {"$ref": "#/$defs/confidence"},
+    "matched_rules": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "invariant_codes": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "ai_recommendation": {"type": "boolean"},
+    "ai_confidence": {"$ref": "#/$defs/confidence"},
+    "eligible": {"type": "boolean"},
+    "outcome": {"enum": ["skipped", "dry_run", "created", "reused", "failed"]},
+    "reason_code": {
+      "enum": [
+        "episode_resolved", "expected_transient", "analysis_retry_scheduled",
+        "analysis_circuit_open", "analysis_backoff", "analysis_missing",
+        "ai_did_not_recommend", "deterministic_confidence_low", "ai_confidence_low",
+        "classification_not_issue_eligible", "documented_invariant_missing",
+        "corroborated_product_fix_missing", "independent_reproduction_missing",
+        "eligible_dry_run", "issue_created", "issue_reused", "issue_already_linked",
+        "issue_retry_scheduled", "issue_circuit_open", "issue_backoff"
+      ]
+    },
+    "issue": {"$ref": "#/$defs/issue"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "confidence": {"enum": ["low", "medium", "high"]},
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["labels", "fingerprint", "status"],
+      "properties": {
+        "number": {"type": "integer", "minimum": 1},
+        "url": {"type": "string", "minLength": 1},
+        "labels": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "fingerprint": {"$ref": "#/$defs/fingerprint"},
+        "status": {"enum": ["dry_run", "created", "existing", "read_back"]},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}
