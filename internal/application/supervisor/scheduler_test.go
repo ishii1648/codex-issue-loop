@@ -607,7 +607,7 @@ func (f *webhookFakeGitHub) ListReady(ctx context.Context, cfg config.Config) ([
 
 func (f *webhookFakeGitHub) GetREST(context.Context, config.Config, int) (gh.Issue, error) {
 	f.restGets++
-	return f.issue, nil
+	return openTestIssue(f.issue), nil
 }
 
 func (f *webhookFakeGitHub) InspectPullRequestREST(context.Context, config.Config, int, int, string) (gh.RemoteState, error) {

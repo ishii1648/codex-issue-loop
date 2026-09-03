@@ -26,6 +26,20 @@ func TestEligibleRequiresReadyAndRejectsStateLabels(t *testing.T) {
 	}
 }
 
+func TestEligibleIssueRequiresOpenState(t *testing.T) {
+	cfg := config.Defaults().GitHub
+	issue := Issue{Number: 1, State: "OPEN", Labels: []string{"codex-loop:ready"}}
+	if !EligibleIssue(issue, cfg) {
+		t.Fatal("open ready Issue was rejected")
+	}
+	for _, state := range []string{"CLOSED", ""} {
+		issue.State = state
+		if EligibleIssue(issue, cfg) {
+			t.Fatalf("Issue with state %q was accepted", state)
+		}
+	}
+}
+
 func TestFaultCLIInspectReturnsIssueAndPullRequests(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")
