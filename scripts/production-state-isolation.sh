@@ -44,9 +44,9 @@ snapshot_production() {
       issue_count: ($status[0].state.issues | length),
       leases: [
         $status[0].state.issues | to_entries[] |
-        select(.value.lease != null) |
-        {issue_number:(.key | tonumber), owner:.value.lease.owner, slot:.value.lease.slot,
-         resources:.value.lease.resolved_resources, base_sha:.value.lease.base_sha}
+        select(.value.execution_lease != null) |
+        {issue_number:(.key | tonumber), owner:.value.execution_lease.owner, slot:.value.execution_lease.slot,
+         resources:.value.execution_lease.resolved_resources, base_sha:.value.execution_lease.base_sha}
       ] | sort_by(.issue_number),
       pending_request_count: ($status[0].pending_requests | length),
       active_workers: $status[0].worker_pool.active,
