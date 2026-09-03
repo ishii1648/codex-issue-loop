@@ -186,14 +186,21 @@ type fakeGitHub struct {
 	inspectHook               func()
 }
 
+func openTestIssue(issue gh.Issue) gh.Issue {
+	if issue.State == "" {
+		issue.State = "OPEN"
+	}
+	return issue
+}
+
 func (f *fakeGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return []gh.Issue{f.issue}, nil
+	return []gh.Issue{openTestIssue(f.issue)}, nil
 }
 func (f *fakeGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) {
-	return f.issue, nil
+	return openTestIssue(f.issue), nil
 }
 func (f *fakeGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
 	f.inspectCalls++
@@ -426,6 +433,25 @@ func testLoop(t *testing.T, result worker.Result) (*Loop, *fakeGitHub) {
 	body := "Implement it"
 	github := &fakeGitHub{issue: gh.Issue{Number: 1, Title: "Test", Body: body, Labels: []string{"codex-loop:ready"}}}
 	return &Loop{Config: cfg, Store: store, GitHub: github, Worktrees: fakeWorktree{path: repo}, Worker: fakeWorker{result: result}}, github
+}
+
+func TestClosedIssueIsRejectedBeforeLeaseAndGitHubMutation(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	github.issue.State = "CLOSED"
+	before, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.startIssueAtSlotWithResources(context.Background(), github.issue, "run_closed", 0); err != nil {
+		t.Fatal(err)
+	}
+	after, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.StateRevision != before.StateRevision || after.Issues["1"] != nil || github.claimed {
+		t.Fatalf("closed Issue caused side effects: before=%d after=%d issue=%+v claimed=%v", before.StateRevision, after.StateRevision, after.Issues["1"], github.claimed)
+	}
 }
 
 func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {

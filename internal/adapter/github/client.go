@@ -356,6 +356,9 @@ func Eligible(labels []string, cfg config.GitHub) bool {
 }
 
 func EligibleIssue(issue Issue, cfg config.GitHub) bool {
+	if !strings.EqualFold(issue.State, "open") {
+		return false
+	}
 	if !Eligible(issue.Labels, cfg) {
 		return false
 	}
