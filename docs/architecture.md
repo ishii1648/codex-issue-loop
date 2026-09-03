@@ -83,7 +83,7 @@ production、内部test、外部testのimport graphをアーキテクチャテ�
 人が実装を読むときは、外部I/Oを起点にせず、次の順序を基本とする。
 
 1. `internal/domain/**`で状態名、不変条件、状態遷移の入力と出力を確認する。
-2. `internal/domain/admission/**`と`internal/domain/capability/**`で、Issue選択と実行能力の決定論的な判定を確認する。
+2. `internal/domain/admission/**`で、ready Issueの依存関係、resource競合、capacityに基づく決定論的な選択を確認する。
 3. `internal/application/supervisor/**`で、ドメインdecisionを永続transactionと外部effectへ対応づけるapplication orchestrationを確認する。
 4. `internal/adapter/state/**`、`internal/adapter/github/**`、`internal/adapter/worker/**`、`internal/adapter/publish/**`で永続化・外部I/Oの実装詳細を確認する。
 

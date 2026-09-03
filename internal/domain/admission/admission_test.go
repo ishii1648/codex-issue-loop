@@ -2,19 +2,13 @@ package admission
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 )
-
-const testCapabilityBlock = "\n<!-- agent-loop:capabilities\nversion: 1\nprofile: standard\nnetwork: none\nbrowser_cdp: false\ndownload: false\nexternal_time_gate: false\n-->"
 
 func testSettings(concurrency int) Settings {
 	return Settings{
 		Concurrency: concurrency, MetadataVersion: 1,
-		CapabilityProfiles: map[string]capability.Provider{"standard": {Version: 1, Profile: "standard", Network: capability.NetworkNone}},
 		Definitions: []ResourceDefinition{
 			{Name: "config", Paths: []string{"internal/platform/config/**"}},
 			{Name: "docs", Paths: []string{"docs/**"}},
@@ -24,18 +18,11 @@ func testSettings(concurrency int) Settings {
 }
 
 func metadata(dependencies string) string {
-	return resourceMetadata(dependencies) + testCapabilityBlock
+	return resourceMetadata(dependencies)
 }
 
 func resourceMetadata(dependencies string) string {
 	return "<!-- agent-loop:metadata\nversion: 1\ndepends_on: " + dependencies + "\n-->"
-}
-
-func withCapabilities(body string) string {
-	if strings.Contains(body, "<!-- agent-loop:capabilities") {
-		return body
-	}
-	return body + testCapabilityBlock
 }
 
 func candidate(number int, resource, dependencies string) Candidate {
@@ -113,7 +100,7 @@ func TestSelectTable(t *testing.T) {
 		{
 			name: "missing metadata is exclusive",
 			input: Input{Settings: testSettings(3), Candidates: []Candidate{
-				{Number: 1, Labels: []string{"area:config"}, Body: testCapabilityBlock}, candidate(2, "area:docs", "[]"),
+				{Number: 1, Labels: []string{"area:config"}}, candidate(2, "area:docs", "[]"),
 			}},
 			wantSelected: []int{1},
 			wantReasons:  map[int]string{2: ReasonResourceConflict},
@@ -172,24 +159,19 @@ func TestSelectIsIndependentOfCandidateLabelAndLeaseOrder(t *testing.T) {
 	}
 }
 
-func TestCapabilityMismatchDoesNotHeadOfLineBlockCompatibleCandidate(t *testing.T) {
-	settings := testSettings(1)
-	public := strings.Replace(testCapabilityBlock, "network: none", "network: public", 1)
-	result, err := Select(Input{Settings: settings, Candidates: []Candidate{
-		{Number: 1, Labels: []string{"area:config"}, Body: resourceMetadata("[]") + public},
-		{Number: 2, Labels: []string{"area:docs"}, Body: metadata("[]")},
+func TestLegacyCapabilityMetadataDoesNotAffectAdmission(t *testing.T) {
+	legacyBlock := "\n<!-- agent-loop:capabilities\nversion: 1\nprofile: unknown\nnetwork: public\n-->"
+	result, err := Select(Input{Settings: testSettings(1), Candidates: []Candidate{
+		{Number: 1, Labels: []string{"area:config"}, Body: resourceMetadata("[]") + legacyBlock},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := selectedNumbers(result); !reflect.DeepEqual(got, []int{2}) {
+	if got := selectedNumbers(result); !reflect.DeepEqual(got, []int{1}) {
 		t.Fatalf("selected=%v result=%+v", got, result)
 	}
-	if got := skipReasons(result)[1]; got != ReasonCapabilityMismatch {
-		t.Fatalf("skip reason=%q result=%+v", got, result)
-	}
-	if len(result.Skipped[0].Evaluation.Capability.Mismatches) != 1 || result.Skipped[0].Evaluation.Capability.Mismatches[0].Code != capability.CodeNetworkMismatch {
-		t.Fatalf("mismatch=%+v", result.Skipped[0].Evaluation.Capability)
+	if len(result.Skipped) != 0 {
+		t.Fatalf("legacy capability metadata caused a skip: %+v", result.Skipped)
 	}
 }
 
@@ -269,10 +251,10 @@ func TestMetadataValidationRejectsAmbiguousForms(t *testing.T) {
 		"<!-- agent-loop:metadata\nversion: 1\ndepends_on: []\nextra: true\n-->",
 		"<!-- agent-loop:metadata\nversion: 1\nversion: 1\ndepends_on: []\n-->",
 		"<!-- agent-loop:metadata\nversion: 1\ndepends_on: []",
-		resourceMetadata("[]") + "\n" + resourceMetadata("[]") + testCapabilityBlock,
+		resourceMetadata("[]") + "\n" + resourceMetadata("[]"),
 	}
 	for index, body := range bodies {
-		result, err := Select(Input{Settings: testSettings(1), Candidates: []Candidate{{Number: 1, Labels: []string{"area:config"}, Body: withCapabilities(body)}}})
+		result, err := Select(Input{Settings: testSettings(1), Candidates: []Candidate{{Number: 1, Labels: []string{"area:config"}, Body: body}}})
 		if err != nil {
 			t.Fatalf("case %d: %v", index, err)
 		}
@@ -289,7 +271,7 @@ func TestMetadataAndClaimFallbackPriority(t *testing.T) {
 		wantReason string
 		wantDeps   []int
 	}{
-		{name: "missing metadata wins", candidate: Candidate{Number: 1, Labels: []string{"area:unknown"}, Body: testCapabilityBlock}, wantReason: FallbackMetadataMissing, wantDeps: []int{}},
+		{name: "missing metadata wins", candidate: Candidate{Number: 1, Labels: []string{"area:unknown"}}, wantReason: FallbackMetadataMissing, wantDeps: []int{}},
 		{name: "invalid metadata wins", candidate: Candidate{Number: 1, Labels: []string{"area:config"}, Body: metadata("[1]")}, wantReason: FallbackMetadataInvalid, wantDeps: []int{}},
 		{name: "missing claim", candidate: Candidate{Number: 1, Body: metadata("[2]")}, wantReason: FallbackResourceMissing, wantDeps: []int{2}},
 		{name: "invalid claim", candidate: Candidate{Number: 1, Labels: []string{"area: config"}, Body: metadata("[2]")}, wantReason: FallbackResourceInvalid, wantDeps: []int{2}},
@@ -338,10 +320,8 @@ func TestSettingsValidation(t *testing.T) {
 
 func TestLegacySelectorPreservesConcurrencyOneOrdering(t *testing.T) {
 	result, err := Select(Input{
-		Settings: Settings{Concurrency: 1, MetadataVersion: 1, Legacy: true, CapabilityProfiles: map[string]capability.Provider{
-			"standard": {Version: 1, Profile: "standard", Network: capability.NetworkNone},
-		}},
-		Candidates: []Candidate{{Number: 9, Body: testCapabilityBlock}, {Number: 2, Body: testCapabilityBlock}, {Number: 5, Body: testCapabilityBlock}},
+		Settings:   Settings{Concurrency: 1, MetadataVersion: 1, Legacy: true},
+		Candidates: []Candidate{{Number: 9}, {Number: 2}, {Number: 5}},
 		Ineligible: map[int]string{2: "completed"},
 	})
 	if err != nil {

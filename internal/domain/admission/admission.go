@@ -10,7 +10,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ishii1648/codex-issue-loop/internal/domain/capability"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,7 +21,6 @@ const (
 	ReasonDependencyCycle      = "dependency_cycle"
 	ReasonDependencyIncomplete = "dependency_incomplete"
 	ReasonResourceConflict     = "resource_conflict"
-	ReasonCapabilityMismatch   = "capability_mismatch"
 	ReasonNoCapacity           = "no_capacity"
 )
 
@@ -40,10 +38,9 @@ type ResourceDefinition struct {
 }
 
 type Settings struct {
-	Concurrency        int
-	MetadataVersion    int
-	Definitions        []ResourceDefinition
-	CapabilityProfiles map[string]capability.Provider
+	Concurrency     int
+	MetadataVersion int
+	Definitions     []ResourceDefinition
 
 	// Legacy keeps schema-v2 queues on the same selector without activating
 	// metadata semantics before the schema-v3 migration. Every candidate is an
@@ -107,7 +104,6 @@ type Evaluation struct {
 	Dependencies      []int
 	FallbackReason    string
 	Errors            []string
-	Capability        capability.Evaluation
 	metadataValid     bool
 }
 
@@ -237,10 +233,6 @@ func Select(input Input) (Result, error) {
 			result.Skipped = append(result.Skipped, Skip{Evaluation: evaluation, Reason: ReasonIneligible, Detail: detail})
 			continue
 		}
-		if !evaluation.Capability.Compatible {
-			result.Skipped = append(result.Skipped, Skip{Evaluation: evaluation, Reason: ReasonCapabilityMismatch, Detail: capabilityDetail(evaluation.Capability)})
-			continue
-		}
 		if cycle[number] {
 			result.Skipped = append(result.Skipped, Skip{Evaluation: evaluation, Reason: ReasonDependencyCycle})
 			continue
@@ -281,7 +273,7 @@ func EvaluateCandidate(settings Settings, candidate Candidate) (Evaluation, erro
 
 func evaluate(candidate Candidate, settings Settings, known map[string]bool) Evaluation {
 	candidate.Labels = normalizedSet(append([]string(nil), candidate.Labels...))
-	result := Evaluation{Candidate: candidate, DeclaredResources: []string{}, Resources: []string{RepositoryResource}, Dependencies: []int{}, Capability: capability.Evaluate(candidate.Body, settings.CapabilityProfiles)}
+	result := Evaluation{Candidate: candidate, DeclaredResources: []string{}, Resources: []string{RepositoryResource}, Dependencies: []int{}}
 	if settings.Legacy {
 		result.DeclaredResources = []string{RepositoryResource}
 		return result
@@ -304,15 +296,6 @@ func evaluate(candidate Candidate, settings Settings, known map[string]bool) Eva
 	}
 	result.Resources = claims
 	return result
-}
-
-func capabilityDetail(evaluation capability.Evaluation) string {
-	codes := make([]string, 0, len(evaluation.Mismatches))
-	for _, mismatch := range evaluation.Mismatches {
-		codes = append(codes, mismatch.Code)
-	}
-	sort.Strings(codes)
-	return strings.Join(codes, ",")
 }
 
 func normalizeLeases(leases []Lease) ([]Lease, map[int]bool, error) {

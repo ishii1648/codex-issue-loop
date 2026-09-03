@@ -12,7 +12,7 @@ queue:
 resources:
   definitions:
     - name: config
-      paths: [.agent-loop*.yaml, internal/platform/config/**, internal/domain/admission/**, internal/domain/capability/**, docs/resource-admission.md, docs/specification.md]
+      paths: [.agent-loop*.yaml, internal/platform/config/**, internal/domain/admission/**, docs/resource-admission.md, docs/specification.md]
     - name: scheduler
       paths: [internal/domain/issue/**, internal/domain/statecontract/**, internal/application/supervisor/**, internal/adapter/state/**, internal/adapter/webhook/**, internal/platform/schema/**, internal/platform/failure/**, internal/platform/fsutil/**]
     - name: github

@@ -13,8 +13,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
-const githubTestCapabilityContract = "<!-- agent-loop:capabilities\nversion: 1\nprofile: standard\nnetwork: none\nbrowser_cdp: false\ndownload: false\nexternal_time_gate: false\n-->"
-
 func TestEligibleRequiresReadyAndRejectsStateLabels(t *testing.T) {
 	cfg := config.Defaults().GitHub
 	if !Eligible([]string{"codex-loop:ready"}, cfg) {

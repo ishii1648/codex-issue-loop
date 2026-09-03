@@ -80,7 +80,7 @@ func runHarness(args []string) error {
 	switch args[0] {
 	case "seed":
 		body := func(dependencies string) string {
-			return "Offline release contract.\n<!-- agent-loop:metadata\nversion: 1\ndepends_on: " + dependencies + "\n-->\n<!-- agent-loop:capabilities\nversion: 1\nprofile: standard\nnetwork: none\nbrowser_cdp: false\ndownload: false\nexternal_time_gate: false\n-->"
+			return "Offline release contract.\n<!-- agent-loop:metadata\nversion: 1\ndepends_on: " + dependencies + "\n-->"
 		}
 		state := contractState{
 			SchemaVersion: 1,
