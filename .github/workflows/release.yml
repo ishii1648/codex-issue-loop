@@ -287,25 +287,25 @@ jobs:
           candidate_digest=$(shasum -a 256 dist/candidate/agent-loop_Darwin_arm64 | awk '{print $1}')
           jq -e --arg tag "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
             --arg candidate_tag "$candidate_tag" --arg digest "$candidate_digest" '
-              .schema_version == 1 and .release_tag == $tag and .release_commit == $commit and
+              def exact_keys($expected): keys == ($expected | sort);
+              exact_keys(["schema_version","public_payload","release_tag","release_commit","candidate_tag",
+                "candidate_binary_sha256","production_state_accessed","production_state_changes",
+                "production_state_equal","production_health","offline_contract","private_evidence_sha256"]) and
+              (.production_health | exact_keys(["doctor_safe","worker_limit_enforced","active_workers_within_limit"])) and
+              (.offline_contract | exact_keys(["mode","credentials_absent","external_network",
+                "lifecycle_sequences_complete","final_resources_clean"])) and
+              .schema_version == 2 and .public_payload == "redacted-summary" and
+              .release_tag == $tag and .release_commit == $commit and
               .candidate_tag == $candidate_tag and .candidate_binary_sha256 == $digest and
               .production_state_accessed == true and .production_state_changes == 0 and
-              .production_before == .production_after and .production_before.worker_limit == 1 and
-              .production_before.active_workers <= 1 and .production_before.doctor_safe == true and
-              .offline_contract.mode == "credentialless-offline" and
-              .offline_contract.credentials.canary_github_token == false and
-              .offline_contract.credentials.openai_api_key == false and
+              .production_state_equal == true and .production_health.doctor_safe == true and
+              .production_health.worker_limit_enforced == true and
+              .production_health.active_workers_within_limit == true and
+              .offline_contract.mode == "credentialless-offline" and .offline_contract.credentials_absent == true and
               .offline_contract.external_network == false and
-              (.offline_contract.sequences | length) == 2 and
-              .offline_contract.supervisor_starts >= 2 and
-              .offline_contract.webhook_fixture_replay == 1 and
-              .offline_contract.transaction_crash_recovery == 1 and
-              .offline_contract.final.active_workers == 0 and
-              .offline_contract.final.active_leases == 0 and
-              .offline_contract.final.pending_requests == 0 and
-              .offline_contract.final.orphan_pid_pgid == 0 and
-              .offline_contract.final.duplicate_prs == 0 and
-              .offline_contract.final.duplicate_comment_markers == 0
+              .offline_contract.lifecycle_sequences_complete == true and
+              .offline_contract.final_resources_clean == true and
+              (.private_evidence_sha256 | test("^[0-9a-f]{64}$"))
             ' production-state/production-state-report.json >/dev/null
       - name: Attest production isolation evidence
         uses: actions/attest-build-provenance@v3
@@ -390,8 +390,22 @@ jobs:
             .final.orphan_pid_pgid == 0 and .final.duplicate_prs == 0 and .final.duplicate_comment_markers == 0
           ' evidence/contracts/offline-contract-report.json >/dev/null
           jq -e --arg digest "$digest" --arg commit "$RELEASE_COMMIT" '
-            .schema_version == 1 and .release_commit == $commit and .candidate_binary_sha256 == $digest and
-            .production_state_changes == 0 and .production_before == .production_after and .production_before.doctor_safe == true
+            def exact_keys($expected): keys == ($expected | sort);
+            exact_keys(["schema_version","public_payload","release_tag","release_commit","candidate_tag",
+              "candidate_binary_sha256","production_state_accessed","production_state_changes",
+              "production_state_equal","production_health","offline_contract","private_evidence_sha256"]) and
+            (.production_health | exact_keys(["doctor_safe","worker_limit_enforced","active_workers_within_limit"])) and
+            (.offline_contract | exact_keys(["mode","credentials_absent","external_network",
+              "lifecycle_sequences_complete","final_resources_clean"])) and
+            .schema_version == 2 and .release_commit == $commit and .candidate_binary_sha256 == $digest and
+            .public_payload == "redacted-summary" and .production_state_changes == 0 and
+            .production_state_equal == true and .production_health.doctor_safe == true and
+            .production_health.worker_limit_enforced == true and
+            .production_health.active_workers_within_limit == true and
+            .offline_contract.credentials_absent == true and .offline_contract.external_network == false and
+            .offline_contract.lifecycle_sequences_complete == true and
+            .offline_contract.final_resources_clean == true and
+            (.private_evidence_sha256 | test("^[0-9a-f]{64}$"))
           ' evidence/production/production-state-report.json >/dev/null
           jq -e --arg digest "$digest" '
             .schema_version == 1 and .expected_sha256 == $digest and .actual_sha256 == $digest and
