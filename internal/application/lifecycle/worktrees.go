@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -133,7 +134,59 @@ func (m Manager) Purge(ctx context.Context, cfg config.Config, repoID string, st
 		plan.Entries = []Entry{*entry}
 		return plan, nil
 	}
+	orphan, found, orphanErr := m.inspectOrphan(ctx, cfg, repoID, issueNumber)
+	if orphanErr != nil {
+		return plan, orphanErr
+	}
+	if found {
+		if err := m.remove(ctx, cfg, store, &orphan, true); err != nil {
+			return plan, err
+		}
+		orphan.Eligible = true
+		orphan.Action = "purged"
+		orphan.Reasons = []string{"explicitly_confirmed_orphan_purge"}
+		plan.Entries = []Entry{orphan}
+		return plan, nil
+	}
 	return plan, fmt.Errorf("Issue #%d has no retained worktree", issueNumber)
+}
+
+func (m Manager) inspectOrphan(ctx context.Context, cfg config.Config, repoID string, issueNumber int) (Entry, bool, error) {
+	root := cfg.Git.WorktreeRoot
+	if root == "" {
+		root = filepath.Join(m.Worktrees.StateRoot, "worktrees")
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return Entry{}, false, fmt.Errorf("resolve orphan worktree root: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return Entry{}, false, fmt.Errorf("resolve orphan worktree root symlinks: %w", err)
+	}
+	path := filepath.Join(root, repoID, fmt.Sprintf("issue-%d", issueNumber))
+	inspection, err := m.Worktrees.Inspect(ctx, cfg, path, "")
+	if err != nil {
+		return Entry{}, false, fmt.Errorf("inspect orphan Issue #%d worktree: %w", issueNumber, err)
+	}
+	if !inspection.Exists || !inspection.Valid {
+		return Entry{}, false, nil
+	}
+	entry := Entry{
+		IssueNumber: issueNumber,
+		Status:      "orphaned",
+		Path:        path,
+		Branch:      inspection.Branch,
+		MaxAge:      "0s",
+		Age:         "0s",
+		Action:      "retain",
+		Reasons:     []string{"durable_record_missing"},
+		Safety: WorktreeSafety{
+			Dirty: inspection.Dirty,
+		},
+		PurgeConfirmation: ConfirmationToken(repoID, issueNumber),
+	}
+	return entry, true, nil
 }
 
 func (m Manager) inspect(ctx context.Context, cfg config.Config, repoID string, snapshot state.Snapshot, issue *state.Issue, now time.Time) (Entry, error) {
