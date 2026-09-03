@@ -15,11 +15,13 @@ GitHub Releaseには次を公開する。
 - `release-manifest.json`（delivery protocol、tag/commit、target、artifact digest、schema互換範囲）
 - GitHub Actions artifact provenance attestation
 
+suffixなしのstable Releaseが唯一の正式releaseであり、GAは別の段階・channel・状態として定義しない。candidateは公開前検証の一時artifactで、repository assignmentの対象ではない。stable公開後のrepository別適用成否はrollout状態であり、releaseの成熟度を変更しない。
+
 release jobは同じtag、commit、`SOURCE_DATE_EPOCH`から2回buildし、binary、SBOM、checksumのbyte一致を確認してから公開する。repository固有の長期secretは使わず、GitHub Actionsの短命OIDC tokenと`GITHUB_TOKEN`だけを使う。
 
-GitHub Actionsのartifact downloadとGitHub Release downloadでは実行modeが保持されないため、isolated canaryとpost-release readbackはdownload後にbinaryを`0755`へ戻してから実行する。これはfile bytesを変更しない。mode復元後もmanifestのSHA-256とattestationを正本とし、不一致時はcandidate公開、production昇格、またはrelease health確定を停止する。
+GitHub Actionsのartifact downloadとGitHub Release downloadでは実行modeが保持されないため、isolated canaryとstable readbackはdownload後にbinaryを`0755`へ戻してから実行する。これはfile bytesを変更しない。mode復元後もmanifestのSHA-256とattestationを正本とし、不一致時はcandidate公開またはstable公開を停止する。
 
-candidate integrityは待機を挟まず、candidate prereleaseから取得したbinaryとcanonical artifactのbyte一致およびGitHub attestationを即時検証する。stable公開後のproduction healthだけを5分間soakし、開始時・1分後・5分後に全repositoryのassignment、doctor、statusを採取する。
+candidate integrityは待機を挟まず、candidate prereleaseから取得したbinaryとcanonical artifactのbyte一致およびGitHub attestationを即時検証する。Release workflowはstable公開後のartifact readbackで完了する。repository rolloutは独立workflowで検証し、5分間のhealth soakとして開始時・1分後・5分後に対象repositoryのassignment、doctor、statusを採取する。
 
 Pull Requestとmainの通常CIでも`scripts/check-release.sh`を実行し、固定test versionから2回作成したartifactのbyte一致と埋め込みversion/commitを確認する。
 
@@ -29,7 +31,7 @@ release artifactの`version --json`とinstall manifestはstorage schemaのcurren
 
 1. `main`のCIとIssue/milestoneを確認する。
 2. releaseするcommitへannotated tagを作る。
-3. tagをpushし、Release workflowの成功を確認する。
+3. tagをpushし、`verify-stable-release`までのRelease workflow成功を確認する。
 
 ```sh
 git tag -a v1.2.3 -m 'v1.2.3'
@@ -51,6 +53,8 @@ chmod 0755 agent-loop_Darwin_arm64
 ```
 
 checksum、attestation、version/commitのいずれかが一致しなければ実行・installしない。
+
+stable公開後のassignment、rollback drill、health reportはRelease workflowの完了条件ではない。rollout成功後に`production-health-report.json`をstable Releaseへ追加し、独立した`Repository rollout health` workflowを起動する。rollout失敗時は対象repositoryだけをpreviousへ戻し、artifact自体の修正が必要と確認できた場合に限って新しいpatch releaseを作る。
 
 ## Mac側pull型delivery
 

@@ -3,7 +3,9 @@
 ## 不変条件
 
 - 配布対象はstable Releaseだけであり、alpha、beta、LKG channelはない。
+- stableはGAと同義の唯一の正式releaseであり、GAを別の昇格状態として持たない。
 - stable Releaseの公開だけではassignmentを変更しない。
+- assignmentのhealthはrepository rolloutの結果であり、stable Releaseの状態を変更しない。
 - assignmentの正本はowner-onlyのdelivery configであり、repository ID、version、commit、artifact SHA-256、immutable slot、generation、previousを保持する。
 - applyとrollbackは対象repository以外のplist、PID、assignment、durable stateを変更しない。
 - active workerは停止しない。drain期限では変更をdeferしてfenceを解除する。
