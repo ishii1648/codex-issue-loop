@@ -221,7 +221,7 @@ webhook:
 - secretsを設定ファイルに記述しない。
 - `security.redact_env`には追加でマスクする値そのものではなく、値を保持する環境変数名だけを記述する。
 - base branchとGitHub repository名はargv/refとして安全な形式だけを許可する。branch prefixとworktree rootは実装が所有する。
-- `formatters.go.enabled`は既定で`false`とし、後方互換なpublisher動作を維持する。有効時はregisterが`gofmt`を絶対pathへ固定し、固定sourceのstdin整形probeを通過したcapabilityだけを内部timeout内でbuilt-in adapterとして実行する。doctorも同じread-only probeを再実行する。repository設定からcommand、追加引数、shell hookは指定できない。
+- `formatters.go.enabled`は既定で`false`とし、後方互換なpublisher動作を維持する。有効時はregisterがoperator環境を継承しない固定sourceのstdin整形probeを通過した`gofmt`実体のcanonical absolute pathを固定する。PATH上のshimがprobeを通らない場合は`go env GOROOT`でtoolchainの`bin/gofmt`を解決して同じprobeを行う。doctorも同じread-only probeを再実行する。repository設定からcommand、追加引数、shell hookは指定できない。
 - draft PR作成とmerge後のIssue closeは実装が有効に固定する。`completion.auto_merge`の既定は`false`とし、高影響なrepository方針として明示できる。
 - `completion.auto_merge: false`ではCI成功後にPRをReady for reviewへ移し、人手のmergeを待つ。`true`ではbase branchへの追随とCI再確認後にsquash mergeする。
 - conflict recovery budget、worktree保持期間、log rotation、worker run保持数は安全な内部既定値とし、repositoryの通常設定から調整する対象にしない。

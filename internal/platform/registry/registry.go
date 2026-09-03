@@ -104,15 +104,15 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		if resolveErr != nil {
 			return Entry{}, resolveErr
 		}
-		entry.Commands[name] = absolute
-	}
-	if cfg.Formatters.Go.Enabled {
-		formatterCtx, cancelFormatter := context.WithTimeout(context.Background(), 5*time.Second)
-		formatterErr := compat.ProbeGofmt(formatterCtx, entry.Commands["gofmt"])
-		cancelFormatter()
-		if formatterErr != nil {
-			return Entry{}, fmt.Errorf("verify gofmt capability: %w", formatterErr)
+		if name == "gofmt" {
+			formatterCtx, cancelFormatter := context.WithTimeout(context.Background(), 5*time.Second)
+			absolute, resolveErr = resolveGofmt(formatterCtx, absolute)
+			cancelFormatter()
+			if resolveErr != nil {
+				return Entry{}, fmt.Errorf("verify gofmt capability: %w", resolveErr)
+			}
 		}
+		entry.Commands[name] = absolute
 	}
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
 	entry.WorkerVersion = compat.ProbeBackend(probeCtx, entry.WorkerBackend, entry.Commands[entry.WorkerBackend]).Version
@@ -130,6 +130,56 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		return Entry{}, err
 	}
 	return entry, nil
+}
+
+func resolveGofmt(ctx context.Context, discovered string) (string, error) {
+	candidate, candidateErr := canonicalExecutable(discovered)
+	if candidateErr == nil {
+		if probeErr := compat.ProbeGofmt(ctx, candidate); probeErr == nil {
+			return candidate, nil
+		} else {
+			candidateErr = probeErr
+		}
+	}
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and Go toolchain discovery failed: %w", candidateErr, err)
+	}
+	output, err := exec.CommandContext(ctx, goPath, "env", "GOROOT").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and resolve GOROOT: %w: %s", candidateErr, err, strings.TrimSpace(string(output)))
+	}
+	root := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and GOROOT is not absolute", candidateErr)
+	}
+	toolchainFormatter, err := canonicalExecutable(filepath.Join(root, "bin", "gofmt"))
+	if err != nil {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and resolve toolchain gofmt: %w", candidateErr, err)
+	}
+	if err := compat.ProbeGofmt(ctx, toolchainFormatter); err != nil {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and toolchain gofmt probe failed: %w", candidateErr, err)
+	}
+	return toolchainFormatter, nil
+}
+
+func canonicalExecutable(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return "", fmt.Errorf("command is not an executable regular file: %s", resolved)
+	}
+	return resolved, nil
 }
 
 func (s Store) Remove(repoID string) error {

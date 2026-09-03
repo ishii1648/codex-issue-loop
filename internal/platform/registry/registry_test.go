@@ -137,7 +137,8 @@ func TestRegistryRegistersGofmtOnlyWhenEnabled(t *testing.T) {
 	}
 	cfg.Formatters.Go.Enabled = true
 	enabled, err := store.Add(cfg)
-	if err != nil || enabled.Commands["gofmt"] != filepath.Join(binDir, "gofmt") {
+	expectedFormatter, resolveErr := filepath.EvalSymlinks(filepath.Join(binDir, "gofmt"))
+	if err != nil || resolveErr != nil || enabled.Commands["gofmt"] != expectedFormatter {
 		t.Fatalf("enabled formatter registration=%+v err=%v", enabled.Commands, err)
 	}
 	if err := os.WriteFile(filepath.Join(binDir, "gofmt"), []byte("#!/bin/sh\nprintf 'wrong\\n'\n"), 0o700); err != nil {
@@ -145,6 +146,53 @@ func TestRegistryRegistersGofmtOnlyWhenEnabled(t *testing.T) {
 	}
 	if _, err := store.Add(cfg); err == nil || !strings.Contains(err.Error(), "gofmt capability") {
 		t.Fatalf("invalid gofmt capability registered: %v", err)
+	}
+}
+
+func TestRegistryPinsToolchainGofmtWhenDiscoveredCommandNeedsUserEnvironment(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	toolchainBin := filepath.Join(root, "toolchain", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(toolchainBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "gh", "codex", "launchctl"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "gofmt"), []byte("#!/bin/sh\ntest \"$AQUA_GLOBAL_CONFIG\" != \"\" || exit 1\nprintf 'package probe\\n\\nfunc f() {}\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	goCommand := "#!/bin/sh\ntest \"$1 $2\" = \"env GOROOT\" || exit 1\nprintf '%s\\n' '" + filepath.Join(root, "toolchain") + "'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(goCommand), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	toolchainGofmt := filepath.Join(toolchainBin, "gofmt")
+	if err := os.WriteFile(toolchainGofmt, []byte("#!/bin/sh\nprintf 'package probe\\n\\nfunc f() {}\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("AQUA_GLOBAL_CONFIG", filepath.Join(root, "aqua.yaml"))
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testRegistryConfig(t, repo, "owner/repo")
+	cfg.Formatters.Go.Enabled = true
+	entry, err := (Store{Path: filepath.Join(root, "registry.json")}).Add(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFormatter, err := filepath.EvalSymlinks(toolchainGofmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Commands["gofmt"] != expectedFormatter {
+		t.Fatalf("registered gofmt=%q, want self-contained toolchain path %q", entry.Commands["gofmt"], expectedFormatter)
 	}
 }
 

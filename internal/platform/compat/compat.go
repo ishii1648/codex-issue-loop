@@ -195,6 +195,7 @@ func ProbeGofmt(ctx context.Context, path string) error {
 		return fmt.Errorf("gofmt path is missing")
 	}
 	command := exec.CommandContext(ctx, path)
+	command.Env = []string{"PATH=/usr/bin:/bin"}
 	command.Stdin = strings.NewReader("package probe\nfunc f( ){}\n")
 	output, err := command.CombinedOutput()
 	if err != nil {
