@@ -197,9 +197,13 @@ func runGH(args []string) error {
 		if err != nil {
 			return err
 		}
+		mergeCommit, err := squashMerge(state.Remote, pr.BaseRefName, pr.HeadRefOID, pr.Number)
+		if err != nil {
+			return err
+		}
 		now := time.Now().UTC().Format(time.RFC3339)
-		pr.State, pr.MergedAt, pr.MergeCommitOID = "MERGED", &now, pr.HeadRefOID
-		return git(state.Remote, "update-ref", "refs/heads/"+pr.BaseRefName, pr.HeadRefOID)
+		pr.State, pr.MergedAt, pr.MergeCommitOID = "MERGED", &now, mergeCommit
+		return nil
 	case "label list":
 		return json.NewEncoder(os.Stdout).Encode([]label{{Name: "codex-loop:ready"}, {Name: "area:contract"}})
 	case "label create":
@@ -326,6 +330,7 @@ func writeIssue(item *issue) error {
 	value := map[string]any{
 		"number": item.Number, "title": item.Title, "body": item.Body, "url": item.URL, "createdAt": item.CreatedAt,
 		"state": item.State, "labels": labels(item.Labels), "assignees": []any{}, "milestone": nil, "comments": comments(item.Comments),
+		"author": map[string]any{"login": "offline", "is_bot": false},
 	}
 	return json.NewEncoder(os.Stdout).Encode(value)
 }
@@ -335,7 +340,8 @@ func writeIssues(items []*issue) error {
 	for _, item := range items {
 		values = append(values, map[string]any{
 			"number": item.Number, "title": item.Title, "body": item.Body, "url": item.URL, "createdAt": item.CreatedAt,
-			"labels": labels(item.Labels), "assignees": []any{}, "milestone": nil,
+			"state": item.State, "labels": labels(item.Labels), "assignees": []any{}, "milestone": nil,
+			"author": map[string]any{"login": "offline", "is_bot": false},
 		})
 	}
 	return json.NewEncoder(os.Stdout).Encode(values)
@@ -528,4 +534,29 @@ func gitOutput(remote string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+func squashMerge(remote, baseRef, head string, number int) (string, error) {
+	base, err := gitOutput(remote, "rev-parse", "refs/heads/"+baseRef)
+	if err != nil {
+		return "", err
+	}
+	tree, err := gitOutput(remote, "merge-tree", "--write-tree", base, head)
+	if err != nil {
+		return "", err
+	}
+	command := exec.Command("git", "--git-dir", remote, "commit-tree", tree, "-p", base, "-m", fmt.Sprintf("Offline squash merge PR #%d", number))
+	command.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=offline-contract", "GIT_AUTHOR_EMAIL=offline-contract@example.invalid",
+		"GIT_COMMITTER_NAME=offline-contract", "GIT_COMMITTER_EMAIL=offline-contract@example.invalid",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git commit-tree: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	commit := strings.TrimSpace(string(output))
+	if err := git(remote, "update-ref", "refs/heads/"+baseRef, commit, base); err != nil {
+		return "", err
+	}
+	return commit, nil
 }
