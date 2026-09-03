@@ -315,6 +315,90 @@ printf '[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mer
 	}
 }
 
+func TestPublishAllowsExistingPullRequestWhenBaseBranchFastForwards(t *testing.T) {
+	root, remote, repo, baseSHA := setupPublishRepo(t)
+	branch := "codex/issue-101-base-fast-forward"
+	runGit(t, repo, "switch", "-c", branch)
+	if err := os.WriteFile(filepath.Join(repo, "issue.txt"), []byte("issue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "issue.txt")
+	runGit(t, repo, "commit", "-m", "issue result")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "push", "-u", "origin", branch)
+
+	baseUpdate := filepath.Join(root, "base-fast-forward")
+	runGit(t, root, "clone", "-b", "main", remote, baseUpdate)
+	runGit(t, baseUpdate, "config", "user.name", "Base Updater")
+	runGit(t, baseUpdate, "config", "user.email", "base@example.invalid")
+	if err := os.WriteFile(filepath.Join(baseUpdate, "preceding-issue.txt"), []byte("merged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, baseUpdate, "add", "preceding-issue.txt")
+	runGit(t, baseUpdate, "commit", "-m", "merge preceding issue")
+	runGit(t, baseUpdate, "push", "origin", "main")
+
+	fakeGH := filepath.Join(root, "gh")
+	payload := fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/101","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"nameWithOwner":"owner/repo"}}]`, baseSHA, branch, head)
+	if err := os.WriteFile(fakeGH, []byte("#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	result, audit, err := (Manager{GitPath: "git", GHPath: fakeGH}).Publish(context.Background(), cfg, gh.Issue{Number: 101}, repo, branch, "https://github.example/owner/repo/pull/101", "retry", baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Commit != head || result.PullRequestURL != "https://github.example/owner/repo/pull/101" || audit.BaseSHA != baseSHA {
+		t.Fatalf("result=%+v audit=%+v", result, audit)
+	}
+	if strings.Join(audit.ChangedPaths, ",") != "issue.txt" {
+		t.Fatalf("changed paths crossed into the advanced base: %+v", audit.ChangedPaths)
+	}
+}
+
+func TestPublishRefusesExistingPullRequestWhenBaseHistoryDiverges(t *testing.T) {
+	root, remote, repo, baseSHA := setupPublishRepo(t)
+	branch := "codex/issue-102-diverged-base"
+	runGit(t, repo, "switch", "-c", branch)
+	if err := os.WriteFile(filepath.Join(repo, "issue.txt"), []byte("issue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "issue.txt")
+	runGit(t, repo, "commit", "-m", "issue result")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "push", "-u", "origin", branch)
+
+	rewritten := filepath.Join(root, "rewritten-base")
+	runGit(t, root, "init", rewritten)
+	runGit(t, rewritten, "config", "user.name", "Base Rewriter")
+	runGit(t, rewritten, "config", "user.email", "base@example.invalid")
+	if err := os.WriteFile(filepath.Join(rewritten, "README.md"), []byte("rewritten\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, rewritten, "add", "README.md")
+	runGit(t, rewritten, "commit", "-m", "rewrite base")
+	runGit(t, rewritten, "branch", "-M", "main")
+	runGit(t, rewritten, "remote", "add", "origin", remote)
+	runGit(t, rewritten, "push", "--force", "origin", "main")
+
+	fakeGH := filepath.Join(root, "gh")
+	payload := fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/102","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"nameWithOwner":"owner/repo"}}]`, baseSHA, branch, head)
+	if err := os.WriteFile(fakeGH, []byte("#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.GitHub.Repo = "owner/repo"
+	_, audit, err := (Manager{GitPath: "git", GHPath: fakeGH}).Publish(context.Background(), cfg, gh.Issue{Number: 102}, repo, branch, "https://github.example/owner/repo/pull/102", "retry", baseSHA)
+	var mismatch publication.PullRequestMismatchError
+	if !errors.As(err, &mismatch) || !strings.Contains(mismatch.Detail, "base SHA diverged") || audit.Reason != publication.ReasonPullRequestMismatch {
+		t.Fatalf("diverged base was not refused: audit=%+v err=%v", audit, err)
+	}
+	if runGit(t, repo, "rev-parse", "HEAD") != head {
+		t.Fatal("publisher mutated the branch after base divergence")
+	}
+}
+
 func TestPublishRefusesUnsafeExistingPullRequestStateBeforeFormatting(t *testing.T) {
 	for _, test := range []struct {
 		name       string
