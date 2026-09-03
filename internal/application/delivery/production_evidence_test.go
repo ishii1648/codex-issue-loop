@@ -59,15 +59,17 @@ printf '%s\n' "$count" >"$COUNT_PATH"
 revision=7
 if [ "${MISMATCH:-0}" = 1 ] && [ "$count" -gt 1 ]; then revision=8; fi
 supervisor=idle
-case "${DOCTOR_MODE:-}" in stopped*) supervisor=stopped ;; esac
-printf '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"repo_id":"production-id","state_revision":%s,"supervisor":{"state":"%s"},"issues":{"7":{"execution_lease":{"owner":{"run_id":"run_7","generation":1},"slot":0,"resolved_resources":["repo:*"],"base_sha":"base"}}}}}\n' "$revision" "$supervisor"
+active_workers=1
+active_execution='{"issue_number":7,"run_id":"run_7","generation":1,"started_at":"2026-09-04T00:00:00Z"}'
+case "${DOCTOR_MODE:-}" in stopped*) supervisor=stopped; active_workers=0; active_execution=null ;; esac
+printf '{"worker_pool":{"active":%s,"limit":1,"issues":[]},"pending_requests":[],"state":{"repo_id":"production-id","state_revision":%s,"supervisor":{"state":"%s"},"active_execution":%s,"issues":{"7":{"generation":1,"run_id":"run_7","status":"running"}}}}\n' "$active_workers" "$revision" "$supervisor" "$active_execution"
 `)
 			candidate := writeExecutable(t, root, "candidate", "#!/bin/sh\nexit 0\n")
 			fakeContract := writeExecutable(t, root, "offline-contract", `#!/bin/sh
 [ "$HOME" != "$EXPECTED_AMBIENT_HOME" ]
 [ -d "$HOME" ]
 mkdir -p "$CONTRACT_ARTIFACT_DIR"
-printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","home_isolated":true,"credentials":{"canary_github_token":false,"openai_api_key":false},"external_network":false,"sequences":[{"status":"completed"},{"status":"completed"}],"supervisor_starts":2,"webhook_fixture_replay":1,"transaction_crash_recovery":1,"final":{"active_workers":0,"active_leases":0,"pending_requests":0,"orphan_pid_pgid":0,"duplicate_prs":0,"duplicate_comment_markers":0}}' >"$CONTRACT_ARTIFACT_DIR/offline-contract-report.json"
+printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","home_isolated":true,"credentials":{"canary_github_token":false,"openai_api_key":false},"external_network":false,"sequences":[{"status":"completed"},{"status":"completed"}],"supervisor_starts":2,"webhook_fixture_replay":1,"transaction_crash_recovery":1,"final":{"active_workers":0,"active_executions":0,"pending_requests":0,"orphan_pid_pgid":0,"duplicate_prs":0,"duplicate_comment_markers":0}}' >"$CONTRACT_ARTIFACT_DIR/offline-contract-report.json"
 `)
 			artifactDir := filepath.Join(root, "artifacts")
 			cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-state-isolation.sh"))
@@ -148,7 +150,7 @@ printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","home_isolate
 				!report.Contract.LifecycleSequencesComplete || !report.Contract.FinalResourcesClean {
 				t.Fatalf("report=%s", data)
 			}
-			for _, forbidden := range []string{"production_before", "production_after", "repo_id", "state_revision", "issue_count", "leases", "run_id", "base_sha"} {
+			for _, forbidden := range []string{"production_before", "production_after", "repo_id", "state_revision", "issue_count", "active_execution", "run_id"} {
 				if strings.Contains(string(data), `"`+forbidden+`"`) {
 					t.Fatalf("public report contains %q: %s", forbidden, data)
 				}
@@ -179,9 +181,11 @@ printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","home_isolate
 			if !mapsEqual(privateEvidence.Before, privateEvidence.After) || privateEvidence.Contract["home_isolated"] != true {
 				t.Fatalf("private evidence=%s", privateData)
 			}
-			leases, ok := privateEvidence.Before["leases"].([]any)
-			if !ok || len(leases) != 1 {
-				t.Fatalf("execution lease was not captured from the canonical status schema: %s", privateData)
+			if test.doctorMode == "" {
+				execution, ok := privateEvidence.Before["active_execution"].(map[string]any)
+				if !ok || execution["issue_number"] != float64(7) || execution["run_id"] != "run_7" {
+					t.Fatalf("active execution was not captured from the canonical status schema: %s", privateData)
+				}
 			}
 		})
 	}
@@ -250,7 +254,7 @@ case "$1" in
     if [ "${BAD_HEALTH:-0}" = 1 ]; then result=rollback_failed; fi
     printf '{"phase":"succeeded","result":"%s","current":{"version":"v0.8.0","commit":"`+evidenceCommit+`"}}\n' "$result" ;;
   doctor) printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}' ;;
-  status) printf '%s\n' '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"state_revision":9,"supervisor":{"state":"idle"},"issues":{"7":{"execution_lease":{"owner":{"run_id":"run_7","generation":1}}}}}}' ;;
+  status) printf '%s\n' '{"worker_pool":{"active":1,"limit":1},"pending_requests":[],"state":{"state_revision":9,"supervisor":{"state":"idle"},"active_execution":{"issue_number":7,"run_id":"run_7","generation":1},"issues":{"7":{"generation":1,"run_id":"run_7","status":"running"}}}}' ;;
   version) printf '%s\n' '{"version":"v0.8.0","commit":"`+evidenceCommit+`"}' ;;
   *) exit 2 ;;
 esac
@@ -288,11 +292,11 @@ esac
 				}
 				var report struct {
 					Status struct {
-						ActiveLeases int `json:"active_leases"`
+						ActiveExecutions int `json:"active_executions"`
 					} `json:"status"`
 				}
-				if err := json.Unmarshal(data, &report); err != nil || report.Status.ActiveLeases != 1 {
-					t.Fatalf("release health did not read execution_lease: report=%s err=%v", data, err)
+				if err := json.Unmarshal(data, &report); err != nil || report.Status.ActiveExecutions != 1 {
+					t.Fatalf("release health did not read active_execution: report=%s err=%v", data, err)
 				}
 			}
 		})
@@ -311,7 +315,7 @@ case "$1 $2 $3" in
     if [ "$1" = doctor ]; then
       printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}'
     elif [ "$1" = status ]; then
-      printf '%s\n' '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"state_revision":19,"supervisor":{"state":"polling"},"issues":{"7":{"execution_lease":{"owner":{"run_id":"run_7","generation":1}}}}}}'
+      printf '%s\n' '{"worker_pool":{"active":1,"limit":1},"pending_requests":[],"state":{"state_revision":19,"supervisor":{"state":"polling"},"active_execution":{"issue_number":7,"run_id":"run_7","generation":1},"issues":{"7":{"generation":1,"run_id":"run_7","status":"running"}}}}'
     else
       exit 2
     fi ;;
@@ -326,7 +330,7 @@ esac
 		t.Fatal(err)
 	}
 	rollback := filepath.Join(root, "rollback.json")
-	rollbackJSON := `{"schema_version":1,"typed_rollback":true,"same_artifact_reapplied":true,"before":{"version":"v0.9.0"},"rollback":{"result":"succeeded"},"reapplied":{"version":"v0.9.0"},"preserved":{"state":true,"issues":true,"leases":true,"worktrees":true},"other_repository_unchanged":{"assignment":true,"pid":true,"binary":true,"state_revision":true}}`
+	rollbackJSON := `{"schema_version":1,"typed_rollback":true,"same_artifact_reapplied":true,"before":{"version":"v0.9.0"},"rollback":{"result":"succeeded"},"reapplied":{"version":"v0.9.0"},"preserved":{"state":true,"issues":true,"execution":true,"worktrees":true},"other_repository_unchanged":{"assignment":true,"pid":true,"binary":true,"state_revision":true}}`
 	if err := os.WriteFile(rollback, []byte(rollbackJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -356,11 +360,11 @@ esac
 		Healthy       bool `json:"healthy"`
 		Repositories  []struct {
 			Status struct {
-				ActiveLeases int `json:"active_leases"`
+				ActiveExecutions int `json:"active_executions"`
 			} `json:"status"`
 		} `json:"repositories"`
 	}
-	if err := json.Unmarshal(data, &report); err != nil || report.SchemaVersion != 2 || !report.Healthy || len(report.Repositories) != 1 || report.Repositories[0].Status.ActiveLeases != 1 {
+	if err := json.Unmarshal(data, &report); err != nil || report.SchemaVersion != 2 || !report.Healthy || len(report.Repositories) != 1 || report.Repositories[0].Status.ActiveExecutions != 1 {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
 }
@@ -502,6 +506,7 @@ func TestRepositoryRolloutHealthIsAnIndependentWorkflow(t *testing.T) {
 		`production-health-report.json`,
 		`.rollout_mode == "per-repository-stable-assignment"`,
 		`.rollback_drill.typed_rollback == true`,
+		`.rollback_drill.preserved.execution == true`,
 		`.soak.duration_seconds == 300`,
 		`subject-path: dist/stable/production-health-report.json`,
 	} {
@@ -509,7 +514,7 @@ func TestRepositoryRolloutHealthIsAnIndependentWorkflow(t *testing.T) {
 			t.Fatalf("rollout workflow is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"gh release create", "promote-stable", "sleep 30", "environment: production"} {
+	for _, forbidden := range []string{"gh release create", "promote-stable", "sleep 30", "environment: production", "preserved.leases", "active_leases"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("rollout workflow contains release coupling %q", forbidden)
 		}
@@ -560,8 +565,17 @@ func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(data), `.lease != null`) || !strings.Contains(string(data), `execution_lease`) {
-			t.Fatalf("%s does not consume the canonical execution_lease status field", path)
+		if strings.Contains(string(data), `execution_lease`) || !strings.Contains(string(data), `active_execution`) {
+			t.Fatalf("%s does not consume the canonical active_execution status field", path)
+		}
+	}
+	for _, path := range []string{".github/workflows/release.yml", ".github/workflows/rollout.yml"} {
+		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), `active_leases`) || strings.Contains(string(data), `preserved.leases`) {
+			t.Fatalf("%s retains removed lease evidence", path)
 		}
 	}
 }

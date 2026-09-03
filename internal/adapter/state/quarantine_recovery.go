@@ -56,7 +56,7 @@ type SemanticMismatchRecoveryPlan struct {
 	RestoredRevision          uint64   `json:"restored_revision"`
 	RestoredIssueCount        int      `json:"restored_issue_count"`
 	RestoredActiveWorkers     int      `json:"restored_active_workers"`
-	RestoredActiveLeases      int      `json:"restored_active_leases"`
+	RestoredActiveExecutions  int      `json:"restored_active_executions"`
 	RestoredPendingRequests   int      `json:"restored_pending_requests"`
 	RestoredRecoveryMarker    bool     `json:"restored_recovery_marker"`
 	NextBackup                string   `json:"next_backup,omitempty"`
@@ -183,15 +183,15 @@ func (s Store) semanticMismatchRecoveryPlanUnlocked(expectedBackup string) (Snap
 	restoredMarker := restored.Recovery != nil && restored.Recovery.Status == RecoveryStateBlocked
 	nextBackup := ""
 	activeWorkers := 0
-	activeLeases := 0
+	activeExecutions := 0
 	pendingRequests := 0
 	for _, issue := range restored.Issues {
 		if issue != nil && (issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
 			activeWorkers++
 		}
-		if issue != nil && issue.Lease != nil {
-			activeLeases++
-		}
+	}
+	if restored.ActiveExecution != nil {
+		activeExecutions = 1
 	}
 	for _, request := range restored.PendingRequests {
 		if request != nil && request.Status == issuedomain.RequestStatusPending {
@@ -216,8 +216,8 @@ func (s Store) semanticMismatchRecoveryPlanUnlocked(expectedBackup string) (Snap
 		if pendingRequests != 0 {
 			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("restored snapshot retains %d pending requests", pendingRequests)
 		}
-		if activeWorkers != 0 || activeLeases != 0 {
-			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("restored snapshot retains active workers=%d leases=%d", activeWorkers, activeLeases)
+		if activeWorkers != 0 || activeExecutions != 0 {
+			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("restored snapshot retains active workers=%d executions=%d", activeWorkers, activeExecutions)
 		}
 		if err := validateEventSequence(restored, events); err != nil {
 			return Snapshot{}, SemanticMismatchRecoveryPlan{}, fmt.Errorf("semantic recovery backup event chain is invalid: %w", err)
@@ -235,7 +235,7 @@ func (s Store) semanticMismatchRecoveryPlanUnlocked(expectedBackup string) (Snap
 		Eligible: true, ConfirmationRequired: true, Backup: backup, RecoveryReason: current.Recovery.Reason,
 		CurrentSemanticContract: current.SemanticContractVersion, RestoredSemanticContract: restored.SemanticContractVersion,
 		RestoredRevision: restored.StateRevision, RestoredIssueCount: len(restored.Issues), RestoredRecoveryMarker: restoredMarker,
-		RestoredActiveWorkers: activeWorkers, RestoredActiveLeases: activeLeases, RestoredPendingRequests: pendingRequests,
+		RestoredActiveWorkers: activeWorkers, RestoredActiveExecutions: activeExecutions, RestoredPendingRequests: pendingRequests,
 		NextBackup: nextBackup, StateSHA256: fileSHA256(stateData), EventsSHA256: fileSHA256(eventsData),
 		SemanticMigrationRequired: !restoredMarker && restored.SemanticContractVersion != statecontract.CurrentVersion,
 		MutationScope:             []string{"current recovery marker backup", "exact state snapshot restore", "exact event log restore", "recovery journal"},
@@ -322,8 +322,9 @@ func (s Store) legacyMergedIdentityRecoveryPlanUnlocked(expectedBackup string) (
 		if !issue.PullRequestMerged || (issue.PullRequestNumber > 0 && issue.PullRequestURL != "" && issue.HeadSHA != "") {
 			continue
 		}
-		if issue.Status != issuedomain.StatusCompleted || issue.Lease != nil || issue.PullRequestURL == "" || issue.Branch == "" ||
-			(issue.GitHubSync != issuedomain.GitHubSyncNone && issue.GitHubSync != issuedomain.GitHubSyncDone) {
+		effect := PendingEffect(&restored, issue.Number)
+		if issue.Status != issuedomain.StatusCompleted || issue.PullRequestURL == "" || issue.Branch == "" ||
+			(effect != nil && effect.Kind != issuedomain.EffectMarkDone) {
 			return Snapshot{}, QuarantinedSnapshotRecoveryPlan{}, fmt.Errorf("Issue #%d is not an immutable completed legacy merged record", issue.Number)
 		}
 		targets = append(targets, LegacyMergedIdentityTarget{IssueNumber: issue.Number, RunID: issue.RunID, Branch: issue.Branch,

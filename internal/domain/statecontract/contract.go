@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	CurrentVersion       = 3
+	CurrentVersion       = 4
 	MinimumVersion       = 1
 	CurrentSchemaVersion = 5
 	MigrationFromSchema  = 4
@@ -51,20 +51,25 @@ func Current() Contract {
 	return Contract{
 		Version: CurrentVersion, SchemaVersion: CurrentSchemaVersion, MigrationFromSchema: MigrationFromSchema,
 		Fields: []Field{
+			{Path: "active_execution", Class: ExecutionRequiredProvenance, Introduced: 4,
+				RequiredStatuses: activeExecutionStatuses(),
+				Migration: MigrationPolicy{Code: "DERIVE_SINGLE_ACTIVE_EXECUTION", Kind: "migrate",
+					OperatorGuide: "derive the single execution authority from the canonical run and generation; quarantine ambiguity"}},
 			{Path: "issues[].workspace", Class: ExecutionRequiredProvenance, Introduced: 1,
 				RequiredStatuses: workspaceRequiredStatuses(),
 				Migration: MigrationPolicy{
 					Code: "WORKSPACE_PROVENANCE_PRESERVED_OR_QUARANTINED", Kind: "migrate",
 					OperatorGuide: "stopped v4 records are converted to a typed continuation checkpoint; ambiguous records are isolated",
 				}},
-			{Path: "issues[].execution_lease", Class: ExecutionRequiredProvenance, Introduced: 2,
-				RequiredStatuses: executionLeaseStatuses(),
-				Migration:        MigrationPolicy{Code: "RENAME_ACTIVE_EXECUTION_LEASE", Kind: "migrate"}},
-			{Path: "issues[].continuation_checkpoint", Class: Optional, Introduced: 2,
+			{Path: "issues[].generation", Class: ExecutionRequiredProvenance, Introduced: 4,
+				RequiredStatuses: activeExecutionStatuses(),
+				Migration: MigrationPolicy{Code: "DERIVE_EXECUTION_GENERATION", Kind: "migrate",
+					OperatorGuide: "derive generation from legacy execution authority; reject ambiguous runtime state"}},
+			{Path: "issues[].continuation", Class: Optional, Introduced: 4,
 				Migration: MigrationPolicy{Code: "FOLD_LEGACY_RECOVERY_TO_CHECKPOINT", Kind: "migrate"}},
-			{Path: "issues[].continuation_checkpoint.stage", Class: Optional, Introduced: 3,
+			{Path: "issues[].continuation.stage", Class: Optional, Introduced: 4,
 				Migration: MigrationPolicy{Code: "NORMALIZE_CONTINUATION_STAGE", Kind: "migrate"}},
-			{Path: "issues[].continuation_checkpoint.evidence", Class: Optional, Introduced: 3,
+			{Path: "issues[].continuation.evidence", Class: Optional, Introduced: 4,
 				Migration: MigrationPolicy{Code: "PRESERVE_CONTINUATION_EVIDENCE", Kind: "preserve"}},
 			{Path: "issues[].suspension", Class: Optional, Introduced: 2,
 				Migration: MigrationPolicy{Code: "FOLD_TERMINAL_RECOVERY_TO_SUSPENSION", Kind: "migrate"}},
@@ -138,10 +143,10 @@ func workspaceRequiredStatuses() []issuedomain.Status {
 	return statuses
 }
 
-func executionLeaseStatuses() []issuedomain.Status {
+func activeExecutionStatuses() []issuedomain.Status {
 	statuses := make([]issuedomain.Status, 0)
 	for _, status := range issuedomain.AllStatuses() {
-		if status.RequiresExecutionLease() {
+		if status.RequiresActiveExecution() {
 			statuses = append(statuses, status)
 		}
 	}

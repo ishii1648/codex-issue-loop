@@ -34,12 +34,11 @@ func (f *fakeProcessGroups) SignalGroup(pgid int, signal syscall.Signal) error {
 	return nil
 }
 
-func TestStopWorkersTerminatesAndRecordsEveryIssueIndependently(t *testing.T) {
+func TestStopWorkersTerminatesAndRecordsActiveExecution(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
-	for number, run := range map[int]string{2: "run_2", 1: "run_1"} {
-		_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
-			IssueNumber: number, RunID: run, Slot: number - 1,
-			ResolvedResources: []string{"resource-" + strconv.Itoa(number)}, ReservedAt: time.Now().UTC(),
+	for number, run := range map[int]string{1: "run_1"} {
+		_, _, err := loop.Store.StartExecution(state.ExecutionStart{
+			IssueNumber: number, RunID: run, StartedAt: time.Now().UTC(),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -55,23 +54,23 @@ func TestStopWorkersTerminatesAndRecordsEveryIssueIndependently(t *testing.T) {
 		}
 	}
 	groups := &fakeProcessGroups{
-		alive: map[int]bool{101: true, 102: true}, owned: map[int]bool{101: true, 102: true},
-		ignoreTerm: map[int]bool{102: true}, signals: map[int][]syscall.Signal{},
+		alive: map[int]bool{101: true}, owned: map[int]bool{101: true},
+		ignoreTerm: map[int]bool{}, signals: map[int][]syscall.Signal{},
 	}
 	report, err := StopWorkers(context.Background(), loop.Store, 20*time.Millisecond, "test stop", groups)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Workers) != 2 || report.Workers[0].IssueNumber != 1 || report.Workers[0].Forced || !report.Workers[1].Forced {
+	if len(report.Workers) != 1 || report.Workers[0].IssueNumber != 1 || report.Workers[0].Forced {
 		t.Fatalf("report=%+v", report)
 	}
 	snapshot, err := loop.Store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"1", "2"} {
+	for _, key := range []string{"1"} {
 		issue := snapshot.Issues[key]
-		if issue.Status != issuedomain.StatusRetryWait || issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease == nil || issue.LastError != "test stop" {
+		if issue.Status != issuedomain.StatusRetryWait || issue.WorkerPID != 0 || issue.WorkerPGID != 0 || snapshot.ActiveExecution != nil || issue.Continuation == nil || issue.LastError != "test stop" {
 			t.Fatalf("Issue %s=%+v", key, issue)
 		}
 	}
@@ -79,10 +78,13 @@ func TestStopWorkersTerminatesAndRecordsEveryIssueIndependently(t *testing.T) {
 
 func TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "run_1", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{Number: 1, RunID: "run_1", Status: issuedomain.StatusRunning, WorkerPID: 101, WorkerPGID: 101,
-			LeaseGeneration: 1, Lease: fixtureLease("run_1")}
-		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
+		item := snapshot.Issues["1"]
+		item.Status, item.WorkerPID, item.WorkerPGID = issuedomain.StatusRunning, 101, 101
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -106,8 +108,8 @@ func TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases(t *testing.T)
 		cmd  *exec.Cmd
 		done chan error
 	}
-	children := make([]child, 0, 2)
-	for number := 1; number <= 2; number++ {
+	children := make([]child, 0, 1)
+	for number := 1; number <= 1; number++ {
 		readyReader, readyWriter, err := os.Pipe()
 		if err != nil {
 			t.Fatal(err)
@@ -142,9 +144,8 @@ func TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases(t *testing.T)
 		children = append(children, child{cmd: command, done: done})
 
 		runID := "run_" + strconv.Itoa(number)
-		_, _, err = loop.Store.ReserveLease(state.LeaseReservation{
-			IssueNumber: number, RunID: runID, Slot: number - 1,
-			ResolvedResources: []string{"resource-" + strconv.Itoa(number)}, ReservedAt: time.Now().UTC(),
+		_, _, err = loop.Store.StartExecution(state.ExecutionStart{
+			IssueNumber: number, RunID: runID, StartedAt: time.Now().UTC(),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -166,7 +167,7 @@ func TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Workers) != 2 {
+	if len(report.Workers) != 1 {
 		t.Fatalf("report=%+v", report)
 	}
 	for _, process := range children {
@@ -197,9 +198,9 @@ func TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"1", "2"} {
+	for _, key := range []string{"1"} {
 		item := loaded.Issues[key]
-		if item.Status != issuedomain.StatusRetryWait || item.WorkerPID != 0 || item.WorkerPGID != 0 || item.Lease == nil {
+		if item.Status != issuedomain.StatusRetryWait || item.WorkerPID != 0 || item.WorkerPGID != 0 || loaded.ActiveExecution != nil || item.Continuation == nil {
 			t.Fatalf("Issue %s after restart=%+v", key, item)
 		}
 	}

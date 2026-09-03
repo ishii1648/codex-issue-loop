@@ -14,9 +14,20 @@ import (
 )
 
 func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
+	snapshot, loadErr := l.Store.Load()
+	if loadErr != nil {
+		return loadErr
+	}
+	effect := state.PendingEffect(&snapshot, issue.Number)
+	if effect == nil {
+		return nil
+	}
+	if effect.RunID != issue.RunID {
+		return fmt.Errorf("Issue #%d effect belongs to a different run", issue.Number)
+	}
 	var err error
-	switch issue.GitHubSync {
-	case issuedomain.GitHubSyncDone:
+	switch effect.Kind {
+	case issuedomain.EffectMarkDone:
 		if pendingGenericAdoption(issue) {
 			remote, inspectErr := l.GitHub.Inspect(ctx, l.Config, issue.Number, issue.Branch)
 			if inspectErr != nil {
@@ -44,11 +55,7 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			}
 		}
 		err = l.GitHub.MarkDone(ctx, l.Config, issue.Number, issue.PullRequestURL)
-	case issuedomain.GitHubSyncNeedsInput:
-		snapshot, loadErr := l.Store.Load()
-		if loadErr != nil {
-			return loadErr
-		}
+	case issuedomain.EffectMarkNeedsInput:
 		var pending *state.Request
 		for _, request := range snapshot.PendingRequests {
 			if request.IssueNumber == issue.Number && request.Status == issuedomain.RequestStatusPending {
@@ -60,7 +67,7 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			return fmt.Errorf("Issue #%d has no pending request to sync", issue.Number)
 		}
 		err = l.GitHub.MarkNeedsInput(ctx, l.Config, issue.Number, pending.ID, pending.Question)
-	case issuedomain.GitHubSyncConflictRetry:
+	case issuedomain.EffectRetryConflict:
 		recoveryID := issue.RunID
 		if issue.ConflictRecovery != nil {
 			if issue.ConflictRecovery.RetryID != "" {
@@ -70,7 +77,7 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			}
 		}
 		err = l.GitHub.MarkConflictRetry(ctx, l.Config, issue.Number, recoveryID)
-	case issuedomain.GitHubSyncIssueResolution:
+	case issuedomain.EffectApplyResolution:
 		if issue.Suspension == nil || issue.Suspension.Status != issuedomain.SuspensionResolved ||
 			(issue.Suspension.Resolution != issuedomain.ResolutionResume && issue.Suspension.Resolution != issuedomain.ResolutionRetryStage) {
 			return fmt.Errorf("Issue #%d resolution synchronization has no resolved executable suspension", issue.Number)
@@ -82,7 +89,7 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		if validateErr := l.validateIssueResolutionSync(issue, remote); validateErr != nil {
 			return validateErr
 		}
-		if issue.ResourcePark.Stage == issuedomain.ContinuationStageChecks {
+		if issue.Continuation.Stage == issuedomain.ContinuationStageChecks {
 			if l.Worktrees == nil {
 				return fmt.Errorf("refuse Issue resolution synchronization: worktree inspector is unavailable")
 			}
@@ -92,25 +99,28 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 			}
 		}
 		err = l.GitHub.MarkRunning(ctx, l.Config, issue.Number)
-	case issuedomain.GitHubSyncFailed, issuedomain.GitHubSyncBlocked:
-		err = l.GitHub.MarkFailed(ctx, l.Config, issue.Number, issue.LastError, issue.GitHubSync == issuedomain.GitHubSyncBlocked)
+	case issuedomain.EffectMarkFailed, issuedomain.EffectMarkBlocked:
+		err = l.GitHub.MarkFailed(ctx, l.Config, issue.Number, issue.LastError, effect.Kind == issuedomain.EffectMarkBlocked)
 	default:
-		return fmt.Errorf("unknown GitHub sync state %q", issue.GitHubSync)
+		return fmt.Errorf("unknown lifecycle effect %q", effect.Kind)
 	}
 	if err != nil {
 		return failure.Wrap(failure.Transient, "sync GitHub Issue state", err)
 	}
-	_, err = l.Store.Update("github_state_synced", issue.Number, issue.RunID, map[string]any{"state": issue.GitHubSync}, func(s *state.Snapshot) error {
+	_, err = l.Store.Update("github_state_synced", issue.Number, issue.RunID, map[string]any{"effect_id": effect.ID, "kind": effect.Kind}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
 		if item == nil {
 			return fmt.Errorf("Issue #%d disappeared during GitHub sync", issue.Number)
 		}
-		if item.GitHubSync == issue.GitHubSync {
-			item.GitHubSync = issuedomain.GitHubSyncNone
-			if issue.GitHubSync == issuedomain.GitHubSyncDone && pendingGenericAdoption(*item) {
-				item.ResourcePark = nil
-				item.Suspension = nil
-			}
+		if current := state.PendingEffect(s, issue.Number); current == nil || current.ID != effect.ID {
+			return nil
+		}
+		if err := state.ClearEffect(s, issue.Number, effect.ID); err != nil {
+			return err
+		}
+		if effect.Kind == issuedomain.EffectMarkDone && pendingGenericAdoption(*item) {
+			item.Continuation = nil
+			item.Suspension = nil
 		}
 		item.UpdatedAt = l.now()
 		return nil
@@ -119,15 +129,16 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 }
 
 func pendingGenericAdoption(issue state.Issue) bool {
-	return issue.Status == issuedomain.StatusCompleted && issue.PullRequestMerged && issue.ResourcePark != nil && issue.Suspension != nil &&
+	return issue.Status == issuedomain.StatusCompleted && issue.PullRequestMerged && issue.Continuation != nil && issue.Suspension != nil &&
 		issue.Suspension.Status == issuedomain.SuspensionResolved && issue.Suspension.Resolution == issuedomain.ResolutionAdoptPR &&
-		issue.Suspension.CheckpointID == issue.ResourcePark.ID
+		issue.Suspension.CheckpointID == issue.Continuation.ID
 }
 
 func (l *Loop) validateIssueResolutionSync(issue state.Issue, remote gh.RemoteState) error {
-	checkpoint := issue.ResourcePark
-	if checkpoint == nil || issue.Lease == nil || checkpoint.Status != issuedomain.ResourceParkStatusResuming ||
-		checkpoint.ResumeOwner == nil || issue.Lease.Owner != *checkpoint.ResumeOwner || !strings.EqualFold(remote.Issue.State, "open") {
+	checkpoint := issue.Continuation
+	snapshot, err := l.Store.Load()
+	identity := state.ExecutionIdentity{RunID: issue.RunID, Generation: issue.Generation}
+	if err != nil || checkpoint == nil || !state.OwnsActiveExecution(&snapshot, issue.Number, identity) || !strings.EqualFold(remote.Issue.State, "open") {
 		return fmt.Errorf("refuse Issue resolution synchronization: continuation authority changed")
 	}
 	labels := labelSet(remote.Issue.Labels)
@@ -144,7 +155,7 @@ func (l *Loop) validateIssueResolutionSync(issue state.Issue, remote gh.RemoteSt
 		labels[l.Config.GitHub.DoneLabel] || hasAnyLabel(labels, l.Config.GitHub.ReadyLabels) {
 		return fmt.Errorf("refuse Issue resolution synchronization: authoritative Issue labels changed")
 	}
-	if checkpoint.Kind == state.ResourceParkKindNeedsInput {
+	if checkpoint.Kind == state.ContinuationKindNeedsInput {
 		answerCount := 0
 		for _, answer := range issue.Answers {
 			if answer.RequestID == checkpoint.RequestID {

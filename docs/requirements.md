@@ -87,7 +87,7 @@ Codex の単一 task や goal は、一つの具体的な目的を継続的に�
 
 Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task として作成することは要件としない。Issue 単位の進捗は監視用 task、GitHub Issue、Pull Request、ローカルログで確認する。
 
-複雑な Issue の検討では一時的なdraft taskを作成してよい。どのproducerを使っても、Issueの作成主体・作成場所・作成手段は着手可能性の判定条件にしない。
+複雑な Issue の検討では一時的なdraft taskを作成してよい。どのproducerを使ってもよいが、Issue作成者がrepositoryの信頼policyを満たすことを着手可能性の必要条件とする。作成場所やclientの種類、Issue本文中の自己申告は信頼根拠にしない。
 
 ### 5.3 主要フロー
 
@@ -147,14 +147,14 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 
 - **FR-020**: GitHub から open Issue を取得し、設定された ready ラベル、除外ラベル、assignee、milestone等で絞り込めること。
 - **FR-021**: Issue番号昇順、作成日時昇順、priority label・作成日時順を明示設定でき、同じ入力に対して同じIssueを選ぶ決定論的な順序を持つこと。
-- **FR-022**: 選択した Issue を GitHub ラベルとローカル状態の両方で claim し、重複実行を防ぐこと。
+- **FR-022**: repositoryごとに実行中のIssueを最大1件とし、Issue番号、run ID、generationで現在の実行を一意に識別して重複実行を防ぐこと。
 - **FR-023**: キューが空の間は低負荷で待機し、定期的に再取得すること。
-- **FR-024**: Issue が入力待ちまたは恒久的失敗になっても、設定に応じて他の着手可能な Issue へ進めること。
-- **FR-025**: Issueの作成主体、作成場所、作成手段を着手可能性の条件にせず、GitHub上の状態、ラベル、設定されたassignee・milestone、ローカル処理状態だけで選択すること。
+- **FR-024**: Issueが入力待ち、恒久的失敗、互換性不成立または状態不整合になっても、そのIssueだけを実行対象外にして、他の着手可能なIssueの処理を無条件に継続すること。
+- **FR-025**: Issue作成者がrepositoryの信頼policyを満たすことを着手可能性の必要条件とし、GitHubから取得したactor identityとrepository permission、または明示的なactor allowlistによって機械的に検証すること。
 - **FR-026**: queue orderingは全pageの候補取得後に適用し、作成日時とIssue番号で安定したtie-breakを行うこと。
 - **FR-027**: priority labelの順位は設定配列で定義し、labelなしを最低順位、複数該当を最上位一致として扱うこと。不正設定は起動前に拒否すること。
-- **FR-028**: 同一repository内並列化では、configに定義したresourceとGitHubの`area:` label、Issue本文のversion付き`depends_on` metadataだけからeffective claimと依存関係を決定すること。自然言語やLLMによる補完を行わないこと。
-- **FR-029**: resourceまたはmetadataが未指定・未知・不正なIssueは`repo:*`相当へ縮退し、同じrepositoryの他Issueと並列実行しないこと。
+- **FR-028**: Issue作成者の信頼性はworker開始直前に最新のGitHub事実で再検証し、権限を確認できない、または信頼policyを満たさないIssueは実行しないこと。Issue本文、コメント、ラベルによって作成者の信頼性を自己申告または上書きできないこと。
+- **FR-029**: 作成者を検証できないIssueは理由を監査可能に記録して着手対象から外すが、他の検証済みIssueの選択と実行を妨げないこと。
 
 ### 6.4 Codexワーカー
 
@@ -181,7 +181,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-044**: draft Pull RequestのCI結果をモデル呼び出しなしで監視し、すべて成功した場合だけReady for reviewへ移すこと。CI失敗時は同じworktreeと失敗理由をworkerへ渡して再試行すること。
 - **FR-045**: 対象リポジトリのmanifestでauto mergeを選択でき、既定は無効とすること。有効時はbase branchへの追随とCI再確認を行い、conflict時は既存worktree・branch・Pull Requestを維持した永続的な自動復旧を開始すること。
 - **FR-045-A**: conflict recoveryはimmutableなbase SHA、競合file、試行履歴を永続化し、workerへIssue・元PR差分・base追加commit・競合内容・検証要件を渡すこと。workerはGit公開操作を行わず、supervisorが未解消entry、marker、base SHA、path scope、検証結果を確認して通常pushすること。
-- **FR-045-B**: terminal `blocked` / `failed`はhard leaseを保持せず、`issue plan`と`issue resolve --action retry-stage`がcanonical snapshotと現在のprocess/git/GitHubを再検証してdurable stateとGitHubを監査付きで同期できること。
+- **FR-045-B**: terminal `blocked` / `failed`はrepositoryの実行枠を保持せず、`issue plan`と`issue resolve --action retry-stage`がcanonical snapshotと現在のprocess/git/GitHubを再検証してdurable stateとGitHubを監査付きで同期できること。
 - **FR-045-C**: 継続可能なworkerまたはlifecycle stageはgeneric checkpointへ同一成果物とauthorityを保存し、operator選択後に`issue resolve --action resume|retry-stage|adopt-pr|cancel`で解決できること。ambiguous、manual/security、active worker、inconsistent worktree/PRは副作用なく拒否すること。
 - **FR-046**: Issueを完了扱いにし、設定に応じてcloseするのは対応Pull Requestのmergeを確認した後とすること。
 
@@ -218,17 +218,17 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-072**: cleanup/purge適用時はloop停止を要求し、`git worktree prune`と整合させ、削除前後を監査eventへ記録すること。
 - **FR-073**: purgeは通常cleanupと分離し、Issue単位の完全一致確認tokenと復元可能性の表示を必須にすること。
 
-### 6.9 将来の並列化と複数host冗長化
+### 6.9 単一実行と世代分離
 
-- **FR-080**: 単一hostのworker並列化と、複数hostの冗長化を独立したmode・migrationとして扱うこと。
-- **FR-081**: 単一host並列化では1つのsupervisorがIssue claim、state更新、GitHub公開、rate limitを直列化し、worker slotだけを並列化すること。
-- **FR-082**: 複数host modeはGitHub外の線形化可能なcoordinator、単調増加epoch、期限付きlease、条件付き更新を必要とし、coordinator喪失時はfail closedすること。
-- **FR-083**: 複数hostのworkerはGitHubへ直接公開せず、durable publication intentを介してfenced publication gatewayだけがbranch、comment、Pull Requestを更新すること。
-- **FR-084**: status/watchは複数hostのownership、Issue状態、attentionをcoordinatorから集約し、event取りこぼしをreconciliationで修復すること。
-- **FR-085**: distributed modeの有効化前にbackend conformance、credential、backup、partition、publication takeoverをdoctorまたは運用検証で確認すること。
-- **FR-086**: 単一hostのresource claimは`claiming`からPR merge確認まで永続化すること。retry、CI待ち、open PRはactive leaseを保持するが、発生箇所を問わず`needs_input`はcontinuation provenanceを保ったcheckpointへleaseを退避し、後続Issueのadmissionから外すこと。
-- **FR-087**: admissionは固定snapshot、正規化済み集合、queueの全順序、Issue番号tie-breakから決定し、同じsnapshotとscheduler versionに対して同じ選択結果と待機理由を返すこと。
-- **FR-088**: resource/依存metadataの導入はconfig/state schema v3への停止・backup・preview・明示applyを伴うmigrationとし、v2 Issueを自動書換えまたは暗黙に並列化しないこと。
+- **FR-080**: repositoryごとのworker concurrencyは`1`に固定し、同時に複数のIssueを実行しないこと。
+- **FR-081**: repositoryの実行枠は空、または一つの`Issue番号 + run ID + generation`にだけ割り当てられた状態であること。
+- **FR-082**: worker開始前に現在の実行を永続化し、worker終了、入力待ち、恒久的失敗、取消または隔離時に実行枠を解放すること。
+- **FR-083**: worker結果、回答、retry、公開操作は現在のrun IDとgenerationが一致する場合だけ状態を変更できること。
+- **FR-084**: 古いgenerationの遅延結果や外部通知は現在状態を変更せず、無視した事実を監査可能に記録すること。
+- **FR-085**: supervisor再起動時はprocessと永続状態を照合し、実行中Issueが0件または1件となるまで新しいIssueを開始しないこと。
+- **FR-086**: concurrency 1の間はIssue間resource、依存metadata、競合グラフを着手判定に要求しないこと。
+- **FR-087**: Issue選択は固定snapshot、queueの全順序、Issue番号tie-breakから決定し、同じsnapshotとscheduler versionに対して同じ選択結果と待機理由を返すこと。
+- **FR-088**: worker並列化または複数host実行は現行要件の対象外とし、導入時は既存の単一実行契約と暗黙に混在させず、独立した要件・互換性評価・major version判断を必要とすること。
 - **FR-089**: Webhook modeのrepository schedulerはfsnotifyをhintとして扱い、60秒のlocal reconciliationでcanonical snapshotとmailboxを再評価すること。このtimerはGitHub ready collectionを直接取得しないこと。
 - **FR-090**: statusとdoctorはsafety sweepのready collection、mailbox、canonical snapshotを照合し、ready Issueが2 local reconciliation intervalを超えて未claimの場合とmailboxが同一targetの重複で非有界化した場合を失敗として表示すること。repository assignmentのvalidなtyped maintenance fenceが存在する間だけdoctorのqueue liveness判定をdeferできるが、他の診断は必須とし、fence解除後の通常doctorとrollout healthではqueue livenessを再び必須にすること。
 
@@ -242,7 +242,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **NFR-004**: 再起動後に GitHub とローカル状態を照合し、安全に処理を再開すること。
 - **NFR-005**: attention状態はユーザーの回答または明示的な取消までstickyに保持し、一過性eventの欠落で解除されないこと。
 - **NFR-006**: 永続状態に単調増加するrevisionを持たせ、監視の再接続とrace検出に利用できること。
-- **NFR-007**: network partitionではavailabilityよりsafetyを優先し、古いepochのhostによるclaim、state更新、GitHub公開を拒否すること。
+- **NFR-007**: process終了や通信遅延の後も、古いrun IDまたはgenerationによる状態更新とGitHub公開を拒否すること。
 - **NFR-008**: GitHub API応答を失った場合も、同じpublication intent、branch、冪等markerを照合して再開し、別PRを作って回避しないこと。
 
 ### 7.2 セキュリティ
@@ -265,9 +265,11 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 
 - **NFR-030**: 初期対象は Apple Silicon macOS とする。
 - **NFR-031**: コアロジックは `launchd`、GitHub、Codex のアダプターから分離すること。
-- **NFR-032**: 設定ファイルとCLIの後方互換性を管理するため、schema versionを持つこと。
+- **NFR-032**: Issue lifecycleの公開状態、意味、許可される遷移、terminal判定、実行枠の消費、人間操作の要否をversion付きAPIとして定義すること。
 - **NFR-033**: ユニットテストでは GitHub や Codex の実サービスを必要としないこと。
-- **NFR-034**: 現行v2の設定・stateは暗黙に並列・distributed modeへ移行せず、concurrency 1の動作を維持すること。
+- **NFR-034**: 設定、永続state、CLI JSON、event、Issue lifecycle APIは可能な限り後方互換を維持し、旧versionの未完了Issue、request、workspace、publication identityを決定的に移行すること。
+- **NFR-035**: fieldまたは状態の追加など既存利用者の解釈を壊さない変更はIssue lifecycle APIのminor versionとし、既存状態の意味変更、削除、terminal判定または許可遷移の非互換変更はIssue lifecycle APIのmajor versionを更新すること。
+- **NFR-036**: 互換移行できない個別IssueはそのIssueだけを隔離して他Issueの処理を継続し、repository全体の正本を安全に解釈できない場合だけ全体を停止すること。
 
 ## 8. 運用上の前提
 
@@ -306,7 +308,7 @@ Codex ワーカーまたは supervisor を強制終了しても、LaunchAgent �
 
 ### AC-5: キュー処理
 
-3件の ready Issue を登録すると、設定された順序で1件ずつ処理され、それぞれに結果が反映される。
+3件のready Issueを登録すると、設定された順序で1件ずつ処理される。先頭Issueを入力待ち、恒久的失敗または状態不整合にしても実行枠が解放され、後続Issueが処理される。
 
 ### AC-6: スマートフォン運用
 
@@ -322,11 +324,23 @@ Mac mini に物理アクセスせず、Codex Remote から起動、状態確認�
 
 ### AC-9: 外部producerからの投入
 
-GitHub UI、CLI/API、automation、または別ホストのCodexから作成したIssueでも、同じ着手可能条件を満たせばMac mini上のsupervisorが取得して処理を開始する。
+GitHub UI、CLI/API、automation、または別ホストのCodexから作成したIssueでも、作成者の信頼policyを含む同じ着手可能条件を満たせばMac mini上のsupervisorが取得して処理を開始する。
 
 ### AC-10: 監視task未接続時の永続化
 
 監視taskを閉じた状態で`needs_input`へ遷移しても、pending requestは永続snapshotに残る。再接続した監視taskはstatus-first手順で同じrequestを即時再表示し、supervisor再起動でも失われない。
+
+### AC-11: Issue作成者の検証
+
+同じready labelを持つIssueでも、信頼policyを満たさない作成者または現在の権限を確認できない作成者のIssueはworkerを開始しない。そのIssueを保留したまま、検証済み作成者の後続Issueを処理する。
+
+### AC-12: Issue lifecycle APIの互換性
+
+旧minor versionで保存した実行中、入力待ち、公開待ちの各Issueを新minor versionで読み込み、同じ公開状態と意味を維持して継続できる。互換性fixtureを移行できない変更はIssue lifecycle APIのmajor versionを変えない限りreleaseできない。
+
+### AC-13: 古い実行世代の隔離
+
+supervisor再起動後に旧generationのworker結果または回答を到着させても現在のIssue状態と公開物は変化せず、次の着手可能なIssueの処理を妨げない。
 
 ## 10. 実装フェーズ
 

@@ -36,9 +36,9 @@ gh release upload 'candidate-v0.8.0-<workflow-run-id>' \
   '/absolute/evidence-directory/production-state-report.json'
 ```
 
-scriptはproductionの`doctor --json`と`status --json`だけを使用し、credentialless contract前後でstate revision、Issue、lease owner/generation、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`を必須とする。supervisor稼働中はdoctor成功を要求し、保守のため意図的に停止中なら`SUPERVISOR_STOPPED`だけを許容して`active_workers=0`を要求する。その他のdoctor failureは停止中でもfail closedである。
+scriptはproductionの`doctor --json`と`status --json`だけを使用し、credentialless contract前後でstate revision、Issue、root active execution、pending request、worker数をbyte比較する。`worker_limit=1`、`active_workers<=1`を必須とする。supervisor稼働中はdoctor成功を要求し、保守のため意図的に停止中なら`SUPERVISOR_STOPPED`だけを許容して`active_workers=0`を要求する。その他のdoctor failureは停止中でもfail closedである。
 
-raw snapshotとoffline contractはmode `0600`の`production-state-private-evidence.json`へ保存し、公開Releaseへuploadしない。公開する`production-state-report.json`はcandidate SHA-256、変更数0、安全条件のboolean、private evidenceのSHA-256 commitmentだけを含むredacted summaryとする。repository ID、state revision、Issue数、Issue番号、lease owner/generation、run ID、resource、base SHA、pending requestの内容、filesystem pathを公開payloadへ含めない。`production-state-isolation`はこのsummaryのrelease commitとcandidate binary SHA-256を照合してattestする。`candidate-integrity`はcandidate prereleaseからbinaryを1回取得し、canonical candidateとのbyte一致とattestationを即時検査する。immutable artifactの再取得だけを目的とした時間待機は行わない。
+raw snapshotとoffline contractはmode `0600`の`production-state-private-evidence.json`へ保存し、公開Releaseへuploadしない。公開する`production-state-report.json`はcandidate SHA-256、変更数0、安全条件のboolean、private evidenceのSHA-256 commitmentだけを含むredacted summaryとする。repository ID、state revision、Issue数、Issue番号、active execution、run ID、pending requestの内容、filesystem pathを公開payloadへ含めない。`production-state-isolation`はこのsummaryのrelease commitとcandidate binary SHA-256を照合してattestする。`candidate-integrity`はcandidate prereleaseからbinaryを1回取得し、canonical candidateとのbyte一致とattestationを即時検査する。immutable artifactの再取得だけを目的とした時間待機は行わない。
 
 このrepositoryは単一maintainer運用のため、外部collaboratorや自己承認不能なrequired reviewerをrelease authorityにしない。`High-risk review gate`は変更headに結び付いたmachine-readable reviewについて全check成功・finding 0件を必須とする。`promotion-evidence`はCLI surface、offline lifecycle、production非変更、candidate integrityとdigestを即時再検証する。`production` Environmentはstable公開jobだけに付与し、wait timerは`0`とする。通常releaseのstable tagに加え、修正版workflowを実行するdefault branchを許可し、後者では入力tagとpeeled commitの一致をworkflow内でfail closedに検証する。未解決conversationはmain rulesetで引き続きmergeを拒否する。
 
@@ -46,7 +46,7 @@ tag push後にworkflow自体のrelease blockerを修正した場合は、tagを�
 
 manifestのsemantic contract predicateを変更する場合は、tag作成前なら変更commitをrevertして旧predicateへ戻せる。tag作成後はtagやcandidateを移動・再利用せず、修正版workflowをdefault branchへmergeして上記`workflow_dispatch`から同じtagged sourceの全gateを再実行する。
 
-失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production rollout failure時は対象repositoryをprevious versionへrollbackし、state、lease、park、request、worktreeを手編集しない。rollout failureだけを理由にRelease workflowを失敗へ戻したり、新patchを作成したりしない。
+失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production rollout failure時は対象repositoryをprevious versionへrollbackし、state、active execution、continuation、request、worktreeを手編集しない。rollout failureだけを理由にRelease workflowを失敗へ戻したり、新patchを作成したりしない。
 
 stable公開後はrepository別assignmentによる段階展開とtyped rollback drillの後、production hostで5分間のhealth soakを行う。開始時、1分後、5分後に全repositoryのassignment、scoped doctor、statusを採取し、全sampleが成功してから同じstable Releaseへreportを追加する。定期LaunchAgentの実行やEnvironment timerを待つ必要はない。
 
@@ -64,4 +64,4 @@ gh workflow run rollout.yml --repo ishii1648/codex-issue-loop --ref main \
   -f release_tag='v0.9.0'
 ```
 
-privateな`repositories.json`はrepository IDとlocal pathを入力するが、公開reportへpathを出力しない。`rollback-drill.json`は先行repositoryのstable→previous→同じstableというtyped操作と、state、Issue、lease、worktree、対象外repositoryのassignment/PID/binary/state revision保全を記録する。`Repository rollout health` workflowはreportに含まれる1件以上のrepositoryについてexact version/commit/digest、terminal transaction、fence不在、doctor成功、worker limit 1、active worker 1以下を照合してreportをattestする。reportが無い場合や不一致はrollout workflowだけを失敗させ、完了済みRelease workflowの結果を変更しない。
+privateな`repositories.json`はrepository IDとlocal pathを入力するが、公開reportへpathを出力しない。`rollback-drill.json`は先行repositoryのstable→previous→同じstableというtyped操作と、state、Issue、execution identity、worktree、対象外repositoryのassignment/PID/binary/state revision保全を記録する。`Repository rollout health` workflowはreportに含まれる1件以上のrepositoryについてexact version/commit/digest、terminal transaction、fence不在、doctor成功、worker limit 1、active worker 1以下を照合してreportをattestする。reportが無い場合や不一致はrollout workflowだけを失敗させ、完了済みRelease workflowの結果を変更しない。

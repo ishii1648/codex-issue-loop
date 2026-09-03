@@ -151,7 +151,7 @@ test "$(cat "$temporary_root/verified/offline-contract/sequence-2.txt")" = resum
 jq -e '
   .worker_pool.limit == 1 and .worker_pool.active == 0 and
   ([.state.issues[] | select(.status != "completed")] | length) == 0 and
-  ([.state.issues[] | select(.execution_lease != null)] | length) == 0 and
+  .state.active_execution == null and
   ([.state.issues[] | select((.worker_pid // 0) != 0 or (.worker_pgid // 0) != 0)] | length) == 0 and
   ([.pending_requests[] | select(.status == "pending")] | length) == 0
 ' "$temporary_root/final-status.json" >/dev/null
@@ -202,7 +202,7 @@ jq -n \
     final: {
       worker_limit: $status[0].worker_pool.limit,
       active_workers: $status[0].worker_pool.active,
-      active_leases: ([$status[0].state.issues[] | select(.execution_lease != null)] | length),
+      active_executions: (if $status[0].state.active_execution == null then 0 else 1 end),
       pending_requests: ([$status[0].pending_requests[] | select(.status == "pending")] | length),
       orphan_pid_pgid: ([$status[0].state.issues[] | select((.worker_pid // 0) != 0 or (.worker_pgid // 0) != 0)] | length),
       duplicate_prs: (($stub[0].pull_requests | to_entries | map(.value.headRefName) | length) - ($stub[0].pull_requests | to_entries | map(.value.headRefName) | unique | length)),

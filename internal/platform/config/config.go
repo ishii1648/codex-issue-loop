@@ -13,7 +13,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/ishii1648/codex-issue-loop/internal/domain/admission"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 	"gopkg.in/yaml.v3"
 )
@@ -38,7 +37,7 @@ type Config struct {
 	Version            int                `yaml:"version" json:"version"`
 	GitHub             GitHub             `yaml:"github" json:"github"`
 	Queue              Queue              `yaml:"queue" json:"queue"`
-	Resources          Resources          `yaml:"resources" json:"resources"`
+	LegacyResources    LegacyResources    `yaml:"resources" json:"-"`
 	Worker             Worker             `yaml:"worker" json:"worker"`
 	Watch              Watch              `yaml:"watch" json:"watch"`
 	Git                Git                `yaml:"git" json:"git"`
@@ -54,16 +53,22 @@ type Config struct {
 }
 
 type GitHub struct {
-	Repo            string   `yaml:"repo" json:"repo"`
-	RepositoryID    int64    `yaml:"repository_id" json:"repository_id,omitempty"`
-	ReadyLabels     []string `yaml:"ready_labels" json:"ready_labels"`
-	ExcludeLabels   []string `yaml:"exclude_labels" json:"exclude_labels"`
-	RunningLabel    string   `yaml:"running_label" json:"running_label"`
-	NeedsInputLabel string   `yaml:"needs_input_label" json:"needs_input_label"`
-	FailedLabel     string   `yaml:"failed_label" json:"failed_label"`
-	DoneLabel       string   `yaml:"done_label" json:"done_label"`
-	Assignee        string   `yaml:"assignee" json:"assignee,omitempty"`
-	Milestone       string   `yaml:"milestone" json:"milestone,omitempty"`
+	Repo                string              `yaml:"repo" json:"repo"`
+	RepositoryID        int64               `yaml:"repository_id" json:"repository_id,omitempty"`
+	ReadyLabels         []string            `yaml:"ready_labels" json:"ready_labels"`
+	ExcludeLabels       []string            `yaml:"exclude_labels" json:"exclude_labels"`
+	RunningLabel        string              `yaml:"running_label" json:"running_label"`
+	NeedsInputLabel     string              `yaml:"needs_input_label" json:"needs_input_label"`
+	FailedLabel         string              `yaml:"failed_label" json:"failed_label"`
+	DoneLabel           string              `yaml:"done_label" json:"done_label"`
+	Assignee            string              `yaml:"assignee" json:"assignee,omitempty"`
+	Milestone           string              `yaml:"milestone" json:"milestone,omitempty"`
+	TrustedIssueAuthors TrustedIssueAuthors `yaml:"trusted_issue_authors" json:"trusted_issue_authors"`
+}
+
+type TrustedIssueAuthors struct {
+	MinimumPermission string   `yaml:"minimum_permission" json:"minimum_permission"`
+	AllowLogins       []string `yaml:"allow_logins" json:"allow_logins,omitempty"`
 }
 
 type Queue struct {
@@ -75,12 +80,14 @@ type Queue struct {
 	ContinueAfterNeedsInput bool     `yaml:"continue_after_needs_input" json:"continue_after_needs_input"`
 }
 
-type Resources struct {
-	MetadataVersion int                  `yaml:"metadata_version" json:"metadata_version"`
-	Definitions     []ResourceDefinition `yaml:"definitions" json:"definitions,omitempty"`
+// LegacyResources is decode-only compatibility for v5 repository files. It
+// has no effect on queue selection, execution ownership, or publication.
+type LegacyResources struct {
+	MetadataVersion int                        `yaml:"metadata_version" json:"-"`
+	Definitions     []LegacyResourceDefinition `yaml:"definitions" json:"-"`
 }
 
-type ResourceDefinition struct {
+type LegacyResourceDefinition struct {
 	Name  string   `yaml:"name" json:"name"`
 	Paths []string `yaml:"paths" json:"paths"`
 }
@@ -254,12 +261,13 @@ func Defaults() Config {
 	return Config{
 		Version: CurrentVersion,
 		GitHub: GitHub{
-			ReadyLabels:     []string{"codex-loop:ready"},
-			ExcludeLabels:   []string{"blocked", "do-not-automate"},
-			RunningLabel:    "codex-loop:running",
-			NeedsInputLabel: "codex-loop:needs-input",
-			FailedLabel:     "codex-loop:failed",
-			DoneLabel:       "codex-loop:done",
+			ReadyLabels:         []string{"codex-loop:ready"},
+			ExcludeLabels:       []string{"blocked", "do-not-automate"},
+			RunningLabel:        "codex-loop:running",
+			NeedsInputLabel:     "codex-loop:needs-input",
+			FailedLabel:         "codex-loop:failed",
+			DoneLabel:           "codex-loop:done",
+			TrustedIssueAuthors: TrustedIssueAuthors{MinimumPermission: "write"},
 		},
 		Queue: Queue{
 			PollInterval:            Duration{60 * time.Second},
@@ -268,7 +276,6 @@ func Defaults() Config {
 			MaxAttempts:             3,
 			ContinueAfterNeedsInput: true,
 		},
-		Resources: Resources{MetadataVersion: 1},
 		Worker: Worker{
 			Backend:          "codex",
 			CommandNetwork:   CommandNetwork{Policy: "disabled"},
@@ -383,17 +390,21 @@ func (c Config) Validate() error {
 	if len(c.GitHub.ReadyLabels) == 0 {
 		return fmt.Errorf("github.ready_labels must not be empty")
 	}
-	if c.Queue.Concurrency < 1 {
-		return fmt.Errorf("queue.concurrency must be at least 1")
+	if c.Queue.Concurrency != 1 {
+		return fmt.Errorf("queue.concurrency must be 1")
 	}
-	settings := c.AdmissionSettings()
-	if err := settings.Validate(); err != nil {
-		return fmt.Errorf("resources: %w", err)
+	if c.GitHub.TrustedIssueAuthors.MinimumPermission != "write" {
+		return fmt.Errorf("github.trusted_issue_authors.minimum_permission must be write")
 	}
-	if len(c.Resources.Definitions) == 0 {
-		if c.Queue.Concurrency != 1 {
-			return fmt.Errorf("queue.concurrency greater than 1 requires resources.definitions")
+	seenAuthors := map[string]bool{}
+	for _, login := range c.GitHub.TrustedIssueAuthors.AllowLogins {
+		if login == "" || login != strings.TrimSpace(login) || strings.ToLower(login) != login {
+			return fmt.Errorf("github.trusted_issue_authors.allow_logins must contain lowercase exact logins")
 		}
+		if seenAuthors[login] {
+			return fmt.Errorf("github.trusted_issue_authors.allow_logins must not contain duplicate login %q", login)
+		}
+		seenAuthors[login] = true
 	}
 	switch c.Queue.Order {
 	case "issue_number_asc", "created_at_asc":
@@ -623,22 +634,6 @@ func (n CommandNetwork) Validate(worker Worker) error {
 }
 
 func (n CommandNetwork) LocalhostOnly() bool { return n.Policy == "localhost-only" }
-
-// AdmissionSettings returns an immutable copy of the resource taxonomy used
-// by both queue admission and publication auditing. A config without resource
-// definitions remains a conservative repository-wide legacy queue.
-func (c Config) AdmissionSettings() admission.Settings {
-	definitions := make([]admission.ResourceDefinition, len(c.Resources.Definitions))
-	for index, definition := range c.Resources.Definitions {
-		definitions[index] = admission.ResourceDefinition{
-			Name: definition.Name, Paths: append([]string(nil), definition.Paths...),
-		}
-	}
-	return admission.Settings{
-		Concurrency: c.Queue.Concurrency, MetadataVersion: c.Resources.MetadataVersion,
-		Definitions: definitions, Legacy: len(definitions) == 0,
-	}
-}
 
 // EffectiveCommand never expands the configured value through a shell.
 func (w Worker) EffectiveCommand() string {

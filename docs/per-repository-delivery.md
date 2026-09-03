@@ -87,6 +87,6 @@ CLIは保存済みtarget slotのdigest、fence generation、repository stateを�
 - assignment tupleとgeneration
 - LaunchAgent PIDとprogram binary SHA-256
 - state revision
-- Issue、lease、pending request、managed worktreeの要約
+- Issue、active execution、pending request、managed worktreeの要約
 
 対象repositoryは`assignment verify`、`doctor --repo ... --assignment-health --json`、`status --repo ... --json`を保存する。最終状態は全repositoryでworker limit 1、pending assignment transactionなし、repository fenceなしを必須とする。

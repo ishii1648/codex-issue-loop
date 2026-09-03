@@ -4,7 +4,7 @@ Issue worktreeはworker終了、`stop`、`unregister`、`uninstall`では削除�
 
 ## 既定保持ポリシー
 
-保持期間は安全な内部既定値であり、repositoryの`.agent-loop.yaml`には記載しない。completedは7日、failedは30日、blockedとneeds-inputは無期限に保持する。`answer_claim_waiting`と`resume_pending`はneeds-inputと同じポリシーを使い、running、claimed、retry中などの非terminal状態は期間にかかわらず保持する。期間の起点は永続stateのIssue `updated_at`である。
+保持期間は安全な内部既定値であり、repositoryの`.agent-loop.yaml`には記載しない。completedは7日、failedは30日、blockedとneeds-inputは無期限に保持する。continuationを持つ待機状態とrunning、claimed、retry中などの非terminal状態は期間にかかわらず保持する。期間の起点は永続stateのIssue `updated_at`である。
 
 ## Cleanup
 

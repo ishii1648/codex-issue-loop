@@ -7,18 +7,12 @@ github:
   # Labels that people use to admit or exclude work are repository policy.
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
+  trusted_issue_authors:
+    minimum_permission: write
+    allow_logins: []
 
 queue:
   concurrency: 1
-
-# Keep definitions while production concurrency is limited to 1 so a future,
-# explicitly gated rollout does not need to infer the resource taxonomy.
-resources:
-  definitions:
-    - name: application
-      paths: [src/**]
-    - name: docs
-      paths: [README.md, AGENTS.md, CLAUDE.md, docs/**]
 
 git:
   base_branch: main

@@ -44,5 +44,5 @@ func KindOf(err error) Kind {
 	if errors.As(err, &classified) {
 		return classified.Kind
 	}
-	return Supervisor
+	return Issue
 }

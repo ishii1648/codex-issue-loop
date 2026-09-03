@@ -53,10 +53,13 @@ func TestScheduleRetryPersistsClassificationReasonAndTime(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	loop.Clock = fixedClock{value: now}
 	loop.Random = fixedRandom(0.5)
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "run_1", StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := loop.Store.Update("running", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusRunning, RunID: "run_1", Attempts: 1,
-			LeaseGeneration: 1, Lease: fixtureLease("run_1")}
-		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
+		item := snapshot.Issues["1"]
+		item.Status = issuedomain.StatusRunning
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -120,12 +123,14 @@ func TestRunOnceClassifiesGitHubPollingFailureAsTransient(t *testing.T) {
 
 func TestRetryLimitBecomesIssueFailure(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "run_1", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := loop.Store.Update("running", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, Status: issuedomain.StatusRunning, RunID: "run_1", Attempts: loop.Config.Queue.MaxAttempts,
-			LeaseGeneration: 1, Lease: fixtureLease("run_1"),
-		}
-		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
+		item := snapshot.Issues["1"]
+		item.Status = issuedomain.StatusRunning
+		item.Attempts = loop.Config.Queue.MaxAttempts
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -145,7 +150,14 @@ func TestRetryLimitBecomesIssueFailure(t *testing.T) {
 func TestGitHubSynchronizationFailureIsTransient(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.doneErr = context.DeadlineExceeded
-	err := loop.syncGitHub(context.Background(), state.Issue{Number: 1, GitHubSync: issuedomain.GitHubSyncDone})
+	_, err := loop.Store.Update("pending_done", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusCompleted, RunID: "run_1"}
+		return state.SetEffect(snapshot, 1, "run_1", issuedomain.EffectMarkDone, time.Now().UTC())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = loop.syncGitHub(context.Background(), state.Issue{Number: 1, RunID: "run_1"})
 	if failure.KindOf(err) != failure.Transient {
 		t.Fatalf("kind=%s err=%v", failure.KindOf(err), err)
 	}

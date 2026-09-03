@@ -25,6 +25,7 @@ import (
 	schema "github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/application/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
@@ -52,6 +53,8 @@ type versionInfo struct {
 	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
 	SemanticContractCurrent  int    `json:"semantic_contract_current"`
 	SemanticContractMinimum  int    `json:"semantic_contract_minimum"`
+	IssueLifecycleAPICurrent string `json:"issue_lifecycle_api_current"`
+	IssueLifecycleAPIMinimum string `json:"issue_lifecycle_api_minimum"`
 }
 
 type installManifest struct {
@@ -98,7 +101,8 @@ func (a App) Run(ctx context.Context, args []string) int {
 		if len(args) > 1 && args[1] == "--json" {
 			_ = json.NewEncoder(a.Out).Encode(versionInfo{Version: Version, Commit: Commit, Target: runtime.GOOS + "/" + runtime.GOARCH, DeliveryProtocol: delivery.ProtocolVersion, AssignmentProtocol: delivery.AssignmentProtocolVersion,
 				StateSchemaCurrent: schema.CurrentVersion, StateSchemaMigrationFrom: schemaversion.Previous,
-				SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion})
+				SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,
+				IssueLifecycleAPICurrent: issuedomain.LifecycleAPICurrent, IssueLifecycleAPIMinimum: issuedomain.LifecycleAPIMinimum})
 		} else {
 			fmt.Fprintf(a.Out, "agent-loop %s (%s)\n", Version, Commit)
 		}

@@ -13,7 +13,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 )
 
@@ -30,34 +29,31 @@ func (l *Loop) suspendWorker(ctx context.Context, number int, reason string) err
 	if decisionErr != nil {
 		return failure.Wrap(failure.Issue, "decide worker environment block", decisionErr)
 	}
-	parkID, parkedAt := state.NewID("park"), l.now()
-	owner := state.LeaseOwner{}
-	if current.Lease != nil {
-		owner = current.Lease.Owner
-	}
+	checkpointID, suspendedAt := state.NewID("checkpoint"), l.now()
+	identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 	worktreeSHA256, digestErr := l.continuationWorktreeDigest(ctx, current)
 	_, err = l.Store.Update("issue_blocked", number, current.RunID, map[string]any{
 		"error": cause.Error(), "failure_kind": string(failure.Issue), "blocked_origin": "worker", "blocked_kind": "environment",
-		"resource_park_id": parkID, "released_owner": owner, "parked_at": parkedAt,
+		"checkpoint_id": checkpointID, "released_execution": identity, "suspended_at": suspendedAt,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(number)]
 		if item == nil || item.RunID != current.RunID {
 			return fmt.Errorf("Issue #%d run changed while recording worker block", number)
 		}
 		if item.WorkerPID != 0 || item.WorkerPGID != 0 {
-			return fmt.Errorf("Issue #%d worker process identity still exists while parking resources", number)
+			return fmt.Errorf("Issue #%d worker process identity still exists while suspending", number)
 		}
-		if item.Lease == nil || item.Lease.Owner != owner {
-			return fmt.Errorf("Issue #%d does not own a consistent resource lease to park", number)
-		}
-		if err := state.CaptureContinuationLease(item, owner, parkID, parkedAt); err != nil {
+		if err := state.CaptureContinuation(s, number, identity, checkpointID, suspendedAt); err != nil {
 			return err
 		}
-		item.ResourcePark.WorktreeSHA256 = worktreeSHA256
+		item.Continuation.WorktreeSHA256 = worktreeSHA256
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.LastError, item.FailureKind, item.GitHubSync = decision.LastError, decision.FailureKind, decision.GitHubSync
+		item.LastError, item.FailureKind = decision.LastError, decision.FailureKind
+		if err := state.SetEffect(s, item.Number, item.RunID, decision.Effect, l.now()); err != nil {
+			return err
+		}
 		status, recoverability := issuedomain.SuspensionActive, issuedomain.RecoverabilityOperator
 		actions, missing := []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionResume}, []string(nil)
 		if digestErr != nil || worktreeSHA256 == "" {
@@ -66,7 +62,7 @@ func (l *Loop) suspendWorker(ctx context.Context, number int, reason string) err
 		}
 		item.Suspension = &state.Suspension{ID: state.NewID("suspension"), Origin: "worker", Status: status,
 			ReasonCode: "environment", Recoverability: recoverability, Reason: reason, MissingEvidence: missing,
-			AllowedActions: actions, CheckpointID: item.ResourcePark.ID, SuspendedAt: l.now()}
+			AllowedActions: actions, CheckpointID: item.Continuation.ID, SuspendedAt: l.now()}
 		item.RetryAfter, item.UpdatedAt = nil, l.now()
 		return nil
 	})
@@ -81,11 +77,13 @@ func (l *Loop) suspendWorker(ctx context.Context, number int, reason string) err
 }
 
 func (l *Loop) processPublicationCheckpoint(ctx context.Context, current state.Issue) error {
-	checkpoint := current.ResourcePark
+	checkpoint := current.Continuation
+	snapshot, snapshotErr := l.Store.Load()
+	identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 	if checkpoint == nil || checkpoint.Stage != issuedomain.ContinuationStagePublish || checkpoint.Summary == "" || checkpoint.ResultSHA256 == "" ||
-		current.Status != issuedomain.StatusResumePending || current.Lease == nil || checkpoint.Status != issuedomain.ResourceParkStatusResuming ||
-		checkpoint.ResumeOwner == nil || current.Lease.Owner != *checkpoint.ResumeOwner || l.Publisher == nil || l.Worktrees == nil {
-		return l.failCheckpointStage(ctx, current, "publication checkpoint is incomplete or no longer owns its execution lease")
+		current.Status != issuedomain.StatusRunning || snapshotErr != nil || !state.OwnsActiveExecution(&snapshot, current.Number, identity) ||
+		l.Publisher == nil || l.Worktrees == nil {
+		return l.failCheckpointStage(ctx, current, "publication checkpoint is incomplete or no longer owns the active execution")
 	}
 	result, encoded, err := worker.LoadLatestCompletedResult(filepath.Join(l.Store.Dir, "runs", current.RunID))
 	if err != nil || result.Summary != checkpoint.Summary || fmt.Sprintf("%x", sha256.Sum256(encoded)) != checkpoint.ResultSHA256 {
@@ -102,26 +100,18 @@ func (l *Loop) processPublicationCheckpoint(ctx context.Context, current state.I
 	if err := validatePublicationCheckpointRemote(current, remote); err != nil {
 		return l.failCheckpointStage(ctx, current, err.Error())
 	}
-	declared := append([]string(nil), current.DeclaredResources...)
-	if len(declared) == 0 {
-		declared = append(declared, checkpoint.OriginalLease.DeclaredResources...)
-	}
-	effective := append([]string(nil), current.Lease.ResolvedResources...)
 	l.publicationMu.Lock()
 	published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, remote.Issue, current.Worktree, current.Branch, current.PullRequestURL,
-		checkpoint.Summary, checkpoint.OriginalLease.BaseSHA, publication.ResourceScope{Declared: declared, Effective: effective})
+		checkpoint.Summary, checkpoint.BaseSHA)
 	l.publicationMu.Unlock()
 	_, auditErr := l.Store.Update("publication_checkpoint_audited", current.Number, current.RunID, audit, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Status != issuedomain.StatusResumePending || item.Lease == nil || item.Lease.Owner != current.Lease.Owner ||
-			item.ResourcePark == nil || item.ResourcePark.ID != checkpoint.ID || item.ResourcePark.ResultSHA256 != checkpoint.ResultSHA256 {
+		if item == nil || item.Status != issuedomain.StatusRunning || !state.OwnsActiveExecution(snapshot, current.Number, identity) ||
+			item.Continuation == nil || item.Continuation.ID != checkpoint.ID || item.Continuation.ResultSHA256 != checkpoint.ResultSHA256 {
 			return fmt.Errorf("Issue #%d publication checkpoint changed during execution", current.Number)
 		}
 		auditCopy := audit
 		item.PublicationAudit = &auditCopy
-		item.DeclaredResources = append([]string(nil), audit.DeclaredResources...)
-		item.ActualResources = append([]string(nil), audit.ActualResources...)
-		item.Lease.ActualResources = append([]string(nil), audit.ActualResources...)
 		item.UpdatedAt = l.now()
 		return nil
 	})
@@ -145,15 +135,18 @@ func (l *Loop) processPublicationCheckpoint(ctx context.Context, current state.I
 	}
 	_, err = l.Store.Update("publication_checkpoint_completed", current.Number, current.RunID, result, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Lease == nil || item.Lease.Owner != current.Lease.Owner {
-			return fmt.Errorf("Issue #%d publication checkpoint lease changed", current.Number)
+		if item == nil || !state.OwnsActiveExecution(snapshot, current.Number, identity) {
+			return fmt.Errorf("Issue #%d publication checkpoint execution changed", current.Number)
 		}
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.PullRequestURL = published.PullRequestURL
 		item.PullRequestNumber = pullRequestNumber(published.PullRequestURL)
-		item.LastError, item.FailureKind, item.GitHubSync, item.RetryAfter = "", "", issuedomain.GitHubSyncNone, nil
+		item.LastError, item.FailureKind, item.RetryAfter = "", "", nil
+		if err := state.SetEffect(snapshot, item.Number, item.RunID, issuedomain.EffectNone, l.now()); err != nil {
+			return err
+		}
 		item.UpdatedAt = l.now()
 		return nil
 	})
@@ -190,16 +183,20 @@ func (l *Loop) failCheckpointStage(ctx context.Context, current state.Issue, rea
 	worktreeSHA256, _ := l.continuationWorktreeDigest(ctx, current)
 	_, err = l.Store.Update("continuation_stage_failed", current.Number, current.RunID, map[string]string{"reason": reason}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Lease == nil || current.Lease == nil || item.Lease.Owner != current.Lease.Owner {
+		identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
+		if item == nil || !state.OwnsActiveExecution(snapshot, current.Number, identity) {
 			return fmt.Errorf("Issue #%d continuation stage changed", current.Number)
 		}
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		if item.ResourcePark != nil {
-			item.ResourcePark.WorktreeSHA256 = worktreeSHA256
+		if item.Continuation != nil {
+			item.Continuation.WorktreeSHA256 = worktreeSHA256
 		}
-		item.LastError, item.FailureKind, item.GitHubSync, item.RetryAfter = decision.LastError, decision.FailureKind, decision.GitHubSync, nil
+		item.LastError, item.FailureKind, item.RetryAfter = decision.LastError, decision.FailureKind, nil
+		if err := state.SetEffect(snapshot, item.Number, item.RunID, decision.Effect, l.now()); err != nil {
+			return err
+		}
 		item.WorkerPID, item.WorkerPGID = 0, 0
 		item.UpdatedAt = l.now()
 		return nil

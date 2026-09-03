@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 )
@@ -93,47 +94,250 @@ func migrateV5StateObject(object map[string]json.RawMessage, migratedAt time.Tim
 		return err
 	}
 	object["issues"] = encoded
-	return nil
+	return normalizeV5SemanticStateObject(object, migratedAt)
 }
 
-// normalizeV5SemanticStateObject performs the only in-schema semantic v2 to
-// v3 rewrite. Scenario-specific v5 fields remain rejected by Snapshot decoding;
+// normalizeV5SemanticStateObject performs the in-schema semantic rewrite.
+// Scenario-specific v5 fields remain rejected by Snapshot decoding;
 // only generic checkpoint wire values created by the v4 migration are changed.
-func normalizeV5SemanticStateObject(object map[string]json.RawMessage) error {
+func normalizeV5SemanticStateObject(object map[string]json.RawMessage, migratedAt time.Time) error {
 	var issues map[string]json.RawMessage
 	if err := json.Unmarshal(object["issues"], &issues); err != nil {
 		return fmt.Errorf("decode semantic migration Issues: %w", err)
 	}
+	issueObjects := make(map[string]map[string]json.RawMessage, len(issues))
+	effects := make(map[string]json.RawMessage)
+	var active json.RawMessage
+	activeIssue := ""
 	for key, raw := range issues {
 		var item map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("decode semantic migration Issue %s: %w", key, err)
 		}
+		status := rawString(item["status"])
+		if status == "answer_claim_waiting" {
+			status = "resume_pending"
+			item["status"] = mustRaw(status)
+		}
+		if kind, ok := legacyEffectKind(rawString(item["github_sync"])); ok {
+			runID := rawString(item["run_id"])
+			if runID == "" {
+				return fmt.Errorf("Issue %s pending effect has no run identity", key)
+			}
+			effects[key] = mustMarshal(map[string]any{
+				"id": "effect_migrated_" + key, "issue_number": json.Number(key), "run_id": runID,
+				"kind": kind, "created_at": migratedAt,
+			})
+		}
+		lease := item["execution_lease"]
+		leaseRunID, leaseGeneration, leaseBaseSHA, leaseStartedAt, leaseErr := legacyExecutionIdentity(lease)
+		if leaseErr != nil {
+			return fmt.Errorf("decode semantic migration Issue %s execution provenance: %w", key, leaseErr)
+		}
+		generation := rawUint64(item["lease_generation"])
+		if leaseGeneration > generation {
+			generation = leaseGeneration
+		}
 		checkpoint := item["continuation_checkpoint"]
-		if len(checkpoint) == 0 || string(checkpoint) == "null" {
-			continue
+		if len(checkpoint) > 0 && string(checkpoint) != "null" {
+			converted, checkpointGeneration, err := normalizeLegacyContinuation(key, checkpoint, lease, migratedAt)
+			if err != nil {
+				return err
+			}
+			item["continuation"] = converted
+			if checkpointGeneration > generation {
+				generation = checkpointGeneration
+			}
+		} else if len(lease) > 0 && string(lease) != "null" && !legacyActiveExecutionStatus(status) {
+			stage, err := normalizeContinuationStage(legacyCheckpointStage(item, status))
+			if err != nil {
+				return fmt.Errorf("Issue %s: %w", key, err)
+			}
+			item["continuation"] = mustMarshal(map[string]any{
+				"id": "checkpoint_migrated_" + key, "created_at": leaseStartedAt, "run_id": leaseRunID,
+				"generation": leaseGeneration, "base_sha": leaseBaseSHA, "stage": stage,
+			})
 		}
-		var value map[string]json.RawMessage
-		if err := json.Unmarshal(checkpoint, &value); err != nil {
-			return fmt.Errorf("decode semantic migration Issue %s checkpoint: %w", key, err)
+		if generation > 0 {
+			item["generation"] = json.RawMessage(fmt.Sprint(generation))
 		}
-		stage, err := normalizeContinuationStage(rawString(value["stage"]))
-		if err != nil {
-			return fmt.Errorf("Issue %s: %w", key, err)
+		if legacyActiveExecutionStatus(status) {
+			if len(lease) == 0 || string(lease) == "null" {
+				return fmt.Errorf("Issue %s executing lifecycle has no execution provenance", key)
+			}
+			if len(active) != 0 {
+				return fmt.Errorf("Issues %s and %s both claim the single active execution", activeIssue, key)
+			}
+			active = mustMarshal(map[string]any{
+				"issue_number": json.Number(key), "run_id": leaseRunID, "generation": leaseGeneration,
+				"base_sha": leaseBaseSHA, "started_at": leaseStartedAt,
+			})
+			activeIssue = key
 		}
-		value["stage"] = mustRaw(stage)
-		switch kind := rawString(value["kind"]); kind {
-		case "", "needs_input":
-		case "environment_block":
-			delete(value, "kind")
-		default:
-			return fmt.Errorf("Issue %s: unknown continuation checkpoint kind %q", key, kind)
+		for _, field := range []string{"execution_lease", "lease_generation", "continuation_checkpoint", "declared_resources", "actual_resources", "github_sync"} {
+			delete(item, field)
 		}
-		item["continuation_checkpoint"] = mustMarshal(value)
+		issueObjects[key] = item
+	}
+	var requests map[string]json.RawMessage
+	if raw := object["pending_requests"]; len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &requests); err != nil {
+			return fmt.Errorf("decode semantic migration requests: %w", err)
+		}
+		for id, rawRequest := range requests {
+			var request map[string]json.RawMessage
+			if err := json.Unmarshal(rawRequest, &request); err != nil {
+				return fmt.Errorf("decode semantic migration request %s: %w", id, err)
+			}
+			if checkpointID := rawString(request["resource_park_id"]); checkpointID != "" {
+				request["checkpoint_id"] = mustRaw(checkpointID)
+				issueKey := fmt.Sprint(rawInt(request["issue_number"]))
+				if item := issueObjects[issueKey]; item != nil {
+					var continuation map[string]json.RawMessage
+					if json.Unmarshal(item["continuation"], &continuation) == nil && rawString(continuation["id"]) == checkpointID {
+						continuation["kind"] = mustRaw(state.ContinuationKindNeedsInput)
+						continuation["request_id"] = mustRaw(id)
+						item["continuation"] = mustMarshal(continuation)
+					}
+				}
+			}
+			if released := request["released_owner"]; len(released) > 0 && string(released) != "null" {
+				request["released_execution"] = released
+			}
+			delete(request, "resource_park_id")
+			delete(request, "released_owner")
+			requests[id] = mustMarshal(request)
+		}
+		object["pending_requests"] = mustMarshal(requests)
+	}
+	for key, item := range issueObjects {
 		issues[key] = mustMarshal(item)
 	}
 	object["issues"] = mustMarshal(issues)
+	object["pending_effects"] = mustMarshal(effects)
+	object["issue_lifecycle_api_version"] = mustRaw(issuedomain.LifecycleAPICurrent)
+	if len(active) == 0 {
+		delete(object, "active_execution")
+	} else {
+		object["active_execution"] = active
+	}
 	return nil
+}
+
+func normalizeLegacyContinuation(key string, rawCheckpoint, fallbackLease json.RawMessage, migratedAt time.Time) (json.RawMessage, uint64, error) {
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal(rawCheckpoint, &value); err != nil {
+		return nil, 0, fmt.Errorf("decode semantic migration Issue %s checkpoint: %w", key, err)
+	}
+	stage, err := normalizeContinuationStage(rawString(value["stage"]))
+	if err != nil {
+		return nil, 0, fmt.Errorf("Issue %s: %w", key, err)
+	}
+	value["stage"] = mustRaw(stage)
+	switch kind := rawString(value["kind"]); kind {
+	case "", state.ContinuationKindNeedsInput:
+	case "environment_block":
+		delete(value, "kind")
+	default:
+		return nil, 0, fmt.Errorf("Issue %s: unknown continuation checkpoint kind %q", key, kind)
+	}
+	provenance := value["original_execution_lease"]
+	if len(provenance) == 0 || string(provenance) == "null" {
+		provenance = fallbackLease
+	}
+	runID, generation, baseSHA, startedAt, err := legacyExecutionIdentity(provenance)
+	if err != nil {
+		return nil, 0, fmt.Errorf("Issue %s checkpoint execution provenance: %w", key, err)
+	}
+	if saved := rawString(value["run_id"]); saved != "" {
+		runID = saved
+	}
+	createdAt := startedAt
+	if parsed, ok := rawTime(value["parked_at"]); ok {
+		createdAt = parsed
+	}
+	if createdAt.IsZero() {
+		createdAt = migratedAt
+	}
+	value["created_at"] = mustMarshal(createdAt)
+	value["run_id"] = mustRaw(runID)
+	value["generation"] = json.RawMessage(fmt.Sprint(generation))
+	if baseSHA != "" {
+		value["base_sha"] = mustRaw(baseSHA)
+	}
+	for _, field := range []string{"status", "original_execution_lease", "parked_at", "resumed_at", "resume_owner"} {
+		delete(value, field)
+	}
+	return mustMarshal(value), generation, nil
+}
+
+func legacyExecutionIdentity(raw json.RawMessage) (string, uint64, string, time.Time, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", 0, "", time.Time{}, nil
+	}
+	var value struct {
+		Owner struct {
+			RunID      string `json:"run_id"`
+			Generation uint64 `json:"generation"`
+		} `json:"owner"`
+		BaseSHA    string    `json:"base_sha"`
+		ReservedAt time.Time `json:"reserved_at"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", 0, "", time.Time{}, err
+	}
+	if value.Owner.RunID == "" || value.Owner.Generation == 0 || value.ReservedAt.IsZero() {
+		return "", 0, "", time.Time{}, fmt.Errorf("execution identity is incomplete")
+	}
+	return value.Owner.RunID, value.Owner.Generation, value.BaseSHA, value.ReservedAt, nil
+}
+
+func legacyActiveExecutionStatus(status string) bool {
+	switch status {
+	case "claiming", "claimed", "running", "resolving_conflict":
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyEffectKind(value string) (issuedomain.EffectKind, bool) {
+	switch value {
+	case "done":
+		return issuedomain.EffectMarkDone, true
+	case "needs_input":
+		return issuedomain.EffectMarkNeedsInput, true
+	case "failed":
+		return issuedomain.EffectMarkFailed, true
+	case "blocked":
+		return issuedomain.EffectMarkBlocked, true
+	case "conflict_retry":
+		return issuedomain.EffectRetryConflict, true
+	case "issue_resolution":
+		return issuedomain.EffectApplyResolution, true
+	default:
+		return issuedomain.EffectNone, false
+	}
+}
+
+func rawUint64(raw json.RawMessage) uint64 {
+	var value uint64
+	_ = json.Unmarshal(raw, &value)
+	return value
+}
+
+func rawInt(raw json.RawMessage) int {
+	var value int
+	_ = json.Unmarshal(raw, &value)
+	return value
+}
+
+func rawTime(raw json.RawMessage) (time.Time, bool) {
+	var value time.Time
+	if json.Unmarshal(raw, &value) != nil || value.IsZero() {
+		return time.Time{}, false
+	}
+	return value, true
 }
 
 func normalizeContinuationStage(stage string) (string, error) {
@@ -273,11 +477,11 @@ func migrateV5Issue(key string, issue map[string]json.RawMessage, migratedAt tim
 
 	if terminal {
 		delete(issue, "execution_lease")
-		if status != "completed" && len(checkpoint) > 0 && string(checkpoint) != "null" {
-			issue["continuation_checkpoint"] = checkpoint
-		}
 	} else if len(lease) > 0 && string(lease) != "null" {
 		issue["execution_lease"] = lease
+	}
+	if status != "completed" && len(checkpoint) > 0 && string(checkpoint) != "null" {
+		issue["continuation_checkpoint"] = checkpoint
 	}
 
 	if status == "blocked" || status == "failed" {

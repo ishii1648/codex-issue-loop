@@ -274,7 +274,7 @@ func Validate(bundle Bundle) error {
 		return err
 	}
 	if !equalCompleteness(bundle.Completeness, want) {
-		return errors.New("recovery fixture completeness metadata does not match its records")
+		return fmt.Errorf("recovery fixture completeness metadata does not match its records: recorded=%+v observed=%+v", bundle.Completeness, want)
 	}
 	hash, err := contentHash(bundle)
 	if err != nil {
@@ -298,9 +298,10 @@ func migratedFixtureSnapshot(bundle Bundle) (state.Snapshot, error) {
 		pending[identity.ID] = raw
 	}
 	raw := map[string]any{
-		"version":                   bundle.Manifest.SourceSchemaVersion,
-		"semantic_contract_version": statecontract.CurrentVersion,
-		"repo_id":                   bundle.Capture.Durable.RepoID, "repo_path": bundle.Capture.Durable.RepoPath,
+		"version":                     bundle.Manifest.SourceSchemaVersion,
+		"semantic_contract_version":   statecontract.CurrentVersion,
+		"issue_lifecycle_api_version": issuedomain.LifecycleAPICurrent,
+		"repo_id":                     bundle.Capture.Durable.RepoID, "repo_path": bundle.Capture.Durable.RepoPath,
 		"state_revision":   bundle.Capture.Durable.StateRevision,
 		"supervisor":       map[string]any{"state": "stopped", "updated_at": bundle.Manifest.CapturedAt},
 		"issues":           map[string]json.RawMessage{strconv.Itoa(bundle.Manifest.IssueNumber): bundle.Capture.Durable.Issue},

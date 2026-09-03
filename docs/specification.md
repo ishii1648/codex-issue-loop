@@ -159,16 +159,12 @@ github:
   repository_id: 123456789
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
+  trusted_issue_authors:
+    minimum_permission: write
+    allow_logins: []
 
 queue:
   concurrency: 1
-
-resources:
-  definitions:
-    - name: supervisor
-      paths: [internal/application/supervisor/**]
-    - name: docs
-      paths: [README.md, docs/**]
 
 git:
   base_branch: main
@@ -196,13 +192,13 @@ webhook:
 
 - `version` は必須。現行は`4`とし、v3は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
-- 公開repositoryではGitHubのIssue作成policyを`Collaborators only`にし、ready labelの付与権限も信頼済みcollaboratorへ限定する。Issue本文はworkerのnetwork、browser、downloadその他の起動権限を指定・拡張しない。
+- 公開repositoryではGitHubのIssue作成policyを`Collaborators only`にし、ready labelの付与権限も信頼済みcollaboratorへ限定する。これらのGitHub設定に加えて、worker開始前にIssue作成者を`github.trusted_issue_authors`で検証する。Issue本文は作成者の信頼性やworkerのnetwork、browser、downloadその他の起動権限を指定・拡張しない。
+- `github.trusted_issue_authors.minimum_permission`は`write`を既定かつ最低値とし、GitHubが返す`write`、`maintain`、`admin`を信頼する。GitHub Appまたはbotなどrepository permissionを持たないprincipalは、exact loginが`allow_logins`に明示された場合だけ信頼する。空・不明なauthor、permission取得失敗、削除済みaccountは検証失敗とする。
 - `webhook.mode`の既定は`polling`であり、設定を追加しただけでWebhookをsilentに有効化しない。`webhook`では`github.repository_id`、GitHub App用の1件以上の`installation_ids`、公開URLを秘密値なしで識別する`public_url_identifier`を必須とする。classic repository webhookだけは`allow_repository_webhook: true`を明示してinstallation欠落を許可でき、HMACとrepository ID/full nameは引き続き必須とする。
 - Webhook listenerはliteralな`127.0.0.1`または`::1`だけを許可する。共有brokerを使う全repositoryはlistenerを一致させる。public/LAN addressやhostnameへのbindは拒否する。
 - `secret_source`は環境変数名またはrepository外の絶対file pathのどちらか一方だけを指定する。fileはruntimeでregular fileかつowner-only permissionであることを検証する。rotation中だけ`previous_secret_source`を併記できる。secret値をconfig、registry、snapshot、event、status、logへ保存しない。
 - 内部のsafety sweep間隔は15分で、managed-root brokerだけがpage別のETag/Last-Modifiedとcache bodyを`webhook-sweep.json`へ永続化し、ready labelを含む安定したREST collection URLを最大10 page（1000件）まで条件付きrequestする。304 pageはdurable cacheと合成し、正しく認証された304は成功として記録する。broker起動直後にもoutage recovery sweepを行う。Webhook modeのrepository schedulerはGitHub ready queue timerとsweep state writerを持たず、repository mailbox、Issue retry deadline、worker event、shared cooldownでwakeするほか、60秒ごとのlocal reconciliationでcanonical snapshotとmailboxを再評価する。このlocal timerはGitHub ready collectionを取得しない。通常経路は対象Issue/PR/SHAだけをREST再検証し、queueまたは変化のないPRをGraphQL pollingしない。
-- production/self-hostingの`queue.concurrency`は安定化期間中`1`に固定する。実装とresource taxonomyは将来の再評価用に保持するが、`2`以上への変更はconformance、isolated canary、resource budgetを満たす独立したrolloutとして扱う。`resources.definitions`未設定時も安全なlegacy modeとして`1`だけを許可し、全Issueを`repo:*`で直列化する。
-- resource metadata versionは実装が`1`に固定する。各definitionは一意なresource名と1件以上のrepository相対path globを持つ。path規則は[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。
+- `queue.concurrency`は`1`だけを許可する。`2`以上は設定エラーとし、Issue間resource、`area:` label、`depends_on` metadataを着手判定へ使用しない。
 - `queue.order`は`issue_number_asc`、`created_at_asc`、`priority_then_created_at`を許可する。既定値は後方互換な`issue_number_asc`とする。
 - `priority_then_created_at`では`queue.priority_labels`を高い順に1件以上指定する。labelなしは最低順位、複数該当は最上位一致とする。
 - `worker.model: null` はユーザーのCodex既定値を使う。
@@ -230,7 +226,7 @@ webhook:
 - `completion.auto_merge: false`ではCI成功後にPRをReady for reviewへ移し、人手のmergeを待つ。`true`ではbase branchへの追随とCI再確認後にsquash mergeする。
 - conflict recovery budget、worktree保持期間、log rotation、worker run保持数は安全な内部既定値とし、repositoryの通常設定から調整する対象にしない。
 
-同一repository内並列化で追加するresource definition、`area:` label、Issue本文の`depends_on`、決定論的admission、lease lifecycleは[Resource claim・依存metadata・admission契約](resource-admission.md)を正本とする。schema v3ではdurable leaseとmigrationを導入済みで、resource definitionと複数worker admissionは後続段階で有効化する。
+worker並列化と複数host実行は現行仕様の対象外とする。導入する場合は現行設定の意味を暗黙に変更せず、Issue lifecycle APIの互換性評価を含む独立した要件と仕様を先に定義する。
 
 ### 5.2 log rotationと容量保護
 
@@ -304,9 +300,9 @@ agent-loop start --repo /path/to/repo [--json]
 
 `start` 自身は常駐しない。
 
-`stop`と`restart`はLaunchAgentをunloadした後、snapshotに保存された全Issueのworker PID/PGIDを照合する。所有権を確認できたprocess groupすべてへ先に`SIGTERM`を送り、内部のgrace periodだけ待機する。残存groupだけを`SIGKILL`し、全groupの終了を確認してからIssueごとに`worker_process_stopped`を記録する。worktree、session、branch、leaseは保持し、通常workerは`retry_wait`、conflict workerは`resolving_conflict`から次回起動時に再開する。PID再利用などで所有権を確認できないgroupはsignalせず停止処理を失敗させる。
+`stop`と`restart`はLaunchAgentをunloadした後、snapshotに保存されたactive workerのPID/PGIDを照合する。所有権を確認できたprocess groupへ先に`SIGTERM`を送り、内部のgrace periodだけ待機する。残存groupだけを`SIGKILL`し、終了を確認してから`worker_process_stopped`を記録する。worktree、session、branch、run ID、generationは保持し、通常workerは`retry_wait`、conflict workerは`resolving_conflict`から次回起動時に再開する。PID再利用などで所有権を確認できないgroupはsignalせず停止処理を失敗させる。
 
-`status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、`limit`、`available`、Issue番号順の`issues`を返す。各active Issueは`issue_number`、`run_id`、`phase`、PID/PGID、slot、resolved resources、`(run_id, generation)` resource ownerを持つ。未回答requestは`pending_requests`へrequest ID順で返す。
+`status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、固定値`limit: 1`、`available`、active Issueを返す。active Issueは`issue_number`、`run_id`、`generation`、`phase`、PID/PGIDを持つ。未回答requestは`pending_requests`へrequest ID順で返す。
 
 ### 6.4 watch
 
@@ -354,12 +350,12 @@ agent-loop answer --request-id req_... --message-file -
 処理:
 
 1. request IDと未回答状態を検証する
-2. 通常worker requestでは保存run、park ID、元lease owner、PID/PGID不在を検証する
-3. 回答を原子的に保存し、競合がなければ新generationのleaseを同じtransactionで1回だけ取得する
-4. 競合中は他Issueのleaseを変更せず`answer_claim_waiting`にする
+2. 通常worker requestでは保存run、generation、continuation provenance、PID/PGID不在を検証する
+3. 回答を原子的に保存し、repositoryの実行枠が空いていればgenerationを同じtransactionで1回だけ進める
+4. 他Issueが実行中ならその実行を変更せず、回答済みrequestを再開待ちにする
 5. `answer_recorded` イベントを追記する
 
-通常workerの`needs_input`は`input_requested` transactionでrequest provenanceと元lease全体を`resource_park`へ移し、GitHub needs-inputを維持したままadmissionから外す。回答済みclaim待機はresource/slotが空くまでschedulerのworker dispatch対象にせず、解放event後に同じrequest/run/parkを再検証して`resume_pending`へ進める。manual/security、PR conflict、publication監査、active worker、複数request、未知のlegacy stateはfail closedとする。continuationは保存workspaceと新lease owner generationをspawn直前に再検証する。
+通常workerの`needs_input`は`input_requested` transactionでrequestとcontinuation provenanceを保存し、GitHub needs-inputを維持したままrepositoryの実行枠を解放する。回答済みrequestは実行枠が空くまでworker dispatch対象にせず、枠の解放後に同じrequest、run、generationを再検証して`resume_pending`へ進める。manual/security、PR conflict、publication監査、active worker、複数request、未知のlegacy stateは対象Issueに対してfail closedとする。continuationは保存workspaceと新しいgenerationをspawn直前に再検証する。
 
 ### 6.6 issue plan / issue resolve
 
@@ -373,15 +369,15 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 
 `issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`と、現在のprocess、managed worktree、content SHA-256、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。`resume`とpublicationの`retry-stage`は保存時と現在のworktree HEAD・content SHA-256・base ancestryが一致しなければ拒否し、checksの`retry-stage`はcleanかつfully pushedなlocal/remote/PR HEAD一致を要求する。
 
-`issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`は保存checkpointから空slot・resource競合を再検査し、generationを一度だけ進めてExecutionLeaseを取得する。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずpending requestをcanceledへ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
+`issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`はrepositoryの実行枠が空であることを再検査し、generationを一度だけ進めて現在の実行として記録する。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずpending requestをcanceledへ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
 
-ambiguousなIssueはその`suspension`だけをquarantineする。terminal `blocked` / `failed`はPID/PGIDとExecutionLeaseを保持せず、他Issueのadmissionを妨げない。durable state、label、checkpointを手編集して判定を通してはならない。
+ambiguousなIssueはその`suspension`だけをquarantineする。terminal `blocked` / `failed`はPID/PGIDとrepositoryの実行枠を保持せず、他Issueの選択を妨げない。durable state、label、checkpointを手編集して判定を通してはならない。
 
 ### 6.7 legacy v4 recovery（migration入力のみ）
 
 旧scenario別field、status、sync、substateはv4 raw fixtureをgeneric `ContinuationCheckpoint` / `Suspension` / `ContinuationEvidence`へ変換するmigration decoder内だけで解釈する。旧commandはCLIへ登録せず、v5 snapshotに旧fieldまたは旧lifecycle語彙があれば自動修復せずfail closedとする。
 
-migrationはevent件数や順序から実行authorityを合成しない。保存済みexecution lease、workspace、session、result digest、Pull Request identityなどcanonical snapshot内の証拠だけをfoldし、不足・矛盾するIssueはそのIssueだけをquarantineして`cancel`以外を不許可にする。移行後のoperator操作は§6.6のgeneric commandだけを使う。
+migrationはevent件数や順序から実行authorityを合成しない。保存済みの旧execution lease、workspace、session、result digest、Pull Request identityなどcanonical v4 snapshot内の証拠だけをfoldし、不足・矛盾するIssueはそのIssueだけをquarantineして`cancel`以外を不許可にする。移行後のoperator操作は§6.6のgeneric commandだけを使う。
 
 ### 6.8 recover-quarantined-snapshot
 
@@ -392,7 +388,7 @@ agent-loop recover-quarantined-snapshot --repo /absolute/path/to/repository --ba
 
 aggregate validator導入前の`completed + pull_request_merged` recordがPR URLだけ、または途中のhead SHAだけを保持し、新validatorの初回readでsnapshot全体が`recovery_blocked`へ隔離された場合に限る。CLIは現在のrevision 1 recovery markerと単一`recovery_blocked` event、markerが指すmanaged recovery root直下のexact backup、delivery maintenance snapshot、active PID/PGID不在、prepared transaction不在、元snapshot/event sequenceを検証する。欠落対象を仮補完してaggregate validatorを再実行し、merged identity以外の違反が1件でもあれば拒否する。
 
-`--dry-run`とconfirmはいずれもGitHubのmerged PR一覧をread-onlyで取得し、各recordの保存URL・branch・configured base・head repositoryが一意なmerged PRと一致することを検証する。GitHubのPR numberと最終head SHAをauthoritative値として補完し、旧headが途中値ならbefore/afterをreportとeventへ残す。applyは元quarantine backupを変更せず、現在のrecovery markerも別のmanaged backupへ保存し、`legacy_merged_identity_quarantine_recovered` eventを追加した整合snapshot/event chainへ置換する。Issue status、run、attempt/continuation、session、回答、worktree、lease、GitHub labelは変更しない。これは汎用破損復旧ではなく、running LaunchAgent、open/fork/別branch PR、URL/number不一致、追加invariant違反、別backupでは副作用なくfail closedとする。
+`--dry-run`とconfirmはいずれもGitHubのmerged PR一覧をread-onlyで取得し、各recordの保存URL・branch・configured base・head repositoryが一意なmerged PRと一致することを検証する。GitHubのPR numberと最終head SHAをauthoritative値として補完し、旧headが途中値ならbefore/afterをreportとeventへ残す。applyは元quarantine backupを変更せず、現在のrecovery markerも別のmanaged backupへ保存し、`legacy_merged_identity_quarantine_recovered` eventを追加した整合snapshot/event chainへ置換する。Issue status、run、attempt/continuation、session、回答、worktree、execution identity、GitHub labelは変更しない。これは汎用破損復旧ではなく、running LaunchAgent、open/fork/別branch PR、URL/number不一致、追加invariant違反、別backupでは副作用なくfail closedとする。
 
 ### 6.9 recover-semantic-quarantine
 
@@ -403,7 +399,7 @@ agent-loop recover-semantic-quarantine --repo /absolute/path/to/repository --bac
 agent-loop recover-semantic-quarantine --repo /absolute/path/to/repository --backup /exact/recovery/backup --confirm-exact-backup --json
 ```
 
-CLIはcurrent revision 1 marker、単一`recovery_blocked` event、exactなversion mismatch reason、marker payload、managed recovery root内の記録済みbackup、state/event digestとsequence、repository identity、prepared transaction不在、LaunchAgent unloaded、worker/lease/pending request不在を検証する。backupが別のsemantic recovery markerなら1段だけ戻して`next_backup`を返し、元snapshotなら既知のmigration元contractと停止状態を要求する。元backupを変更せずcurrent markerとcompleted journalを別backupへ保存し、state/eventをbyte-exactに復元する。復元後は通常commandを実行せず、全repositoryを停止したまま`migrate --json`と`migrate --apply --json`を行う。
+CLIはcurrent revision 1 marker、単一`recovery_blocked` event、exactなversion mismatch reason、marker payload、managed recovery root内の記録済みbackup、state/event digestとsequence、repository identity、prepared transaction不在、LaunchAgent unloaded、worker/active execution/pending request不在を検証する。backupが別のsemantic recovery markerなら1段だけ戻して`next_backup`を返し、元snapshotなら既知のmigration元contractと停止状態を要求する。元backupを変更せずcurrent markerとcompleted journalを別backupへ保存し、state/eventをbyte-exactに復元する。復元後は通常commandを実行せず、全repositoryを停止したまま`migrate --json`と`migrate --apply --json`を行う。
 
 ### 6.10 終了コード
 
@@ -449,33 +445,12 @@ inboxはdelivery IDを正本とし、redeliveryを冪等にdedupeする。pendin
 stopped
    │ start
    ▼
-starting ──► polling ◄──────────────┐
-                 │ issue found      │
-                 ▼                  │
-              claiming              │
-                 │                  │
-                 ▼                  │
-              running               │
-        ┌────────┼─────────┐        │
-        ▼        ▼         ▼        │
- awaiting_checks needs_input retry_wait
-        │        │         │         │
- PR dirty├─► resolving_conflict      │
-        │         │ worker/publish   │
-  CI成功│         └─► awaiting_checks│
-        │        │ answer  └─────────┘
-        ▼        ▼
- awaiting_merge running
-        │ merge確認
-        ▼
-   completed ───────────────────────► polling
-
-running ──fatal/nonrecoverable──► blocked
-resolving_conflict ──budget超過/nonrecoverable──► blocked
-blocked/failed ──generic resolution──► resume_pending / awaiting_checks / resolving_conflict
+starting ──► running ──► stopped
+                │
+                └─ repository全体の安全性を判定不能 ──► blocked
 ```
 
-`needs_input` はIssue単位の状態であり、`continue_after_needs_input: true` の場合、supervisor全体は別Issueのpollingを続けてよい。ただし同一worktreeは回答まで変更しない。
+`running`はqueueを継続的に評価できるrepository状態であり、Issueの`needs_input`、`failed`、`blocked`、互換性不成立、状態不整合では解除しない。これらは対象Issueだけを実行対象外にし、実行枠を解放して別Issueの選択へ戻る。repository全体を`blocked`にできるのは、canonical state全体を安全に解釈できない、global configが不正、または全Issueに共通する認証・実行・公開authorityを確認できない場合に限る。
 
 ### 8.2 Issue状態
 
@@ -490,7 +465,25 @@ blocked/failed ──generic resolution──► resume_pending / awaiting_check
 - `failed`
 - `blocked`
 
-すべての遷移はsnapshot更新前にevent logへ記録し、再起動時にsnapshotとGitHubを照合する。
+`claimed`、`running`、worker実行中の`resolving_conflict`だけがrepositoryの実行枠を消費する。`needs_input`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、`completed`、`failed`、`blocked`は実行枠を消費せず、別Issueを選択できる。状態遷移の失敗は対象Issueへ閉じ込め、canonical state全体を解釈できる限りrepository状態を`blocked`へ遷移させない。
+
+すべての遷移はsnapshotとeventを一つのtransactionとして記録し、再起動時にsnapshot、GitHub、process、worktreeを照合する。
+
+### 8.3 Issue lifecycle API
+
+Issue状態は外部利用者が依存する公開APIとする。APIは`major.minor`でversionを持ち、各状態について次を規定する。
+
+- 状態の意味と許可される遷移
+- terminalかどうか
+- repositoryの実行枠を消費するか
+- 自動継続できるか
+- 人間の回答または明示操作が必要か
+
+CLI JSON、snapshotのsemantic contract、event、GitHubへの状態表示は、同じIssue lifecycle APIへ対応付けられなければならない。内部保存形式の変更だけではAPI versionを変更しない。
+
+既存状態またはfieldの意味を維持する追加はminor versionとする。状態の削除・改名、既存状態の意味、terminal判定、実行枠消費、許可遷移を非互換に変更する場合はIssue lifecycle APIのmajor versionを更新する。新しいminor versionは同じmajorの全旧minor fixtureを読み、同じ公開上の意味で継続できなければreleaseできない。
+
+major version更新でも、canonical snapshotに十分な根拠があるIssueは可能な限り決定的に移行し、run、generation、workspace、request/answer、publication identityを保持する。移行不能な個別IssueはそのIssueだけをquarantineして実行枠を解放する。snapshot全体を安全に読み取れない場合だけrepositoryを`blocked`にする。
 
 ## 9. Issue選択とclaim
 
@@ -504,8 +497,11 @@ Issueは以下をすべて満たす場合に着手可能とする。
 - running、needs-input、done、failedラベルを持たない
 - Pull Requestではない
 - ローカル状態で処理中ではない
+- Issue作成者が信頼policyを満たす
 
-Issueのauthor、作成場所、作成に使ったclientは着手可能条件に含めない。producerは着手可能ラベルを付与できるGitHub権限、または同ラベルを付与するautomationを持つ必要がある。
+作成場所と作成に使ったclientは条件に含めない。作成者はGitHubのactor identityを正本とし、repository owner、`write`以上の現在のrepository permissionを持つcollaborator、または設定にexact loginが明示されたprincipalだけを信頼する。Issue本文・コメント・ラベルによる自己申告は使用しない。
+
+候補一覧の取得時とworker開始直前に作成者を検証する。authorまたはpermissionを取得できない、削除済みaccount、信頼policy不一致の場合は、そのIssueへ検証失敗理由と観測時刻を記録して候補から外す。検証失敗したIssueが先頭でも、後続の検証済みIssueの選択を継続する。
 
 ### 9.2 並び順
 
@@ -515,16 +511,17 @@ GitHub CLIのpaginationが完了した候補集合をlocalでsortし、APIの返
 
 ### 9.3 claim手順
 
-1. 候補一覧を取得してローカルでsortする
-2. 先頭Issueの最新状態を再取得する
-3. ローカル状態へwrite-aheadの`claiming`を保存する
-4. runningラベルを追加し、readyラベルを外す
-5. run IDを含む開始コメントを冪等キー付きで作成する
-6. ローカル状態を `claimed` にする
+1. 候補一覧を取得し、作成者の信頼policyを検証してローカルでsortする
+2. 先頭の検証済みIssueについて最新状態、author identity、repository permissionを再取得する
+3. repositoryの実行枠が空であることを確認する
+4. ローカル状態へIssue番号、run ID、generationを含むwrite-aheadの`claiming`を保存する
+5. runningラベルを追加し、readyラベルを外す
+6. run IDを含む開始コメントを冪等キー付きで作成する
+7. ローカル状態を `claimed` にする
 
-`claiming`で停止した場合は、再起動後に最新Issueを再取得し、同じrun IDと冪等markerでclaimを再実行する。
+`claiming`で停止した場合は、再起動後に最新Issueと作成者の信頼性を再取得し、同じrun ID、generation、冪等markerでclaimを再実行する。
 
-GitHub APIには汎用的なcompare-and-swapがないため、MVPは「同一リポジトリを処理するsupervisorは1つ」という運用制約を置く。local `flock`は同一hostだけを保護する。複数host対応では単なる分散lockだけでなく、線形化可能なcoordinator、epoch、durable publication intent、GitHub副作用を集約するfenced publication gatewayを必要とする。[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
+同一repositoryを処理するsupervisorは1つ、workerは最大1つとする。現在のIssue番号、run ID、generationが一致するworker結果、回答、公開操作だけを受理する。過去generationから遅れて届いた結果は状態を変更せず、拒否した事実をeventへ記録する。
 
 ## 10. worktreeとGit仕様
 
@@ -560,7 +557,7 @@ codex exec \
 
 実際の引数は起動前に `codex exec --help` とversion capabilityを検査する。構造化された初回実行を安全に行えないversionでは推測で継続せず、supervisorの開始を拒否する。session resumeだけが利用できない場合は、同じIssue worktree、run ID、永続化された回答履歴を使って新規sessionを起動する。session IDはJSONL内の`thread_id`、`session_id`、および既知のnested形式を受け付ける。
 
-初回とすべてのcontinuationはprocess spawn直前に、保存済みworktree pathとbranch、Git common dir、GitHub repository identity、main checkoutではないこと、symlinkを含まないことをlocalに再検証する。同じtransaction境界でrun ID、session ID、active lease owner generationも照合する。初回に保存したworkspace provenanceが欠損または一致しないcontinuationではworkerを起動せず、session、lease、worktree provenanceを保持した非resumableな`blocked`へ移す。backend process開始後はOS spawnへ渡したexpected/actual cwdをPID/PGIDとともに`worker_process_started`へ記録する。この契約はCodex、Claude Code、OpenCodeとresume非対応fallbackに共通である。
+初回とすべてのcontinuationはprocess spawn直前に、保存済みworktree pathとbranch、Git common dir、GitHub repository identity、main checkoutではないこと、symlinkを含まないことをlocalに再検証する。同じtransaction境界でrun ID、session ID、current generationも照合する。初回に保存したworkspace provenanceが欠損または一致しないcontinuationではworkerを起動せず、session、run、generation、worktree provenanceを保持した非resumableな`blocked`へ移してrepositoryの実行枠を解放する。backend process開始後はOS spawnへ渡したexpected/actual cwdをPID/PGIDとともに`worker_process_started`へ記録する。この契約はCodex、Claude Code、OpenCodeとresume非対応fallbackに共通である。
 
 ### 11.2 preflightとexecution profile
 
@@ -600,7 +597,7 @@ preflightは別プロセスではなく、初回worker promptに含める論理�
 Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked worktreeのGit metadataは元repositoryの`.git/worktrees`配下にありsandbox外なので、workerへ書き込み権限を広げない。workerが`completed`を返した後、supervisor内のpublisherがrepository Git operation gate内で次を順に実行する。
 
 1. 保存済みPRがある場合は全stateの同一head branch PRを列挙し、保存URL、open state、base/head ref名、authoritative base/head SHA、local HEADのforward-only関係を検証する。複数PR、closed-without-merge、別branch、divergeは変更前に拒否する。
-2. 保存済みbase SHA（既存PRではauthoritative base SHA）からHEAD/worktreeまでのtracked pathとuntracked pathをNUL区切りで列挙し、resource claimを監査する。
+2. 保存済みbase SHA（既存PRではauthoritative base SHA）からHEAD/worktreeまでのtracked pathとuntracked pathをNUL区切りで列挙し、公開対象とworktree境界を監査する。
 3. `formatters.go.enabled: true`なら、列挙済みの既存・新規`.go` regular fileだけを対象にする。各pathがworktree内のcleanな相対pathで、symlink、hard link、directory、worktree外参照でないことを検証し、shellを介さず固定済み`gofmt -w <paths...>`を実行する。続けて`gofmt -l`相当と`git diff --check`を検証する。
 4. formatterの対象数、変更有無、成功またはsecret-safeなfailure codeを`publication_audited` eventとIssueの最新`publication_audit` statusへ保存する。timeout、cancellation、実行・検証失敗ではcommit、push、PR更新を行わずretryへ移す。
 5. `git status --porcelain`で差分を確認し、差分があれば`git add --all`と`git diff --cached --check`を行う。formatter変更はworker変更と同じcommitへ含め、整形済みまたはretry済みで差分がなければ空commitを作らない。
@@ -712,7 +709,7 @@ GitHub primary rate limitを検出した場合、`supervisor.rate_limit`へresou
 
 `state_revision` は有効な状態更新ごとに単調増加させる。event通知を取りこぼしたwatchも、最後に確認したrevisionとの差分から状態変化を検出できる。
 
-Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフラグに加え、active時はslot、declared/resolved/actual resources、base SHA、reserved timestamp、`(run_id, generation)` ownerを持つleaseを保持する。typed environment blockの`resource_park`はpark ID/status/time、元lease全体、resume time/new ownerを保持する。declared/actual resourcesはlease解放後もIssue auditとして残す。これによりworker起動前のwrite-ahead予約、park中の非admission continuation、限定resumeのfencing、publish前のpath scope検査、再起動後の排他復元を行う。`status --json`は`resource_admission.resource_parks`と`claim_waiting_candidates[].blocked_by`でpark状態、保存claim、resumeを妨げるIssue/resource/worker slot理由を表示する。
+Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフラグ、run ID、generationを保持する。repository snapshotは実行枠が空か、一つのIssue番号、run ID、generationへ割り当てられているかを表現する。worker開始前のwrite-ahead予約、continuation、worker結果、回答、公開操作はこの三つ組を照合する。入力待ち、retry待ち、外部check待ち、merge待ち、terminal、quarantineでは実行枠を空にする一方、Issue側のrun、generation、workspace、request、publication provenanceは保持する。
 
 ### 12.2 events.jsonl
 
@@ -739,7 +736,7 @@ Issue状態にはbranch、worktree、session ID、PR URL、merge確認済みフ�
 - `worker_preflight_completed`
 - `worker_continuation_started`
 - `worker_completed`
-- `publication_audited`（resource監査とbuilt-in formatter結果を含む）
+- `publication_audited`（公開対象監査とbuilt-in formatter結果を含む）
 - `pull_request_checks_pending`
 - `pull_request_poll_scheduled`
 - `pull_request_ready`
@@ -775,15 +772,19 @@ transactionなしでsnapshotとevent logが食い違う場合、途中に壊れ�
 
 復元を許可するtyped例外は§6.8のlegacy merged identity recoveryと§6.9のsemantic mismatch recoveryだけである。各commandは自身のexact reason以外へ流用せず、managed backup、marker、state/event chain、停止状態を再検証する。
 
-### 12.4 永続schema migration
+### 12.4 永続schemaとIssue lifecycle APIのmigration
 
-config、registry、state、active event log、prepared transactionの現行storage schemaはv5、state semantic contractはv3とする。release artifactは`state_schema_current=5`、`state_schema_migration_from=4`、`semantic_contract_current=3`、`semantic_contract_minimum=1`を`version --json`とinstall manifestへ埋め込む。storage v3以下、v6以上、semantic minimum未満またはcurrent超過は自動変換しない。
+config、registry、state、active event log、prepared transactionの現行storage schemaはv5、state semantic contractはv4とする。Issue lifecycle APIはstorage schemaと独立した`major.minor`を持つ。release artifactは`state_schema_current`、`state_schema_migration_from`、`semantic_contract_current`、`semantic_contract_minimum`、`issue_lifecycle_api_current`、`issue_lifecycle_api_minimum`を`version --json`とinstall manifestへ埋め込む。
 
-semantic contractはfieldをoptional、observational、execution-required provenanceへ分類するversioned sourceである。同じ宣言からruntime validator、migration preview、CI ruleを導出する。execution-required fieldの追加にdeterministic migrationまたはstable non-migratable codeと運用手順がなければrelease checkを失敗させる。現v3では`issues[].workspace`と実行statusの`issues[].execution_lease`を検証し、checkpoint stageを`resume|publish|checks|conflict`へ固定する。
+storage schemaは保存形式、semantic contractはfieldの検証規則、Issue lifecycle APIは外部状態の意味と遷移契約を表す。保存形式を変更しても、決定的migrationによって同じ公開状態、terminal判定、実行枠消費、再開可否を維持できる場合はIssue lifecycle APIのmajor versionを変更しない。
 
-`migrate --json`はsupported v4 stateへ新validatorをread-onlyで適用し、Issueごとのmigratable/non-migratable、stable code、理由、ruleをJSONで返す。scenario別recovery fieldをcanonical snapshotだけからcheckpoint/suspensionへfoldし、ambiguousなIssueだけをquarantineする。
+同じIssue lifecycle API majorの新releaseは、サポート対象となる全旧minorのfixtureを読み込み、実行中、入力待ち、retry待ち、外部check待ち、merge待ち、terminalの意味を変えずに継続できなければならない。field追加には既定値または決定的migrationを用意する。既存状態の意味、terminal判定、実行枠消費、許可遷移を変更・削除する場合はIssue lifecycle API majorを更新する。
 
-v4→v5かつsemantic v1→v3、またはv5 semantic v2→v3 migrationは次の順序で行う。v2→v3はgeneric checkpoint stageだけを正規化し、suspension/evidenceをbyte-equivalentな意味で保持する。
+semantic contractはfieldをoptional、observational、execution-required provenanceへ分類するversioned sourceである。execution-required fieldの追加に、旧状態から根拠を合成しない決定的migration、または個別Issueを安定してnon-migratableと判定する規則がなければrelease checkを失敗させる。
+
+`migrate --json`はsupported stateへ新validatorをread-onlyで適用し、Issueごとのmigratable/non-migratable、移行前後のIssue lifecycle API version、公開状態の対応、stable code、理由、ruleをJSONで返す。scenario別recovery fieldはcanonical snapshotだけからcheckpoint/suspensionへfoldし、ambiguousなIssueだけをquarantineする。
+
+supported storage schemaとsemantic contractのmigrationは次の順序で行う。
 
 1. 全登録LaunchAgentが停止中であることを確認する
 2. config、registry、state、active event、transactionをchecksum付きmigration backupへcopyする
@@ -792,9 +793,9 @@ v4→v5かつsemantic v1→v3、またはv5 semantic v2→v3 migrationは次の�
 5. `semantic_migration_applied`へauthority、source、before/after、operator confirmation、provenance非合成を記録する
 6. 全対象へ新validatorを再適用し、journalを`completed`にする
 
-process停止後も再実行は同じjournal、backup、migration/event IDを使い、適用済みartifactを重複更新しない。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、Issue、request/answer、generation、session、publication/PR auditを保持する。startup時のsilent backfillは禁止し、supervisorはsemantic validator失敗時にworker/GitHub mutationより前でblockedになる。
+process停止後も再実行は同じjournal、backup、migration/event IDを使い、適用済みartifactを重複更新しない。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、Issue、request/answer、run、generation、session、workspace、publication/PR auditを保持する。startup時のsilent backfillは禁止する。個別Issueだけがsemantic validatorに適合しない場合は、そのIssueをquarantineして実行枠を解放し、他Issueを処理する。repository identity、snapshot root、transaction chainなど正本全体を解釈できない場合だけsupervisorを`blocked`にする。
 
-rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active ExecutionLeaseがある間はrollbackを拒否する。schema v4対応binaryへ戻す場合は、先にschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schemaとbinaryの対応versionが異なるrollbackはCLIが拒否する。旧credential fileはmigration対象・backup対象に含めず、rollback互換のため暗黙削除しない。明示的な整理手順は[migration runbook](migration.md)を正本とする。
+rollbackは管理対象migration backupのmanifest、restore先、SHA-256を検証してから全fileを復元する。active workerがある間はrollbackを拒否する。旧schema対応binaryへ戻す場合は、先に対応するschema backupをrestoreし、その後に対応するinstall backupをrestoreする。schema、Issue lifecycle API、binaryの対応versionが異なるrollbackはCLIが拒否する。旧credential fileはmigration対象・backup対象に含めず、rollback互換のため暗黙削除しない。明示的な整理手順は[migration runbook](migration.md)を正本とする。
 
 ## 13. 監視とCodex task連携
 
@@ -856,10 +857,10 @@ App Server所有threadのprogrammatic continuationと、任意のDesktop taskを
 | --- | --- | --- |
 | 一時障害 | network timeout、GitHub 5xx、Codex一時失敗 | backoff後に再試行 |
 | Issue固有の恒久障害 | test不能、競合要件、許可されない操作 | Issueをblocked/failedにして次へ |
-| supervisor全体の障害 | auth失効、config不正、binary消失 | supervisorをblockedにして通知対象 |
-| ユーザー入力待ち | product判断、権限承認 | requestを保存し、設定に応じて次へ |
+| supervisor全体の障害 | canonical state全体を解釈不能、global config不正、全Issueに共通する認証・binary・公開authorityの消失 | supervisorをblockedにして通知対象 |
+| ユーザー入力待ち | product判断、権限承認 | requestを保存し、実行枠を解放して次へ |
 
-実装上はerrorを `transient`、`issue`、`supervisor` のtyped classificationで伝播させる。未分類errorは安全側に倒して `supervisor` とみなし、文字列の部分一致で遷移を決めない。workerが返す `needs_input` はerrorではなく状態遷移として扱う。
+errorは影響範囲を`transient`、`issue`、`supervisor`として分類し、文字列の部分一致で遷移を決めない。Issue番号、run ID、generationまたはIssue lifecycle遷移に関連して発生した未分類errorは対象Issueの失敗として隔離し、実行枠を解放して次のIssueへ進む。未分類errorを一律に`supervisor`へ昇格させてはならない。`supervisor`に分類できるのは、repository全体の正本または全Issueに共通するauthorityを安全に扱えない根拠がある場合だけとする。workerが返す`needs_input`はerrorではなく状態遷移として扱う。
 
 ### 14.2 backoff
 
@@ -875,7 +876,7 @@ worker retry、GitHub queue polling、GitHub同期retryの待機時間に独立�
 
 Issue retryのsnapshotには `failure_kind`、`last_error`、`retry_after` を保存し、`retry_scheduled` eventにも分類、理由、予定時刻、delayを記録する。supervisorの一時障害も同じ情報と連続失敗数をsnapshotおよび `supervisor_retry_scheduled` eventへ保存する。連続失敗数と予定時刻はlaunchdによるprocess再起動後も引き継ぐ。連続失敗数は、GitHub取得から永続状態更新までを含む1回のsupervisor cycleが成功した場合にのみresetし、`supervisor_recovered` eventを記録する。event通知やretry状態自身の書き込みによる早期起床ではbackoffを解除せず、counterもresetしない。
 
-`supervisor` 分類は継続による状態破壊を避けるため直ちにblockedへ移す。`transient` 分類は最大5回まで再試行し、5回連続で失敗した場合にblockedへ移す。`issue` 分類は対象Issueをblockedまたはfailedへ移し、GitHub同期後に別のIssueを処理できる状態を維持する。
+`supervisor`分類は継続によるrepository全体の状態破壊を避けるため`blocked`へ移す。`transient`分類は最大5回まで再試行し、Issue文脈の一時障害が上限に達した場合は対象Issueだけを`blocked`または`failed`へ移す。repository全体に共通する操作が上限に達しても、上記のsupervisor-wide条件を満たすことを確認してから`blocked`へ移す。`issue`分類とIssue文脈の未分類errorは、GitHub同期の成否にかかわらず対象Issueの実行枠を解放し、同期自体は冪等に再試行しながら別Issueを処理できる状態を維持する。
 
 ### 14.3 worker timeoutとprocess終了
 
@@ -935,6 +936,8 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - Codex sandboxは既定で `workspace-write`とし、worker起動時に`approval_policy="never"`を上書きする
 - dangerous bypassは設定schemaでもMVPでは許可しない
 - GitHub Issueは信頼済み入力とはみなさず、prompt injectionの可能性をworkerへ明示する
+- Issue作成者はworker開始直前にGitHub actor identityとrepository permission、またはexact allowlistで検証し、本文・コメント・ラベルによる自己申告を信頼しない
+- 作成者の検証に失敗したIssueは実行しないが、後続する検証済みIssueの処理は止めない
 - stopはプロセスを終了するが、worktreeや未コミット変更を削除しない
 - reset/purgeを実装する場合は別コマンドとし、明示確認を必須にする
 - CIで到達可能なGo依存脆弱性を`govulncheck`により検出する
@@ -945,8 +948,9 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 ### 17.1 ユニットテスト
 
 - configの正常・異常系
+- Issue作成者のpermission・allowlist検証、検証不能時のfail closed、後続Issueへの継続
 - Issue filterと決定論的sort
-- 全状態遷移
+- Issue lifecycle APIで定義した全状態遷移、terminal判定、実行枠消費
 - answerの冪等性とconflict
 - structured result validation
 - preflight profile分類と曖昧時の`extended` fallback
@@ -971,8 +975,11 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - attention状態と`state_revision`の永続化
 - standard workerが追加runなしで完了すること
 - extended workerだけが設定上限内でresumeされること
-- 将来のsingle-host worker slotで同一Issueを二重割当しないこと、およびclaim/publishの直列化
-- coordinator adapterのCAS、epoch、lease expiry、partition、古いhost拒否、publication takeover conformance
+- repositoryの実行枠が常に0件または1件であること
+- Issue失敗、入力待ち、状態不整合、互換性不成立の各経路で実行枠を解放し、後続Issueをpickすること
+- supervisor再起動後に旧run IDまたはgenerationの結果、回答、公開要求を拒否すること
+- 同じIssue lifecycle API majorの全旧minor fixtureを同じ公開上の意味で継続できること
+- lifecycleの非互換fixtureがIssue lifecycle API majorを変えずにreleaseされないこと
 
 ### 17.3 macOS E2E
 
@@ -985,7 +992,8 @@ register/startを行う自動E2Eは`scripts/e2e-supervisor.sh`で実行し、成
 - `needs_input`のスマートフォン通知、回答、再開
 - ChatGPT desktop taskを閉じた後のsupervisor継続
 - Codexによる定期status確認なしでwatchがattentionまで待機すること
-- multi-host障害環境でpartition中に片側だけが進行し、二重branch・Pull Requestを作らないこと
+- 信頼policy不一致のready Issueをskipし、後続する信頼済み作成者のready Issueを処理すること
+- 先行Issueを失敗または入力待ちにしても、後続Issueを実際にworker起動まで進めること
 
 ## 18. 実装時に確定する項目
 
@@ -997,4 +1005,3 @@ register/startを行う自動E2Eは`scripts/e2e-supervisor.sh`で実行し、成
 - worker timeout時のgrace period
 - desktop app更新によるRemote/通知表示差異のE2E手順
 - Codex CLI session resumeのversion別capabilityとfallback
-- distributed coordinatorとpublication gatewayのbackend、認証、backup、障害環境

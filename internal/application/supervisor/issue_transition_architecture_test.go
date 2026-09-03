@@ -84,25 +84,11 @@ func TestDurableLifecycleAssignmentsStayWithinRegisteredBoundaries(t *testing.T)
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", "..", ".."))
 	loaded := loadTypedPackages(t, repoRoot, false)
 	allowed := map[string]map[string]bool{
-		"GitHubSync": paths(
-			"internal/application/app/app.go", "internal/application/app/operator_attention.go",
-			"internal/application/supervisor/reconcile.go", "internal/application/supervisor/supervisor.go",
-			"internal/application/supervisor/checks_lifecycle.go", "internal/application/supervisor/conflict_lifecycle.go",
-			"internal/application/supervisor/github_sync_lifecycle.go", "internal/application/supervisor/publication_lifecycle.go",
-			"internal/application/supervisor/worker_execution.go", "internal/application/supervisor/continuation_stage.go",
-			"internal/application/app/issue_resolution.go"),
-		"Lease": paths(
-			"internal/adapter/state/lease.go", "internal/adapter/state/issue_transition.go",
-			"internal/adapter/state/legacy_v4_decode.go", "internal/adapter/state/suspension.go",
-			"internal/application/app/app.go", "internal/application/app/status.go",
-			"internal/application/supervisor/scheduler.go", "internal/application/supervisor/supervisor.go",
-			"internal/application/recoveryfixture/fixture.go"),
-		"ResourcePark": paths(
-			"internal/adapter/state/lease.go", "internal/adapter/state/issue_transition.go", "internal/adapter/state/legacy_v4_decode.go", "internal/adapter/state/suspension.go",
-			"internal/application/app/app.go", "internal/application/app/status.go",
-			"internal/application/supervisor/reconcile.go", "internal/application/supervisor/scheduler.go",
-			"internal/application/supervisor/supervisor.go", "internal/application/supervisor/github_sync_lifecycle.go",
-			"internal/application/app/issue_resolution.go"),
+		"ActiveExecution": paths(
+			"internal/adapter/state/execution.go", "internal/adapter/state/suspension.go", "internal/adapter/state/state.go"),
+		"Continuation": paths(
+			"internal/adapter/state/execution.go", "internal/adapter/state/issue_transition.go", "internal/adapter/state/suspension.go",
+			"internal/application/app/issue_resolution.go", "internal/application/supervisor/github_sync_lifecycle.go"),
 		"Request.Status": paths(
 			"internal/adapter/state/lease.go", "internal/adapter/state/issue_transition.go", "internal/application/app/app.go",
 			"internal/application/app/status.go", "internal/application/app/operator_attention.go",
@@ -151,12 +137,10 @@ func durableBoundaryName(info *types.Info, selector *ast.SelectorExpr) string {
 		return ""
 	}
 	switch {
-	case name == "Issue" && selector.Sel.Name == "GitHubSync":
-		return "GitHubSync"
-	case name == "Issue" && selector.Sel.Name == "Lease":
-		return "Lease"
-	case name == "Issue" && selector.Sel.Name == "ResourcePark":
-		return "ResourcePark"
+	case name == "Snapshot" && selector.Sel.Name == "ActiveExecution":
+		return "ActiveExecution"
+	case name == "Issue" && selector.Sel.Name == "Continuation":
+		return "Continuation"
 	case name == "Request" && selector.Sel.Name == "Status":
 		return "Request.Status"
 	default:
@@ -231,7 +215,6 @@ func TestIssueStatusStringConversionsStayAtSerializationBoundaries(t *testing.T)
 		"internal/application/lifecycle/worktrees.go":         1,
 		"internal/application/migration/migration.go":         3,
 		"internal/adapter/state/semantic.go":                  1,
-		"internal/application/supervisor/scheduler.go":        1,
 		"internal/application/supervisor/worker_execution.go": 2,
 	}
 	seen := map[string]int{}
@@ -276,7 +259,7 @@ func isIssueLifecycleVocabularyType(value types.Type) bool {
 		return false
 	}
 	switch named.Obj().Name() {
-	case "Status", "GitHubSync", "ResourceParkStatus", "RequestStatus",
+	case "Status", "EffectKind", "RequestStatus",
 		"ContinuationStage", "SuspensionStatus", "Recoverability", "ResolutionAction",
 		"ConflictAttemptStatus":
 		return true

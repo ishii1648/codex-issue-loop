@@ -124,10 +124,10 @@ func TestProductionDerivedV4RecoveryMatrixMigratesElevenIssuesAndFourteenSubstat
 	if legacyCount != 0 || terminalLeases != 0 || answerCount != 1 || generationTotal != 13 {
 		t.Fatalf("migration lost or retained data: legacy=%d terminal_leases=%d answers=%d generations=%d", legacyCount, terminalLeases, answerCount, generationTotal)
 	}
-	if snapshot.Issues["183"].Suspension.Recoverability != issuedomain.RecoverabilityNone || snapshot.Issues["183"].ResourcePark == nil {
+	if snapshot.Issues["183"].Suspension.Recoverability != issuedomain.RecoverabilityNone || snapshot.Issues["183"].Continuation == nil {
 		t.Fatalf("#183 stale lease was not converted to a non-executable checkpoint: %+v", snapshot.Issues["183"])
 	}
-	if snapshot.Issues["449"].Lease != nil || snapshot.Issues["449"].ResourcePark == nil || !containsResolution(snapshot.Issues["449"].Suspension.AllowedActions, issuedomain.ResolutionResume) {
+	if snapshot.ActiveExecution != nil || snapshot.Issues["449"].Continuation == nil || !containsResolution(snapshot.Issues["449"].Suspension.AllowedActions, issuedomain.ResolutionResume) {
 		t.Fatalf("#449 was not converted to an operator-resumable suspension: %+v", snapshot.Issues["449"])
 	}
 }
@@ -160,7 +160,7 @@ func TestV5MigrationQuarantinesOnlyAmbiguousExecutingIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 	isolated := snapshot.Issues["1"]
-	if isolated.Status != issuedomain.StatusBlocked || isolated.Lease != nil || isolated.Suspension == nil ||
+	if isolated.Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil || isolated.Suspension == nil ||
 		isolated.Suspension.Status != issuedomain.SuspensionQuarantined || isolated.Suspension.Recoverability != issuedomain.RecoverabilityAmbiguous {
 		t.Fatalf("ambiguous Issue was not isolated: %+v", isolated)
 	}
@@ -206,7 +206,7 @@ func TestV5MigrationConvertsLegacyScenarioStatusesToTypedSuspensions(t *testing.
 		t.Fatal(err)
 	}
 	for key, item := range snapshot.Issues {
-		if item.Status != issuedomain.StatusBlocked || item.Suspension == nil || item.Lease != nil {
+		if item.Status != issuedomain.StatusBlocked || item.Suspension == nil || snapshot.ActiveExecution != nil {
 			t.Fatalf("Issue %s retained legacy scenario runtime: %+v", key, item)
 		}
 	}
@@ -234,7 +234,11 @@ func migratedRecoveryCounts(t *testing.T, data []byte) (legacyCount, terminalLea
 		_ = json.Unmarshal(item["answers"], &answers)
 		answerCount += len(answers)
 		var generation int
-		_ = json.Unmarshal(item["lease_generation"], &generation)
+		if raw := item["generation"]; len(raw) > 0 {
+			_ = json.Unmarshal(raw, &generation)
+		} else {
+			_ = json.Unmarshal(item["lease_generation"], &generation)
+		}
 		generationTotal += generation
 	}
 	return legacyCount, terminalLeases, answerCount, generationTotal
