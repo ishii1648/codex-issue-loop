@@ -23,6 +23,7 @@ scripts/check-release.sh
 | 1 Issueの失敗・入力待ち・PR/check待ち・quarantine後もそのIssueを再admitせず後続を取得 | scheduler fault/conformance suite |
 | 作成者がtrusted ownerであるIssueだけを受理 | `internal/adapter/github/author_test.go`、`internal/domain/queue`、scheduler author verification suite |
 | root pending effectによるGitHub副作用の冪等性 | publication、GitHub sync、partial failure suite |
+| 先行PR merge後も後続PRを同一intentで継続し、base履歴分岐は拒否 | `TestPublishAllowsExistingPullRequestWhenBaseBranchFastForwards`、`TestPublishRefusesExistingPullRequestWhenBaseHistoryDiverges` |
 | stop/restartとorphan process回収 | process controller、scheduler cancellation、fault suite |
 | worktree provenance不一致をspawn前に拒否 | worktree validation、issue resolution suite |
 

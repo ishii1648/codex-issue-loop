@@ -90,8 +90,15 @@ func (m Manager) validateExistingPullRequest(ctx context.Context, cfg config.Con
 		return "", nil, publication.PullRequestMismatchError{Detail: "fetch authoritative Pull Request base: " + err.Error()}
 	}
 	remoteBase, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "refs/remotes/origin/"+cfg.Git.BaseBranch)
-	if err != nil || strings.TrimSpace(remoteBase) != pr.BaseRefOID {
-		return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("Pull Request base SHA changed during validation: pr=%s remote=%s", pr.BaseRefOID, strings.TrimSpace(remoteBase))}
+	if err != nil {
+		return "", nil, publication.PullRequestMismatchError{Detail: "resolve authoritative Pull Request base: " + err.Error()}
+	}
+	remoteBase = strings.TrimSpace(remoteBase)
+	// A preceding Issue may merge while this Pull Request is open. The base
+	// branch may only move forward from the SHA GitHub reported; rewritten or
+	// divergent history remains a fail-closed mismatch.
+	if _, err := m.run(ctx, git, "-C", worktreePath, "merge-base", "--is-ancestor", pr.BaseRefOID, remoteBase); err != nil {
+		return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("Pull Request base SHA diverged during validation: pr=%s remote=%s", pr.BaseRefOID, remoteBase)}
 	}
 	for name, sha := range map[string]string{"base": pr.BaseRefOID, "head": pr.HeadRefOID} {
 		if _, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "--verify", sha+"^{commit}"); err != nil {

@@ -236,6 +236,7 @@ internal/
 - eventを正本または実行authorityにしない。
 - workerにqueue選択、commit、push、PR作成を許可しない。
 - 同一publication intentの再試行で別branchまたは別PRを作らない。
+- PR待機中にbase branchが進んでもfast-forwardなら同一publication intentを継続し、履歴分岐だけを拒否する。
 - 同一API majorのminor updateでIssue状態の意味を変えない。
 
 ## 13. 実装との関係

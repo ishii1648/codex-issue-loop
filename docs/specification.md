@@ -596,8 +596,8 @@ preflightは別プロセスではなく、初回worker promptに含める論理�
 
 Codex workerにはIssue worktreeだけを`workspace-write`で渡す。linked worktreeのGit metadataは元repositoryの`.git/worktrees`配下にありsandbox外なので、workerへ書き込み権限を広げない。workerが`completed`を返した後、supervisor内のpublisherがrepository Git operation gate内で次を順に実行する。
 
-1. 保存済みPRがある場合は全stateの同一head branch PRを列挙し、保存URL、open state、base/head ref名、authoritative base/head SHA、local HEADのforward-only関係を検証する。複数PR、closed-without-merge、別branch、divergeは変更前に拒否する。
-2. 保存済みbase SHA（既存PRではauthoritative base SHA）からHEAD/worktreeまでのtracked pathとuntracked pathをNUL区切りで列挙し、公開対象とworktree境界を監査する。
+1. 保存済みPRがある場合は全stateの同一head branch PRを列挙し、保存URL、open state、base/head ref名、authoritative base/head SHA、local HEADのforward-only関係を検証する。base branchはPRが報告したbase SHAからのfast-forwardだけを許容し、先行Issueのmerge後も同じPRを再利用する。複数PR、closed-without-merge、別branch、force-pushまたはdivergeは変更前に拒否する。
+2. 保存済みbase SHA（既存PRではPRが報告したbase SHA）からHEAD/worktreeまでのtracked pathとuntracked pathをNUL区切りで列挙し、公開対象とworktree境界を監査する。後から進んだbase branchを差分起点へ置換せず、先行Issueの変更を当該Issueの公開対象へ混入させない。
 3. `formatters.go.enabled: true`なら、列挙済みの既存・新規`.go` regular fileだけを対象にする。各pathがworktree内のcleanな相対pathで、symlink、hard link、directory、worktree外参照でないことを検証し、shellを介さず固定済み`gofmt -w <paths...>`を実行する。続けて`gofmt -l`相当と`git diff --check`を検証する。
 4. formatterの対象数、変更有無、成功またはsecret-safeなfailure codeを`publication_audited` eventとIssueの最新`publication_audit` statusへ保存する。timeout、cancellation、実行・検証失敗ではcommit、push、PR更新を行わずretryへ移す。
 5. `git status --porcelain`で差分を確認し、差分があれば`git add --all`と`git diff --cached --check`を行う。formatter変更はworker変更と同じcommitへ含め、整形済みまたはretry済みで差分がなければ空commitを作らない。
