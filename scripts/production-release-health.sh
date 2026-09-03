@@ -43,7 +43,7 @@ capture_sample() {
       failed_diagnostic_codes:[$doctor[0].diagnostics[] | select(.ok | not) | .code] | sort},
     status:{state_revision:$status[0].state.state_revision,supervisor_state:$status[0].state.supervisor.state,
       active_workers:$status[0].worker_pool.active,worker_limit:$status[0].worker_pool.limit,
-      active_leases:[$status[0].state.issues[] | select(.lease != null)] | length,
+      active_leases:[$status[0].state.issues[] | select(.execution_lease != null)] | length,
       pending_requests:$status[0].pending_requests | length},
     rollback_occurred:($delivery[0].result == "rolled_back" or $delivery[0].result == "rollback_failed"),
     healthy:($version[0].version == $release_tag and $version[0].commit == $release_commit and

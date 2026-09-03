@@ -60,7 +60,7 @@ revision=7
 if [ "${MISMATCH:-0}" = 1 ] && [ "$count" -gt 1 ]; then revision=8; fi
 supervisor=idle
 case "${DOCTOR_MODE:-}" in stopped*) supervisor=stopped ;; esac
-printf '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"repo_id":"production-id","state_revision":%s,"supervisor":{"state":"%s"},"issues":{}}}\n' "$revision" "$supervisor"
+printf '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"repo_id":"production-id","state_revision":%s,"supervisor":{"state":"%s"},"issues":{"7":{"execution_lease":{"owner":{"run_id":"run_7","generation":1},"slot":0,"resolved_resources":["repo:*"],"base_sha":"base"}}}}}\n' "$revision" "$supervisor"
 `)
 			candidate := writeExecutable(t, root, "candidate", "#!/bin/sh\nexit 0\n")
 			fakeContract := writeExecutable(t, root, "offline-contract", `#!/bin/sh
@@ -179,6 +179,10 @@ printf '%s\n' '{"schema_version":1,"mode":"credentialless-offline","home_isolate
 			if !mapsEqual(privateEvidence.Before, privateEvidence.After) || privateEvidence.Contract["home_isolated"] != true {
 				t.Fatalf("private evidence=%s", privateData)
 			}
+			leases, ok := privateEvidence.Before["leases"].([]any)
+			if !ok || len(leases) != 1 {
+				t.Fatalf("execution lease was not captured from the canonical status schema: %s", privateData)
+			}
 		})
 	}
 }
@@ -246,7 +250,7 @@ case "$1" in
     if [ "${BAD_HEALTH:-0}" = 1 ]; then result=rollback_failed; fi
     printf '{"phase":"succeeded","result":"%s","current":{"version":"v0.8.0","commit":"`+evidenceCommit+`"}}\n' "$result" ;;
   doctor) printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}' ;;
-  status) printf '%s\n' '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"state_revision":9,"supervisor":{"state":"idle"},"issues":{}}}' ;;
+  status) printf '%s\n' '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"state_revision":9,"supervisor":{"state":"idle"},"issues":{"7":{"execution_lease":{"owner":{"run_id":"run_7","generation":1}}}}}}' ;;
   version) printf '%s\n' '{"version":"v0.8.0","commit":"`+evidenceCommit+`"}' ;;
   *) exit 2 ;;
 esac
@@ -277,6 +281,20 @@ esac
 			if (err == nil) != test.wantOK {
 				t.Fatalf("err=%v output=%s", err, output)
 			}
+			if test.wantOK {
+				data, readErr := os.ReadFile(filepath.Join(artifactDir, "production-health-report.json"))
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				var report struct {
+					Status struct {
+						ActiveLeases int `json:"active_leases"`
+					} `json:"status"`
+				}
+				if err := json.Unmarshal(data, &report); err != nil || report.Status.ActiveLeases != 1 {
+					t.Fatalf("release health did not read execution_lease: report=%s err=%v", data, err)
+				}
+			}
 		})
 	}
 }
@@ -293,7 +311,7 @@ case "$1 $2 $3" in
     if [ "$1" = doctor ]; then
       printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}'
     elif [ "$1" = status ]; then
-      printf '%s\n' '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"state_revision":19,"supervisor":{"state":"polling"},"issues":{}}}'
+      printf '%s\n' '{"worker_pool":{"active":0,"limit":1},"pending_requests":[],"state":{"state_revision":19,"supervisor":{"state":"polling"},"issues":{"7":{"execution_lease":{"owner":{"run_id":"run_7","generation":1}}}}}}'
     else
       exit 2
     fi ;;
@@ -336,8 +354,13 @@ esac
 	var report struct {
 		SchemaVersion int  `json:"schema_version"`
 		Healthy       bool `json:"healthy"`
+		Repositories  []struct {
+			Status struct {
+				ActiveLeases int `json:"active_leases"`
+			} `json:"status"`
+		} `json:"repositories"`
 	}
-	if err := json.Unmarshal(data, &report); err != nil || report.SchemaVersion != 2 || !report.Healthy {
+	if err := json.Unmarshal(data, &report); err != nil || report.SchemaVersion != 2 || !report.Healthy || len(report.Repositories) != 1 || report.Repositories[0].Status.ActiveLeases != 1 {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
 }
@@ -530,6 +553,15 @@ func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 	for _, required := range []string{`host_gomodcache=$(go env GOMODCACHE)`, `host_gocache=$(go env GOCACHE)`, `GOMODCACHE="$host_gomodcache"`, `GOCACHE="$host_gocache"`} {
 		if !strings.Contains(string(productionIsolation), required) {
 			t.Fatalf("production isolation does not preserve the primed Go cache through HOME isolation: missing %q", required)
+		}
+	}
+	for _, path := range []string{"scripts/offline-release-contract.sh", "scripts/production-state-isolation.sh", "scripts/production-assignment-health.sh", "scripts/production-release-health.sh"} {
+		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), `.lease != null`) || !strings.Contains(string(data), `execution_lease`) {
+			t.Fatalf("%s does not consume the canonical execution_lease status field", path)
 		}
 	}
 }
