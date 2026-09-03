@@ -245,6 +245,53 @@ func TestWebhookSchedulerReconcilesMailboxWithoutFsnotify(t *testing.T) {
 	t.Fatal("missed mailbox notification was not reconciled")
 }
 
+func TestSchedulerTransitionsFromStartingBeforeResumingRetainedWorker(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
+	pool := &blockingPoolWorker{started: make(chan int, 1), release: make(chan struct{}, 1)}
+	loop.Worker = pool
+	now := time.Now().UTC()
+	_, err := loop.Store.Update("retained_worker_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = state.SupervisorStateStarting
+		branch := "codex/issue-1-test"
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: "run_retained",
+			DeclaredResources: []string{"repo:*"},
+			LeaseGeneration:   1, Lease: &state.ResourceLease{
+				Owner: state.LeaseOwner{RunID: "run_retained", Generation: 1}, Slot: 0,
+				DeclaredResources: []string{"repo:*"}, ResolvedResources: []string{"repo:*"}, ReservedAt: now,
+			},
+			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			Attempts: 1, ExecutionProfile: "standard", UpdatedAt: now,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.SchedulerTimers = inertSchedulerTimers{created: make(chan struct{}, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	select {
+	case <-pool.started:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("retained worker did not resume")
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil || snapshot.Supervisor.State != state.SupervisorStateRunning {
+		cancel()
+		t.Fatalf("supervisor=%+v err=%v", snapshot.Supervisor, err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchedulerCycleAndGitHubAttemptShareRuntimeRunID(t *testing.T) {
 	loop, fake := testLoop(t, worker.Result{})
 	loop.Logger = log.New(io.Discard, "", 0)
