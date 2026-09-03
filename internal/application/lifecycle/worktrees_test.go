@@ -172,6 +172,42 @@ func TestPurgeRequiresExactConfirmationAndCanRemoveDirtyWorktree(t *testing.T) {
 	}
 }
 
+func TestPurgeCanRemoveExplicitlyConfirmedOrphanWorktree(t *testing.T) {
+	ctx := context.Background()
+	cfg, stateRoot := lifecycleRepository(t)
+	worktrees := worktree.Manager{StateRoot: stateRoot, GitPath: "git"}
+	created, err := worktrees.Ensure(ctx, cfg, "repo-id", 10, "orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(created.Path, "dirty.txt"), []byte("discard\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Dir: filepath.Join(stateRoot, "repos", "repo-id"), RepoID: "repo-id", RepoPath: cfg.RepoPath}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{Worktrees: worktrees, Remote: fakeRemote{open: map[int]string{}}}
+	result, err := manager.Purge(ctx, cfg, "repo-id", store, snapshot, 10, ConfirmationToken("repo-id", 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Action != "purged" || result.Entries[0].Status != "orphaned" || !result.Entries[0].Safety.Dirty {
+		t.Fatalf("result=%+v", result)
+	}
+	if _, err := os.Stat(created.Path); !os.IsNotExist(err) {
+		t.Fatalf("orphan worktree remains: %v", err)
+	}
+	events, _ := os.ReadFile(store.EventsPath())
+	if !strings.Contains(string(events), `"type":"worktree_purged"`) || !strings.Contains(string(events), `"issue_number":10`) {
+		t.Fatalf("orphan purge audit event missing: %s", events)
+	}
+}
+
 func lifecycleRepository(t *testing.T) (config.Config, string) {
 	t.Helper()
 	root := t.TempDir()
