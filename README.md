@@ -66,7 +66,7 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 
 更新・rollbackを含む詳細は[Release・install・update](docs/release.md)を参照してください。
 
-production Releaseはstableだけを配布し、公開だけではrepositoryを更新しません。hostの設定を明示migrationした後、exact stable versionをrepository単位でpreview/applyします。設定は`$HOME/.agent-loop-delivery.yaml`、artifactはimmutable slotへ置かれます。
+production Releaseはstableだけを配布し、stableをGAと分けません。公開だけではrepositoryを更新せず、hostの設定を明示migrationした後、exact stable versionをrepository単位でpreview/applyします。設定は`$HOME/.agent-loop-delivery.yaml`、artifactはimmutable slotへ置かれます。assignment healthはreleaseとは独立したrollout結果です。
 
 ```sh
 "$agent_loop_bin" delivery assignment migrate --json

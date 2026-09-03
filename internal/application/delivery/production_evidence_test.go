@@ -309,7 +309,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		"candidate-integrity":             {"production-state-isolation"},
 		"promotion-evidence":              {"candidate-integrity"},
 		"promote-stable":                  {"build-candidate", "promotion-evidence"},
-		"post-release-health":             {"promote-stable"},
+		"verify-stable-release":           {"promote-stable"},
 	}
 	for name, dependencies := range want {
 		current, ok := workflow.Jobs[name]
@@ -358,8 +358,6 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		`subject-path: promotion-evidence.json`,
 		`.assignment_protocol == 1`,
 		`.production_before.doctor_safe == true`,
-		`.rollout_mode == "per-repository-stable-assignment"`,
-		`.rollback_drill.typed_rollback == true`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow is missing byte-promotion evidence %q", required)
@@ -374,12 +372,64 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	if strings.Count(text, "environment: production") != 1 {
 		t.Fatal("release workflow must enter the production environment exactly once")
 	}
+	if strings.Contains(text, "post-release-health") || strings.Contains(text, "production-health-report.json") {
+		t.Fatal("release workflow must not depend on repository rollout health")
+	}
+}
+
+func TestRepositoryRolloutHealthIsAnIndependentWorkflow(t *testing.T) {
+	path := filepath.Join(repositoryRoot(t), ".github", "workflows", "rollout.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run  string `yaml:"run"`
+				Uses string `yaml:"uses"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := workflow.Jobs["verify-rollout-health"]
+	if !ok || len(job.Steps) == 0 {
+		t.Fatal("rollout workflow has no verify-rollout-health job")
+	}
+	for index, step := range job.Steps {
+		if (step.Run == "") == (step.Uses == "") {
+			t.Fatalf("rollout workflow step %d must contain exactly one of run or uses", index+1)
+		}
+	}
+	text := string(data)
+	for _, required := range []string{
+		`workflow_dispatch:`,
+		`Existing stable release tag to verify after repository rollout`,
+		`verify-rollout-health`,
+		`production-health-report.json`,
+		`.rollout_mode == "per-repository-stable-assignment"`,
+		`.rollback_drill.typed_rollback == true`,
+		`.soak.duration_seconds == 300`,
+		`subject-path: dist/stable/production-health-report.json`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("rollout workflow is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"gh release create", "promote-stable", "sleep 30", "environment: production"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("rollout workflow contains release coupling %q", forbidden)
+		}
+	}
 }
 
 func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 	for _, path := range []string{
 		".github/workflows/contracts.yml",
 		".github/workflows/release.yml",
+		".github/workflows/rollout.yml",
 		"scripts/cli-surface-contract.sh",
 		"scripts/offline-release-contract.sh",
 		"scripts/production-assignment-health.sh",

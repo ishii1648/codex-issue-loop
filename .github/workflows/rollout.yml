@@ -1,0 +1,103 @@
+name: Repository rollout health
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable release tag to verify after repository rollout
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag }}
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: rollout-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify-rollout-health:
+    name: verify-rollout-health
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Resolve the immutable stable release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git cat-file -t "${RELEASE_TAG}" | grep -qx tag
+          release_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+          git merge-base --is-ancestor "$release_commit" origin/main
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease \
+            --jq 'select(.tagName == "'"$RELEASE_TAG"'" and (.isDraft|not) and (.isPrerelease|not))' >/dev/null
+          printf 'commit=%s\n' "$release_commit" >>"$GITHUB_OUTPUT"
+      - name: Download stable artifact and rollout evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist/stable
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir dist/stable
+      - name: Verify stable artifact and repository rollout evidence
+        env:
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist/stable
+          shasum -a 256 -c checksums.txt
+          stable_digest=$(shasum -a 256 agent-loop_Darwin_arm64 | awk '{print $1}')
+          jq -e --arg tag "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" --arg digest "$stable_digest" '
+            .version == $tag and .commit == $commit and .artifact_sha256 == $digest and .assignment_protocol == 1
+          ' release-manifest.json >/dev/null
+          chmod 0755 agent-loop_Darwin_arm64
+          ./agent-loop_Darwin_arm64 version --json | jq -e --arg tag "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
+            '.version == $tag and .commit == $commit and .assignment_protocol == 1' >/dev/null
+          jq -e --arg tag "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" --arg digest "$stable_digest" '
+            .schema_version == 2 and .release_tag == $tag and .release_commit == $commit and
+            .stable_binary_sha256 == $digest and .rollout_mode == "per-repository-stable-assignment" and
+            .rollback_drill.typed_rollback == true and .rollback_drill.same_artifact_reapplied == true and
+            .rollback_drill.preserved.state == true and .rollback_drill.preserved.issues == true and
+            .rollback_drill.preserved.leases == true and .rollback_drill.preserved.worktrees == true and
+            .rollback_drill.other_repository_unchanged.assignment == true and
+            .rollback_drill.other_repository_unchanged.pid == true and
+            .rollback_drill.other_repository_unchanged.binary == true and
+            .rollback_drill.other_repository_unchanged.state_revision == true and
+            (.repositories | length) >= 1 and all(.repositories[];
+              .assignment.version == $tag and .assignment.commit == $commit and
+              .assignment.artifact_sha256 == $digest and .runtime.digest == $digest and
+              .runtime.matches == true and .runtime.loaded == true and .runtime.running == true and
+              .transaction_phase == "succeeded" and .fence_active == false and .verified == true and
+              .doctor.schema_version == 1 and .doctor.ok == true and
+              (.doctor.failed_diagnostic_codes | length) == 0 and
+              .status.worker_limit == 1 and .status.active_workers <= 1 and .healthy == true) and
+            .soak.duration_seconds == 300 and .soak.sample_offsets_seconds == [0,60,300] and
+            (.soak.samples | length) == 3 and all(.soak.samples[]; .healthy == true) and
+            .healthy == true
+          ' production-health-report.json >/dev/null
+      - name: Verify attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify dist/stable/agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
+      - name: Attest rollout evidence
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/stable/production-health-report.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: production-health-report-${{ inputs.release_tag }}
+          path: dist/stable/production-health-report.json
+          if-no-files-found: error
