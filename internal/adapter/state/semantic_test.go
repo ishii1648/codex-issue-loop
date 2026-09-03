@@ -52,12 +52,12 @@ func TestSemanticContractDoesNotRequireProvenanceBeforeWorkerBoundary(t *testing
 	}
 }
 
-func TestSemanticContractRequiresLeaseForExecutingLifecycle(t *testing.T) {
+func TestSemanticContractRequiresRepositoryActiveExecution(t *testing.T) {
 	snapshot := semanticFixture(issuedomain.StatusRunning.String())
-	snapshot.Issues["442"].Lease = nil
+	snapshot.ActiveExecution = nil
 	err := ValidateSemanticContract(snapshot)
 	var compatibility SemanticCompatibilityError
-	if !errors.As(err, &compatibility) || len(compatibility.Violations) != 1 || compatibility.Violations[0].Code != SemanticCodeExecutionLeaseMissing {
+	if !errors.As(err, &compatibility) || len(compatibility.Violations) != 1 || compatibility.Violations[0].Code != SemanticCodeExecutionAuthorityMissing {
 		t.Fatalf("err=%v violations=%+v", err, compatibility.Violations)
 	}
 }
@@ -68,9 +68,12 @@ func semanticFixture(status string) Snapshot {
 		Number: 442, Status: issuedomain.Status(status), RunID: "run-442", Worktree: "/state/worktrees/442", Branch: "codex/issue-442", Attempts: 1,
 		Workspace: &WorkerWorkspace{Path: "/state/worktrees/442", Branch: "codex/issue-442", RepoID: "repo-1", Repository: "owner/repo", GitCommonDir: "/repo/.git", MainCheckout: "/repo", CapturedAt: now},
 	}
-	if issue.Status.RequiresExecutionLease() {
-		issue.LeaseGeneration = 1
-		issue.Lease = &ExecutionLease{Owner: LeaseOwner{RunID: issue.RunID, Generation: 1}, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{RepositoryResource}, ReservedAt: now}
+	if issue.Status.RequiresActiveExecution() {
+		issue.Generation = 1
 	}
-	return Snapshot{RepoID: "repo-1", Issues: map[string]*Issue{"442": issue}}
+	snapshot := Snapshot{RepoID: "repo-1", Issues: map[string]*Issue{"442": issue}}
+	if issue.Status.RequiresActiveExecution() {
+		snapshot.ActiveExecution = &ActiveExecution{IssueNumber: issue.Number, RunID: issue.RunID, Generation: issue.Generation, StartedAt: now}
+	}
+	return snapshot
 }

@@ -31,7 +31,7 @@ func TestCompleteDerivesPublicationState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !decision.PullRequestMerged || decision.GitHubSync != GitHubSyncDone || decision.Transition.To != StatusCompleted {
+	if !decision.PullRequestMerged || decision.Effect != EffectMarkDone || decision.Transition.To != StatusCompleted {
 		t.Fatalf("unexpected completion decision: %+v", decision)
 	}
 }
@@ -68,7 +68,6 @@ func TestRecoveryTransitions(t *testing.T) {
 	}{
 		{name: "start fresh claim", make: func() (Transition, error) { return StartClaim(StatusUnset) }, to: StatusClaiming},
 		{name: "resume answer", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusResumePending) }, to: StatusResumePending},
-		{name: "wait for answer resources", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusAnswerClaimWaiting) }, to: StatusAnswerClaimWaiting},
 		{name: "retry conflict", make: func() (Transition, error) { return RetryConflict(StatusBlocked) }, to: StatusResolvingConflict},
 	}
 	for _, test := range tests {
@@ -132,7 +131,6 @@ func TestExecutionTransitions(t *testing.T) {
 		{name: "start claimed worker", make: func() (Transition, error) { return StartClaimedWorker(StatusClaimed) }, from: StatusClaimed, to: StatusRunning},
 		{name: "start answered resume", make: func() (Transition, error) { return StartAnsweredResume(StatusResumePending) }, from: StatusResumePending, to: StatusRunning},
 		{name: "start retry", make: func() (Transition, error) { return StartRetry(StatusRetryWait) }, from: StatusRetryWait, to: StatusRunning},
-		{name: "acquire answered claim", make: func() (Transition, error) { return AcquireAnsweredClaim(StatusAnswerClaimWaiting) }, from: StatusAnswerClaimWaiting, to: StatusResumePending},
 		{name: "interrupt claim", make: func() (Transition, error) { return InterruptExecution(StatusClaiming) }, from: StatusClaiming, to: StatusRetryWait},
 		{name: "interrupt running", make: func() (Transition, error) { return InterruptExecution(StatusRunning) }, from: StatusRunning, to: StatusRetryWait},
 	}
@@ -166,20 +164,17 @@ func TestOutcomeDecisionsDeriveCompanionState(t *testing.T) {
 		name   string
 		make   func() (OutcomeDecision, error)
 		to     Status
-		sync   GitHubSync
+		effect EffectKind
 		reason string
 	}{
 		{name: "workspace block", make: func() (OutcomeDecision, error) {
 			return RejectWorkerWorkspace(StatusRunning, "unsafe workspace", "issue")
-		}, to: StatusBlocked, sync: GitHubSyncBlocked, reason: "unsafe workspace"},
-		{name: "resource correction", make: func() (OutcomeDecision, error) {
-			return RequestResourceCorrection(StatusRunning, "claim mismatch", "issue")
-		}, to: StatusNeedsInput, sync: GitHubSyncNeedsInput, reason: "claim mismatch"},
+		}, to: StatusBlocked, effect: EffectMarkBlocked, reason: "unsafe workspace"},
 		{name: "checks exhausted", make: func() (OutcomeDecision, error) {
 			return ExhaustPullRequestChecks(StatusAwaitingChecks, "checks failed", "issue")
-		}, to: StatusFailed, sync: GitHubSyncFailed, reason: "checks failed"},
-		{name: "generic failure", make: func() (OutcomeDecision, error) { return Fail(StatusRunning, "worker failed", "issue", false) }, to: StatusFailed, sync: GitHubSyncFailed, reason: "worker failed"},
-		{name: "generic block", make: func() (OutcomeDecision, error) { return Fail(StatusResolvingConflict, "manual repair", "issue", true) }, to: StatusBlocked, sync: GitHubSyncBlocked, reason: "manual repair"},
+		}, to: StatusFailed, effect: EffectMarkFailed, reason: "checks failed"},
+		{name: "generic failure", make: func() (OutcomeDecision, error) { return Fail(StatusRunning, "worker failed", "issue", false) }, to: StatusFailed, effect: EffectMarkFailed, reason: "worker failed"},
+		{name: "generic block", make: func() (OutcomeDecision, error) { return Fail(StatusResolvingConflict, "manual repair", "issue", true) }, to: StatusBlocked, effect: EffectMarkBlocked, reason: "manual repair"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -187,7 +182,7 @@ func TestOutcomeDecisionsDeriveCompanionState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if decision.Transition.To != test.to || decision.GitHubSync != test.sync || decision.LastError != test.reason || decision.FailureKind != "issue" {
+			if decision.Transition.To != test.to || decision.Effect != test.effect || decision.LastError != test.reason || decision.FailureKind != "issue" {
 				t.Fatalf("unexpected outcome decision: %+v", decision)
 			}
 		})
@@ -198,7 +193,7 @@ func TestOutcomeDecisionsRejectIncompleteOrUnrelatedInput(t *testing.T) {
 	if _, err := RejectAnsweredResume(StatusRunning, "remote changed", "issue"); err == nil {
 		t.Fatal("running Issue must not use answered resume rejection")
 	}
-	if _, err := RequestResourceCorrection(StatusRunning, "", "issue"); err == nil {
+	if _, err := RejectWorkerWorkspace(StatusRunning, "", "issue"); err == nil {
 		t.Fatal("outcome decision must require a reason")
 	}
 	if _, err := Fail(StatusCompleted, "failed", "issue", false); err == nil {
@@ -227,19 +222,19 @@ func TestReconcileObservationTransitions(t *testing.T) {
 func TestStatusOperationalPredicates(t *testing.T) {
 	tests := []struct {
 		status          Status
-		occupiesSlot    bool
+		activeExecution bool
 		webhookTerminal bool
 		webhookRoutable bool
 	}{
-		{status: StatusClaiming, occupiesSlot: true, webhookRoutable: true},
-		{status: StatusRunning, occupiesSlot: true, webhookRoutable: true},
+		{status: StatusClaiming, activeExecution: true, webhookRoutable: true},
+		{status: StatusRunning, activeExecution: true, webhookRoutable: true},
 		{status: StatusRetryWait, webhookRoutable: true},
 		{status: StatusNeedsInput, webhookTerminal: true, webhookRoutable: true},
 		{status: StatusCompleted, webhookTerminal: true},
 	}
 	for _, test := range tests {
-		if got := test.status.OccupiesWorkerSlot(); got != test.occupiesSlot {
-			t.Errorf("%s OccupiesWorkerSlot=%v want %v", test.status, got, test.occupiesSlot)
+		if got := test.status.RequiresActiveExecution(); got != test.activeExecution {
+			t.Errorf("%s RequiresActiveExecution=%v want %v", test.status, got, test.activeExecution)
 		}
 		if got := test.status.TerminalForWebhook(); got != test.webhookTerminal {
 			t.Errorf("%s TerminalForWebhook=%v want %v", test.status, got, test.webhookTerminal)
@@ -252,21 +247,20 @@ func TestStatusOperationalPredicates(t *testing.T) {
 
 func TestStatusSchedulingPredicates(t *testing.T) {
 	tests := []struct {
-		status        Status
-		pending       bool
-		retainsLogs   bool
-		preventsIdle  bool
-		ineligible    bool
-		usesSlot      bool
-		blocksPRQueue bool
+		status       Status
+		pending      bool
+		retainsLogs  bool
+		preventsIdle bool
+		ineligible   bool
+		dispatches   bool
 	}{
-		{status: StatusUnset, usesSlot: true},
-		{status: StatusClaiming, pending: true, retainsLogs: true, preventsIdle: true, usesSlot: true},
-		{status: StatusRunning, retainsLogs: true, preventsIdle: true, ineligible: true, usesSlot: true},
-		{status: StatusNeedsInput, retainsLogs: true, ineligible: true, usesSlot: true},
-		{status: StatusAwaitingChecks, pending: true, retainsLogs: true, preventsIdle: true, blocksPRQueue: true},
+		{status: StatusUnset},
+		{status: StatusClaiming, pending: true, retainsLogs: true, preventsIdle: true, dispatches: true},
+		{status: StatusRunning, retainsLogs: true, preventsIdle: true, ineligible: true},
+		{status: StatusNeedsInput, retainsLogs: true, ineligible: true},
+		{status: StatusAwaitingChecks, pending: true, retainsLogs: true, preventsIdle: true},
 		{status: StatusAwaitingMerge, pending: true, retainsLogs: true, preventsIdle: true},
-		{status: StatusCompleted, ineligible: true, usesSlot: true},
+		{status: StatusCompleted, ineligible: true},
 	}
 	for _, test := range tests {
 		if got := test.status.PendingDispatch(); got != test.pending {
@@ -281,15 +275,9 @@ func TestStatusSchedulingPredicates(t *testing.T) {
 		if got := test.status.IneligibleForAdmission(); got != test.ineligible {
 			t.Errorf("%s IneligibleForAdmission=%v want %v", test.status, got, test.ineligible)
 		}
-		if got := test.status.UsesWorkerSlot(); got != test.usesSlot {
-			t.Errorf("%s UsesWorkerSlot=%v want %v", test.status, got, test.usesSlot)
+		if got := test.status.DispatchesWorker(); got != test.dispatches {
+			t.Errorf("%s DispatchesWorker=%v want %v", test.status, got, test.dispatches)
 		}
-		if got := test.status.BlocksQueueForPullRequest(false); got != test.blocksPRQueue {
-			t.Errorf("%s BlocksQueueForPullRequest(false)=%v want %v", test.status, got, test.blocksPRQueue)
-		}
-	}
-	if !StatusAwaitingMerge.BlocksQueueForPullRequest(true) {
-		t.Fatal("awaiting merge must block an auto-merge queue")
 	}
 }
 
@@ -316,19 +304,19 @@ func TestAllStatusesAreValidAndClassifiedForWorkspaceProvenance(t *testing.T) {
 	}
 }
 
-func TestGitHubSyncVocabularyAndCombinedDispatch(t *testing.T) {
-	for _, sync := range AllGitHubSyncs() {
-		if err := sync.Validate(); err != nil {
-			t.Errorf("AllGitHubSyncs contains invalid value %q: %v", sync, err)
+func TestEffectVocabularyAndCombinedDispatch(t *testing.T) {
+	for _, effect := range AllEffectKinds() {
+		if err := effect.Validate(); err != nil {
+			t.Errorf("AllEffectKinds contains invalid value %q: %v", effect, err)
 		}
 	}
-	if StatusCompleted.DispatchPending(GitHubSyncNone) {
+	if StatusCompleted.DispatchPending(false) {
 		t.Fatal("synchronized completed Issue must not be dispatched")
 	}
-	if !StatusCompleted.DispatchPending(GitHubSyncDone) {
-		t.Fatal("completed Issue with pending done synchronization must be dispatched")
+	if !StatusCompleted.DispatchPending(true) {
+		t.Fatal("completed Issue with a pending effect must be dispatched")
 	}
-	if StatusRunning.UsesWorkerSlotWhile(GitHubSyncFailed) {
-		t.Fatal("GitHub synchronization must not consume a worker slot")
+	if StatusRunning.DispatchesWorkerWhile(true) {
+		t.Fatal("pending effect must not dispatch a worker")
 	}
 }

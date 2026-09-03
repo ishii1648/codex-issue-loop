@@ -346,7 +346,7 @@ func TestLoadAcceptsQueueOrderStrategies(t *testing.T) {
 	}
 }
 
-func TestLoadResourceDefinitionsEnableRepositoryConcurrency(t *testing.T) {
+func TestLoadRejectsRepositoryConcurrencyAboveOneEvenWithLegacyResourceDefinitions(t *testing.T) {
 	dir := writeConfig(t, `version: 4
 github:
   repo: owner/repo
@@ -360,13 +360,8 @@ resources:
     - name: docs
       paths: [docs/**, README.md]
 `)
-	cfg, err := Load(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	settings := cfg.AdmissionSettings()
-	if settings.Legacy || settings.Concurrency != 3 || len(settings.Definitions) != 2 {
-		t.Fatalf("settings=%+v", settings)
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "queue.concurrency must be 1") {
+		t.Fatalf("concurrent queue accepted: %v", err)
 	}
 }
 
@@ -376,14 +371,8 @@ func TestSelfHostingAndExampleConfigurationsLimitProductionConcurrencyToOne(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantResources := []string{"config", "scheduler", "github", "worker", "host", "operations", "release", "docs"}
-	if cfg.Queue.Concurrency != 1 || cfg.Resources.MetadataVersion != 1 || len(cfg.Resources.Definitions) != len(wantResources) {
+	if cfg.Queue.Concurrency != 1 || len(cfg.LegacyResources.Definitions) != 0 {
 		t.Fatalf("self-hosting production config=%+v", cfg)
-	}
-	for index, name := range wantResources {
-		if cfg.Resources.Definitions[index].Name != name {
-			t.Fatalf("resource %d=%q want=%q", index, cfg.Resources.Definitions[index].Name, name)
-		}
 	}
 
 	exampleData, err := os.ReadFile(filepath.Join(repositoryRoot, ".agent-loop.example.yaml"))
@@ -400,12 +389,10 @@ func TestSelfHostingAndExampleConfigurationsLimitProductionConcurrencyToOne(t *t
 	}
 }
 
-func TestLoadRejectsConcurrentQueueWithoutValidResourceDefinitions(t *testing.T) {
+func TestLoadRejectsConcurrentQueueRegardlessOfLegacyResourceDefinitions(t *testing.T) {
 	fragments := []string{
 		"queue:\n  concurrency: 2\n",
 		"queue:\n  concurrency: 2\nresources:\n  definitions:\n    - name: repo\n      paths: [docs/**]\n",
-		"resources:\n  metadata_version: 2\n  definitions:\n    - name: docs\n      paths: [docs/**]\n",
-		"resources:\n  definitions:\n    - name: docs\n      paths: [../docs/**]\n",
 	}
 	for _, fragment := range fragments {
 		dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\n"+fragment)

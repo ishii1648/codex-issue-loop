@@ -253,7 +253,7 @@ func inspectSemanticState(path string) ([]SemanticFinding, error) {
 	_ = json.Unmarshal(object["version"], &version)
 	_ = json.Unmarshal(object["semantic_contract_version"], &semanticVersion)
 	if version == CurrentVersion && semanticVersion >= statecontract.MinimumVersion && semanticVersion < statecontract.CurrentVersion {
-		if err := normalizeV5SemanticStateObject(object); err != nil {
+		if err := normalizeV5SemanticStateObject(object, time.Now().UTC()); err != nil {
 			return nil, err
 		}
 		object["semantic_contract_version"] = json.RawMessage(fmt.Sprint(statecontract.CurrentVersion))
@@ -743,7 +743,7 @@ func migrateTransaction(path string, migration journal) error {
 					return fmt.Errorf("migrate transaction snapshot: %w", err)
 				}
 			} else if sourceVersion == CurrentVersion && sourceSemanticVersion < statecontract.CurrentVersion {
-				if err := normalizeV5SemanticStateObject(nested); err != nil {
+				if err := normalizeV5SemanticStateObject(nested, migration.StartedAt); err != nil {
 					return fmt.Errorf("migrate transaction snapshot semantic contract: %w", err)
 				}
 			}
@@ -807,7 +807,7 @@ func migrateState(path string, migration journal) error {
 			return err
 		}
 	} else if sourceVersion == CurrentVersion && sourceSemanticVersion < statecontract.CurrentVersion {
-		if err := normalizeV5SemanticStateObject(object); err != nil {
+		if err := normalizeV5SemanticStateObject(object, migration.StartedAt); err != nil {
 			return err
 		}
 	}
@@ -875,6 +875,9 @@ func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
 				return err
 			}
 		}
+		if active := object["active_execution"]; len(active) > 0 && string(active) != "null" {
+			return fmt.Errorf("rollback blocked: repository has an active execution in %s", entry.Source)
+		}
 		var issues map[string]struct {
 			Lease          json.RawMessage `json:"lease"`
 			ExecutionLease json.RawMessage `json:"execution_lease"`
@@ -884,6 +887,7 @@ func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
 			Checkpoint *struct {
 				Status string `json:"status"`
 			} `json:"continuation_checkpoint"`
+			Continuation json.RawMessage `json:"continuation"`
 		}
 		if err := json.Unmarshal(object["issues"], &issues); err != nil {
 			return err
@@ -897,6 +901,9 @@ func ensureRollbackHasNoActiveLeases(manifest backupManifest) error {
 			}
 			if issue.Checkpoint != nil && (issue.Checkpoint.Status == "parked" || issue.Checkpoint.Status == "resuming") {
 				return fmt.Errorf("rollback blocked: parked resource continuation for Issue #%s in %s", number, entry.Source)
+			}
+			if len(issue.Continuation) > 0 && string(issue.Continuation) != "null" {
+				return fmt.Errorf("rollback blocked: retained continuation for Issue #%s in %s", number, entry.Source)
 			}
 		}
 	}

@@ -169,6 +169,7 @@ func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, p
 	if decisionErr != nil {
 		return failure.Wrap(failure.Issue, "decide Pull Request checks exhaustion", decisionErr)
 	}
+	identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 	_, err := l.Store.Update("pull_request_checks_retry_exhausted", current.Number, current.RunID, map[string]any{
 		"pull_request_url": pr.URL, "pull_request_number": pr.Number, "head_sha": pr.HeadSHA,
 		"checks_status": pr.ChecksStatus, "attempts": current.Attempts, "continuations": current.Continuations,
@@ -177,24 +178,31 @@ func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, p
 		if item == nil || item.RunID != current.RunID || item.PullRequestURL != pr.URL || item.Branch != pr.HeadRefName {
 			return fmt.Errorf("Issue #%d changed while recording Pull Request checks exhaustion", current.Number)
 		}
+		if state.OwnsActiveExecution(s, current.Number, identity) {
+			if err := state.CaptureContinuation(s, current.Number, identity, state.NewID("checkpoint"), now); err != nil {
+				return err
+			}
+		}
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
 		item.FailureKind = decision.FailureKind
-		item.GitHubSync = decision.GitHubSync
+		if err := state.SetEffect(s, item.Number, item.RunID, decision.Effect, now); err != nil {
+			return err
+		}
 		item.RetryAfter = nil
 		item.SessionID = ""
 		item.Session = nil
 		item.HeadSHA = pr.HeadSHA
 		item.PullRequestNumber = pr.Number
-		if item.ResourcePark == nil {
+		if item.Continuation == nil {
 			return fmt.Errorf("Issue #%d checks exhaustion did not capture a continuation checkpoint", current.Number)
 		}
-		item.ResourcePark.HeadSHA = pr.HeadSHA
-		item.ResourcePark.PullRequestURL = pr.URL
-		item.ResourcePark.PullRequestNumber = pr.Number
-		item.ResourcePark.Evidence = &state.ContinuationEvidence{
+		item.Continuation.HeadSHA = pr.HeadSHA
+		item.Continuation.PullRequestURL = pr.URL
+		item.Continuation.PullRequestNumber = pr.Number
+		item.Continuation.Evidence = &state.ContinuationEvidence{
 			Origin: "pull_request_lifecycle", Phase: "required_checks",
 			Code: "checks_retry_exhausted", Status: "failure", ObservedAt: now,
 		}
@@ -227,7 +235,9 @@ func (l *Loop) blockPullRequestLifecycle(ctx context.Context, current state.Issu
 		}
 		item.LastError = decision.LastError
 		item.FailureKind = decision.FailureKind
-		item.GitHubSync = decision.GitHubSync
+		if err := state.SetEffect(s, item.Number, item.RunID, decision.Effect, l.now()); err != nil {
+			return err
+		}
 		item.RetryAfter = nil
 		item.WorkerPID = 0
 		item.WorkerPGID = 0
@@ -267,14 +277,11 @@ func (l *Loop) completeIssue(ctx context.Context, current state.Issue, pullReque
 	if decisionErr != nil {
 		return failure.Wrap(failure.Issue, "decide Issue completion", decisionErr)
 	}
-	owner := state.LeaseOwner{}
-	if current.Lease != nil {
-		owner = current.Lease.Owner
-	}
+	identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 	_, err := l.Store.Update("issue_completed", current.Number, current.RunID, payload, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		if decision.Lease == issuedomain.ReleaseLease {
-			if err := state.ReleaseIssueLease(item, owner); err != nil {
+		if state.OwnsActiveExecution(s, current.Number, identity) {
+			if err := state.ReleaseExecution(s, current.Number, identity); err != nil {
 				return err
 			}
 		}
@@ -291,7 +298,9 @@ func (l *Loop) completeIssue(ctx context.Context, current state.Issue, pullReque
 		item.Session = nil
 		item.PullRequestMerged = decision.PullRequestMerged
 		item.FailureKind = ""
-		item.GitHubSync = decision.GitHubSync
+		if err := state.SetEffect(s, item.Number, item.RunID, decision.Effect, l.now()); err != nil {
+			return err
+		}
 		item.RetryAfter, item.UpdatedAt = nil, l.now()
 		return nil
 	})

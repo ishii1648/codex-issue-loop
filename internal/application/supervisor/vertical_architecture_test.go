@@ -23,7 +23,6 @@ func TestVerticalLifecycleFilesBoundOrchestrationSize(t *testing.T) {
 	}
 	verticalFiles := []string{
 		"internal/application/supervisor/worker_execution.go",
-		"internal/application/supervisor/publication_lifecycle.go",
 		"internal/application/supervisor/continuation_stage.go",
 		"internal/application/supervisor/checks_lifecycle.go",
 		"internal/application/supervisor/conflict_lifecycle.go",
@@ -92,7 +91,6 @@ func TestVerticalLifecyclesOwnDecisionPersistenceAndEffects(t *testing.T) {
 	root := filepath.Clean(filepath.Join(filepath.Dir(current), "..", "..", ".."))
 	required := map[string][]string{
 		"internal/application/supervisor/worker_execution.go":      {"issuedomain.", "l.Store.Update(", "l.runWorker(", "l.GitHub."},
-		"internal/application/supervisor/publication_lifecycle.go": {"publication.", "l.Store.Update("},
 		"internal/application/supervisor/continuation_stage.go":    {"issuedomain.", "l.Store.Update(", "l.Publisher.", "l.GitHub.Inspect("},
 		"internal/application/supervisor/checks_lifecycle.go":      {"issuedomain.", "l.Store.Update(", "l.GitHub.", "l.inspectIssue("},
 		"internal/application/supervisor/conflict_lifecycle.go":    {"conflict.", "l.Store.Update(", "l.Conflicts.", "l.runWorker("},

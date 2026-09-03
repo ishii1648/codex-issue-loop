@@ -7,9 +7,8 @@ import (
 )
 
 const (
-	ReasonResourceClaimMismatch = "resource_claim_mismatch"
-	ReasonFormatterFailed       = "formatter_failed"
-	ReasonPullRequestMismatch   = "pull_request_mismatch"
+	ReasonFormatterFailed     = "formatter_failed"
+	ReasonPullRequestMismatch = "pull_request_mismatch"
 )
 
 type FormatterAudit struct {
@@ -22,22 +21,12 @@ type FormatterAudit struct {
 }
 
 // Audit is persisted before publication so restart and status output retain
-// the exact resource decision even when publication is refused.
+// the exact deterministic publication decision even when publication fails.
 type Audit struct {
-	BaseSHA           string         `json:"base_sha"`
-	ChangedPaths      []string       `json:"changed_paths"`
-	DeclaredResources []string       `json:"declared_resources"`
-	ActualResources   []string       `json:"actual_resources"`
-	Formatter         FormatterAudit `json:"formatter"`
-	Reason            string         `json:"reason,omitempty"`
-}
-
-// ResourceScope keeps the labels observed at admission separate from the
-// effective fail-closed claim used by the scheduler. A fallback such as
-// repo:* must authorize publication without rewriting the original audit.
-type ResourceScope struct {
-	Declared  []string
-	Effective []string
+	BaseSHA      string         `json:"base_sha"`
+	ChangedPaths []string       `json:"changed_paths"`
+	Formatter    FormatterAudit `json:"formatter"`
+	Reason       string         `json:"reason,omitempty"`
 }
 
 const (
@@ -65,10 +54,6 @@ type FailureProvenance struct {
 	Recoverable bool      `json:"recoverable"`
 	Reason      string    `json:"reason"`
 	FailedAt    time.Time `json:"failed_at"`
-
-	DeclaredResources []string `json:"declared_resources,omitempty"`
-	ResolvedResources []string `json:"resolved_resources,omitempty"`
-	ActualResources   []string `json:"actual_resources,omitempty"`
 }
 
 func ClassifyFailure(err error, now time.Time) FailureProvenance {
@@ -92,16 +77,6 @@ func ClassifyFailure(err error, now time.Time) FailureProvenance {
 		result.Code = ReasonPullRequestMismatch
 	}
 	return result
-}
-
-type ClaimMismatchError struct {
-	Declared  []string
-	Effective []string
-	Actual    []string
-}
-
-func (e ClaimMismatchError) Error() string {
-	return fmt.Sprintf("%s: actual resources %v are not covered by effective resources %v (declared %v)", ReasonResourceClaimMismatch, e.Actual, e.Effective, e.Declared)
 }
 
 // FormatterError is safe to persist. Detail contains only a bounded, redacted

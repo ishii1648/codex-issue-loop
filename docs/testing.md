@@ -6,98 +6,46 @@
 make test
 make fault-test
 make test-race
+scripts/check-release.sh
 ```
 
-`make test`は通常suite、`make fault-test`は `TestFault` prefixを持つ障害注入・復旧suite、`make test-race`は全packageをrace detector付きで実行する。GitHub Actionsでは3つを独立stepとして実行する。
+通常suite、`TestFault`障害注入suite、race detector、release gateを独立して成功させる。外部GitHub APIやCodex inferenceを使うcontract testは置かず、local bare Git remote、fake GitHub/worker、fixture replay、隔離したHOMEで再現する。
 
-## 仕様17.2との対応
+## 中核ドメイン契約
 
-| 統合テスト要件 | 主なテストケース |
-|---|---|
-| fake GitHub adapter + fake Codex process | `TestFaultStandardWorkerCompletesWithoutAdditionalRun`、`TestFaultFakeCodexProcessProducesStructuredResult` |
-| worktree作成、再利用、異常終了 | `TestFaultWorktreeCreateReuseAndPartialCreation` |
-| supervisor二重起動防止 | `TestFaultSecondSupervisorCannotAcquireLock` |
-| snapshot途中書き込みからの復旧 | `TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint`、`TestFaultPartialEventTailIsTruncatedAndRecorded` |
-| worker kill後のreconciliation | `TestFaultWorkerKillReturnsRecoverableProcessError`、`TestFaultWorkerAndGitHubStateReconciliationDecisions` |
-| timeoutの段階的終了とprocess group回収 | `TestFaultWorkerTimeoutUsesGracefulProcessGroupTermination`、`TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace`、`TestWorkerTimeoutStageIsPersistedForRetry` |
-| 複数workerのstop・orphan回収 | `TestSchedulerCancellationStopsAllWorkers`、`TestStopWorkersTerminatesAndRecordsEveryIssueIndependently`、`TestStopWorkersRejectsUnownedProcessGroupWithoutMutatingIssue` |
-| concurrency 2の同時result barrier | `TestFaultSchedulerConcurrentResultBarrier` |
-| terminal Issueの通常reconciliationとworker継続 | `TestTerminalPullRequestReconciliationRequiresAuthoritativeSavedMerge`、`TestPeriodicTerminalReconciliationCompletesAndIsIdempotent`、`TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker` |
-| same-resourceの同時予約競合 | `TestFaultConcurrentLeaseReservationsNeverOverlapResources` |
-| 実processのstop・restart・orphan回収 | `TestFaultRealProcessStopRestartLeavesNoOrphanAndRetainsLeases` |
-| watchの接続、切断、複数接続 | `TestFaultDisconnectedEventChannelsFallBackToTimer`、`TestFaultMultipleWatchConnectionsObserveSameRevision`、`TestFSNotifyMultipleWatchersWakeAndCanReconnect` |
-| 複数requestの表示・個別回答 | `TestWatchReturnsEveryPendingRequestInRequestIDOrder`、`TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
-| Desktop監視の即時再表示・payload保持・冪等回答・watch再開 | `TestWatchAnswerReconnectRoundTripPreservesQuestionContract` |
-| event通知を破棄した場合のreconciliation | `TestFaultDroppedEventReconcilesAttention` |
-| watcher作成・購読失敗時のpolling-only fallback | `TestFaultWatcherSubscriptionFailureFallsBackToReconciliation` |
-| fsnotify自己wakeとbacklogのcoalesce | `TestSchedulerFsnotifyWakeCannotBypassSupervisorRetryDeadline`、`TestSchedulerCoalescesSelfGeneratedWakeBacklog` |
-| primary rate-limitの共有cooldown | `TestCLIPrimaryGraphQLRateLimitUsesRESTRateLimitReset`、`TestSchedulerSharesPrimaryRateLimitCooldownAcrossRepositories`、`TestStoreSharesAndAtomicallyCountsSuppressedRetries` |
-| E2E LaunchAgent cleanup | `TestE2ESupervisorCleanupOnSuccessFailureSignalAndTimeout` |
-| read-subscribe-read間に状態が変わるrace | `TestFaultReadSubscribeReadRace` |
-| attention状態と`state_revision`の永続化 | `TestFaultAttentionRevisionPersistsSnapshotAndEvent`、`TestFaultAttentionRemainsStickyUntilAnswered` |
-| standard workerが追加runなしで完了 | `TestFaultStandardWorkerCompletesWithoutAdditionalRun` |
-| extended workerだけが設定上限内でresume | `TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit` |
-| 削除済みApp Server設定の拒否と旧Goal state互換 | `TestLoadRejectsRemovedAppServerSection`、`TestLegacyGoalSnapshotIsIgnoredWithoutLosingContinuationState` |
-| event rotation後のsequence復旧 | `TestFaultEventRotationKeepsCheckpointAndRecoverySequence` |
-| disk容量reserveでのblocked化 | `TestFaultDiskSafetyReserveBlocksSupervisor` |
-| localhost-only configの閉じたallowlistと不整合拒否 | `TestLoadLocalhostOnlyCommandNetworkIsClosedAndOptIn` |
-| Codex proxy/tool隔離argvとcapability検出 | `TestCodexLocalhostNetworkArgumentsAreFailClosed`、`TestCodexProbeDetectsLocalhostNetworkProxyCapability` |
-| worker環境blockedのlease park、continuation保持、後続`repo:*` queue継続 | `TestWorkerEnvironmentBlockParksLeaseAndPreservesContinuationState`、`TestWorkerEnvironmentBlockParkAllowsFollowingRepositoryIssue`、`TestParkedLeaseReleasesAdmissionAndResumeUsesNewGeneration` |
-| 既存typed blockのstartup parkとGitHub block同期crash冪等性 | `TestStartupReconciliationParksExistingTypedEnvironmentBlock`、`TestFaultWorkerEnvironmentParkSurvivesGitHubSyncCrashIdempotently` |
-| needs-input park、回答provenance、競合中のdurable answer、解放後の1回だけの再取得 | `TestRunOncePersistsQuestion`、`TestAnswerDurablyWaitsWithoutStealingConflictingLease`、`TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce` |
-| park済みoperator resumeの競合拒否・新generation・dirty/session/answer保持・GitHub同期crash冪等性 | `TestFaultResumeBlockedReacquiresParkedLeaseOnceAcrossGitHubSyncFailure`、`TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestEnvironmentResumeContinuesSameSessionAndWorktree` |
-| park/legacy resumeのfail-closed・typed legacy lost lease回復 | `TestResourceParkValidationFailsClosed`、`TestResumeBlockedEnvironmentPreservesWorktreeBranchSessionAndDirtyChanges`、`TestTypedLegacyWorkerBlockRecoveryFromMissingLeaseFixture`、`TestTypedLegacyWorkerBlockRequiresExactDurableCause`、`TestLegacyWorkerBlockRecoveryRequiresSameRunLeaseWorktreeAndBranch`、`TestFaultResumeBlockedRecoversLeaseLostByInterruptedReconciliation`、`TestResumeBlockedRejectsUnconfirmedAndNonEnvironmentBlocks` |
-| exact v0.6.14 missing-Workspace interrupted resume（全27 events、running status、owner/slotなしlegacy request、resume IDなし→ありsync）の限定回復・改変拒否・generation 2→3・並行/crash fence・same-worktree spawn | `TestInterruptedWorkspaceResumeEvidenceFromZeitreise442Full27EventFixture`、`TestInterruptedWorkspaceResumeEvidenceRetainsSyntheticShortFixtureCompatibility`、`TestInterruptedWorkspaceResumeCandidateFailsClosedForOtherSupervisorBlocks`、`TestInterruptedWorkspaceResumeEvidenceRejectsTamperedOrReorderedHistory`、`TestInterruptedWorkspaceResumeEvidenceRejectsCurrentStateMismatches`、`TestFaultZeitreise442Full27EventHistoryBackfillsAndSpawnsSameWorktree` |
-| 手動merge済みPR adoptionのfail-closed検証・lease解放・冪等性 | `TestValidateMergedPullRequestAdoptionFailsClosed`、`TestAdoptMergedPullRequestReleasesLeaseAndIsIdempotent` |
+| 契約 | 主な検証 |
+| --- | --- |
+| Issue lifecycle APIの許可遷移とmajor互換性 | `internal/domain/issue`、`internal/application/conformance` |
+| root active executionが常に0/1件 | `TestConcurrentExecutionStartsHaveSingleWinner`、snapshot validator suite |
+| Issue番号・run ID・generationのfence | `internal/adapter/state/execution_test.go` |
+| waiting・terminal・quarantineで実行枠解放 | lifecycle boundary、supervisor reconciliation suite |
+| needs-input回答後の同一continuation再開 | `TestRunOncePersistsQuestion`、`TestAnswerDurablyWaitsWithoutStealingActiveExecution` |
+| 1 Issueの失敗・入力待ち・PR/check待ち後も後続を取得 | scheduler fault/conformance suite |
+| 作成者がtrusted ownerであるIssueだけを受理 | `internal/adapter/github/author_test.go`、`internal/domain/queue`、scheduler author verification suite |
+| root pending effectによるGitHub副作用の冪等性 | publication、GitHub sync、partial failure suite |
+| stop/restartとorphan process回収 | process controller、scheduler cancellation、fault suite |
+| worktree provenance不一致をspawn前に拒否 | worktree validation、issue resolution suite |
 
-## 追加の部分障害と境界
+## Migration・互換性
 
-| 対象 | 主なテストケース |
-|---|---|
-| supervisor kill後の永続状態再利用 | `TestFaultSupervisorRestartResumesWithDurableAnswers` |
-| GitHub label/comment同期の途中停止 | `TestFaultPartialLabelCommentSyncCanBeRetried`、`TestFaultGitHubSyncPartialFailureIsRetried` |
-| merged PR adoptionのdone同期前停止とsupervisor再起動 | `TestRestartCompletesRequestedMergedPullRequestAdoption` |
-| generic checkpoint保存とstartup reconciliation | `TestTerminalTransitionParksGenericCheckpointWithoutRecoveryInspection`、`TestStartupReconciliationParksExistingNeedsInputLease` |
-| checkpoint resumeのresource/slot raceと二重owner防止 | `TestFaultConcurrentParkedLeaseResumeCreatesOneFencedOwner`、`TestStatusSummarizesMultipleWorkersResourcesAndRequests` |
-| answered continuationの同一worktree・claim再取得 | `TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce`、`TestIssueResolveResumeRejectsChangedWorktreeAndCheckpointBase` |
-| checks失敗のgeneric evidence・checkpoint stage再試行 | `TestPullRequestChecksFailureUsesGenericContinuationEvidence`、`TestIssueResolveRetryStageReturnsToCheckpointStage` |
-| push後に未記録のPR | `TestFaultStartupReconciliationPersistsDiscoveredPullRequest` |
-| registry add/resolve/remove | `TestFaultRegistryAddResolveRemoveAndAmbiguity` |
-| atomic fileとmarshal失敗 | `TestFaultAtomicWriteReplacesContentAndPreservesMode`、`TestFaultJSONMarshalFailureDoesNotCreateDestination` |
-| layout isolationとpermission | `TestFaultLayoutUsesIsolatedRootsAndPrivateDirectories` |
-| GitHub CLI response破損 | `TestFaultGitHubAdapterRejectsMalformedResponse` |
-| queue strategy・tie-break・pagination後sort | `TestOrderIssuesSupportsCreatedAtAndPriorityWithStableTieBreaks`、`TestListReadyOrdersAfterCollectingPaginatedFixture`、`TestSelectReadyAppliesChangedOrderOnlyToUnclaimedIssues` |
-| Webhook通知欠落・60秒trigger契約・mailbox boundedness・一時remote障害中の安全なcoalesce・stalled ready診断・assignment maintenance中だけのliveness defer | `TestWebhookSchedulerReconcilesMailboxWithoutFsnotify`、`TestSchedulerCycleContractAcceptsEveryRuntimeWakeTrigger`、`TestWebhookMailboxCompactsSafeIntentsBeforeTargetReconciliationFailure`、`TestSafetySweepCoalescesRepeatedReadyCollectionIntent`、`TestQueueHealthFailsAfterTwoLocalReconciliationIntervalsUntilIssueIsDurable`、`TestQueueHealthDefersOnlyForValidRepositoryAssignmentMaintenance` |
-| GitHubラベルのpreview・冪等作成・部分成功 | `TestBootstrapLabelsPreviewsCreatesAndPreservesExistingMetadata`、`TestBootstrapLabelsIsIdempotentWhenEveryLabelExists`、`TestFaultBootstrapLabelsReportsPartialSuccessAndCanBeRerun` |
-| doctorの安定code・認証・sleep・state・停止理由 | `TestDoctorOutputHasStableSchemaCodesAndSafeRemediations`、`TestFaultDoctorHostAuthAndSleepFixturesHaveUniqueCodes`、`TestFaultDoctorDetectsCorruptStateWithoutModifyingIt`、`TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog` |
-| 回復不能なsnapshot/event不整合 | `TestFaultRevisionMismatchIsQuarantined`、`TestFaultCorruptSnapshotIsQuarantined` |
-| log世代上限とworker run保持 | `TestLongRunningWriterKeepsBoundedGenerations`、`TestWorkerRunLogPruningPreservesActiveAndAuditsDeletion` |
-| install manifest・update backup・rollback | `TestInstallArtifactsAreIdempotentAndVersioned`、`TestUpdateBackupCanRestoreBinarySkillAndManifest`、`TestDoctorDetectsInstalledBinaryAndSkillMismatch` |
-| host delivery config・release検証・drain・rollback | `TestConfigSecureAtomicWriteAndValidation`、`TestConfigRejectsSymlinkAndRelativeOverride`、`TestVerifierChecksEveryBoundaryBeforeExecutingCandidate`、`TestCompatibilityBlocksMajorSchemaDowngradeAndRetag`、`TestDeliveryMaintenanceFenceDrainsWithoutDispatchOrCancellation`、`TestFaultControllerApplyAndDoctorFailureRollback` |
-| SPDX SBOMの決定性 | `TestGenerateProducesDeterministicSPDXDocument` |
-| v1→v2 migration・backup restore・途中停止再開 | `TestApplyMigratesV1FixturesAndRestoreRecoversOriginalBytes`、`TestInterruptedApplyReusesJournalAndConvergesIdempotently`、`TestUnsupportedVersionIsRejectedWithoutBackup`、`TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback` |
-| worktree cleanup/purge・安全条件・監査 | `TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval`、`TestPurgeRequiresExactConfirmationAndCanRemoveDirtyWorktree` |
+production由来のsanitized v4 fixtureはmigration decoderの入力としてだけ保持する。release gateは11 Issue・14旧substateをroot `active_execution`、Issue-local `continuation`、`continuation_evidence`、`suspension`へ変換し、Issue・answer・audit・generationの欠損/重複が0であることを検査する。
 
-障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
+current v5入力に旧lease、resource park、scenario別status/sync/substateが残る場合は自動復旧せず拒否する。prepared transaction内のnested snapshotも同じdecoderとvalidatorを通す。event type/orderは監査の完全性確認に使うが、runtime authorityには使わない。
 
-production由来のsanitized v4 fixtureはmigration decoderの互換入力としてだけ保持する。release gateは11 Issue・14旧substateをgeneric checkpoint/suspension/evidenceへ変換し、Issue・answer・audit・generationの欠損/重複が0、terminal hard leaseが0、legacy runtime fieldが0であることを検証する。event type/orderは保存監査の完全性確認に使うが、runtime continuation authorityには使わない。export、sanitization、review手順は[production recovery fixture runbook](recovery-fixtures.md)を参照する。
+## Release・delivery
 
-Codex Desktopのquestion notification、macOS通知権限、Activityの回答待ち、pinした`codex-issue-loop` / `zeitreise`監視chatの責務分離はrepository内の自動testでは再現しない。[Codex Desktop監視task運用](codex-desktop-monitoring.md)の実機受け入れ手順で検証する。
+| 境界 | 主な検証 |
+| --- | --- |
+| 決定的build、manifest、checksum、SBOM | `scripts/check-release.sh` |
+| CLI surfaceとcredential不使用 | `scripts/cli-surface-contract.sh` |
+| lifecycle fixture replayと再起動 | `scripts/offline-release-contract.sh` |
+| production state非変更 | `scripts/production-state-isolation.sh` |
+| candidate/stable同一artifact | release workflow candidate integrity・promotion evidence |
+| repository別assignment、doctor、rollback drill | `scripts/production-assignment-health.sh` |
+| active executionとworker上限 | production state/release/assignment health tests |
 
-Codex network proxy、macOS sandbox、Deno listen/connect、spawnしたChrome CDP、親/子processのpublic/LAN/link-local拒否は認証済みrelease hostだけで[localhost-only command network](localhost-network.md)の実機受け入れを行う。通常suiteはmodel呼び出しや外部networkを使わない。
-
-production/self-hostingのconcurrency 1固定、concurrency 2のfault matrix、isolated canary、resource計測、rollbackは[concurrency runbook](concurrency-rollout.md)を正本とする。
+production確認では両repositoryに検証Issueを投入し、正常完了、needs-input中の後続進行、Issue-local failure中の後続進行、PR/check待ち中の後続進行を実測する。未trusted authorのskipと旧generation拒否は追加credentialを使わずfixture/fake serverで検証する。
 
 ## セキュリティ負テスト
 
-| 境界 | 主なテスト |
-|---|---|
-| Prompt injection・巨大入力・制御文字 | `TestPromptTreatsIssueInjectionAsBoundedData`、`TestIssueInputIsBoundedAndControlCharactersAreRemoved` |
-| 既知token・設定secret・private key | `TestConfiguredSecretIsRedactedFromTextAndJSON`、`TestLineWriterRedactsPrivateKeyBlock`、`TestWorkerArtifactsNeverPersistSecrets` |
-| state・event・file mode | `TestStateAndEventsNeverPersistSecrets`、`TestWritePlistUsesAbsoluteCommandsAndEscapesPaths` |
-| GitHubコメント・CLI error | `TestGitHubCommentsAndErrorsRedactSecrets` |
-| path traversal・symbolic link | `TestWorktreeRejectsTraversalAndSymbolicLink`、`TestLoadRejectsUnsafePathsRefsAndSecretNames` |
-| continuation worktree provenance・legacy backfill・dirty/behind main checkout隔離・spawn cwd監査 | `TestFaultWorktreeCreateReuseAndPartialCreation`、`TestRetryContinuationKeepsDirtyBehindMainCheckoutUntouched`、`TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges`、`TestFaultResumeBlockedBackfillsMissingWorkspaceProvenanceForDirtyBehindManagedWorktree`、`TestWorkerProcessCallbackFencesRunAndPersistsProcessGroup` |
-| schema v3の旧配送data除去・active lease/parked continuationのrollback拒否・旧credential保持 | `TestApplyMigratesV3FixturesAndRestoreRecoversOriginalBytes`、`TestV4ActiveLeaseAndParkedContinuationBlockRollback` |
-
-既知の到達可能な依存脆弱性は`make vuln-check`で検査し、Pull Requestと`main`のCIで必須にする。
+Issue本文による権限拡張、secret永続化、path traversal、symlink、別repository worktree、stale generation、未知lifecycle API major、旧v5 runtime fieldを拒否する。通常suiteはmodel呼び出し、外部network、新規tokenを必要としない。

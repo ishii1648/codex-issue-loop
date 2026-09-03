@@ -129,9 +129,9 @@ sleep 3
 "$agent_loop_bin" issue resolve --repo "$PWD" --issue 123 --action cancel --json
 ```
 
-`issue plan`はcanonical snapshotと現在のprocess、worktree/git、GitHub状態だけを読み、event件数や順序には依存しません。state revision、checkpoint、suspension、全actionの可否と理由をJSONで返し、state/eventを変更しないことも検査します。`issue resolve`はplan時のrevisionとsuspensionを再照合し、`resume` / `retry-stage`では新generationのExecutionLeaseをtransaction内で取得します。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEADだけを採用し、`cancel`はpending requestをcanceledへ収束させます。
+`issue plan`はcanonical snapshotと現在のprocess、worktree/git、GitHub状態だけを読み、event件数や順序には依存しません。state revision、continuation、suspension、全actionの可否と理由をJSONで返し、state/eventを変更しないことも検査します。`issue resolve`はplan時のrevisionとsuspensionを再照合し、`resume` / `retry-stage`ではrepository rootの単一`active_execution`をtransaction内で取得します。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEADだけを採用し、`cancel`はpending requestをcanceledへ収束させます。
 
-実行中のcapacityは`execution_lease`だけが表し、中断可能なworkspace・session・base/resource・PR情報は`continuation_checkpoint`、理由・recoverability・許可actionは`suspension`が保持します。terminal `blocked` / `failed`はExecutionLeaseとPID/PGIDを保持しないため、ambiguousな1 Issueをquarantineしてもrepository全体のqueueは停止しません。state、label、checkpointは手編集せず、planが拒否した場合は観測された不一致を解消して再planします。
+実行中のcapacityはsnapshot rootの`active_execution`だけが表します。中断可能なworkspace・session・base・PR情報はIssueの`continuation`、理由・recoverability・許可actionは`suspension`が保持します。待機・terminal・quarantine状態は`active_execution`とPID/PGIDを保持できず、1 Issueの停止がrepository全体のqueueを停止させません。state、label、continuationは手編集せず、planが拒否した場合は観測された不一致を解消して再planします。
 
 local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_network` localhost-only policyへopt-inできます。既定はnetwork無効です。設定と残余リスクは[localhost-only command network](docs/localhost-network.md)を参照してください。
 
@@ -152,7 +152,7 @@ agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loo
 "$agent_loop_bin" doctor --repo /absolute/path/to/repo-b --json
 ```
 
-リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。同一リポジトリのproduction/self-hostingは安定化期間中`queue.concurrency: 1`で直列実行します。複数workerの実装とresource taxonomyは保持しますが、再有効化にはconformanceとisolated canaryが必要です。resource設定がない既存configも`repo:*`で安全に直列実行されます。
+リポジトリごとにLaunchAgent、supervisor、永続状態、ログ、worktreeが分かれるため、異なるリポジトリのループは並列に動作します。同一リポジトリは`queue.concurrency: 1`で直列実行し、snapshot rootの`active_execution`が実行中Issueを最大1件に限定します。
 
 - 同じGitHubリポジトリを複数のcloneやhostから同時に動かさないでください。
 - `status`、`watch`、`stop`などでは常に`--repo`で対象を明示してください。
@@ -174,7 +174,7 @@ gh issue edit 123 --add-label codex-loop:ready
 
 PR作成、CI再試行、自動merge、Issue closeの動作は`.agent-loop.yaml`で設定します。詳細は[システム仕様](docs/specification.md)を参照してください。
 
-同一repository内並列実行で使う`resources.definitions`、`area:` resource claim、Issue本文の`depends_on` metadata、ready付与前のproducer責務は[Resource admission契約](docs/resource-admission.md)を参照してください。publisherは保存済みbase SHAからtracked/untracked変更pathを検査し、actual resourceが宣言claimを超える場合はcommit・pushせず`needs_input`へ移します。`formatters.go.enabled: true`を明示したrepositoryでは、register済み`gofmt`が変更対象Go fileだけをcommit前に整形します。CIは引き続きread-onlyの`make fmt-check`を最終防衛線とします。
+Issueはready label、作成者検証、既存stateとの照合を通過したものだけをFIFO/設定済み順序で取得します。`formatters.go.enabled: true`を明示したrepositoryでは、register済み`gofmt`が変更対象Go fileだけをcommit前に整形します。CIは引き続きread-onlyの`make fmt-check`を最終防衛線とします。
 
 Issue本文はworker権限を拡張しません。network、browser/CDP、downloadなどの実行能力は`.agent-loop.yaml`のworker起動設定とbuilt-in adapterだけが決め、起動時の互換性検査はfail-closedです。公開repositoryでは第三者による自動実行要求を防ぐため、GitHubのIssue作成を`Collaborators only`にし、ready labelを付けられる権限も信頼済みcollaboratorに限定してください。
 
@@ -205,7 +205,7 @@ printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
   --json
 ```
 
-出力が`claim_waiting: true`なら回答は保存済みです。`status --json`の`resource_admission.claim_waiting_candidates[].blocked_by`を確認し、相手Issueの通常処理を待ちます。`ready`/`running` labelやstate fileを手動編集せず、同じ回答を別requestへ再送しないでください。
+回答はrequest recordへ一度だけ保存されます。別Issueが実行中なら、回答済みIssueは`continuation`を保ったまま待機し、単一実行枠が空いた後にschedulerが再開します。`ready`/`running` labelやstate fileを手動編集せず、同じ回答を別requestへ再送しないでください。
 
 ### 4. 停止・再開する
 
@@ -233,7 +233,7 @@ schema migrationが必要な場合はloopを開始せず、[migration runbook](d
 
 ## 詳細ドキュメント
 
-- 運用: [Codex Desktop監視task](docs/codex-desktop-monitoring.md)、[Mac mini常駐運用](docs/mac-mini-runbook.md)、[Repository別stable delivery](docs/per-repository-delivery.md)、[break-glass repair](docs/break-glass-repair.md)、[concurrency 2 rollout・rollback](docs/concurrency-rollout.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[worktree](docs/worktree-lifecycle.md)
+- 運用: [Codex Desktop監視task](docs/codex-desktop-monitoring.md)、[Mac mini常駐運用](docs/mac-mini-runbook.md)、[Repository別stable delivery](docs/per-repository-delivery.md)、[break-glass repair](docs/break-glass-repair.md)、[concurrency運用契約](docs/concurrency-rollout.md)、[user-scope Issue作成ルール](docs/user-rules.md)、[doctor・復旧](docs/doctor.md)、[Release・更新](docs/release.md)、[migration](docs/migration.md)、[worktree](docs/worktree-lifecycle.md)
 - 設定・設計: [設定例](.agent-loop.example.yaml)、[システム仕様](docs/specification.md)、[Resource admission契約](docs/resource-admission.md)、[アーキテクチャ](docs/architecture.md)、[要件](docs/requirements.md)、[ADR](docs/adr/)
 - 実測: [Mac mini実機E2E](docs/e2e/2026-08-15-mac-mini.md)、[LLM内ループとのtoken消費比較](docs/e2e/2026-08-16-llm-loop-token-comparison.md)
 - 開発: [Build・test](Makefile)、[実装状況](docs/implementation.md)、[脅威モデル](docs/threat-model.md)、[セキュリティ運用](docs/security-runbook.md)、[CLI互換性](docs/compatibility.md)

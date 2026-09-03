@@ -25,7 +25,7 @@
   "final": {
     "worker_limit": 1,
     "active_workers": 0,
-    "active_leases": 0,
+    "active_executions": 0,
     "pending_requests": 0,
     "orphan_pid_pgid": 0,
     "duplicate_prs": 0,

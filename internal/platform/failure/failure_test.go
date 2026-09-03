@@ -14,8 +14,8 @@ func TestWrapPreservesTypedClassification(t *testing.T) {
 	}
 }
 
-func TestUnclassifiedErrorDefaultsToSupervisor(t *testing.T) {
-	if got := KindOf(errors.New("unknown")); got != Supervisor {
+func TestUnclassifiedErrorDefaultsToIssueIsolation(t *testing.T) {
+	if got := KindOf(errors.New("unknown")); got != Issue {
 		t.Fatalf("kind=%s", got)
 	}
 }

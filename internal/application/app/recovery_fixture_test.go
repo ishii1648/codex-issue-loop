@@ -75,19 +75,22 @@ esac
 		t.Fatal(err)
 	}
 	baseSHA := runGitOutputApp(t, repo, "rev-parse", "HEAD")
-	_, owner, err := store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 166, Title: "private title", RunID: "run_fixture_166", Slot: 0,
-		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
-		BaseSHA: baseSHA, ReservedAt: time.Now().UTC(),
+	_, identity, err := store.StartExecution(state.ExecutionStart{
+		IssueNumber: 166, Title: "private title", RunID: "run_fixture_166",
+		BaseSHA: baseSHA, StartedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.Update("issue_blocked", 166, owner.RunID, map[string]any{"remote_head": nil}, func(snapshot *state.Snapshot) error {
+	_, err = store.Update("issue_blocked", 166, identity.RunID, map[string]any{"remote_head": nil}, func(snapshot *state.Snapshot) error {
 		issue := snapshot.Issues["166"]
-		issue.Status = issuedomain.StatusBlocked
 		issue.Worktree = repo
 		issue.Branch = "main"
+		issue.Workspace = testWorkerWorkspace(snapshot, repo, "main")
+		if err := state.CaptureContinuation(snapshot, issue.Number, identity, state.NewID("checkpoint"), time.Now().UTC()); err != nil {
+			return err
+		}
+		issue.Status = issuedomain.StatusBlocked
 		issue.FailureKind = "issue"
 		issue.LastError = "worker blocked: private environment detail"
 		return nil

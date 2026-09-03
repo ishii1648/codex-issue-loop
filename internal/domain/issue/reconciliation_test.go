@@ -42,7 +42,7 @@ func TestDecideReconciliationOwnsLifecycleTargets(t *testing.T) {
 }
 
 func TestTerminalPullRequestReconciliationRequiresExactIdentity(t *testing.T) {
-	current := ReconciliationState{Status: StatusFailed, Branch: "codex/issue-1", PullRequest: "pr", GitHubSync: GitHubSyncNone}
+	current := ReconciliationState{Status: StatusFailed, Branch: "codex/issue-1", PullRequest: "pr", Effect: EffectNone}
 	decision, ok := DecideTerminalPullRequestReconciliation(current, ReconciliationObservation{
 		PullRequests: []ReconciliationPullRequest{{URL: "other", HeadRefName: current.Branch, Merged: true}},
 	})

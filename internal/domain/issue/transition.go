@@ -74,8 +74,7 @@ type CompletionDecision struct {
 	Transition        Transition
 	PullRequestURL    string
 	PullRequestMerged bool
-	GitHubSync        GitHubSync
-	Lease             LeaseDisposition
+	Effect            EffectKind
 }
 
 func Complete(from Status, pullRequestURL string) (CompletionDecision, error) {
@@ -87,13 +86,13 @@ func Complete(from Status, pullRequestURL string) (CompletionDecision, error) {
 	}
 	return CompletionDecision{
 		Transition: transition, PullRequestURL: pullRequestURL,
-		PullRequestMerged: pullRequestURL != "", GitHubSync: GitHubSyncDone, Lease: ReleaseLease,
+		PullRequestMerged: pullRequestURL != "", Effect: EffectMarkDone,
 	}, nil
 }
 
 type InputDecision struct {
 	Transition Transition
-	GitHubSync GitHubSync
+	Effect     EffectKind
 }
 
 func RequestInput(from Status) (InputDecision, error) {
@@ -102,7 +101,7 @@ func RequestInput(from Status) (InputDecision, error) {
 	if err != nil {
 		return InputDecision{}, err
 	}
-	return InputDecision{Transition: transition, GitHubSync: GitHubSyncNeedsInput}, nil
+	return InputDecision{Transition: transition, Effect: EffectMarkNeedsInput}, nil
 }
 
 type ChecksDecision struct {
@@ -125,9 +124,8 @@ func ResolveConflict(from Status) (Transition, error) {
 		StatusAwaitingChecks, StatusAwaitingMerge)
 }
 
-// StartClaim begins a new fenced run. StatusClaiming is accepted for the
-// idempotent reserve-after-release path; failed records may be explicitly
-// queued again after their GitHub labels have changed.
+// StartClaim begins a new fenced run. StatusClaiming is accepted for an
+// idempotent repeated start; failed records may be explicitly queued again.
 func StartClaim(from Status) (Transition, error) {
 	return newAllowedTransition("start_claim", from, StatusClaiming,
 		StatusUnset, StatusClaiming, StatusFailed)
@@ -135,7 +133,7 @@ func StartClaim(from Status) (Transition, error) {
 
 func ResumeAfterAnswer(from, target Status) (Transition, error) {
 	switch target {
-	case StatusAnswerClaimWaiting, StatusResumePending, StatusResolvingConflict:
+	case StatusResumePending, StatusResolvingConflict:
 		return newAllowedTransition("resume_after_answer", from, target, StatusNeedsInput)
 	default:
 		return Transition{}, fmt.Errorf("resume after answer does not allow target status %q", target)
@@ -162,10 +160,6 @@ func StartRetry(from Status) (Transition, error) {
 	return newAllowedTransition("start_retry", from, StatusRunning, StatusRetryWait)
 }
 
-func AcquireAnsweredClaim(from Status) (Transition, error) {
-	return newAllowedTransition("acquire_answered_claim", from, StatusResumePending, StatusAnswerClaimWaiting)
-}
-
 func InterruptExecution(from Status) (Transition, error) {
 	return newAllowedTransition("interrupt_execution", from, StatusRetryWait,
 		StatusClaiming, StatusClaimed, StatusRunning)
@@ -175,10 +169,10 @@ type OutcomeDecision struct {
 	Transition  Transition
 	LastError   string
 	FailureKind string
-	GitHubSync  GitHubSync
+	Effect      EffectKind
 }
 
-func newOutcomeDecision(name string, from, to Status, reason, failureKind string, githubSync GitHubSync, allowed ...Status) (OutcomeDecision, error) {
+func newOutcomeDecision(name string, from, to Status, reason, failureKind string, effect EffectKind, allowed ...Status) (OutcomeDecision, error) {
 	transition, err := newAllowedTransition(name, from, to, allowed...)
 	if err != nil {
 		return OutcomeDecision{}, err
@@ -186,29 +180,25 @@ func newOutcomeDecision(name string, from, to Status, reason, failureKind string
 	if reason == "" || failureKind == "" {
 		return OutcomeDecision{}, fmt.Errorf("Issue outcome %s requires reason and failure kind", name)
 	}
-	return OutcomeDecision{Transition: transition, LastError: reason, FailureKind: failureKind, GitHubSync: githubSync}, nil
+	return OutcomeDecision{Transition: transition, LastError: reason, FailureKind: failureKind, Effect: effect}, nil
 }
 
 func RejectAnsweredResume(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("reject_answered_resume", from, StatusBlocked, reason, failureKind, GitHubSyncNone, StatusResumePending)
+	return newOutcomeDecision("reject_answered_resume", from, StatusBlocked, reason, failureKind, EffectNone, StatusResumePending)
 }
 
 func RejectWorkerWorkspace(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("reject_worker_workspace", from, StatusBlocked, reason, failureKind, GitHubSyncBlocked,
+	return newOutcomeDecision("reject_worker_workspace", from, StatusBlocked, reason, failureKind, EffectMarkBlocked,
 		StatusRunning, StatusResolvingConflict)
 }
 
-func RequestResourceCorrection(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("request_resource_correction", from, StatusNeedsInput, reason, failureKind, GitHubSyncNeedsInput, StatusRunning)
-}
-
 func ExhaustPullRequestChecks(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("exhaust_pull_request_checks", from, StatusFailed, reason, failureKind, GitHubSyncFailed,
+	return newOutcomeDecision("exhaust_pull_request_checks", from, StatusFailed, reason, failureKind, EffectMarkFailed,
 		StatusAwaitingChecks, StatusAwaitingMerge)
 }
 
 func BlockPullRequestLifecycle(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("block_pull_request_lifecycle", from, StatusBlocked, reason, failureKind, GitHubSyncBlocked,
+	return newOutcomeDecision("block_pull_request_lifecycle", from, StatusBlocked, reason, failureKind, EffectMarkBlocked,
 		StatusAwaitingChecks, StatusAwaitingMerge)
 }
 
@@ -217,17 +207,17 @@ func Fail(from Status, reason, failureKind string, blocked bool) (OutcomeDecisio
 	if blocked {
 		name, target = "block_issue", StatusBlocked
 	}
-	githubSync := GitHubSyncFailed
+	effect := EffectMarkFailed
 	if blocked {
-		githubSync = GitHubSyncBlocked
+		effect = EffectMarkBlocked
 	}
-	return newOutcomeDecision(name, from, target, reason, failureKind, githubSync,
+	return newOutcomeDecision(name, from, target, reason, failureKind, effect,
 		StatusUnset, StatusClaimed, StatusRunning, StatusAwaitingChecks, StatusAwaitingMerge,
 		StatusResumePending, StatusResolvingConflict, StatusRetryWait)
 }
 
 func SuspendWorker(from Status, reason, failureKind string) (OutcomeDecision, error) {
-	return newOutcomeDecision("suspend_worker", from, StatusBlocked, reason, failureKind, GitHubSyncBlocked, StatusRunning)
+	return newOutcomeDecision("suspend_worker", from, StatusBlocked, reason, failureKind, EffectMarkBlocked, StatusRunning)
 }
 
 func StartConflictAttempt(from Status) (Transition, error) {
@@ -251,7 +241,7 @@ func ReconcileObservation(from, to Status) (Transition, error) {
 		return newAllowedTransition("reconcile_observation", from, to, StatusCompleted)
 	case StatusCompleted, StatusFailed, StatusBlocked:
 		return newAllowedTransition("reconcile_observation", from, to,
-			StatusClaiming, StatusClaimed, StatusRunning, StatusAnswerClaimWaiting,
+			StatusClaiming, StatusClaimed, StatusRunning,
 			StatusResumePending, StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks,
 			StatusAwaitingMerge, StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted)
 	default:

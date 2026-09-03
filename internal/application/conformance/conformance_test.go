@@ -215,9 +215,9 @@ func TestFaultDurableTransactionFiveCrashBoundaries(t *testing.T) {
 			if err := store.Initialize(); err != nil {
 				t.Fatal(err)
 			}
-			_, owner, err := store.ReserveLease(state.LeaseReservation{
-				IssueNumber: 1, Title: "conformance", RunID: "run_conformance", Slot: 0,
-				ResolvedResources: []string{state.RepositoryResource}, BaseSHA: strings.Repeat("a", 40), ReservedAt: now,
+			_, owner, err := store.StartExecution(state.ExecutionStart{
+				IssueNumber: 1, Title: "conformance", RunID: "run_conformance",
+				BaseSHA: strings.Repeat("a", 40), StartedAt: now,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -298,13 +298,13 @@ func TestFaultDurableTransactionFiveCrashBoundaries(t *testing.T) {
 				t.Fatalf("boundary=%s snapshot=%+v", boundary, loaded)
 			}
 			item := loaded.Issues["1"]
-			if item == nil || item.Status != issuedomain.StatusRunning || item.Lease == nil || item.Lease.Owner != owner ||
-				item.LeaseGeneration != owner.Generation || item.WorkerPID != 4242 || item.WorkerPGID != 4242 {
-				t.Fatalf("boundary=%s lost worker or lease ownership: issue=%+v owner=%+v", boundary, item, owner)
+			if item == nil || item.Status != issuedomain.StatusRunning || item.Generation != owner.Generation ||
+				item.WorkerPID != 4242 || item.WorkerPGID != 4242 || !state.OwnsActiveExecution(&loaded, 1, owner) {
+				t.Fatalf("boundary=%s lost worker or execution ownership: issue=%+v owner=%+v", boundary, item, owner)
 			}
 			activeWorkers := 0
 			for _, issue := range loaded.Issues {
-				if issue != nil && issue.Status.OccupiesWorkerSlot() && issue.Lease != nil {
+				if issue != nil && issue.Status.RequiresActiveExecution() && loaded.ActiveExecution != nil && loaded.ActiveExecution.IssueNumber == issue.Number {
 					activeWorkers++
 				}
 			}

@@ -35,7 +35,7 @@ func TestIssuePlanIgnoresEventsAndCancelIsFencedAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
-	_, _, err := store.ReserveLease(state.LeaseReservation{IssueNumber: 1, Title: "fixture", RunID: "run_1", Slot: 0, DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now})
+	_, _, err := store.StartExecution(state.ExecutionStart{IssueNumber: 1, Title: "fixture", RunID: "run_1", StartedAt: now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +51,10 @@ func TestIssuePlanIgnoresEventsAndCancelIsFencedAndIdempotent(t *testing.T) {
 		item := snapshot.Issues["1"]
 		item.LastError = "ambiguous fixture"
 		item.Worktree, item.Workspace = "", nil
+		identity := state.ExecutionIdentity{RunID: item.RunID, Generation: item.Generation}
+		if err := state.CaptureContinuation(snapshot, item.Number, identity, state.NewID("checkpoint"), now); err != nil {
+			return err
+		}
 		decision, decisionErr := issuedomain.Fail(item.Status, item.LastError, "issue", true)
 		if decisionErr != nil {
 			return decisionErr
@@ -98,7 +102,7 @@ func TestIssuePlanIgnoresEventsAndCancelIsFencedAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := resolved.Issues["1"]
-	if item.Lease != nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionResolved || item.Suspension.Resolution != issuedomain.ResolutionCancel {
+	if resolved.ActiveExecution != nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionResolved || item.Suspension.Resolution != issuedomain.ResolutionCancel {
 		t.Fatalf("resolved Issue=%+v", item)
 	}
 	revision := resolved.StateRevision
@@ -131,8 +135,8 @@ func TestIssueResolveResumeRetriesGitHubWithoutRefencing(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := afterFailure.Issues["449"]
-	if item.Status != issuedomain.StatusResumePending || item.Lease == nil || item.Lease.Owner.Generation != 2 ||
-		item.GitHubSync != issuedomain.GitHubSyncIssueResolution || item.Suspension == nil ||
+	if item.Status != issuedomain.StatusResumePending || afterFailure.ActiveExecution != nil || item.Continuation == nil || item.Continuation.Generation != 2 ||
+		state.PendingEffect(&afterFailure, 449) == nil || state.PendingEffect(&afterFailure, 449).Kind != issuedomain.EffectApplyResolution || item.Suspension == nil ||
 		item.Suspension.Status != issuedomain.SuspensionResolved || item.Suspension.Resolution != issuedomain.ResolutionResume {
 		t.Fatalf("durable resolution boundary=%+v", item)
 	}
@@ -146,7 +150,7 @@ func TestIssueResolveResumeRetriesGitHubWithoutRefencing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := afterRetry.Issues["449"]; got.Lease == nil || got.Lease.Owner.Generation != 2 || got.GitHubSync != issuedomain.GitHubSyncNone {
+	if got := afterRetry.Issues["449"]; afterRetry.ActiveExecution != nil || got.Continuation == nil || got.Continuation.Generation != 2 || state.PendingEffect(&afterRetry, 449) != nil {
 		t.Fatalf("retry refenced or failed to converge: %+v", got)
 	}
 	revision := afterRetry.StateRevision
@@ -156,7 +160,7 @@ func TestIssueResolveResumeRetriesGitHubWithoutRefencing(t *testing.T) {
 		t.Fatalf("idempotent code=%d stderr=%s", code, stderr.String())
 	}
 	idempotent, err := fixture.store.Load()
-	if err != nil || idempotent.StateRevision != revision || idempotent.Issues["449"].Lease.Owner.Generation != 2 {
+	if err != nil || idempotent.StateRevision != revision || idempotent.ActiveExecution != nil || idempotent.Issues["449"].Continuation == nil || idempotent.Issues["449"].Continuation.Generation != 2 {
 		t.Fatalf("idempotent resume mutated state: revision=%d/%d err=%v", revision, idempotent.StateRevision, err)
 	}
 }
@@ -177,7 +181,7 @@ func TestIssueResolveResumeRejectsChangedWorktreeAndCheckpointBase(t *testing.T)
 		t.Fatal(err)
 	}
 	if _, err := fixture.store.Update("fixture_change_checkpoint_base", 450, fixture.runID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["450"].ResourcePark.OriginalLease.BaseSHA = strings.Repeat("f", 40)
+		snapshot.Issues["450"].Continuation.BaseSHA = strings.Repeat("f", 40)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -191,7 +195,7 @@ func TestIssueResolveResumeRejectsChangedWorktreeAndCheckpointBase(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item := snapshot.Issues["450"]; item.Lease != nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionActive {
+	if item := snapshot.Issues["450"]; snapshot.ActiveExecution != nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionActive {
 		t.Fatalf("rejected resolution changed execution state: %+v", item)
 	}
 }
@@ -232,8 +236,8 @@ func TestIssueResolveRetryStageReturnsToCheckpointStage(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["102"]
-	if item.Status != issuedomain.StatusAwaitingChecks || item.Lease == nil || item.Lease.Owner.Generation != 2 ||
-		item.Suspension == nil || item.Suspension.Resolution != issuedomain.ResolutionRetryStage || item.GitHubSync != issuedomain.GitHubSyncNone {
+	if item.Status != issuedomain.StatusAwaitingChecks || snapshot.ActiveExecution != nil ||
+		item.Suspension == nil || item.Suspension.Resolution != issuedomain.ResolutionRetryStage || state.PendingEffect(&snapshot, 102) != nil {
 		t.Fatalf("retry-stage result=%+v", item)
 	}
 	if item.HeadSHA != fixture.head || item.PullRequestNumber != 12 {
@@ -275,8 +279,8 @@ func TestIssueResolveAdoptPRRequiresExactCleanMergedHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["129"]
-	if item.Status != issuedomain.StatusCompleted || item.Lease != nil || item.ResourcePark != nil || item.Suspension != nil ||
-		!item.PullRequestMerged || item.PullRequestNumber != 132 || item.HeadSHA != fixture.head || item.GitHubSync != issuedomain.GitHubSyncNone {
+	if item.Status != issuedomain.StatusCompleted || snapshot.ActiveExecution != nil || item.Continuation != nil || item.Suspension != nil ||
+		!item.PullRequestMerged || item.PullRequestNumber != 132 || item.HeadSHA != fixture.head || state.PendingEffect(&snapshot, 129) != nil {
 		t.Fatalf("adopted Issue=%+v", item)
 	}
 }
@@ -305,13 +309,12 @@ func TestIssueResolveCancelClearsPendingAttentionWithoutExecution(t *testing.T) 
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["183"]
-	if item.Lease != nil || item.Status != issuedomain.StatusBlocked || item.Suspension == nil ||
+	if snapshot.ActiveExecution != nil || item.Status != issuedomain.StatusBlocked || item.Suspension == nil ||
 		item.Suspension.Resolution != issuedomain.ResolutionCancel || snapshot.PendingRequests["req_cancel"].Status != issuedomain.RequestStatusCanceled {
 		t.Fatalf("canceled Issue=%+v request=%+v", item, snapshot.PendingRequests["req_cancel"])
 	}
-	if _, _, err := fixture.store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 184, Title: "next", RunID: "run_184", Slot: 0,
-		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: time.Now().UTC(),
+	if _, _, err := fixture.store.StartExecution(state.ExecutionStart{
+		IssueNumber: 184, Title: "next", RunID: "run_184", StartedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("isolated suspension stopped the repository queue: %v", err)
 	}
@@ -378,10 +381,9 @@ func newIssueResolutionFixture(t *testing.T, number int, issueState string, pull
 	if err := fixture.store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fixture.store.ReserveLease(state.LeaseReservation{
-		IssueNumber: number, Title: "fixture", RunID: fixture.runID, Slot: 0,
-		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
-		BaseSHA: base, ReservedAt: time.Now().UTC(),
+	if _, _, err := fixture.store.StartExecution(state.ExecutionStart{
+		IssueNumber: number, Title: "fixture", RunID: fixture.runID,
+		BaseSHA: base, StartedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -400,6 +402,10 @@ func (f *issueResolutionFixture) block(t *testing.T, from issuedomain.Status, re
 		item.Workspace = testWorkerWorkspace(snapshot, f.worktree, f.branch)
 		item.HeadSHA, item.PullRequestURL = f.head, pullRequestURL
 		item.LastError = reason
+		identity := state.ExecutionIdentity{RunID: item.RunID, Generation: item.Generation}
+		if err := state.CaptureContinuation(snapshot, item.Number, identity, state.NewID("checkpoint"), time.Now().UTC()); err != nil {
+			return err
+		}
 		decision, err := issuedomain.Fail(from, reason, "issue", true)
 		if err != nil {
 			return err
@@ -407,11 +413,11 @@ func (f *issueResolutionFixture) block(t *testing.T, from issuedomain.Status, re
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
-		item.ResourcePark.WorktreeSHA256 = digest
-		if resumable && item.ResourcePark != nil {
+		item.Continuation.WorktreeSHA256 = digest
+		if resumable && item.Continuation != nil {
 			item.Suspension = &state.Suspension{ID: state.NewID("suspension"), Origin: "worker", Status: issuedomain.SuspensionActive,
 				ReasonCode: "environment", Recoverability: issuedomain.RecoverabilityOperator, Reason: reason,
-				AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionResume}, CheckpointID: item.ResourcePark.ID, SuspendedAt: time.Now().UTC()}
+				AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionResume}, CheckpointID: item.Continuation.ID, SuspendedAt: time.Now().UTC()}
 		}
 		return nil
 	}); err != nil {

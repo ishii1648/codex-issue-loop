@@ -20,6 +20,16 @@ func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, p
 	if l.Conflicts == nil {
 		return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "Pull Request conflict recovery", errors.New("conflict recovery manager is unavailable")), true)
 	}
+	snapshot, err := l.Store.Load()
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "load conflict execution boundary", err)
+	}
+	if active := snapshot.ActiveExecution; active != nil && active.IssueNumber != current.Number {
+		return failure.Wrap(failure.Transient, "acquire conflict execution", fmt.Errorf("active execution belongs to Issue #%d", active.IssueNumber))
+	}
+	if snapshot.ActiveExecution == nil && current.Continuation == nil {
+		return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "acquire conflict execution", errors.New("continuation checkpoint is missing")), true)
+	}
 	// A newly observed dirty PR starts by fetching the latest base even when a
 	// previous recovery record is retained for audit. Only resolving_conflict
 	// resumes the exact recorded MERGE_HEAD.
@@ -89,6 +99,19 @@ func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, p
 		"attempts": recovery.Attempts, "base_updates": recovery.BaseUpdates,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.RunID != current.RunID || item.Generation != current.Generation {
+			return fmt.Errorf("Issue #%d changed before conflict execution", current.Number)
+		}
+		if s.ActiveExecution == nil {
+			if item.Continuation == nil {
+				return fmt.Errorf("Issue #%d continuation checkpoint is missing", current.Number)
+			}
+			if _, resumeErr := state.ResumeContinuation(s, item.Number, item.Continuation.ID, l.now()); resumeErr != nil {
+				return resumeErr
+			}
+		} else if !state.OwnsActiveExecution(s, item.Number, state.ExecutionIdentity{RunID: item.RunID, Generation: item.Generation}) {
+			return fmt.Errorf("Issue #%d conflict execution is occupied", current.Number)
+		}
 		if err := state.ApplyIssueTransition(item, conflictDecision); err != nil {
 			return err
 		}
@@ -153,10 +176,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		return failure.Wrap(failure.Transient, "refresh Issue for conflict recovery", err)
 	}
 	runID := state.NewID("conflict")
-	previousOwner := state.LeaseOwner{}
-	if current.Lease != nil {
-		previousOwner = current.Lease.Owner
-	}
+	previousIdentity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 	attemptNumber := len(current.ConflictRecovery.History) + 1
 	attemptTransition, decisionErr := issuedomain.StartConflictAttempt(current.Status)
 	if decisionErr != nil {
@@ -168,13 +188,11 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 	}
 	_, err = l.Store.Update("conflict_recovery_attempt_started", current.Number, runID, payload, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		owner, transferErr := state.TransferIssueLease(item, previousOwner, runID)
+		identity, transferErr := state.TransferExecution(s, current.Number, previousIdentity, runID, l.now())
 		if transferErr != nil {
 			return transferErr
 		}
-		if owner != (state.LeaseOwner{}) {
-			payload["lease_owner"] = owner
-		}
+		payload["execution_identity"] = identity
 		if err := state.ApplyIssueTransition(item, attemptTransition); err != nil {
 			return err
 		}
@@ -256,7 +274,10 @@ func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current
 			if err := state.ApplyIssueTransition(item, inputDecision.Transition); err != nil {
 				return err
 			}
-			item.GitHubSync, item.UpdatedAt = inputDecision.GitHubSync, l.now()
+			if err := state.SetEffect(s, item.Number, item.RunID, inputDecision.Effect, l.now()); err != nil {
+				return err
+			}
+			item.UpdatedAt = l.now()
 			finishConflictAttempt(item, issuedomain.ConflictAttemptStatusNeedsInput, result.Summary, l.now())
 			q := result.Question
 			s.PendingRequests[requestID] = &state.Request{

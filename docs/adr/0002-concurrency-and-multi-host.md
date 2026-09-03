@@ -1,8 +1,10 @@
 # ADR-0002: 単一ホスト並列化と複数ホスト冗長化を分離する
 
-- Status: Accepted
+- Status: Superseded by [ADR-0005](0005-single-execution-boundary.md)
 - Date: 2026-08-16
 - Decision owners: codex-issue-loop maintainers
+
+2026-09-04に、現行product boundaryをconcurrency 1へ固定し、resource admissionとmulti-hostを将来拡張として保持しない判断へ変更した。本書は旧判断の履歴として保持し、現行設計の根拠には使用しない。
 
 ## Context
 

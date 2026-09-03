@@ -16,7 +16,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
@@ -39,7 +38,7 @@ type reconciliationDecision struct {
 	pullRequest string
 	prNumber    int
 	headSHA     string
-	githubSync  issuedomain.GitHubSync
+	effect      issuedomain.EffectKind
 	retryAt     *time.Time
 	workerPID   int
 	workerPGID  int
@@ -70,7 +69,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 	}
 	numbers := make([]int, 0, len(snapshot.Issues))
 	for _, item := range snapshot.Issues {
-		if !startupRemoteInspectionRequired(item, l.now()) {
+		if !startupRemoteInspectionRequired(snapshot, item, l.now()) {
 			continue
 		}
 		numbers = append(numbers, item.Number)
@@ -83,7 +82,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				return err
 			}
 			current := latest.Issues[strconv.Itoa(number)]
-			if current == nil || !startupRemoteInspectionRequired(current, l.now()) {
+			if current == nil || !startupRemoteInspectionRequired(latest, current, l.now()) {
 				break
 			}
 			remote, err := l.inspectIssue(ctx, *current)
@@ -112,66 +111,49 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				}
 			}
 			request := singlePendingRequest(latest, number)
-			parkInputLease := current.Status == issuedomain.StatusNeedsInput && current.GitHubSync == issuedomain.GitHubSyncNone && current.Lease != nil && current.ResourcePark == nil &&
+			captureInputContinuation := current.Status == issuedomain.StatusNeedsInput && state.PendingEffect(&latest, current.Number) == nil && current.Continuation == nil &&
 				current.PullRequestURL == "" && current.WorkerPID == 0 && current.WorkerPGID == 0 && decision.status == issuedomain.StatusNeedsInput &&
-				decision.githubSync == issuedomain.GitHubSyncNone && decision.pullRequest == "" && request != nil &&
-				(request.ResumeStatus == issuedomain.StatusUnset || request.ResumeStatus == issuedomain.StatusResumePending) && current.ConflictRecovery == nil
-			parkReconciledLease := parkInputLease
-			parkID := ""
-			parkedAt := time.Time{}
-			if parkReconciledLease {
-				parkID = state.NewID("park")
-				parkedAt = l.now()
+				decision.effect == issuedomain.EffectNone && decision.pullRequest == "" && request != nil &&
+				(request.ResumeStatus == issuedomain.StatusUnset || request.ResumeStatus == issuedomain.StatusResumePending) && current.ConflictRecovery == nil &&
+				latest.ActiveExecution != nil && latest.ActiveExecution.IssueNumber == current.Number
+			checkpointID := ""
+			suspendedAt := time.Time{}
+			if captureInputContinuation {
+				checkpointID = state.NewID("checkpoint")
+				suspendedAt = l.now()
 			}
 			_, err = l.Store.Update("startup_reconciled", number, current.RunID, map[string]any{
-				"previous_status":       current.Status,
-				"status":                decision.status,
-				"reason":                decision.reason,
-				"worktree":              inspection,
-				"pull_requests":         remote.PullRequests,
-				"predicate_report":      predicateReport,
-				"resource_park_id":      parkID,
-				"resource_park_created": parkReconciledLease,
+				"previous_status":    current.Status,
+				"status":             decision.status,
+				"reason":             decision.reason,
+				"worktree":           inspection,
+				"pull_requests":      remote.PullRequests,
+				"predicate_report":   predicateReport,
+				"checkpoint_id":      checkpointID,
+				"checkpoint_created": captureInputContinuation,
 			}, func(s *state.Snapshot) error {
 				item := s.Issues[strconv.Itoa(number)]
 				if !reflect.DeepEqual(item, current) {
 					return errReconciliationStateChanged
 				}
-				if parkReconciledLease {
-					if err := state.CaptureContinuationLease(item, current.Lease.Owner, parkID, parkedAt); err != nil {
+				if captureInputContinuation {
+					identity := state.ExecutionIdentity{RunID: latest.ActiveExecution.RunID, Generation: latest.ActiveExecution.Generation}
+					if err := state.CaptureContinuation(s, number, identity, checkpointID, suspendedAt); err != nil {
 						return err
 					}
-					if parkInputLease {
-						latestRequest := s.PendingRequests[request.ID]
-						if latestRequest == nil || !reflect.DeepEqual(latestRequest, request) {
-							return errReconciliationStateChanged
-						}
-						owner := item.ResourcePark.OriginalLease.Owner
-						item.ResourcePark.Kind = state.ResourceParkKindNeedsInput
-						item.ResourcePark.RequestID = request.ID
-						latestRequest.RunID = item.RunID
-						latestRequest.ResourceParkID = parkID
-						latestRequest.ReleasedOwner = &owner
-						latestRequest.ResumeStatus = issuedomain.StatusUnset
-						if item.PublicationAudit != nil && item.PublicationAudit.Reason == publication.ReasonResourceClaimMismatch {
-							item.ResourcePark.Stage = issuedomain.ContinuationStageResume
-							item.ResourcePark.Evidence = &state.ContinuationEvidence{
-								Origin: "startup_reconciliation", Phase: "resource_audit", Code: publication.ReasonResourceClaimMismatch,
-								Status: string(issuedomain.StatusNeedsInput), ObservedAt: parkedAt,
-							}
-						}
+					latestRequest := s.PendingRequests[request.ID]
+					if latestRequest == nil || !reflect.DeepEqual(latestRequest, request) {
+						return errReconciliationStateChanged
 					}
+					item.Continuation.Kind = state.ContinuationKindNeedsInput
+					item.Continuation.RequestID = request.ID
+					latestRequest.RunID = item.RunID
+					latestRequest.CheckpointID = checkpointID
+					latestRequest.ReleasedExecution = &identity
+					latestRequest.ResumeStatus = issuedomain.StatusUnset
 				}
 				if err := state.ApplyIssueTransition(item, lifecycleTransition); err != nil {
 					return err
-				}
-				if issuedomain.DecideLease(decision.status, decision.pullRequest != "", false) == issuedomain.ReleaseLease && item.Lease != nil {
-					if item.ResourcePark != nil && item.ResourcePark.Status == issuedomain.ResourceParkStatusResuming {
-						item.ResourcePark.Status = issuedomain.ResourceParkStatusResumed
-					}
-					if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
-						return err
-					}
 				}
 				item.LastError = decision.lastError
 				item.Branch = decision.branch
@@ -184,7 +166,9 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					item.HeadSHA = decision.headSHA
 				}
 				item.PullRequestMerged = decision.prMerged
-				item.GitHubSync = decision.githubSync
+				if err := state.SetEffect(s, item.Number, item.RunID, decision.effect, l.now()); err != nil {
+					return err
+				}
 				item.RetryAfter = decision.retryAt
 				item.WorkerPID = decision.workerPID
 				item.WorkerPGID = decision.workerPGID
@@ -230,22 +214,22 @@ func startupReconciliationPredicateReport(issueNumber int, decision reconciliati
 	return report
 }
 
-func startupRemoteInspectionRequired(item *state.Issue, now time.Time) bool {
+func startupRemoteInspectionRequired(snapshot state.Snapshot, item *state.Issue, now time.Time) bool {
 	if item == nil {
 		return false
 	}
-	if item.GitHubSync != issuedomain.GitHubSyncNone {
+	if state.PendingEffect(&snapshot, item.Number) != nil {
 		return true
 	}
 	switch item.Status {
-	case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusRunning, issuedomain.StatusAnswerClaimWaiting, issuedomain.StatusResumePending, issuedomain.StatusAwaitingChecks, issuedomain.StatusAwaitingMerge, issuedomain.StatusResolvingConflict:
+	case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusRunning, issuedomain.StatusResumePending, issuedomain.StatusAwaitingChecks, issuedomain.StatusAwaitingMerge, issuedomain.StatusResolvingConflict:
 		return true
 	case issuedomain.StatusRetryWait:
 		return item.RetryAfter == nil || !item.RetryAfter.After(now)
 	case issuedomain.StatusBlocked, issuedomain.StatusFailed:
 		return terminalPullRequestCandidate(*item)
 	case issuedomain.StatusNeedsInput:
-		return item.Lease != nil && item.ResourcePark == nil && item.PullRequestURL == "" && item.WorkerPID == 0 && item.WorkerPGID == 0
+		return false
 	default:
 		return false
 	}
@@ -318,11 +302,6 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		if err := state.ApplyIssueTransition(item, lifecycleTransition); err != nil {
 			return err
 		}
-		if issuedomain.DecideLease(decision.status, decision.pullRequest != "", false) == issuedomain.ReleaseLease && item.Lease != nil {
-			if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
-				return err
-			}
-		}
 		item.LastError = decision.lastError
 		item.Branch = decision.branch
 		item.PullRequestURL = decision.pullRequest
@@ -334,7 +313,9 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 			item.HeadSHA = decision.headSHA
 		}
 		item.PullRequestMerged = decision.prMerged
-		item.GitHubSync = decision.githubSync
+		if err := state.SetEffect(snapshot, item.Number, item.RunID, decision.effect, l.now()); err != nil {
+			return err
+		}
 		item.RetryAfter = decision.retryAt
 		item.WorkerPID = decision.workerPID
 		item.WorkerPGID = decision.workerPGID
@@ -373,7 +354,7 @@ func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg confi
 			return true
 		}
 	}
-	return labels[cfg.NeedsInputLabel] && (current.Status == issuedomain.StatusNeedsInput || current.Status == issuedomain.StatusAnswerClaimWaiting || current.Status == issuedomain.StatusResumePending)
+	return labels[cfg.NeedsInputLabel] && (current.Status == issuedomain.StatusNeedsInput || current.Status == issuedomain.StatusResumePending)
 }
 
 func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) reconciliationDecision {
@@ -382,7 +363,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 	prNumber, headSHA := reconciledPullRequestIdentity(remote.PullRequests, decision.PullRequest)
 	return reconciliationDecision{
 		status: decision.Status, lastError: decision.LastError, branch: decision.Branch,
-		pullRequest: decision.PullRequest, prNumber: prNumber, headSHA: headSHA, githubSync: decision.GitHubSync, retryAt: decision.RetryAt,
+		pullRequest: decision.PullRequest, prNumber: prNumber, headSHA: headSHA, effect: decision.Effect, retryAt: decision.RetryAt,
 		workerPID: decision.WorkerPID, workerPGID: decision.WorkerPGID, prMerged: decision.PullRequestMerged,
 		markRunning: decision.MarkRunning, reason: decision.Reason,
 	}
@@ -400,9 +381,12 @@ func reconciledPullRequestIdentity(pullRequests []gh.PullRequest, url string) (i
 func (l *Loop) reconciliationInputs(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) (issuedomain.ReconciliationState, issuedomain.ReconciliationObservation) {
 	currentState := issuedomain.ReconciliationState{
 		Number: current.Number, Status: current.Status, LastError: current.LastError, Branch: current.Branch,
-		PullRequest: current.PullRequestURL, GitHubSync: current.GitHubSync, RetryAt: current.RetryAfter,
+		PullRequest: current.PullRequestURL, Effect: issuedomain.EffectNone, RetryAt: current.RetryAfter,
 		WorkerPID: current.WorkerPID, WorkerPGID: current.WorkerPGID, PullRequestMerged: current.PullRequestMerged,
 		WorktreeSaved: current.Worktree != "",
+	}
+	if effect := state.PendingEffect(&snapshot, current.Number); effect != nil {
+		currentState.Effect = effect.Kind
 	}
 	labels := labelSet(remote.Issue.Labels)
 	observation := issuedomain.ReconciliationObservation{
@@ -463,7 +447,7 @@ func (l *Loop) decideTerminalPullRequestReconciliation(current state.Issue, remo
 	prNumber, headSHA := reconciledPullRequestIdentity(remote.PullRequests, decision.PullRequest)
 	return reconciliationDecision{
 		status: decision.Status, lastError: decision.LastError, branch: decision.Branch,
-		pullRequest: decision.PullRequest, prNumber: prNumber, headSHA: headSHA, githubSync: decision.GitHubSync, retryAt: decision.RetryAt,
+		pullRequest: decision.PullRequest, prNumber: prNumber, headSHA: headSHA, effect: decision.Effect, retryAt: decision.RetryAt,
 		workerPID: decision.WorkerPID, workerPGID: decision.WorkerPGID, prMerged: decision.PullRequestMerged,
 		markRunning: decision.MarkRunning, reason: decision.Reason,
 	}, ok
@@ -489,18 +473,18 @@ func (l *Loop) hasManualExclusion(issue gh.Issue, current state.Issue) bool {
 func blockDecision(decision reconciliationDecision, reason string) reconciliationDecision {
 	domainDecision := issuedomain.BlockReconciliation(issuedomain.ReconciliationDecision{
 		Status: decision.status, LastError: decision.lastError, Branch: decision.branch,
-		PullRequest: decision.pullRequest, GitHubSync: decision.githubSync, RetryAt: decision.retryAt,
+		PullRequest: decision.pullRequest, Effect: decision.effect, RetryAt: decision.retryAt,
 		WorkerPID: decision.workerPID, WorkerPGID: decision.workerPGID, PullRequestMerged: decision.prMerged,
 		MarkRunning: decision.markRunning, Reason: decision.reason,
 	}, reason)
-	decision.status, decision.lastError, decision.githubSync = domainDecision.Status, domainDecision.LastError, domainDecision.GitHubSync
+	decision.status, decision.lastError, decision.effect = domainDecision.Status, domainDecision.LastError, domainDecision.Effect
 	decision.retryAt, decision.workerPID, decision.workerPGID, decision.reason = domainDecision.RetryAt, domainDecision.WorkerPID, domainDecision.WorkerPGID, domainDecision.Reason
 	return decision
 }
 
 func terminalPullRequestCandidate(issue state.Issue) bool {
 	return issuedomain.TerminalPullRequestCandidate(issuedomain.ReconciliationState{
-		Status: issue.Status, PullRequest: issue.PullRequestURL, PullRequestMerged: issue.PullRequestMerged, GitHubSync: issue.GitHubSync,
+		Status: issue.Status, PullRequest: issue.PullRequestURL, PullRequestMerged: issue.PullRequestMerged, Effect: issuedomain.EffectNone,
 	})
 }
 

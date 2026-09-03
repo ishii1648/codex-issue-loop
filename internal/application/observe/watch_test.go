@@ -73,24 +73,25 @@ func TestWatchReturnsEveryPendingRequestInRequestIDOrder(t *testing.T) {
 	}
 }
 
-func TestWatchReportsAnsweredClaimWaitingWithParkSnapshot(t *testing.T) {
+func TestWatchPreservesAnsweredGenericContinuation(t *testing.T) {
 	store := newWatchStore(t)
 	now := time.Date(2026, 8, 18, 8, 0, 0, 0, time.UTC)
-	owner := state.LeaseOwner{RunID: "run_1", Generation: 1}
+	owner := state.ExecutionIdentity{RunID: "run_1", Generation: 1}
 	_, err := store.Update("answer_recorded", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = state.SupervisorStateStopped
 		request := &state.Request{
-			ID: "req_1", IssueNumber: 1, Question: "Continue?", RunID: owner.RunID, ResourceParkID: "park_1",
-			ReleasedOwner: &owner, Status: issuedomain.RequestStatusAnswered, Answer: "yes", CreatedAt: now, AnsweredAt: &now,
+			ID: "req_1", IssueNumber: 1, Question: "Continue?", RunID: owner.RunID, CheckpointID: "checkpoint_1",
+			ReleasedExecution: &owner, Status: issuedomain.RequestStatusAnswered, Answer: "yes", CreatedAt: now, AnsweredAt: &now,
 		}
 		snapshot.PendingRequests[request.ID] = request
 		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, RunID: owner.RunID, Status: issuedomain.StatusAnswerClaimWaiting, LeaseGeneration: 1,
+			Number: 1, RunID: owner.RunID, Status: issuedomain.StatusResumePending, Generation: 1,
 			Worktree: "/tmp/issue-1", Branch: "codex/issue-1",
 			Workspace: &state.WorkerWorkspace{Path: "/tmp/issue-1", Branch: "codex/issue-1", RepoID: snapshot.RepoID,
 				Repository: "owner/repo", GitCommonDir: snapshot.RepoPath + "/.git", MainCheckout: snapshot.RepoPath, CapturedAt: now},
-			ResourcePark: &state.ContinuationCheckpoint{
-				ID: "park_1", Kind: state.ResourceParkKindNeedsInput, RequestID: request.ID, Status: issuedomain.ResourceParkStatusParked, ParkedAt: now,
-				OriginalLease: state.ResourceLease{Owner: owner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-1", ReservedAt: now},
+			Continuation: &state.ContinuationCheckpoint{
+				ID: "checkpoint_1", Kind: state.ContinuationKindNeedsInput, RequestID: request.ID, CreatedAt: now,
+				RunID: owner.RunID, Generation: owner.Generation, BaseSHA: "base-1", Stage: issuedomain.ContinuationStageResume,
 			},
 		}
 		return nil
@@ -99,12 +100,12 @@ func TestWatchReportsAnsweredClaimWaitingWithParkSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := Wait(context.Background(), store, time.Second, 0, false)
-	if err != nil || result.Reason != "answer_claim_waiting" || len(result.PendingRequests) != 0 {
+	if err != nil || result.Reason != "stopped" || len(result.PendingRequests) != 0 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	park := result.Snapshot.Issues["1"].ResourcePark
-	if park == nil || park.RequestID != "req_1" || park.OriginalLease.BaseSHA != "base-1" || result.Snapshot.PendingRequests["req_1"].Status != issuedomain.RequestStatusAnswered {
-		t.Fatalf("watch lost parked answer provenance: %+v", result)
+	checkpoint := result.Snapshot.Issues["1"].Continuation
+	if checkpoint == nil || checkpoint.RequestID != "req_1" || checkpoint.BaseSHA != "base-1" || result.Snapshot.PendingRequests["req_1"].Status != issuedomain.RequestStatusAnswered {
+		t.Fatalf("watch lost continuation provenance: %+v", result)
 	}
 }
 

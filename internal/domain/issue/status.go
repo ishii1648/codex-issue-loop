@@ -22,25 +22,24 @@ const (
 )
 
 const (
-	StatusUnset              Status = ""
-	StatusClaiming           Status = "claiming"
-	StatusClaimed            Status = "claimed"
-	StatusRunning            Status = "running"
-	StatusAnswerClaimWaiting Status = "answer_claim_waiting"
-	StatusResumePending      Status = "resume_pending"
-	StatusRetryWait          Status = "retry_wait"
-	StatusNeedsInput         Status = "needs_input"
-	StatusAwaitingChecks     Status = "awaiting_checks"
-	StatusAwaitingMerge      Status = "awaiting_merge"
-	StatusResolvingConflict  Status = "resolving_conflict"
-	StatusBlocked            Status = "blocked"
-	StatusFailed             Status = "failed"
-	StatusCompleted          Status = "completed"
+	StatusUnset             Status = ""
+	StatusClaiming          Status = "claiming"
+	StatusClaimed           Status = "claimed"
+	StatusRunning           Status = "running"
+	StatusResumePending     Status = "resume_pending"
+	StatusRetryWait         Status = "retry_wait"
+	StatusNeedsInput        Status = "needs_input"
+	StatusAwaitingChecks    Status = "awaiting_checks"
+	StatusAwaitingMerge     Status = "awaiting_merge"
+	StatusResolvingConflict Status = "resolving_conflict"
+	StatusBlocked           Status = "blocked"
+	StatusFailed            Status = "failed"
+	StatusCompleted         Status = "completed"
 )
 
 var allStatuses = [...]Status{
 	StatusUnset, StatusClaiming, StatusClaimed, StatusRunning,
-	StatusAnswerClaimWaiting, StatusResumePending, StatusRetryWait,
+	StatusResumePending, StatusRetryWait,
 	StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 	StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted,
 }
@@ -80,7 +79,7 @@ func (s Status) WorktreeRetentionClass() WorktreeRetentionClass {
 		return WorktreeRetainFailed
 	case StatusBlocked:
 		return WorktreeRetainBlocked
-	case StatusNeedsInput, StatusAnswerClaimWaiting, StatusResumePending:
+	case StatusNeedsInput, StatusResumePending:
 		return WorktreeRetainAttention
 	default:
 		return WorktreeRetainIndefinitely
@@ -89,7 +88,7 @@ func (s Status) WorktreeRetentionClass() WorktreeRetentionClass {
 
 func (s Status) RequiresWorkspaceProvenance() bool {
 	switch s {
-	case StatusClaimed, StatusRunning, StatusAnswerClaimWaiting, StatusResumePending,
+	case StatusClaimed, StatusRunning, StatusResumePending,
 		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 		StatusResolvingConflict:
 		return true
@@ -98,19 +97,13 @@ func (s Status) RequiresWorkspaceProvenance() bool {
 	}
 }
 
-// Retained leases in waiting and attention states still fence resources, but
-// do not consume a bounded worker slot.
-func (s Status) OccupiesWorkerSlot() bool {
+func (s Status) RequiresActiveExecution() bool {
 	switch s {
-	case StatusClaiming, StatusClaimed, StatusRunning, StatusResumePending, StatusResolvingConflict:
+	case StatusClaiming, StatusClaimed, StatusRunning, StatusResolvingConflict:
 		return true
 	default:
 		return false
 	}
-}
-
-func (s Status) RequiresExecutionLease() bool {
-	return s.OccupiesWorkerSlot()
 }
 
 func (s Status) TerminalForWebhook() bool {
@@ -119,8 +112,7 @@ func (s Status) TerminalForWebhook() bool {
 
 func (s Status) WebhookRoutable() bool {
 	switch s {
-	case StatusClaiming, StatusClaimed, StatusRunning, StatusAnswerClaimWaiting,
-		StatusResumePending,
+	case StatusClaiming, StatusClaimed, StatusRunning, StatusResumePending,
 		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 		StatusResolvingConflict:
 		return true
@@ -133,7 +125,7 @@ func (s Status) WebhookRoutable() bool {
 // admission still apply.
 func (s Status) PendingDispatch() bool {
 	switch s {
-	case StatusClaiming, StatusAnswerClaimWaiting, StatusResumePending,
+	case StatusClaiming, StatusResumePending,
 		StatusRetryWait, StatusAwaitingChecks, StatusAwaitingMerge, StatusResolvingConflict:
 		return true
 	default:
@@ -143,8 +135,8 @@ func (s Status) PendingDispatch() bool {
 
 // Status and GitHub synchronization are separate durable lifecycle axes;
 // pending synchronization requires dispatch independently of status policy.
-func (s Status) DispatchPending(sync GitHubSync) bool {
-	return sync.Pending() || s.PendingDispatch()
+func (s Status) DispatchPending(effectPending bool) bool {
+	return effectPending || s.PendingDispatch()
 }
 
 func (s Status) RetainsRunLogs() bool {
@@ -160,7 +152,7 @@ func (s Status) IneligibleForAdmission() bool {
 		return true
 	}
 	switch s {
-	case StatusRunning, StatusClaimed, StatusNeedsInput, StatusAnswerClaimWaiting,
+	case StatusRunning, StatusClaimed, StatusNeedsInput,
 		StatusResumePending, StatusResolvingConflict:
 		return true
 	default:
@@ -168,19 +160,15 @@ func (s Status) IneligibleForAdmission() bool {
 	}
 }
 
-func (s Status) UsesWorkerSlot() bool {
+func (s Status) DispatchesWorker() bool {
 	switch s {
-	case StatusAwaitingChecks, StatusAwaitingMerge:
-		return false
-	default:
+	case StatusClaiming, StatusResumePending, StatusRetryWait, StatusResolvingConflict:
 		return true
+	default:
+		return false
 	}
 }
 
-func (s Status) UsesWorkerSlotWhile(sync GitHubSync) bool {
-	return !sync.Pending() && s.UsesWorkerSlot()
-}
-
-func (s Status) BlocksQueueForPullRequest(autoMerge bool) bool {
-	return s == StatusAwaitingChecks || s == StatusResolvingConflict || autoMerge && s == StatusAwaitingMerge
+func (s Status) DispatchesWorkerWhile(effectPending bool) bool {
+	return !effectPending && s.DispatchesWorker()
 }

@@ -2,14 +2,6 @@ package issue
 
 import "fmt"
 
-type ResourceParkStatus string
-
-const (
-	ResourceParkStatusParked   ResourceParkStatus = "parked"
-	ResourceParkStatusResuming ResourceParkStatus = "resuming"
-	ResourceParkStatusResumed  ResourceParkStatus = "resumed"
-)
-
 type RequestStatus string
 
 const (
@@ -35,10 +27,6 @@ func validateVocabulary[T ~string](kind string, value T, allowed ...T) error {
 		}
 	}
 	return fmt.Errorf("unknown %s %q", kind, value)
-}
-
-func (s ResourceParkStatus) Validate() error {
-	return validateVocabulary("resource park status", s, ResourceParkStatusParked, ResourceParkStatusResuming, ResourceParkStatusResumed)
 }
 
 func (s RequestStatus) Validate() error {

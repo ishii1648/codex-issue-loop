@@ -28,13 +28,16 @@ func (snapshot Snapshot) Validate() error {
 	if snapshot.SemanticContractVersion != statecontract.CurrentVersion {
 		return SemanticContractVersionError{Version: snapshot.SemanticContractVersion, Current: statecontract.CurrentVersion}
 	}
+	if snapshot.IssueLifecycleAPIVersion != issuedomain.LifecycleAPICurrent {
+		return fmt.Errorf("snapshot Issue lifecycle API version %q does not match %q", snapshot.IssueLifecycleAPIVersion, issuedomain.LifecycleAPICurrent)
+	}
 	if strings.TrimSpace(snapshot.RepoID) == "" || strings.TrimSpace(snapshot.RepoPath) == "" {
 		return fmt.Errorf("snapshot repository identity is incomplete")
 	}
-	if snapshot.Issues == nil || snapshot.PendingRequests == nil {
+	if snapshot.Issues == nil || snapshot.PendingEffects == nil || snapshot.QuarantinedIssues == nil || snapshot.IntakeVerifications == nil || snapshot.PendingRequests == nil {
 		return fmt.Errorf("snapshot aggregate maps must be initialized")
 	}
-	if err := validateResourceLeases(snapshot); err != nil {
+	if err := validateExecutionState(snapshot); err != nil {
 		return err
 	}
 	if err := validatePersistenceSemanticContract(snapshot); err != nil {
@@ -49,6 +52,27 @@ func (snapshot Snapshot) Validate() error {
 		}
 		if err := validateIssueAggregate(issue); err != nil {
 			return fmt.Errorf("Issue #%d: %w", issue.Number, err)
+		}
+	}
+	for key, record := range snapshot.QuarantinedIssues {
+		if record == nil || record.IssueNumber < 1 || key != strconv.Itoa(record.IssueNumber) {
+			return fmt.Errorf("quarantined Issue entry %q has invalid identity", key)
+		}
+		if snapshot.Issues[key] != nil {
+			return fmt.Errorf("Issue #%d is both managed and quarantined", record.IssueNumber)
+		}
+		if record.ReasonCode == "" || strings.TrimSpace(record.Reason) == "" || record.QuarantinedAt.IsZero() {
+			return fmt.Errorf("quarantined Issue #%d has incomplete evidence", record.IssueNumber)
+		}
+	}
+	for key, effect := range snapshot.PendingEffects {
+		if err := validateEffectIntent(snapshot, key, effect); err != nil {
+			return err
+		}
+	}
+	for key, verification := range snapshot.IntakeVerifications {
+		if _, err := strconv.Atoi(key); err != nil || verification == nil || verification.Reason == "" || verification.VerifiedAt.IsZero() {
+			return fmt.Errorf("Issue author verification entry %q is invalid", key)
 		}
 	}
 	for id, request := range snapshot.PendingRequests {
@@ -81,20 +105,17 @@ func validatePersistenceSemanticContract(snapshot Snapshot) error {
 }
 
 func validateIssueAggregate(issue *Issue) error {
+	if err := issue.Status.Validate(); err != nil {
+		return err
+	}
 	if issue.Attempts < 0 || issue.Continuations < 0 {
 		return fmt.Errorf("attempt and continuation counters must not be negative")
 	}
 	if issue.WorkerPID < 0 || issue.WorkerPGID < 0 || (issue.WorkerPID == 0) != (issue.WorkerPGID == 0) {
 		return fmt.Errorf("worker PID and PGID must be present or absent together")
 	}
-	if issue.WorkerPID > 0 && (issue.RunID == "" || !issue.Status.OccupiesWorkerSlot()) {
+	if issue.WorkerPID > 0 && (issue.RunID == "" || !issue.Status.RequiresActiveExecution()) {
 		return fmt.Errorf("worker process is not owned by an executing lifecycle")
-	}
-	if issue.Status.Terminal() && issue.Lease != nil {
-		return fmt.Errorf("terminal lifecycle must not retain an execution lease")
-	}
-	if issue.Status.RequiresExecutionLease() && issue.Lease == nil {
-		return fmt.Errorf("executing lifecycle %q has no execution lease", issue.Status)
 	}
 	if issue.Session != nil {
 		if strings.TrimSpace(issue.Session.Backend) == "" || strings.TrimSpace(issue.Session.ID) == "" || issue.SessionID != issue.Session.ID {
@@ -120,16 +141,40 @@ func validateIssueAggregate(issue *Issue) error {
 	if issue.RetryAfter != nil && issue.RetryAfter.IsZero() {
 		return fmt.Errorf("retry deadline is zero")
 	}
-	if issue.LeaseGeneration > 0 && issue.RunID == "" {
-		return fmt.Errorf("lease generation has no run owner")
+	if issue.Generation > 0 && issue.RunID == "" {
+		return fmt.Errorf("execution generation has no run owner")
 	}
 	if issue.Workspace != nil && issue.Workspace.RepositoryID < 0 {
 		return fmt.Errorf("workspace repository ID must not be negative")
 	}
+	if issue.ConflictRecovery != nil {
+		for _, attempt := range issue.ConflictRecovery.History {
+			if err := attempt.Status.Validate(); err != nil {
+				return fmt.Errorf("conflict attempt %d: %w", attempt.Number, err)
+			}
+		}
+	}
+	if checkpoint := issue.Continuation; checkpoint != nil {
+		if !ValidID(checkpoint.ID, "checkpoint_") && !ValidID(checkpoint.ID, "park_") {
+			return fmt.Errorf("continuation checkpoint identity is invalid")
+		}
+		if checkpoint.RunID == "" || checkpoint.Generation == 0 || checkpoint.Generation > issue.Generation || checkpoint.CreatedAt.IsZero() {
+			return fmt.Errorf("continuation checkpoint execution identity is incomplete")
+		}
+		if err := checkpoint.Stage.Validate(); err != nil {
+			return fmt.Errorf("continuation checkpoint stage: %w", err)
+		}
+		if checkpoint.WorktreeSHA256 != "" && !validSHA256(checkpoint.WorktreeSHA256) {
+			return fmt.Errorf("continuation checkpoint worktree digest is invalid")
+		}
+		if checkpoint.ResultSHA256 != "" && !validSHA256(checkpoint.ResultSHA256) {
+			return fmt.Errorf("continuation checkpoint result digest is invalid")
+		}
+	}
 	if err := validateSuspension(issue); err != nil {
 		return err
 	}
-	return validateGitHubSyncSubstate(issue)
+	return nil
 }
 
 func validateSuspension(issue *Issue) error {
@@ -138,8 +183,8 @@ func validateSuspension(issue *Issue) error {
 	}
 	suspension := issue.Suspension
 	if issue.Status == issuedomain.StatusCompleted {
-		pendingAdoptionSync := issue.GitHubSync == issuedomain.GitHubSyncDone && suspension.Status == issuedomain.SuspensionResolved &&
-			suspension.Resolution == issuedomain.ResolutionAdoptPR && issue.ResourcePark != nil && suspension.CheckpointID == issue.ResourcePark.ID
+		pendingAdoptionSync := suspension.Status == issuedomain.SuspensionResolved && suspension.Resolution == issuedomain.ResolutionAdoptPR &&
+			issue.Continuation != nil && suspension.CheckpointID == issue.Continuation.ID
 		if !pendingAdoptionSync {
 			return fmt.Errorf("completed lifecycle retains a suspension outside pending adoption synchronization")
 		}
@@ -177,33 +222,43 @@ func validateSuspension(issue *Issue) error {
 		seen[action] = true
 	}
 	if suspension.CheckpointID != "" {
-		if issue.ResourcePark == nil || issue.ResourcePark.ID != suspension.CheckpointID {
+		if issue.Continuation == nil || issue.Continuation.ID != suspension.CheckpointID {
 			return fmt.Errorf("suspension checkpoint identity is inconsistent")
 		}
 	}
 	return nil
 }
 
-func validateGitHubSyncSubstate(issue *Issue) error {
+func validateEffectIntent(snapshot Snapshot, key string, effect *EffectIntent) error {
+	if effect == nil || key != strconv.Itoa(effect.IssueNumber) || !ValidID(effect.ID, "effect_") || effect.RunID == "" || effect.CreatedAt.IsZero() {
+		return fmt.Errorf("pending effect entry %q has incomplete identity", key)
+	}
+	if err := effect.Kind.Validate(); err != nil {
+		return err
+	}
+	issue := snapshot.Issues[key]
+	if issue == nil || issue.RunID != effect.RunID {
+		return fmt.Errorf("pending effect %s has no matching Issue run", effect.ID)
+	}
 	wantStatus := issuedomain.StatusUnset
-	switch issue.GitHubSync {
-	case issuedomain.GitHubSyncDone:
+	switch effect.Kind {
+	case issuedomain.EffectMarkDone:
 		wantStatus = issuedomain.StatusCompleted
-	case issuedomain.GitHubSyncNeedsInput:
+	case issuedomain.EffectMarkNeedsInput:
 		wantStatus = issuedomain.StatusNeedsInput
-	case issuedomain.GitHubSyncFailed:
+	case issuedomain.EffectMarkFailed:
 		wantStatus = issuedomain.StatusFailed
-	case issuedomain.GitHubSyncBlocked:
+	case issuedomain.EffectMarkBlocked:
 		wantStatus = issuedomain.StatusBlocked
-	case issuedomain.GitHubSyncConflictRetry:
+	case issuedomain.EffectRetryConflict:
 		wantStatus = issuedomain.StatusResolvingConflict
-	case issuedomain.GitHubSyncIssueResolution:
+	case issuedomain.EffectApplyResolution:
 		if issue.Status.Terminal() || issue.Suspension == nil || issue.Suspension.Status != issuedomain.SuspensionResolved {
-			return fmt.Errorf("Issue resolution synchronization has no resolved executable suspension")
+			return fmt.Errorf("Issue resolution effect has no resolved executable suspension")
 		}
 	}
 	if wantStatus != issuedomain.StatusUnset && issue.Status != wantStatus {
-		return fmt.Errorf("GitHub synchronization %q is incompatible with status %q", issue.GitHubSync, issue.Status)
+		return fmt.Errorf("effect %q is incompatible with status %q", effect.Kind, issue.Status)
 	}
 	return nil
 }
@@ -217,8 +272,8 @@ func validateRequestAggregate(snapshot Snapshot, id string, request *Request) er
 		return fmt.Errorf("request %s refers to missing Issue #%d", id, request.IssueNumber)
 	}
 	if request.RunID != "" && request.RunID != issue.RunID {
-		historicalAnsweredRun := request.Status == issuedomain.RequestStatusAnswered && request.ResourceParkID != "" &&
-			request.ReleasedOwner != nil && request.ReleasedOwner.RunID == request.RunID
+		historicalAnsweredRun := request.Status == issuedomain.RequestStatusAnswered && request.CheckpointID != "" &&
+			request.ReleasedExecution != nil && request.ReleasedExecution.RunID == request.RunID
 		if !historicalAnsweredRun {
 			return fmt.Errorf("request %s run does not match Issue #%d", id, issue.Number)
 		}
@@ -242,19 +297,19 @@ func validateRequestAggregate(snapshot Snapshot, id string, request *Request) er
 			return fmt.Errorf("canceled request %s contains an answer", id)
 		}
 	}
-	if request.ResourceParkID != "" {
-		historicalCompletedRequest := issue.Status == issuedomain.StatusCompleted && issue.ResourcePark == nil &&
-			request.Status == issuedomain.RequestStatusAnswered && request.ReleasedOwner != nil &&
-			request.RunID != "" && request.ReleasedOwner.RunID == request.RunID
+	if request.CheckpointID != "" {
+		historicalCompletedRequest := issue.Status == issuedomain.StatusCompleted && issue.Continuation == nil &&
+			request.Status == issuedomain.RequestStatusAnswered && request.ReleasedExecution != nil &&
+			request.RunID != "" && request.ReleasedExecution.RunID == request.RunID
 		if historicalCompletedRequest {
 			return nil
 		}
-		if issue.ResourcePark == nil || issue.ResourcePark.ID != request.ResourceParkID || issue.ResourcePark.RequestID != request.ID {
-			issueParkID, parkRequestID := "", ""
-			if issue.ResourcePark != nil {
-				issueParkID, parkRequestID = issue.ResourcePark.ID, issue.ResourcePark.RequestID
+		if issue.Continuation == nil || issue.Continuation.ID != request.CheckpointID || issue.Continuation.RequestID != request.ID {
+			issueCheckpointID, checkpointRequestID := "", ""
+			if issue.Continuation != nil {
+				issueCheckpointID, checkpointRequestID = issue.Continuation.ID, issue.Continuation.RequestID
 			}
-			return fmt.Errorf("request %s resource park identity is inconsistent: issue park=%q request park=%q park request=%q", id, issueParkID, request.ResourceParkID, parkRequestID)
+			return fmt.Errorf("request %s continuation identity is inconsistent: issue checkpoint=%q request checkpoint=%q checkpoint request=%q", id, issueCheckpointID, request.CheckpointID, checkpointRequestID)
 		}
 	}
 	return nil

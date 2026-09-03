@@ -14,14 +14,9 @@ import (
 	"time"
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
-
-func resourceScope(resources ...string) publication.ResourceScope {
-	return publication.ResourceScope{Declared: append([]string(nil), resources...), Effective: append([]string(nil), resources...)}
-}
 
 func TestPublishCommitsPushesAndCreatesDraftPullRequestIdempotently(t *testing.T) {
 	root := t.TempDir()
@@ -83,14 +78,14 @@ esac
 	manager := Manager{GitPath: "git", GHPath: fakeGH}
 	issue := gh.Issue{Number: 1, Title: "Create marker"}
 
-	first, audit, err := manager.Publish(context.Background(), cfg, issue, repo, branch, "", "implemented", baseSHA, resourceScope(admission.RepositoryResource))
+	first, audit, err := manager.Publish(context.Background(), cfg, issue, repo, branch, "", "implemented", baseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.Branch != branch || first.Commit == "" || first.PullRequestURL != "https://github.example/owner/repo/pull/1" {
 		t.Fatalf("unexpected first publish result: %+v", first)
 	}
-	if len(audit.ChangedPaths) != 1 || audit.ChangedPaths[0] != "results/one.txt" || len(audit.ActualResources) != 1 || audit.ActualResources[0] != admission.RepositoryResource {
+	if len(audit.ChangedPaths) != 1 || audit.ChangedPaths[0] != "results/one.txt" {
 		t.Fatalf("unexpected publication audit: %+v", audit)
 	}
 	if status := runGit(t, repo, "status", "--porcelain"); status != "" {
@@ -100,72 +95,12 @@ esac
 		t.Fatalf("remote commit=%s, want %s", remoteCommit, first.Commit)
 	}
 
-	second, _, err := manager.Publish(context.Background(), cfg, issue, repo, branch, first.PullRequestURL, "implemented", baseSHA, resourceScope(admission.RepositoryResource))
+	second, _, err := manager.Publish(context.Background(), cfg, issue, repo, branch, first.PullRequestURL, "implemented", baseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second != first {
 		t.Fatalf("idempotent publish result=%+v, want %+v", second, first)
-	}
-}
-
-func TestPublishRefusesTrackedAndUntrackedResourcesOutsideClaimBeforeMutation(t *testing.T) {
-	root := t.TempDir()
-	remote := filepath.Join(root, "remote.git")
-	repo := filepath.Join(root, "repo")
-	runGit(t, root, "init", "--bare", remote)
-	runGit(t, root, "init", repo)
-	runGit(t, repo, "config", "user.name", "Audit Publisher")
-	runGit(t, repo, "config", "user.email", "publisher@example.invalid")
-	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, repo, "add", "README.md")
-	runGit(t, repo, "commit", "-m", "base")
-	runGit(t, repo, "branch", "-M", "main")
-	runGit(t, repo, "remote", "add", "origin", remote)
-	runGit(t, repo, "push", "-u", "origin", "main")
-	baseSHA := runGit(t, repo, "rev-parse", "HEAD")
-	branch := "codex/issue-2-audit"
-	runGit(t, repo, "switch", "-c", branch)
-	if err := os.MkdirAll(filepath.Join(repo, "docs"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "docs", "tracked.md"), []byte("tracked\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, repo, "add", "docs/tracked.md")
-	runGit(t, repo, "commit", "-m", "worker committed docs")
-	workerHead := runGit(t, repo, "rev-parse", "HEAD")
-	if err := os.MkdirAll(filepath.Join(repo, "internal", "platform", "config"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "internal", "platform", "config", "untracked.go"), []byte("package config\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Defaults()
-	cfg.GitHub.Repo = "owner/repo"
-	cfg.Resources.Definitions = []config.ResourceDefinition{
-		{Name: "config", Paths: []string{"internal/platform/config/**"}},
-		{Name: "docs", Paths: []string{"docs/**"}},
-	}
-	manager := Manager{GitPath: "git", GHPath: filepath.Join(root, "gh-must-not-run")}
-	_, audit, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 2, Title: "Audit"}, repo, branch, "", "implemented", baseSHA, resourceScope("config"))
-	var mismatch publication.ClaimMismatchError
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("claim mismatch not returned: audit=%+v err=%v", audit, err)
-	}
-	if strings.Join(audit.ChangedPaths, ",") != "docs/tracked.md,internal/platform/config/untracked.go" || strings.Join(audit.ActualResources, ",") != "config,docs" || audit.Reason != publication.ReasonResourceClaimMismatch {
-		t.Fatalf("unexpected audit: %+v", audit)
-	}
-	if got := runGit(t, repo, "rev-parse", "HEAD"); got != workerHead {
-		t.Fatalf("publisher changed HEAD before refusal: got=%s want=%s", got, workerHead)
-	}
-	if got := runGit(t, repo, "status", "--porcelain", "--untracked-files=all"); !strings.Contains(got, "?? internal/platform/config/untracked.go") {
-		t.Fatalf("publisher staged or removed untracked work: %q", got)
-	}
-	if out, commandErr := exec.Command("git", "-C", repo, "rev-parse", "--verify", "origin/"+branch).CombinedOutput(); commandErr == nil {
-		t.Fatalf("publisher pushed refused branch: %s", out)
 	}
 }
 
@@ -179,12 +114,11 @@ func TestPublishUsesRepositoryFallbackWithoutRewritingDeclaredAudit(t *testing.T
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Completion.CreateDraftPR = false
-	result, audit, err := (Manager{GitPath: "git"}).Publish(context.Background(), cfg, gh.Issue{Number: 3, Title: "Fallback"}, repo, branch, "", "implemented", baseSHA,
-		publication.ResourceScope{Effective: []string{admission.RepositoryResource}})
+	result, audit, err := (Manager{GitPath: "git"}).Publish(context.Background(), cfg, gh.Issue{Number: 3, Title: "Fallback"}, repo, branch, "", "implemented", baseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(audit.DeclaredResources) != 0 || len(audit.ActualResources) != 1 || audit.ActualResources[0] != admission.RepositoryResource {
+	if len(audit.ChangedPaths) != 1 || audit.ChangedPaths[0] != "fallback.txt" {
 		t.Fatalf("fallback audit=%+v", audit)
 	}
 	if result.Commit == "" || runGit(t, remote, "rev-parse", branch) != result.Commit {
@@ -222,7 +156,7 @@ func TestRegressionPublishFormatsWorkerGoFilesAndIsIdempotent(t *testing.T) {
 	manager := Manager{GitPath: "git", GofmtPath: filepath.Join(runtime.GOROOT(), "bin", "gofmt")}
 	issue := gh.Issue{Number: 100, Title: "Format Go files"}
 
-	first, audit, err := manager.Publish(context.Background(), cfg, issue, repo, branch, "", "formatted", baseSHA, resourceScope(admission.RepositoryResource))
+	first, audit, err := manager.Publish(context.Background(), cfg, issue, repo, branch, "", "formatted", baseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +169,7 @@ func TestRegressionPublishFormatsWorkerGoFilesAndIsIdempotent(t *testing.T) {
 			t.Fatalf("file %q was not formatted: %s err=%v", name, data, readErr)
 		}
 	}
-	second, secondAudit, err := manager.Publish(context.Background(), cfg, issue, repo, branch, "", "formatted", baseSHA, resourceScope(admission.RepositoryResource))
+	second, secondAudit, err := manager.Publish(context.Background(), cfg, issue, repo, branch, "", "formatted", baseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +198,7 @@ func TestPublishRejectsGoSymlinkBeforeCommitOrPush(t *testing.T) {
 	cfg.Completion.CreateDraftPR = false
 	cfg.Formatters.Go.Enabled = true
 	manager := Manager{GitPath: "git", GofmtPath: filepath.Join(runtime.GOROOT(), "bin", "gofmt")}
-	_, audit, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 100}, repo, branch, "", "", baseSHA, resourceScope(admission.RepositoryResource))
+	_, audit, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 100}, repo, branch, "", "", baseSHA)
 	var formatErr publication.FormatterError
 	if !errors.As(err, &formatErr) || formatErr.Code != "path_unsafe" || audit.Reason != publication.ReasonFormatterFailed {
 		t.Fatalf("unsafe symlink was not rejected: audit=%+v err=%v", audit, err)
@@ -315,7 +249,7 @@ func TestPublishFormatterFailureAndTimeoutDoNotCommitOrPush(t *testing.T) {
 				timer := time.AfterFunc(500*time.Millisecond, cancel)
 				defer timer.Stop()
 			}
-			_, audit, err := (Manager{GitPath: "git", GofmtPath: formatter}).Publish(ctx, cfg, gh.Issue{Number: 100}, repo, branch, "", "", baseSHA, resourceScope(admission.RepositoryResource))
+			_, audit, err := (Manager{GitPath: "git", GofmtPath: formatter}).Publish(ctx, cfg, gh.Issue{Number: 100}, repo, branch, "", "", baseSHA)
 			var formatErr publication.FormatterError
 			if !errors.As(err, &formatErr) || formatErr.Code != test.code || audit.Formatter.FailureCode != test.code {
 				t.Fatalf("formatter failure=%v audit=%+v", err, audit.Formatter)
@@ -369,7 +303,7 @@ printf '[{"url":"https://github.example/owner/repo/pull/100","state":"OPEN","mer
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Formatters.Go.Enabled = true
 	manager := Manager{GitPath: "git", GHPath: fakeGH, GofmtPath: filepath.Join(runtime.GOROOT(), "bin", "gofmt")}
-	result, audit, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 100, Title: "Existing PR"}, repo, branch, "https://github.example/owner/repo/pull/100", "formatted", baseSHA, resourceScope(admission.RepositoryResource))
+	result, audit, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 100, Title: "Existing PR"}, repo, branch, "https://github.example/owner/repo/pull/100", "formatted", baseSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +375,7 @@ func TestPublishRefusesUnsafeExistingPullRequestStateBeforeFormatting(t *testing
 			cfg.GitHub.Repo = "owner/repo"
 			cfg.Formatters.Go.Enabled = true
 			manager := Manager{GitPath: "git", GHPath: fakeGH, GofmtPath: filepath.Join(runtime.GOROOT(), "bin", "gofmt")}
-			_, audit, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 100}, repo, branch, "https://github.example/owner/repo/pull/100", "", baseSHA, resourceScope(admission.RepositoryResource))
+			_, audit, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 100}, repo, branch, "https://github.example/owner/repo/pull/100", "", baseSHA)
 			var mismatch publication.PullRequestMismatchError
 			if !errors.As(err, &mismatch) || audit.Reason != publication.ReasonPullRequestMismatch {
 				t.Fatalf("unsafe PR was not refused: audit=%+v err=%v", audit, err)
@@ -481,7 +415,7 @@ func TestPublishFormatsConcurrentWorktreesWithoutCrossing(t *testing.T) {
 	for index := range fixtures {
 		item := fixtures[index]
 		go func() {
-			_, _, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 101}, item.repo, item.branch, "", "", item.base, resourceScope(admission.RepositoryResource))
+			_, _, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 101}, item.repo, item.branch, "", "", item.base)
 			errorsByWorktree <- err
 		}()
 	}

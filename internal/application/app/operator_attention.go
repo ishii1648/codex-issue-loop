@@ -203,17 +203,18 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 		if pendingForIssue != 1 {
 			return exitError{4, fmt.Errorf("Issue #%d has ambiguous pending requests", currentIssue.Number)}
 		}
-		if currentIssue.Status != issuedomain.StatusNeedsInput || currentIssue.WorkerPID != 0 || currentIssue.WorkerPGID != 0 || currentIssue.Lease != nil {
-			return exitError{4, fmt.Errorf("Issue #%d is not a stopped parked needs-input continuation", currentIssue.Number)}
+		if currentIssue.Status != issuedomain.StatusNeedsInput || currentIssue.WorkerPID != 0 || currentIssue.WorkerPGID != 0 ||
+			(currentSnapshot.ActiveExecution != nil && currentSnapshot.ActiveExecution.IssueNumber == currentIssue.Number) {
+			return exitError{4, fmt.Errorf("Issue #%d is not a stopped needs-input continuation", currentIssue.Number)}
 		}
-		if err := state.ValidateNeedsInputPark(currentIssue, currentRequest); err != nil {
+		if err := state.ValidateNeedsInputContinuation(currentIssue, currentRequest); err != nil {
 			return exitError{4, err}
 		}
 	}
 	answerTransitions := map[issuedomain.Status]issuedomain.Transition{}
 	answerTargets := []issuedomain.Status{currentRequest.ResumeStatus}
 	if parkedNeedsInput {
-		answerTargets = []issuedomain.Status{issuedomain.StatusAnswerClaimWaiting, issuedomain.StatusResumePending}
+		answerTargets = []issuedomain.Status{issuedomain.StatusResumePending}
 	}
 	for _, target := range answerTargets {
 		transition, transitionErr := issuedomain.ResumeAfterAnswer(currentIssue.Status, target)
@@ -254,31 +255,15 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 			if pendingForIssue != 0 {
 				return exitError{4, fmt.Errorf("Issue #%d has ambiguous pending requests", issue.Number)}
 			}
-			if issue.Status != issuedomain.StatusNeedsInput || issue.WorkerPID != 0 || issue.WorkerPGID != 0 || issue.Lease != nil {
+			if issue.Status != issuedomain.StatusNeedsInput || issue.WorkerPID != 0 || issue.WorkerPGID != 0 ||
+				(s.ActiveExecution != nil && s.ActiveExecution.IssueNumber == issue.Number) {
 				return exitError{4, fmt.Errorf("Issue #%d changed before its answer was recorded", issue.Number)}
 			}
-			if err := state.ValidateNeedsInputPark(issue, request); err != nil {
+			if err := state.ValidateNeedsInputContinuation(issue, request); err != nil {
 				return exitError{4, err}
 			}
-			resumeStatus = issuedomain.StatusAnswerClaimWaiting
-			if slot, ok := availableExecutionSlot(s, cfg.Queue.Concurrency, issue.ResourcePark.OriginalLease.Slot, issue.Number); ok {
-				owner, resumeErr := state.ResumeParkedLease(s, issue.Number, issue.ResourcePark.ID, slot, now)
-				if resumeErr == nil {
-					resumeStatus = issuedomain.StatusResumePending
-					payload["lease_owner"] = owner
-					payload["lease_slot"] = slot
-				} else {
-					var conflict state.LeaseConflictError
-					if !errors.As(resumeErr, &conflict) {
-						return resumeErr
-					}
-					payload["claim_waiting"] = true
-					payload["blocked_by_issue"] = conflict.IssueNumber
-				}
-			} else {
-				payload["claim_waiting"] = true
-				payload["blocked_by_worker_slot"] = true
-			}
+			resumeStatus = issuedomain.StatusResumePending
+			payload["execution_waiting"] = s.ActiveExecution != nil
 		}
 		transition, ok := answerTransitions[resumeStatus]
 		if !ok {
@@ -289,7 +274,9 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 		}
 		issue.RetryAfter, issue.UpdatedAt = nil, now
 		if resumeStatus == issuedomain.StatusResolvingConflict {
-			issue.GitHubSync = issuedomain.GitHubSyncConflictRetry
+			if err := state.SetEffect(s, issue.Number, issue.RunID, issuedomain.EffectRetryConflict, now); err != nil {
+				return err
+			}
 		}
 		issue.Answers = append(issue.Answers, state.AnswerRecord{RequestID: request.ID, Question: request.Question, Answer: answer, AnsweredAt: now})
 		return nil
@@ -301,24 +288,14 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 	return a.answerOutput(*jsonOut, updated, cfg.Queue.Concurrency, updated.PendingRequests[*requestID])
 }
 
-func (a App) answerOutput(jsonOut bool, snapshot state.Snapshot, concurrency int, request *state.Request) error {
+func (a App) answerOutput(jsonOut bool, snapshot state.Snapshot, _ int, request *state.Request) error {
 	output := map[string]any{"request_id": request.ID, "recorded": true}
 	issue := snapshot.Issues[strconv.Itoa(request.IssueNumber)]
 	if issue != nil {
 		output["status"] = issue.Status
-		if issue.ResourcePark != nil && issue.ResourcePark.Kind == state.ResourceParkKindNeedsInput {
-			output["resource_park_id"] = issue.ResourcePark.ID
-			output["claim_waiting"] = issue.Status == issuedomain.StatusAnswerClaimWaiting
-			if issue.Lease != nil {
-				output["lease_owner"] = issue.Lease.Owner
-			}
-			status := buildStatus(launchd.Status{}, snapshot, concurrency)
-			for _, candidate := range status.ResourceAdmission.ClaimWaitingCandidates {
-				if candidate.IssueNumber == issue.Number {
-					output["blocked_by"] = candidate.BlockedBy
-					break
-				}
-			}
+		if issue.Continuation != nil && issue.Continuation.Kind == state.ContinuationKindNeedsInput {
+			output["checkpoint_id"] = issue.Continuation.ID
+			output["execution_waiting"] = snapshot.ActiveExecution != nil && snapshot.ActiveExecution.IssueNumber != issue.Number
 		}
 	}
 	return a.output(jsonOut, output)

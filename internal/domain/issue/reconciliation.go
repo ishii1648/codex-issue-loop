@@ -12,7 +12,7 @@ type ReconciliationState struct {
 	LastError         string
 	Branch            string
 	PullRequest       string
-	GitHubSync        GitHubSync
+	Effect            EffectKind
 	RetryAt           *time.Time
 	WorkerPID         int
 	WorkerPGID        int
@@ -60,7 +60,7 @@ type ReconciliationDecision struct {
 	LastError         string
 	Branch            string
 	PullRequest       string
-	GitHubSync        GitHubSync
+	Effect            EffectKind
 	RetryAt           *time.Time
 	WorkerPID         int
 	WorkerPGID        int
@@ -72,7 +72,7 @@ type ReconciliationDecision struct {
 func initialReconciliationDecision(current ReconciliationState) ReconciliationDecision {
 	return ReconciliationDecision{
 		Status: current.Status, LastError: current.LastError, Branch: current.Branch,
-		PullRequest: current.PullRequest, GitHubSync: current.GitHubSync, RetryAt: current.RetryAt,
+		PullRequest: current.PullRequest, Effect: current.Effect, RetryAt: current.RetryAt,
 		WorkerPID: current.WorkerPID, WorkerPGID: current.WorkerPGID, PullRequestMerged: current.PullRequestMerged,
 		Reason: "state already converged",
 	}
@@ -81,7 +81,7 @@ func initialReconciliationDecision(current ReconciliationState) ReconciliationDe
 func BlockReconciliation(decision ReconciliationDecision, reason string) ReconciliationDecision {
 	decision.Status = StatusBlocked
 	decision.LastError = "startup reconciliation blocked: " + reason
-	decision.GitHubSync = GitHubSyncNone
+	decision.Effect = EffectNone
 	decision.RetryAt = nil
 	decision.WorkerPID = 0
 	decision.WorkerPGID = 0
@@ -91,7 +91,7 @@ func BlockReconciliation(decision ReconciliationDecision, reason string) Reconci
 
 func TerminalPullRequestCandidate(current ReconciliationState) bool {
 	return (current.Status == StatusBlocked || current.Status == StatusFailed) && current.PullRequest != "" &&
-		!current.PullRequestMerged && current.GitHubSync == GitHubSyncNone
+		!current.PullRequestMerged && current.Effect == EffectNone
 }
 
 func DecideTerminalPullRequestReconciliation(current ReconciliationState, observed ReconciliationObservation) (ReconciliationDecision, bool) {
@@ -130,7 +130,7 @@ func DecideTerminalPullRequestReconciliation(current ReconciliationState, observ
 		return decision, true
 	}
 	decision.Status, decision.LastError = StatusCompleted, ""
-	decision.PullRequestMerged, decision.GitHubSync = true, GitHubSyncDone
+	decision.PullRequestMerged, decision.Effect = true, EffectMarkDone
 	decision.RetryAt, decision.WorkerPID, decision.WorkerPGID = nil, 0, 0
 	decision.Reason = "saved Pull Request merge discovered for terminal Issue"
 	return decision, true
@@ -159,7 +159,7 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 				decision.Status = StatusAwaitingChecks
 			}
 			decision.PullRequest, decision.PullRequestMerged = open[0].URL, false
-			decision.GitHubSync, decision.RetryAt, decision.WorkerPID = GitHubSyncNone, nil, 0
+			decision.Effect, decision.RetryAt, decision.WorkerPID = EffectNone, nil, 0
 			decision.MarkRunning = true
 			decision.Reason = "legacy completed Issue with open Pull Request returned to lifecycle monitoring"
 			return decision
@@ -167,10 +167,10 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 	}
 	if observed.Done && current.PullRequest == "" && len(observed.PullRequests) == 0 {
 		decision.Status, decision.LastError = StatusCompleted, ""
-		if current.GitHubSync == GitHubSyncDone && !observed.DoneMarker {
-			decision.GitHubSync = GitHubSyncDone
+		if current.Effect == EffectMarkDone && !observed.DoneMarker {
+			decision.Effect = EffectMarkDone
 		} else {
-			decision.GitHubSync = GitHubSyncNone
+			decision.Effect = EffectNone
 		}
 		decision.WorkerPID, decision.RetryAt, decision.Reason = 0, nil, "GitHub done label is authoritative"
 		return decision
@@ -180,19 +180,19 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 	// explicit recovery handshakes, otherwise converge or block deterministically.
 	if observed.Excluded {
 		switch {
-		case current.GitHubSync == GitHubSyncIssueResolution && !current.Status.Terminal():
+		case current.Effect == EffectApplyResolution && !current.Status.Terminal():
 			decision.Reason = "Issue resolution is waiting for GitHub label synchronization"
 			return decision
 		case current.Status == StatusBlocked && observed.OnlyBlockedExclusion && !observed.ManualExclusion:
-			decision.Status, decision.WorkerPID, decision.RetryAt, decision.GitHubSync = StatusBlocked, 0, nil, GitHubSyncNone
+			decision.Status, decision.WorkerPID, decision.RetryAt, decision.Effect = StatusBlocked, 0, nil, EffectNone
 			decision.Reason = "automation-owned blocked state preserved"
 			return decision
-		case current.GitHubSync == GitHubSyncConflictRetry && current.Status == StatusResolvingConflict:
+		case current.Effect == EffectRetryConflict && current.Status == StatusResolvingConflict:
 			decision.Reason = "explicit conflict retry is waiting for GitHub label synchronization"
-		case current.GitHubSync == GitHubSyncBlocked:
+		case current.Effect == EffectMarkBlocked:
 			decision.Status, decision.WorkerPID, decision.RetryAt = StatusBlocked, 0, nil
 			if observed.FailedMarker {
-				decision.GitHubSync = GitHubSyncNone
+				decision.Effect = EffectNone
 			}
 			decision.Reason = "partially synchronized blocked state recovered"
 			return decision
@@ -201,15 +201,15 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		}
 	}
 	if observed.Failed {
-		if current.GitHubSync == GitHubSyncIssueResolution && !current.Status.Terminal() {
+		if current.Effect == EffectApplyResolution && !current.Status.Terminal() {
 			decision.Reason = "Issue resolution is waiting for GitHub label synchronization"
 			return decision
 		}
 		decision.Status, decision.WorkerPID, decision.RetryAt = StatusFailed, 0, nil
-		if current.GitHubSync == GitHubSyncFailed && !observed.FailedMarker {
-			decision.GitHubSync = GitHubSyncFailed
+		if current.Effect == EffectMarkFailed && !observed.FailedMarker {
+			decision.Effect = EffectMarkFailed
 		} else {
-			decision.GitHubSync = GitHubSyncNone
+			decision.Effect = EffectNone
 		}
 		decision.Reason = "GitHub failed label is authoritative"
 		return decision
@@ -242,9 +242,9 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		decision.Status, decision.LastError, decision.PullRequest = StatusCompleted, "", merged.URL
 		decision.PullRequestMerged, decision.WorkerPID, decision.RetryAt, decision.Reason = true, 0, nil, "merged Pull Request discovered"
 		if observed.DoneMarker && observed.Done {
-			decision.GitHubSync = GitHubSyncNone
+			decision.Effect = EffectNone
 		} else {
-			decision.GitHubSync = GitHubSyncDone
+			decision.Effect = EffectMarkDone
 		}
 		return decision
 	}
@@ -284,11 +284,11 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		return BlockReconciliation(decision, fmt.Sprintf("saved worker PID %d is still alive", current.WorkerPID))
 	}
 	decision.WorkerPID, decision.WorkerPGID = 0, 0
-	if current.GitHubSync == GitHubSyncNeedsInput && observed.PendingRequestMarker {
-		decision.GitHubSync = GitHubSyncNone
+	if current.Effect == EffectMarkNeedsInput && observed.PendingRequestMarker {
+		decision.Effect = EffectNone
 	}
-	if current.GitHubSync == GitHubSyncDone && observed.Done && observed.DoneMarker {
-		decision.GitHubSync = GitHubSyncNone
+	if current.Effect == EffectMarkDone && observed.Done && observed.DoneMarker {
+		decision.Effect = EffectNone
 	}
 
 	switch current.Status {
@@ -316,12 +316,10 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		}
 	case StatusResumePending:
 		decision.Reason = "recorded answer remains pending for resume"
-	case StatusAnswerClaimWaiting:
-		decision.Reason = "recorded answer is waiting for its parked resource claim"
 	case StatusNeedsInput:
 		decision.Reason = "unanswered request remains sticky"
 		if !observed.NeedsInput {
-			decision.GitHubSync = GitHubSyncNeedsInput
+			decision.Effect = EffectMarkNeedsInput
 		}
 	case StatusResolvingConflict:
 		decision.Reason = "durable Pull Request conflict recovery will resume in the saved worktree"

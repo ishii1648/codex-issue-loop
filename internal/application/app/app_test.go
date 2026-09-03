@@ -50,22 +50,6 @@ func TestHelpDoesNotCreateOrSecureManagementRoot(t *testing.T) {
 	}
 }
 
-func abandonLeaseForAppTest(store state.Store, issueNumber int, owner state.LeaseOwner) error {
-	_, err := store.Update("lease_abandoned_fixture", issueNumber, owner.RunID, map[string]any{"owner": owner}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(issueNumber)]
-		if item == nil || item.Lease == nil || item.Lease.Owner != owner {
-			return fmt.Errorf("Issue #%d lease is not owned by fixture", issueNumber)
-		}
-		transition, transitionErr := issuedomain.NewTransition("abandon_fixture", item.Status, issuedomain.StatusFailed)
-		if transitionErr != nil {
-			return transitionErr
-		}
-		item.LastError = "test execution abandoned"
-		return state.ApplyIssueTransition(item, transition)
-	})
-	return err
-}
-
 type resumedWorkspaceGitHub struct{ issue gh.Issue }
 
 func testWorkerWorkspace(snapshot *state.Snapshot, path, branch string) *state.WorkerWorkspace {
@@ -80,6 +64,9 @@ func (f resumedWorkspaceGitHub) ListReady(context.Context, config.Config) ([]gh.
 }
 func (f resumedWorkspaceGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) {
 	return f.issue, nil
+}
+func (resumedWorkspaceGitHub) VerifyIssueAuthor(context.Context, config.Config, gh.Issue) (gh.AuthorVerification, error) {
+	return gh.AuthorVerification{Trusted: true, Login: "owner", Permission: "admin", Reason: "test_fixture"}, nil
 }
 func (f resumedWorkspaceGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
 	return gh.RemoteState{Issue: f.issue}, nil
@@ -394,7 +381,7 @@ func mustConfig(t *testing.T, repo string) config.Config {
 	return cfg
 }
 
-func addParkedNeedsInput(t *testing.T, snapshot *state.Snapshot, issue *state.Issue, request *state.Request, slot int) {
+func addParkedNeedsInput(t *testing.T, snapshot *state.Snapshot, issue *state.Issue, request *state.Request, _ int) {
 	t.Helper()
 	if issue.RunID == "" {
 		issue.RunID = fmt.Sprintf("run_%d", issue.Number)
@@ -403,25 +390,19 @@ func addParkedNeedsInput(t *testing.T, snapshot *state.Snapshot, issue *state.Is
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	owner := state.LeaseOwner{RunID: issue.RunID, Generation: 1}
+	owner := state.ExecutionIdentity{RunID: issue.RunID, Generation: 1}
 	issue.Status = issuedomain.StatusNeedsInput
 	issue.Worktree = fmt.Sprintf("/tmp/issue-%d", issue.Number)
 	issue.Branch = fmt.Sprintf("codex/issue-%d", issue.Number)
 	issue.Workspace = &state.WorkerWorkspace{Path: issue.Worktree, Branch: issue.Branch, RepoID: snapshot.RepoID,
 		Repository: "owner/repo", GitCommonDir: filepath.Join(snapshot.RepoPath, ".git"), MainCheckout: snapshot.RepoPath, CapturedAt: now}
-	issue.LeaseGeneration = 1
-	issue.Lease = &state.ResourceLease{
-		Owner: owner, Slot: slot, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-sha", ReservedAt: now,
-	}
-	parkID := "park_" + request.ID
-	if err := state.CaptureContinuationLease(issue, owner, parkID, now); err != nil {
-		t.Fatal(err)
-	}
-	issue.ResourcePark.Kind = state.ResourceParkKindNeedsInput
-	issue.ResourcePark.RequestID = request.ID
+	issue.Generation = 1
+	checkpointID := "checkpoint_" + request.ID
+	issue.Continuation = &state.ContinuationCheckpoint{ID: checkpointID, Kind: state.ContinuationKindNeedsInput, RequestID: request.ID,
+		CreatedAt: now, RunID: issue.RunID, Generation: 1, BaseSHA: "base-sha", Workspace: issue.Workspace, Stage: issuedomain.ContinuationStageResume}
 	request.RunID = issue.RunID
-	request.ResourceParkID = parkID
-	request.ReleasedOwner = &owner
+	request.CheckpointID = checkpointID
+	request.ReleasedExecution = &owner
 	snapshot.Issues[strconv.Itoa(issue.Number)] = issue
 	snapshot.PendingRequests[request.ID] = request
 }
@@ -592,7 +573,7 @@ func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
 	assertRequest(outcome.result, secondRequest)
 }
 
-func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
+func TestStopCancelsSavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -608,14 +589,16 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 		t.Fatal(err)
 	}
 	_, err = store.Update("workers_running", 0, "", nil, func(snapshot *state.Snapshot) error {
-		for _, number := range []int{1, 2} {
+		for _, number := range []int{1} {
 			runID := fmt.Sprintf("run_%d", number)
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
-				Number: number, RunID: runID, Status: issuedomain.StatusRunning, LeaseGeneration: 1,
-				Lease: &state.ExecutionLease{Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: number - 1,
-					DeclaredResources: []string{}, ResolvedResources: []string{fmt.Sprintf("fixture-%d", number)}, ReservedAt: time.Now().UTC()},
+				Number: number, RunID: runID, Status: issuedomain.StatusRunning, Generation: 1, Attempts: 1,
+				Worktree: "/tmp/issue-1", Branch: "codex/issue-1",
+				Workspace: &state.WorkerWorkspace{Path: "/tmp/issue-1", Branch: "codex/issue-1", RepoID: snapshot.RepoID,
+					Repository: "owner/repo", GitCommonDir: snapshot.RepoPath + "/.git", MainCheckout: snapshot.RepoPath, CapturedAt: time.Now().UTC()},
 				WorkerPID: 100 + number, WorkerPGID: 100 + number,
 			}
+			snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: number, RunID: runID, Generation: 1, StartedAt: time.Now().UTC()}
 		}
 		return nil
 	})
@@ -632,10 +615,10 @@ func TestStopCancelsEverySavedWorkerBeforeRecordingSupervisorStopped(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Supervisor.State != "stopped" || len(groups.signals) != 2 {
+	if snapshot.Supervisor.State != "stopped" || len(groups.signals) != 1 {
 		t.Fatalf("supervisor=%+v signals=%v", snapshot.Supervisor, groups.signals)
 	}
-	for _, key := range []string{"1", "2"} {
+	for _, key := range []string{"1"} {
 		if issue := snapshot.Issues[key]; issue.Status != issuedomain.StatusRetryWait || issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
 			t.Fatalf("Issue %s=%+v", key, issue)
 		}
@@ -814,7 +797,8 @@ func TestRecoverSemanticQuarantineRequiresAndRestoresExactRecordedBackup(t *test
 	now := time.Now().UTC()
 	reason := fmt.Sprintf("snapshot semantic contract version %d does not match %d", original.SemanticContractVersion, original.SemanticContractVersion+1)
 	marker := state.Snapshot{Version: state.CurrentVersion, SemanticContractVersion: original.SemanticContractVersion + 1,
-		RepoID: entry.RepoID, RepoPath: entry.RepoPath, StateRevision: 1,
+		IssueLifecycleAPIVersion: issuedomain.LifecycleAPICurrent,
+		RepoID:                   entry.RepoID, RepoPath: entry.RepoPath, StateRevision: 1,
 		Supervisor: state.Supervisor{State: state.SupervisorStateBlocked, UpdatedAt: now,
 			Message: fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", reason, backup)},
 		Issues: map[string]*state.Issue{}, PendingRequests: map[string]*state.Request{},
@@ -898,7 +882,7 @@ func TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID(t *testing.T) {
 	}
 }
 
-func TestAnswerDurablyWaitsWithoutStealingConflictingLease(t *testing.T) {
+func TestAnswerDurablyWaitsWithoutStealingActiveExecution(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -912,19 +896,19 @@ func TestAnswerDurablyWaitsWithoutStealingConflictingLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 18, 5, 0, 0, 0, time.UTC)
-	var competingOwner state.LeaseOwner
+	var competingOwner state.ExecutionIdentity
 	_, err = store.Update("fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
 		addParkedNeedsInput(t, snapshot, &state.Issue{Number: 4, RunID: "run_4"}, &state.Request{
 			ID: "req_4", IssueNumber: 4, Question: "Continue?", Status: issuedomain.RequestStatusPending, CreatedAt: now,
 		}, 0)
-		competingOwner = state.LeaseOwner{RunID: "run_5", Generation: 1}
+		competingOwner = state.ExecutionIdentity{RunID: "run_5", Generation: 1}
 		snapshot.Issues["5"] = &state.Issue{
-			Number: 5, RunID: "run_5", Status: issuedomain.StatusRunning, LeaseGeneration: 1,
+			Number: 5, RunID: "run_5", Status: issuedomain.StatusRunning, Generation: 1,
 			Worktree: "/tmp/issue-5", Branch: "codex/issue-5",
 			Workspace: &state.WorkerWorkspace{Path: "/tmp/issue-5", Branch: "codex/issue-5", RepoID: snapshot.RepoID,
 				Repository: "owner/repo", GitCommonDir: filepath.Join(snapshot.RepoPath, ".git"), MainCheckout: snapshot.RepoPath, CapturedAt: now},
-			Lease: &state.ResourceLease{Owner: competingOwner, Slot: 0, DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-5", ReservedAt: now},
 		}
+		snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: 5, RunID: competingOwner.RunID, Generation: competingOwner.Generation, BaseSHA: "base-5", StartedAt: now}
 		return nil
 	})
 	if err != nil {
@@ -936,21 +920,21 @@ func TestAnswerDurablyWaitsWithoutStealingConflictingLease(t *testing.T) {
 	if code := a.Run(context.Background(), args); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(out.String(), `"claim_waiting": true`) || !strings.Contains(out.String(), `"issue_number": 5`) {
+	if !strings.Contains(out.String(), `"execution_waiting": true`) || !strings.Contains(out.String(), `"checkpoint_id": "checkpoint_req_4"`) {
 		t.Fatalf("structured waiting output=%s", out.String())
 	}
 	afterFirst, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue := afterFirst.Issues["4"]; issue.Status != issuedomain.StatusAnswerClaimWaiting || issue.Lease != nil || issue.ResourcePark.Status != issuedomain.ResourceParkStatusParked || len(issue.Answers) != 1 {
+	if issue := afterFirst.Issues["4"]; issue.Status != issuedomain.StatusResumePending || issue.Continuation == nil || len(issue.Answers) != 1 {
 		t.Fatalf("answered Issue=%+v", issue)
 	}
 	if request := afterFirst.PendingRequests["req_4"]; request.Status != issuedomain.RequestStatusAnswered || request.Answer != "continue" {
 		t.Fatalf("request=%+v", request)
 	}
-	if lease := afterFirst.Issues["5"].Lease; lease == nil || lease.Owner != competingOwner {
-		t.Fatalf("competing lease was changed: %+v", lease)
+	if !state.OwnsActiveExecution(&afterFirst, 5, competingOwner) {
+		t.Fatalf("competing execution was changed: %+v", afterFirst.ActiveExecution)
 	}
 	revision := afterFirst.StateRevision
 	out.Reset()
@@ -959,7 +943,7 @@ func TestAnswerDurablyWaitsWithoutStealingConflictingLease(t *testing.T) {
 		t.Fatalf("idempotent code=%d stderr=%s", code, stderr.String())
 	}
 	afterSecond, _ := store.Load()
-	if afterSecond.StateRevision != revision || len(afterSecond.Issues["4"].Answers) != 1 || afterSecond.Issues["5"].Lease.Owner != competingOwner {
+	if afterSecond.StateRevision != revision || len(afterSecond.Issues["4"].Answers) != 1 || !state.OwnsActiveExecution(&afterSecond, 5, competingOwner) {
 		t.Fatalf("idempotent answer changed state: before=%d after=%d", revision, afterSecond.StateRevision)
 	}
 }

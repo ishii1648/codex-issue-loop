@@ -144,7 +144,7 @@ func TestZeitreise442MissingWorkspaceMigratesToIsolatedQuarantine(t *testing.T) 
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["442"]
-	if item == nil || item.Lease != nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionQuarantined ||
+	if item == nil || snapshot.ActiveExecution != nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionQuarantined ||
 		item.Suspension.Recoverability != issuedomain.RecoverabilityAmbiguous || len(item.Suspension.AllowedActions) != 1 ||
 		item.Suspension.AllowedActions[0] != issuedomain.ResolutionCancel {
 		t.Fatalf("migrated #442=%+v", item)
@@ -167,14 +167,12 @@ func TestApplyMigratesV5SemanticV2CheckpointWithoutChangingEvidence(t *testing.T
 	workspace := &state.WorkerWorkspace{Path: filepath.Join(repo, "worktrees", "issue-7"), Branch: "codex/issue-7",
 		RepoID: "repo-1", Repository: "owner/repo", GitCommonDir: filepath.Join(repo, ".git"), MainCheckout: repo, CapturedAt: first}
 	snapshot.Issues["7"] = &state.Issue{
-		Number: 7, Status: issuedomain.StatusFailed, RunID: "run_7", Attempts: 1, LeaseGeneration: 1,
+		Number: 7, Status: issuedomain.StatusFailed, RunID: "run_7", Attempts: 1, Generation: 1,
 		Branch: workspace.Branch, Worktree: workspace.Path, Workspace: workspace,
 		LastError: "retained reason", FailureKind: "issue", UpdatedAt: first,
-		ResourcePark: &state.ContinuationCheckpoint{
-			ID: "checkpoint_7", Status: issuedomain.ResourceParkStatusParked,
-			OriginalLease: state.ExecutionLease{Owner: state.LeaseOwner{RunID: "run_7", Generation: 1}, Slot: 0,
-				DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: first},
-			ParkedAt: first, RunID: "run_7", Workspace: workspace, Stage: legacyPublicationCheckpointStage,
+		Continuation: &state.ContinuationCheckpoint{
+			ID: "checkpoint_7", CreatedAt: first, RunID: "run_7", Generation: 1,
+			Workspace: workspace, Stage: issuedomain.ContinuationStagePublish,
 			Evidence: originalEvidence,
 		},
 		Suspension: &state.Suspension{ID: "suspension_7", Origin: "publisher", Status: issuedomain.SuspensionActive,
@@ -202,9 +200,9 @@ func TestApplyMigratesV5SemanticV2CheckpointWithoutChangingEvidence(t *testing.T
 		t.Fatal(err)
 	}
 	item := migrated.Issues["7"]
-	if migrated.SemanticContractVersion != statecontract.CurrentVersion || item == nil || item.ResourcePark == nil ||
-		item.ResourcePark.Stage != issuedomain.ContinuationStagePublish || !reflect.DeepEqual(item.ResourcePark.Evidence, originalEvidence) ||
-		item.Suspension == nil || item.Suspension.Reason != "retained reason" || item.Lease != nil {
+	if migrated.SemanticContractVersion != statecontract.CurrentVersion || item == nil || item.Continuation == nil ||
+		item.Continuation.Stage != issuedomain.ContinuationStagePublish || !reflect.DeepEqual(item.Continuation.Evidence, originalEvidence) ||
+		item.Suspension == nil || item.Suspension.Reason != "retained reason" || migrated.ActiveExecution != nil {
 		t.Fatalf("migrated snapshot=%+v issue=%+v", migrated, item)
 	}
 	events, err := os.ReadFile(store.EventsPath())
@@ -319,10 +317,10 @@ func TestLegacyManifestEntryDefaultsToExistingSource(t *testing.T) {
 	}
 }
 
-func TestV4ActiveLeaseAndParkedContinuationBlockRollback(t *testing.T) {
+func TestActiveExecutionAndContinuationBlockRollback(t *testing.T) {
 	l, repo, _ := writeV4Fixture(t, false)
 	statePath := filepath.Join(l.RepoDir("repo-1"), "state.json")
-	v4 := fmt.Sprintf(`{"version":4,"repo_id":"repo-1","repo_path":%q,"state_revision":1,"supervisor":{"state":"running","updated_at":"2026-08-16T00:00:00Z"},"issues":{"63":{"number":63,"title":"active","status":"needs_input","run_id":"run_63","attempts":1,"continuations":0,"branch":"codex/issue-63","worktree":%q,"workspace":{"path":%q,"branch":"codex/issue-63","repo_id":"repo-1","repository":"owner/repo","git_common_dir":%q,"main_checkout":%q,"captured_at":"2026-08-16T00:01:00Z"},"updated_at":"2026-08-16T00:02:00Z","lease_generation":1,"lease":{"owner":{"run_id":"run_63","generation":1},"slot":0,"declared_resources":[],"resolved_resources":["repo:*"],"reserved_at":"2026-08-16T00:02:00Z"}}},"pending_requests":{}}`+"\n", repo, repo, repo, filepath.Join(repo, ".git"), repo)
+	v4 := fmt.Sprintf(`{"version":4,"repo_id":"repo-1","repo_path":%q,"state_revision":1,"supervisor":{"state":"running","updated_at":"2026-08-16T00:00:00Z"},"issues":{"63":{"number":63,"title":"active","status":"running","run_id":"run_63","attempts":1,"continuations":0,"branch":"codex/issue-63","worktree":%q,"workspace":{"path":%q,"branch":"codex/issue-63","repo_id":"repo-1","repository":"owner/repo","git_common_dir":%q,"main_checkout":%q,"captured_at":"2026-08-16T00:01:00Z"},"updated_at":"2026-08-16T00:02:00Z","lease_generation":1,"lease":{"owner":{"run_id":"run_63","generation":1},"slot":0,"declared_resources":[],"resolved_resources":["repo:*"],"reserved_at":"2026-08-16T00:02:00Z"}}},"pending_requests":{}}`+"\n", repo, repo, repo, filepath.Join(repo, ".git"), repo)
 	if err := os.WriteFile(statePath, []byte(v4), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -339,29 +337,29 @@ func TestV4ActiveLeaseAndParkedContinuationBlockRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	issue := loaded.Issues["63"]
-	if issue == nil || issue.Lease == nil || issue.Lease.Owner != (state.LeaseOwner{RunID: "run_63", Generation: 1}) ||
-		len(issue.Lease.ResolvedResources) != 1 || issue.Lease.ResolvedResources[0] != state.RepositoryResource || issue.Status != issuedomain.StatusNeedsInput {
+	identity := state.ExecutionIdentity{RunID: "run_63", Generation: 1}
+	if issue == nil || issue.Generation != identity.Generation || issue.Status != issuedomain.StatusRunning || !state.OwnsActiveExecution(&loaded, 63, identity) {
 		t.Fatalf("migrated issue=%+v", issue)
 	}
-	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "active resource lease") {
-		t.Fatalf("active lease rollback was accepted: %v", err)
+	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "active execution") {
+		t.Fatalf("active execution rollback was accepted: %v", err)
 	}
 	store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
 	if _, err := store.Update("issue_blocked", 63, issue.RunID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["63"]
-		item.Status = issuedomain.StatusBlocked
-		if err := state.CaptureContinuationLease(item, item.Lease.Owner, "park_63", time.Now().UTC()); err != nil {
+		if err := state.CaptureContinuation(snapshot, item.Number, identity, "checkpoint_63", time.Now().UTC()); err != nil {
 			return err
 		}
+		item.Status = issuedomain.StatusBlocked
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "parked resource continuation") {
-		t.Fatalf("parked continuation rollback was accepted: %v", err)
+	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "retained continuation") {
+		t.Fatalf("retained continuation rollback was accepted: %v", err)
 	}
 	if _, err := store.Update("test_park_completed", 63, issue.RunID, nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["63"].ResourcePark = nil
+		snapshot.Issues["63"].Continuation = nil
 		snapshot.Issues["63"].Suspension = nil
 		return nil
 	}); err != nil {
@@ -399,8 +397,8 @@ func TestV4PreparedTransactionMigratesItsSnapshotThroughTheSameV5Boundary(t *tes
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["1"]
-	if snapshot.Version != 5 || snapshot.SemanticContractVersion != statecontract.CurrentVersion || item == nil || item.Lease != nil ||
-		item.ResourcePark == nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionQuarantined {
+	if snapshot.Version != 5 || snapshot.SemanticContractVersion != statecontract.CurrentVersion || item == nil || snapshot.ActiveExecution != nil ||
+		item.Continuation == nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionQuarantined {
 		t.Fatalf("migrated transaction snapshot=%+v Issue=%+v", snapshot, item)
 	}
 	var rawSnapshot struct {

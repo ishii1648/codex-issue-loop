@@ -50,6 +50,13 @@ func (c *rateLimitedGitHub) Get(ctx context.Context, cfg config.Config, number i
 	return c.delegate.Get(ctx, cfg, number)
 }
 
+func (c *rateLimitedGitHub) VerifyIssueAuthor(ctx context.Context, cfg config.Config, issue gh.Issue) (gh.AuthorVerification, error) {
+	if err := c.before(); err != nil {
+		return gh.AuthorVerification{}, err
+	}
+	return c.delegate.VerifyIssueAuthor(ctx, cfg, issue)
+}
+
 func (c *rateLimitedGitHub) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (gh.RemoteState, error) {
 	if err := c.before(); err != nil {
 		return gh.RemoteState{}, err

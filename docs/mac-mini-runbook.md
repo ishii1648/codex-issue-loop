@@ -169,7 +169,7 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
   --json
 ```
 
-記録後、同じrequest IDがansweredになったことをstatusで確認する。`claim_waiting: true`または`status=answer_claim_waiting`なら回答は消えていない。`resource_admission.resource_parks`の保存run/claimと`claim_waiting_candidates[].blocked_by`を確認し、競合Issueの通常解放を待って1回のwatchへ戻る。ready/running label、state、leaseを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
+記録後、同じrequest IDがansweredになったことをstatusで確認する。別Issueがroot `active_execution`を保持していれば、回答済みIssueはcontinuationを保持して待機し、実行枠が空いた後にschedulerが再開する。ready/running label、state、execution identityを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
 ### 停止
 
@@ -225,7 +225,7 @@ terminal `blocked` / `failed` Issueを復旧するときは、scenario別command
 agent-loop issue plan --repo /absolute/path/to/repository --issue 123 --json
 ```
 
-planの`suspension`、`continuation_checkpoint`、evidence、missing evidence、および`resume|retry-stage|adopt-pr|cancel`それぞれのeligible/refusal codeを確認する。active PID/PGID、pending request、worktree/branch/head、open/merged PR、label、resource/slot conflictのいずれかが変わればresolveは拒否される。
+planの`suspension`、`continuation_checkpoint`、evidence、missing evidence、および`resume|retry-stage|adopt-pr|cancel`それぞれのeligible/refusal codeを確認する。active PID/PGID、root execution identity、pending request、worktree/branch/head、open/merged PR、labelのいずれかが変わればresolveは拒否される。
 
 operatorがplan上eligibleなactionを選択した後だけ適用する。
 
@@ -238,9 +238,9 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 - `adopt-pr`は保存branch/head/baseと一致するsame-repositoryの一意なmerged PRだけを採用する。commit、push、PR、mergeは作成しない。
 - `cancel`はworkerを起動せずsuspensionをterminalに解決する。
 
-terminal Issueはactive `ExecutionLease`を持たず、元owner、slot、resource、base SHA、workspace、session、result digestは`ContinuationCheckpoint`へ保持する。成功したresolveだけがgenerationを進めたleaseを再取得する。ambiguousなIssueはそのIssueだけをquarantineし、`cancel`以外を許可しないため、後続queueのcapacityを消費しない。
+terminal Issueはroot `active_execution`を持たず、base SHA、workspace、session、result digestはIssue-local `continuation`へ保持する。成功したresolveだけがgenerationを進めて単一実行枠を取得する。ambiguousなIssueはそのIssueだけをquarantineし、`cancel`以外を許可しないため、後続queueのcapacityを消費しない。
 
-GitHub同期またはtransaction途中で停止した場合も同じ`issue plan`から再確認し、同じactionを再実行して冪等に収束させる。state/event/label/worktreeを手編集せず、別Issueのleaseを解放せず、欠けたauthorityをevent件数・error文言・現在のbaseから合成しない。旧scenario別recordは全loop停止中のtyped migrationだけがv4 raw入力からgeneric checkpointへ変換し、v5に残る旧状態はfail closedとする。
+GitHub同期またはtransaction途中で停止した場合も同じ`issue plan`から再確認し、同じactionを再実行して冪等に収束させる。state/event/label/worktreeを手編集せず、別Issueのexecutionを変更せず、欠けたauthorityをevent件数・error文言・現在のbaseから合成しない。旧scenario別recordは全loop停止中のtyped migrationだけがv4 raw入力からgeneric continuationへ変換し、v5に残る旧状態はfail closedとする。
 
 ### Git transportまたはcommit署名で停止する
 
@@ -350,7 +350,7 @@ semantic contract更新前後のbinaryでreadした結果、version mismatchだ�
   --dry-run --json
 ```
 
-unloaded、worker/lease/pending request 0、exact mismatch reason、digest、revision、Issue件数、`next_backup`を確認してから`--dry-run`を`--confirm-exact-backup`へ置き換える。元snapshotへ戻ったら新binaryの`status`や`doctor`を先に実行せず、全repositoryを停止して`migrate --json` / `migrate --apply --json`を実行する。
+unloaded、worker/active execution/pending request 0、exact mismatch reason、digest、revision、Issue件数、`next_backup`を確認してから`--dry-run`を`--confirm-exact-backup`へ置き換える。元snapshotへ戻ったら新binaryの`status`や`doctor`を先に実行せず、全repositoryを停止して`migrate --json` / `migrate --apply --json`を実行する。
 
 初回導入とrelease前の実Mac E2Eでは、test repositoryと検証済みstable releaseを使い、次を記録する。
 

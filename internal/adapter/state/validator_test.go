@@ -1,30 +1,29 @@
 package state
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
-	"os"
 	"testing"
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	queuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/queue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 )
 
 const (
 	invalidIssueStatus           issuedomain.Status                = "invalid-test-status"
-	invalidGitHubSync            issuedomain.GitHubSync            = "invalid-test-github-sync"
+	invalidEffectKind            issuedomain.EffectKind            = "invalid-test-effect"
 	invalidConflictAttemptStatus issuedomain.ConflictAttemptStatus = "invalid-test-conflict-attempt"
 )
 
 func validSnapshotForInvariantTest() Snapshot {
 	now := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 	return Snapshot{
-		Version: CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion,
+		Version: CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion, IssueLifecycleAPIVersion: issuedomain.LifecycleAPICurrent,
 		RepoID: "repo-deadbeef", RepoPath: "/tmp/repo",
 		Supervisor: Supervisor{State: SupervisorStateStopped, UpdatedAt: now},
-		Issues:     map[string]*Issue{"1": {Number: 1}}, PendingRequests: map[string]*Request{},
+		Issues:     map[string]*Issue{"1": {Number: 1}}, PendingEffects: map[string]*EffectIntent{}, QuarantinedIssues: map[string]*QuarantineRecord{},
+		IntakeVerifications: map[string]*queuedomain.AuthorVerification{}, PendingRequests: map[string]*Request{},
 	}
 }
 
@@ -85,37 +84,29 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 		name   string
 		mutate func(*Snapshot)
 	}{
-		{name: "status and GitHub sync", mutate: func(snapshot *Snapshot) {
+		{name: "status and effect", mutate: func(snapshot *Snapshot) {
 			snapshot.Issues["1"].Status = issuedomain.StatusRunning
-			snapshot.Issues["1"].GitHubSync = issuedomain.GitHubSyncDone
+			snapshot.Issues["1"].RunID = "run_1"
+			snapshot.PendingEffects["1"] = &EffectIntent{ID: "effect_1", IssueNumber: 1, RunID: "run_1", Kind: issuedomain.EffectMarkDone, CreatedAt: now}
 		}},
-		{name: "run and lease generation", mutate: func(snapshot *Snapshot) {
+		{name: "run and execution generation", mutate: func(snapshot *Snapshot) {
 			issue := snapshot.Issues["1"]
-			issue.Status, issue.RunID, issue.LeaseGeneration = issuedomain.StatusClaiming, "run_1", 2
-			issue.Lease = &ResourceLease{Owner: LeaseOwner{RunID: "run_1", Generation: 1}, Slot: 0, ResolvedResources: []string{"state"}, ReservedAt: now}
+			issue.Status, issue.RunID, issue.Generation = issuedomain.StatusClaiming, "run_1", 2
+			snapshot.ActiveExecution = &ActiveExecution{IssueNumber: 1, RunID: "run_1", Generation: 1, StartedAt: now}
 		}},
-		{name: "active lease and parked lease", mutate: func(snapshot *Snapshot) {
+		{name: "active execution and continuation", mutate: func(snapshot *Snapshot) {
 			issue := snapshot.Issues["1"]
-			issue.Status, issue.RunID, issue.LeaseGeneration = issuedomain.StatusBlocked, "run_1", 1
-			lease := ResourceLease{Owner: LeaseOwner{RunID: "run_1", Generation: 1}, Slot: 0, ResolvedResources: []string{"state"}, ReservedAt: now}
-			issue.Lease = &lease
-			issue.ResourcePark = &ContinuationCheckpoint{ID: "park_1", Status: issuedomain.ResourceParkStatusParked, OriginalLease: lease, ParkedAt: now}
+			issue.Status, issue.RunID, issue.Generation = issuedomain.StatusBlocked, "run_1", 1
+			issue.Continuation = &ContinuationCheckpoint{ID: "checkpoint_1", RunID: "run_1", Generation: 1, CreatedAt: now, Stage: issuedomain.ContinuationStageResume}
+			snapshot.ActiveExecution = &ActiveExecution{IssueNumber: 1, RunID: "run_1", Generation: 1, StartedAt: now}
 		}},
-		{name: "worker slot conflict", mutate: func(snapshot *Snapshot) {
+		{name: "multiple active lifecycles", mutate: func(snapshot *Snapshot) {
 			for number := 1; number <= 2; number++ {
 				key := string(rune('0' + number))
 				runID := "run_" + key
-				snapshot.Issues[key] = &Issue{Number: number, Status: issuedomain.StatusClaiming, RunID: runID, LeaseGeneration: 1,
-					Lease: &ResourceLease{Owner: LeaseOwner{RunID: runID, Generation: 1}, Slot: 0, ResolvedResources: []string{key}, ReservedAt: now}}
+				snapshot.Issues[key] = &Issue{Number: number, Status: issuedomain.StatusClaiming, RunID: runID, Generation: 1}
 			}
-		}},
-		{name: "resource conflict", mutate: func(snapshot *Snapshot) {
-			for number := 1; number <= 2; number++ {
-				key := string(rune('0' + number))
-				runID := "run_" + key
-				snapshot.Issues[key] = &Issue{Number: number, Status: issuedomain.StatusClaiming, RunID: runID, LeaseGeneration: 1,
-					Lease: &ResourceLease{Owner: LeaseOwner{RunID: runID, Generation: 1}, Slot: number - 1, ResolvedResources: []string{"shared"}, ReservedAt: now}}
-			}
+			snapshot.ActiveExecution = &ActiveExecution{IssueNumber: 1, RunID: "run_1", Generation: 1, StartedAt: now}
 		}},
 		{name: "pending request answer", mutate: func(snapshot *Snapshot) {
 			snapshot.PendingRequests["req_1"] = &Request{ID: "req_1", IssueNumber: 1, Status: issuedomain.RequestStatusPending, Answer: "already answered"}
@@ -123,8 +114,8 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 		{name: "pending request resume status", mutate: func(snapshot *Snapshot) {
 			snapshot.PendingRequests["req_1"] = &Request{ID: "req_1", IssueNumber: 1, Status: issuedomain.RequestStatusPending, ResumeStatus: invalidIssueStatus}
 		}},
-		{name: "pending request park identity", mutate: func(snapshot *Snapshot) {
-			snapshot.PendingRequests["req_1"] = &Request{ID: "req_1", IssueNumber: 1, Status: issuedomain.RequestStatusPending, ResourceParkID: "park_1"}
+		{name: "pending request checkpoint identity", mutate: func(snapshot *Snapshot) {
+			snapshot.PendingRequests["req_1"] = &Request{ID: "req_1", IssueNumber: 1, Status: issuedomain.RequestStatusPending, CheckpointID: "checkpoint_1"}
 		}},
 		{name: "workspace provenance", mutate: func(snapshot *Snapshot) {
 			issue := snapshot.Issues["1"]
@@ -161,8 +152,9 @@ func TestSnapshotValidateRejectsEveryCrossFieldInvariantClass(t *testing.T) {
 		{name: "unknown lifecycle vocabulary", mutate: func(snapshot *Snapshot) {
 			snapshot.Issues["1"].Status = invalidIssueStatus
 		}},
-		{name: "unknown GitHub synchronization vocabulary", mutate: func(snapshot *Snapshot) {
-			snapshot.Issues["1"].GitHubSync = invalidGitHubSync
+		{name: "unknown effect vocabulary", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["1"].RunID = "run_1"
+			snapshot.PendingEffects["1"] = &EffectIntent{ID: "effect_1", IssueNumber: 1, RunID: "run_1", Kind: invalidEffectKind, CreatedAt: now}
 		}},
 		{name: "unknown semantic contract", mutate: func(snapshot *Snapshot) {
 			snapshot.SemanticContractVersion++
@@ -192,29 +184,26 @@ func TestSnapshotValidateAcceptsSupportedPullRequestReviewDecisions(t *testing.T
 	}
 }
 
-func TestStoreUpdateRejectsInvalidAggregateWithoutPartialDurableWrite(t *testing.T) {
+func TestStoreUpdateQuarantinesInvalidIssueAndAllowsFollowingIssue(t *testing.T) {
 	store := newStore(t)
-	beforeState, err := os.ReadFile(store.StatePath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Update("invalid", 1, "", nil, func(snapshot *Snapshot) error {
+	snapshot, err := store.Update("invalid", 1, "run_1", nil, func(snapshot *Snapshot) error {
 		snapshot.Issues["1"] = &Issue{Number: 1, Attempts: -1}
 		return nil
-	}); err == nil {
-		t.Fatal("invalid snapshot update succeeded")
-	}
-	afterState, err := os.ReadFile(store.StatePath())
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(beforeState, afterState) {
-		t.Fatal("invalid update changed the durable snapshot")
+	if snapshot.Issues["1"] != nil || snapshot.QuarantinedIssues["1"] == nil || snapshot.QuarantinedIssues["1"].ReasonCode != "issue_invariant_violation" {
+		t.Fatalf("invalid Issue was not isolated: %+v", snapshot.QuarantinedIssues["1"])
 	}
-	if _, err := os.Stat(store.EventsPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid update left an event log: %v", err)
+	snapshot, err = store.Update("following_issue", 2, "run_2", nil, func(snapshot *Snapshot) error {
+		snapshot.Issues["2"] = &Issue{Number: 2, Title: "following Issue"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(store.TransactionPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid update left a prepared transaction: %v", err)
+	if snapshot.Issues["2"] == nil || snapshot.QuarantinedIssues["1"] == nil || snapshot.Supervisor.State == SupervisorStateBlocked {
+		t.Fatalf("following Issue did not progress independently: %+v", snapshot)
 	}
 }

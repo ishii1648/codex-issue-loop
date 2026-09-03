@@ -15,7 +15,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/admission"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
@@ -455,17 +454,11 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 			continue
 		}
 		slot := -1
-		if issueUsesWorkerSlot(current) {
+		if issueDispatchesWorker(current, state.PendingEffect(&snapshot, current.Number) != nil) {
 			var ok bool
 			slot, ok = s.freeSlot()
 			if !ok {
 				continue
-			}
-			if current.Lease != nil && current.Lease.Slot != slot {
-				if _, err := s.loop.Store.AssignLeaseSlot(current.Number, current.Lease.Owner, slot); err != nil {
-					return result, failure.Wrap(failure.Supervisor, "assign worker slot", err)
-				}
-				current.Lease.Slot = slot
 			}
 		} else if s.hasMaintenanceJob() {
 			continue
@@ -477,7 +470,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 
 	if len(mailboxCandidates) > 0 && s.hasFreeSlot() {
-		selected, _, ok, selectErr := s.selectReady(ctx, mailboxCandidates, snapshot)
+		selected, ok, selectErr := s.selectReady(ctx, mailboxCandidates, snapshot)
 		if selectErr != nil {
 			return result, failure.Wrap(failure.Supervisor, "select webhook Issue admission", selectErr)
 		}
@@ -486,7 +479,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 			if slotOK {
 				runID := state.NewID("run")
 				s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
-					return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot)
+					return s.loop.startIssue(jobCtx, selected, runID)
 				})
 				result.dispatched = true
 			}
@@ -508,12 +501,6 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		s.pollAt = s.loop.now().Add(s.pollDelay())
 		return result, nil
 	}
-	if !s.loop.Config.Queue.ContinueAfterNeedsInput {
-		if hasPendingRequests(snapshot) {
-			s.pollAt = s.loop.now().Add(s.pollDelay())
-			return result, s.markPollingIfIdle(snapshot, "waiting for user input")
-		}
-	}
 	issues, err := s.listReady(ctx)
 	result.githubAttempted = true
 	if err != nil {
@@ -521,7 +508,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 	result.githubSucceeded = true
 	s.pollAt = s.loop.now().Add(s.pollDelay())
-	selected, _, ok, selectErr := s.selectReady(ctx, issues, snapshot)
+	selected, ok, selectErr := s.selectReady(ctx, issues, snapshot)
 	if selectErr != nil {
 		return result, failure.Wrap(failure.Supervisor, "select Issue admission", selectErr)
 	}
@@ -534,7 +521,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 	runID := state.NewID("run")
 	s.dispatch(ctx, selected.Number, runID, slot, func(jobCtx context.Context) error {
-		return s.loop.startIssueAtSlotWithResources(jobCtx, selected, runID, slot)
+		return s.loop.startIssue(jobCtx, selected, runID)
 	})
 	result.dispatched = true
 	return result, nil
@@ -682,7 +669,7 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 				}
 				continue
 			}
-			if !local.Status.WebhookRoutable() && !local.GitHubSync.Pending() {
+			if !local.Status.WebhookRoutable() && state.PendingEffect(&snapshot, local.Number) == nil {
 				acknowledged = append(acknowledged, delivery)
 				continue
 			}
@@ -719,7 +706,7 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		if gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
 			candidates = append(candidates, candidate)
 			// Keep the delivery until the durable local Issue exists. A crash
-			// between admission and lease reservation can then replay safely.
+			// between selection and execution start can then replay safely.
 			// Older deliveries for the same Issue are acknowledged because this
 			// newest intent is sufficient to repeat the authoritative read.
 		} else {
@@ -809,92 +796,44 @@ func hasPendingRequests(snapshot state.Snapshot) bool {
 	return false
 }
 
-func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot state.Snapshot) (gh.Issue, admission.Evaluation, bool, error) {
-	candidates := make([]admission.Candidate, 0, len(issues))
-	byNumber := make(map[int]gh.Issue, len(issues))
-	for _, issue := range issues {
-		candidates = append(candidates, admission.Candidate{
-			Number: issue.Number, CreatedAt: issue.CreatedAt,
-			Labels: append([]string(nil), issue.Labels...), Body: issue.Body,
-		})
-		byNumber[issue.Number] = issue
+func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot state.Snapshot) (gh.Issue, bool, error) {
+	if s.workerCount() != 0 || snapshot.ActiveExecution != nil {
+		return gh.Issue{}, false, nil
 	}
-	settings := s.loop.Config.AdmissionSettings()
-	dependencies := map[int]admission.DependencyState{}
+	candidates := append([]gh.Issue(nil), issues...)
+	gh.OrderIssues(candidates, s.loop.Config.Queue)
 	for _, candidate := range candidates {
-		evaluation, err := admission.EvaluateCandidate(settings, candidate)
-		if err != nil {
-			return gh.Issue{}, admission.Evaluation{}, false, err
-		}
-		for _, number := range evaluation.Dependencies {
-			if _, exists := dependencies[number]; exists {
-				continue
-			}
-			if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
-				dependencies[number] = admission.DependencyState{
-					Exists: true, Accessible: true,
-					Closed:                   local.Status == issuedomain.StatusCompleted,
-					LocalCompleted:           local.Status == issuedomain.StatusCompleted,
-					PullRequestMergeRecorded: local.PullRequestURL == "" || local.PullRequestMerged,
-					KnownOpenOrUnmergedPR:    local.PullRequestURL != "" && !local.PullRequestMerged,
-				}
-				continue
-			}
-			remote, getErr := s.loop.getIssue(ctx, number)
-			if _, limited := gh.AsRateLimit(getErr); limited {
-				return gh.Issue{}, admission.Evaluation{}, false, getErr
-			}
-			if getErr == nil {
-				dependencies[number] = admission.DependencyState{
-					Exists: true, Accessible: true, Closed: strings.EqualFold(remote.State, "closed"),
-				}
-			}
-		}
-	}
-	active := make([]admission.Lease, 0, len(snapshot.Issues))
-	activeLeaseNumbers := map[int]bool{}
-	ineligible := map[int]string{}
-	for _, issue := range snapshot.Issues {
-		if issue == nil {
+		if !gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
 			continue
 		}
-		if issue.Lease != nil {
-			active = append(active, admission.Lease{
-				IssueNumber: issue.Number,
-				Resources:   append([]string(nil), issue.Lease.ResolvedResources...),
-			})
-			activeLeaseNumbers[issue.Number] = true
+		if current := snapshot.Issues[fmt.Sprint(candidate.Number)]; current != nil && current.Status.IneligibleForAdmission() {
+			continue
 		}
-		if issue.Status.IneligibleForAdmission() {
-			ineligible[issue.Number] = issue.Status.String()
+		if _, running := s.active[candidate.Number]; running {
+			continue
 		}
-	}
-	for number := range s.active {
-		ineligible[number] = "running"
-		if !activeLeaseNumbers[number] {
-			// Before the write-ahead reservation becomes visible, treat a
-			// dispatched claim conservatively as repository-wide.
-			active = append(active, admission.Lease{IssueNumber: number, Resources: []string{admission.RepositoryResource}})
+		verification, err := s.loop.GitHub.VerifyIssueAuthor(ctx, s.loop.Config, candidate)
+		if err != nil {
+			if !state.SameAuthorDecision(snapshot.IntakeVerifications[fmt.Sprint(candidate.Number)], verification) {
+				if recordErr := s.loop.Store.RecordAuthorVerification(candidate.Number, verification); recordErr != nil {
+					return gh.Issue{}, false, failure.Wrap(failure.Supervisor, "record Issue author verification", recordErr)
+				}
+			}
+			s.loop.Logger.Printf("Issue #%d author verification unavailable; skipping candidate: %v", candidate.Number, err)
+			continue
 		}
+		if !verification.Trusted {
+			if !state.SameAuthorDecision(snapshot.IntakeVerifications[fmt.Sprint(candidate.Number)], verification) {
+				if recordErr := s.loop.Store.RecordAuthorVerification(candidate.Number, verification); recordErr != nil {
+					return gh.Issue{}, false, failure.Wrap(failure.Supervisor, "record Issue author verification", recordErr)
+				}
+			}
+			s.loop.Logger.Printf("Issue #%d author rejected; skipping candidate (reason=%s)", candidate.Number, verification.Reason)
+			continue
+		}
+		return candidate, true, nil
 	}
-	concurrency := s.loop.Config.Queue.Concurrency
-	if concurrency < 1 {
-		concurrency = 1
-	}
-	settings.Concurrency = concurrency
-	result, err := admission.Select(admission.Input{
-		Settings: settings,
-		Queue: admission.Queue{
-			Order:          s.loop.Config.Queue.Order,
-			PriorityLabels: append([]string(nil), s.loop.Config.Queue.PriorityLabels...),
-		},
-		Candidates: candidates, Active: active, OccupiedSlots: s.workerCount(), Dependencies: dependencies,
-		Ineligible: ineligible,
-	})
-	if err != nil || len(result.Selected) == 0 {
-		return gh.Issue{}, admission.Evaluation{}, false, err
-	}
-	return byNumber[result.Selected[0].Candidate.Number], result.Selected[0], true, nil
+	return gh.Issue{}, false, nil
 }
 
 func (s *scheduler) preflight(snapshot state.Snapshot) error {
@@ -1080,10 +1019,10 @@ func (s *scheduler) markPollingIfIdle(snapshot state.Snapshot, message string) e
 	return s.loop.markPolling(message)
 }
 
-func pendingIssues(snapshot state.Snapshot, now time.Time, concurrency int) []state.Issue {
+func pendingIssues(snapshot state.Snapshot, now time.Time, _ int) []state.Issue {
 	result := make([]state.Issue, 0, len(snapshot.Issues))
 	for _, issue := range snapshot.Issues {
-		if issue == nil || !pendingIssue(*issue, now) || (issue.Status == issuedomain.StatusAnswerClaimWaiting && !answeredClaimAvailable(snapshot, *issue, concurrency)) {
+		if issue == nil || !pendingIssue(*issue, state.PendingEffect(&snapshot, issue.Number) != nil, now) {
 			continue
 		}
 		result = append(result, *issue)
@@ -1092,32 +1031,13 @@ func pendingIssues(snapshot state.Snapshot, now time.Time, concurrency int) []st
 	return result
 }
 
-func pendingIssue(issue state.Issue, now time.Time) bool {
-	if !issue.Status.DispatchPending(issue.GitHubSync) {
+func pendingIssue(issue state.Issue, effectPending bool, now time.Time) bool {
+	if !issue.Status.DispatchPending(effectPending) {
 		return false
 	}
 	return issue.RetryAfter == nil || !issue.RetryAfter.After(now)
 }
 
-func answeredClaimAvailable(snapshot state.Snapshot, issue state.Issue, concurrency int) bool {
-	if issue.ResourcePark == nil || issue.ResourcePark.Kind != state.ResourceParkKindNeedsInput || issue.ResourcePark.Status != issuedomain.ResourceParkStatusParked || issue.Lease != nil {
-		return false
-	}
-	copy := snapshot
-	if _, ok := availableSnapshotLeaseSlot(&copy, concurrency, issue.ResourcePark.OriginalLease.Slot, issue.Number); !ok {
-		return false
-	}
-	for _, other := range snapshot.Issues {
-		if other == nil || other.Number == issue.Number || other.Lease == nil {
-			continue
-		}
-		if state.ResourcesConflict(issue.ResourcePark.OriginalLease.ResolvedResources, other.Lease.ResolvedResources) {
-			return false
-		}
-	}
-	return true
-}
-
-func issueUsesWorkerSlot(issue state.Issue) bool {
-	return issue.Status.UsesWorkerSlotWhile(issue.GitHubSync)
+func issueDispatchesWorker(issue state.Issue, effectPending bool) bool {
+	return issue.Status.DispatchesWorkerWhile(effectPending)
 }

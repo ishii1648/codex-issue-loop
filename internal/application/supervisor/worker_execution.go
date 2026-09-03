@@ -152,29 +152,21 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 	switch result.Status {
 	case "completed":
 		if l.Publisher != nil {
+			snapshot, loadErr := l.Store.Load()
+			if loadErr != nil {
+				return failure.Wrap(failure.Supervisor, "load active execution before publication", loadErr)
+			}
 			baseSHA := ""
-			declared := append([]string(nil), current.DeclaredResources...)
-			effective := append([]string(nil), declared...)
-			if current.Lease != nil {
-				baseSHA = current.Lease.BaseSHA
-				if len(declared) == 0 {
-					declared = append([]string(nil), current.Lease.DeclaredResources...)
-				}
-				effective = append([]string(nil), current.Lease.ResolvedResources...)
+			if snapshot.ActiveExecution != nil && snapshot.ActiveExecution.IssueNumber == current.Number {
+				baseSHA = snapshot.ActiveExecution.BaseSHA
 			}
 			l.publicationMu.Lock()
-			published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, current.PullRequestURL, result.Summary, baseSHA,
-				publication.ResourceScope{Declared: declared, Effective: effective})
+			published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, issue, current.Worktree, current.Branch, current.PullRequestURL, result.Summary, baseSHA)
 			l.publicationMu.Unlock()
 			_, auditErr := l.Store.Update("publication_audited", issue.Number, current.RunID, audit, func(s *state.Snapshot) error {
 				item := s.Issues[strconv.Itoa(issue.Number)]
 				auditCopy := audit
 				item.PublicationAudit = &auditCopy
-				item.DeclaredResources = append([]string(nil), audit.DeclaredResources...)
-				item.ActualResources = append([]string(nil), audit.ActualResources...)
-				if item.Lease != nil {
-					item.Lease.ActualResources = append([]string(nil), audit.ActualResources...)
-				}
 				item.UpdatedAt = l.now()
 				return nil
 			})
@@ -182,10 +174,6 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 				return failure.Wrap(failure.Supervisor, "persist publication resource audit", auditErr)
 			}
 			if publishErr != nil {
-				var mismatch publication.ClaimMismatchError
-				if errors.As(publishErr, &mismatch) {
-					return l.requestResourceCorrection(ctx, current, audit, publishErr.Error())
-				}
 				return l.schedulePublicationRetry(ctx, current, fmt.Errorf("publish completed work: %w", publishErr), result.Summary)
 			}
 			result.Git = &published
@@ -213,7 +201,9 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			item.PullRequestNumber = pullRequestNumber(prURL)
 			item.PullRequestMerged = false
 			item.FailureKind = ""
-			item.GitHubSync = issuedomain.GitHubSyncNone
+			if err := state.SetEffect(s, item.Number, item.RunID, issuedomain.EffectNone, l.now()); err != nil {
+				return err
+			}
 			item.RetryAfter, item.UpdatedAt = nil, l.now()
 			return nil
 		})
@@ -228,36 +218,35 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		}
 		requestID := state.NewID("req")
 		q := result.Question
-		parkID := state.NewID("park")
-		parkedAt := l.now()
-		owner := state.LeaseOwner{}
-		if current.Lease != nil {
-			owner = current.Lease.Owner
-		}
+		checkpointID := state.NewID("checkpoint")
+		suspendedAt := l.now()
+		identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 		_, err := l.Store.Update("input_requested", issue.Number, current.RunID, map[string]any{
-			"question": q, "request_id": requestID, "resource_park_id": parkID,
-			"released_owner": owner, "parked_at": parkedAt,
+			"question": q, "request_id": requestID, "checkpoint_id": checkpointID,
+			"released_execution": identity, "suspended_at": suspendedAt,
 		}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
 			if item == nil || item.RunID != current.RunID || item.WorkerPID != 0 || item.WorkerPGID != 0 ||
-				item.Lease == nil || item.Lease.Owner != owner || item.ConflictRecovery != nil {
-				return fmt.Errorf("Issue #%d no longer has a parkable needs-input worker boundary", issue.Number)
+				!state.OwnsActiveExecution(s, issue.Number, identity) || item.ConflictRecovery != nil {
+				return fmt.Errorf("Issue #%d no longer has an active needs-input worker boundary", issue.Number)
 			}
-			if err := state.CaptureContinuationLease(item, owner, parkID, parkedAt); err != nil {
+			if err := state.CaptureContinuation(s, issue.Number, identity, checkpointID, suspendedAt); err != nil {
 				return err
 			}
-			item.ResourcePark.Kind = state.ResourceParkKindNeedsInput
-			item.ResourcePark.RequestID = requestID
+			item.Continuation.Kind = state.ContinuationKindNeedsInput
+			item.Continuation.RequestID = requestID
 			if err := state.ApplyIssueTransition(item, inputDecision.Transition); err != nil {
 				return err
 			}
 			item.UpdatedAt = l.now()
 			item.FailureKind = ""
-			item.GitHubSync = inputDecision.GitHubSync
+			if err := state.SetEffect(s, item.Number, item.RunID, inputDecision.Effect, l.now()); err != nil {
+				return err
+			}
 			s.PendingRequests[requestID] = &state.Request{
 				ID: requestID, IssueNumber: issue.Number, Question: q.Text, Reason: q.Reason,
 				Recommended: q.RecommendedOption, Options: q.Options, AllowFreeText: q.AllowFreeText,
-				RunID: current.RunID, ResourceParkID: parkID, ReleasedOwner: &owner,
+				RunID: current.RunID, CheckpointID: checkpointID, ReleasedExecution: &identity,
 				Status: issuedomain.RequestStatusPending, CreatedAt: l.now(),
 			}
 			return nil
@@ -311,14 +300,14 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 	}
 	_, err := l.Store.Update("answered_resume_rejected", current.Number, current.RunID, map[string]string{"reason": reason}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Status != issuedomain.StatusResumePending || item.RunID != current.RunID || item.Lease == nil || current.Lease == nil || item.Lease.Owner != current.Lease.Owner {
+		identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
+		if item == nil || item.Status != issuedomain.StatusResumePending || item.RunID != current.RunID || !state.OwnsActiveExecution(snapshot, current.Number, identity) {
 			return fmt.Errorf("Issue #%d answered continuation changed before rejection", current.Number)
 		}
-		if item.ResourcePark == nil || item.ResourcePark.Kind != state.ResourceParkKindNeedsInput || item.ResourcePark.Status != issuedomain.ResourceParkStatusResuming {
-			return fmt.Errorf("Issue #%d answered continuation park is inconsistent", current.Number)
+		if item.Continuation == nil || item.Continuation.Kind != state.ContinuationKindNeedsInput {
+			return fmt.Errorf("Issue #%d answered continuation is inconsistent", current.Number)
 		}
-		item.ResourcePark.Status = issuedomain.ResourceParkStatusResumed
-		if err := state.ReleaseIssueLease(item, current.Lease.Owner); err != nil {
+		if err := state.ReleaseExecution(snapshot, current.Number, identity); err != nil {
 			return err
 		}
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
@@ -326,98 +315,17 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 		}
 		item.LastError = decision.LastError
 		item.FailureKind = decision.FailureKind
-		item.GitHubSync = decision.GitHubSync
+		if err := state.SetEffect(snapshot, item.Number, item.RunID, decision.Effect, now); err != nil {
+			return err
+		}
 		item.Suspension = &state.Suspension{ID: state.NewID("suspension"), Origin: "supervisor", Status: issuedomain.SuspensionActive,
 			ReasonCode: "answer_resume", Recoverability: issuedomain.RecoverabilityNone, Reason: reason,
-			AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}, CheckpointID: item.ResourcePark.ID, SuspendedAt: now}
+			AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}, CheckpointID: item.Continuation.ID, SuspendedAt: now}
 		item.RetryAfter = nil
 		item.UpdatedAt = now
 		return nil
 	})
 	return failure.Wrap(failure.Supervisor, "persist rejected answered continuation", err)
-}
-
-func (l *Loop) reacquireAnsweredClaim(ctx context.Context, remoteIssue gh.Issue, current state.Issue) error {
-	if current.WorkerPID != 0 || current.WorkerPGID != 0 || current.Lease != nil || current.ResourcePark == nil ||
-		current.ResourcePark.Kind != state.ResourceParkKindNeedsInput || current.ResourcePark.Status != issuedomain.ResourceParkStatusParked || current.PullRequestURL != "" {
-		return nil
-	}
-	labels := labelSet(remoteIssue.Labels)
-	if !strings.EqualFold(remoteIssue.State, "open") || !labels[l.Config.GitHub.NeedsInputLabel] || labels[l.Config.GitHub.RunningLabel] ||
-		labels[l.Config.GitHub.DoneLabel] || labels[l.Config.GitHub.FailedLabel] ||
-		hasAnyLabel(labels, append(append([]string{}, l.Config.GitHub.ReadyLabels...), l.Config.GitHub.ExcludeLabels...)) {
-		return nil
-	}
-	if l.Worktrees == nil || current.Worktree == "" || current.Branch == "" {
-		return nil
-	}
-	inspection, err := l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
-	if err != nil || !inspection.Exists || !inspection.Valid || inspection.Branch != current.Branch || !inspection.LocalBranchExists {
-		return nil
-	}
-	now := l.now()
-	claimTransition, err := issuedomain.AcquireAnsweredClaim(current.Status)
-	if err != nil {
-		return failure.Wrap(failure.Supervisor, "decide answered claim acquisition", err)
-	}
-	_, err = l.Store.Update("answered_claim_acquired", current.Number, current.RunID, map[string]any{
-		"request_id": current.ResourcePark.RequestID, "resource_park_id": current.ResourcePark.ID,
-	}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Status != issuedomain.StatusAnswerClaimWaiting || item.RunID != current.RunID || item.WorkerPID != 0 || item.WorkerPGID != 0 || item.Lease != nil {
-			return errAnsweredClaimWaiting
-		}
-		request := snapshot.PendingRequests[item.ResourcePark.RequestID]
-		if request == nil || request.Status != issuedomain.RequestStatusAnswered {
-			return fmt.Errorf("Issue #%d answered request is missing", current.Number)
-		}
-		if err := state.ValidateNeedsInputPark(item, request); err != nil {
-			return err
-		}
-		slot, ok := availableSnapshotLeaseSlot(snapshot, l.Config.Queue.Concurrency, item.ResourcePark.OriginalLease.Slot, item.Number)
-		if !ok {
-			return errAnsweredClaimWaiting
-		}
-		if _, resumeErr := state.ResumeParkedLease(snapshot, item.Number, item.ResourcePark.ID, slot, now); resumeErr != nil {
-			var conflict state.LeaseConflictError
-			if errors.As(resumeErr, &conflict) {
-				return errAnsweredClaimWaiting
-			}
-			return resumeErr
-		}
-		if err := state.ApplyIssueTransition(item, claimTransition); err != nil {
-			return err
-		}
-		item.RetryAfter = nil
-		item.UpdatedAt = now
-		return nil
-	})
-	if errors.Is(err, errAnsweredClaimWaiting) {
-		return nil
-	}
-	return failure.Wrap(failure.Supervisor, "reacquire answered needs-input claim", err)
-}
-
-func availableSnapshotLeaseSlot(snapshot *state.Snapshot, limit, preferred, issueNumber int) (int, bool) {
-	if limit < 1 {
-		limit = 1
-	}
-	used := map[int]bool{}
-	for _, other := range snapshot.Issues {
-		if other == nil || other.Number == issueNumber || other.Lease == nil || !other.Status.OccupiesWorkerSlot() {
-			continue
-		}
-		used[other.Lease.Slot] = true
-	}
-	if preferred >= 0 && preferred < limit && !used[preferred] {
-		return preferred, true
-	}
-	for slot := 0; slot < limit; slot++ {
-		if !used[slot] {
-			return slot, true
-		}
-	}
-	return -1, false
 }
 
 func (l *Loop) blockWorkerWorkspace(ctx context.Context, expected state.Issue, validationErr *workerWorkspaceError) error {
@@ -437,18 +345,30 @@ func (l *Loop) blockWorkerWorkspace(ctx context.Context, expected state.Issue, v
 		if item == nil || item.RunID != expected.RunID {
 			return fmt.Errorf("Issue #%d run changed while rejecting worker workspace", expected.Number)
 		}
+		identity := state.ExecutionIdentity{RunID: expected.RunID, Generation: expected.Generation}
+		if state.OwnsActiveExecution(snapshot, expected.Number, identity) {
+			if err := state.CaptureContinuation(snapshot, expected.Number, identity, state.NewID("checkpoint"), l.now()); err != nil {
+				return err
+			}
+		}
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		item.LastError = decision.LastError
 		item.FailureKind = decision.FailureKind
-		item.GitHubSync = decision.GitHubSync
+		if err := state.SetEffect(snapshot, item.Number, item.RunID, decision.Effect, l.now()); err != nil {
+			return err
+		}
 		item.WorkerPID = 0
 		item.WorkerPGID = 0
 		item.RetryAfter = nil
+		checkpointID := ""
+		if item.Continuation != nil {
+			checkpointID = item.Continuation.ID
+		}
 		item.Suspension = &state.Suspension{ID: state.NewID("suspension"), Origin: "supervisor", Status: issuedomain.SuspensionActive,
 			ReasonCode: "worker_workspace", Recoverability: issuedomain.RecoverabilityNone, Reason: reason,
-			AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}, CheckpointID: item.ResourcePark.ID, SuspendedAt: l.now()}
+			AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}, CheckpointID: checkpointID, SuspendedAt: l.now()}
 		item.UpdatedAt = l.now()
 		return nil
 	})
@@ -487,14 +407,12 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 		return fail(fmt.Errorf("saved worktree branch changed before spawn"))
 	}
 	validation.Checks["saved_branch_state"] = true
-	if fresh.Lease == nil || expected.Lease == nil {
-		return fail(fmt.Errorf("active resource lease is missing"))
+	snapshot, loadErr := l.Store.Load()
+	identity := state.ExecutionIdentity{RunID: fresh.RunID, Generation: fresh.Generation}
+	if loadErr != nil || fresh.Generation == 0 || fresh.Generation != expected.Generation || !state.OwnsActiveExecution(&snapshot, fresh.Number, identity) {
+		return fail(fmt.Errorf("active execution generation changed before spawn"))
 	}
-	if fresh.LeaseGeneration == 0 || fresh.LeaseGeneration != expected.LeaseGeneration || fresh.Lease.Owner != expected.Lease.Owner ||
-		fresh.Lease.Owner.RunID != fresh.RunID || fresh.Lease.Owner.Generation != fresh.LeaseGeneration {
-		return fail(fmt.Errorf("resource lease owner generation changed before spawn"))
-	}
-	validation.Checks["lease_owner_generation"] = true
+	validation.Checks["active_execution_generation"] = true
 
 	local, inspectErr := l.Worktrees.ValidateLaunch(ctx, l.Config, fresh.Worktree, fresh.Branch)
 	for name, passed := range local.Checks {
@@ -524,12 +442,12 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 
 	payload := map[string]any{
 		"expected_cwd": validation.CanonicalCWD, "validation": validation,
-		"run_id": fresh.RunID, "session_present": fresh.SessionID != "", "lease_owner": fresh.Lease.Owner,
+		"run_id": fresh.RunID, "session_present": fresh.SessionID != "", "execution_identity": identity,
 	}
 	_, err = l.Store.Update("worker_workspace_validated", fresh.Number, fresh.RunID, payload, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(fresh.Number)]
 		if item == nil || item.RunID != fresh.RunID || item.Worktree != fresh.Worktree || item.Branch != fresh.Branch || item.SessionID != fresh.SessionID ||
-			item.Lease == nil || item.Lease.Owner != fresh.Lease.Owner || item.LeaseGeneration != fresh.LeaseGeneration {
+			item.Generation != fresh.Generation || !state.OwnsActiveExecution(snapshot, fresh.Number, identity) {
 			return fmt.Errorf("Issue #%d launch provenance changed during validation", fresh.Number)
 		}
 		if item.Workspace == nil || *item.Workspace != *workspace {
@@ -565,8 +483,9 @@ func (l *Loop) recordWorkerPID(expected state.Issue) worker.Started {
 			if item == nil || item.RunID != runID {
 				return fmt.Errorf("Issue #%d run %s is no longer active", number, runID)
 			}
-			if expected.Lease == nil || item.Lease == nil || item.Lease.Owner != expected.Lease.Owner || item.LeaseGeneration != expected.LeaseGeneration {
-				return fmt.Errorf("Issue #%d run %s resource lease owner generation changed before process audit", number, runID)
+			identity := state.ExecutionIdentity{RunID: expected.RunID, Generation: expected.Generation}
+			if item.Generation != expected.Generation || !state.OwnsActiveExecution(s, number, identity) {
+				return fmt.Errorf("Issue #%d run %s active execution generation changed before process audit", number, runID)
 			}
 			if item.Workspace == nil || item.Workspace.Path != start.ExpectedCWD {
 				return fmt.Errorf("Issue #%d run %s has no matching saved workspace provenance", number, runID)
@@ -660,10 +579,7 @@ func (l *Loop) failIssueAtStage(ctx context.Context, number int, cause error, bl
 	if stateErr != nil {
 		return failure.Wrap(failure.Supervisor, "load Issue before failure transition", stateErr)
 	}
-	owner := state.LeaseOwner{}
-	if current.Lease != nil {
-		owner = current.Lease.Owner
-	}
+	identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 	kind := failure.KindOf(cause)
 	decision, decisionErr := issuedomain.Fail(current.Status, cause.Error(), string(kind), blocked)
 	if decisionErr != nil {
@@ -675,36 +591,38 @@ func (l *Loop) failIssueAtStage(ctx context.Context, number int, cause error, bl
 		if item == nil {
 			return fmt.Errorf("Issue #%d disappeared before failure transition", number)
 		}
+		if state.OwnsActiveExecution(s, number, identity) {
+			if err := state.CaptureContinuation(s, number, identity, state.NewID("checkpoint"), l.now()); err != nil {
+				return err
+			}
+		}
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
 		if stage != issuedomain.ContinuationStageNone {
-			if item.ResourcePark == nil {
+			if item.Continuation == nil {
 				return fmt.Errorf("Issue #%d terminal transition did not capture a continuation checkpoint", number)
 			}
-			item.ResourcePark.Stage = stage
-			item.ResourcePark.Summary = summary
-			item.ResourcePark.ResultSHA256 = resultSHA256
+			item.Continuation.Stage = stage
+			item.Continuation.Summary = summary
+			item.Continuation.ResultSHA256 = resultSHA256
 			evidence := state.ContinuationEvidence{Origin: "runtime", Phase: string(stage), Code: string(kind), Status: decision.Transition.To.String(), ObservedAt: l.now()}
 			if stage == issuedomain.ContinuationStagePublish {
 				provenance := publication.ClassifyFailure(cause, l.now())
 				evidence.Origin, evidence.Phase, evidence.Code = provenance.Origin, provenance.Phase, provenance.Code
 			}
-			item.ResourcePark.Evidence = &evidence
+			item.Continuation.Evidence = &evidence
 		}
-		if item.ResourcePark != nil {
-			item.ResourcePark.WorktreeSHA256 = worktreeSHA256
-		}
-		if issuedomain.DecideLease(decision.Transition.To, item.PullRequestURL != "", false) == issuedomain.ReleaseLease && item.Lease != nil {
-			if err := state.ReleaseIssueLease(item, owner); err != nil {
-				return err
-			}
+		if item.Continuation != nil {
+			item.Continuation.WorktreeSHA256 = worktreeSHA256
 		}
 		item.LastError = decision.LastError
 		item.SessionID = ""
 		item.Session = nil
 		item.FailureKind = decision.FailureKind
-		item.GitHubSync = decision.GitHubSync
+		if err := state.SetEffect(s, item.Number, item.RunID, decision.Effect, l.now()); err != nil {
+			return err
+		}
 		item.RetryAfter, item.UpdatedAt = nil, l.now()
 		return nil
 	})

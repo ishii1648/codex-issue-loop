@@ -135,7 +135,7 @@ jobs:
           cd dist/candidate
           shasum -a 256 -c checksums.txt
           jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
-            '.version == $version and .commit == $commit and .assignment_protocol == 1 and .semantic_contract_current == 3 and .semantic_contract_minimum == 1 and .state_schema_current == 5 and .state_schema_migration_from == 4' release-manifest.json
+            '.version == $version and .commit == $commit and .assignment_protocol == 1 and .semantic_contract_current == 4 and .semantic_contract_minimum == 1 and .state_schema_current == 5 and .state_schema_migration_from == 4 and .issue_lifecycle_api_current == "2.0" and .issue_lifecycle_api_minimum == "1.0"' release-manifest.json
           gh attestation verify agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
 
   replay-production-fixtures:
@@ -386,7 +386,7 @@ jobs:
           jq -e --arg digest "$digest" '
             .schema_version == 1 and .mode == "credentialless-offline" and .candidate_sha256 == $digest and
             .external_network == false and (.sequences | length) == 2 and
-            .final.active_workers == 0 and .final.active_leases == 0 and .final.pending_requests == 0 and
+            .final.active_workers == 0 and .final.active_executions == 0 and .final.pending_requests == 0 and
             .final.orphan_pid_pgid == 0 and .final.duplicate_prs == 0 and .final.duplicate_comment_markers == 0
           ' evidence/contracts/offline-contract-report.json >/dev/null
           jq -e --arg digest "$digest" --arg commit "$RELEASE_COMMIT" '

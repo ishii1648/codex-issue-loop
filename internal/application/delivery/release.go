@@ -49,6 +49,8 @@ type ReleaseManifest struct {
 	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
 	SemanticContractCurrent  int    `json:"semantic_contract_current"`
 	SemanticContractMinimum  int    `json:"semantic_contract_minimum"`
+	IssueLifecycleAPICurrent string `json:"issue_lifecycle_api_current,omitempty"`
+	IssueLifecycleAPIMinimum string `json:"issue_lifecycle_api_minimum,omitempty"`
 }
 
 type BinaryInfo struct {
@@ -61,6 +63,8 @@ type BinaryInfo struct {
 	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
 	SemanticContractCurrent  int    `json:"semantic_contract_current"`
 	SemanticContractMinimum  int    `json:"semantic_contract_minimum"`
+	IssueLifecycleAPICurrent string `json:"issue_lifecycle_api_current,omitempty"`
+	IssueLifecycleAPIMinimum string `json:"issue_lifecycle_api_minimum,omitempty"`
 }
 
 type Release struct {
@@ -300,6 +304,9 @@ func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error
 		manifest.SemanticContractCurrent <= 0 || manifest.SemanticContractMinimum < 0 || manifest.SemanticContractMinimum > manifest.SemanticContractCurrent {
 		return manifest, "", errors.New("release manifest contains an invalid compatibility range")
 	}
+	if (manifest.IssueLifecycleAPICurrent == "") != (manifest.IssueLifecycleAPIMinimum == "") {
+		return manifest, "", errors.New("release manifest contains an incomplete Issue lifecycle API range")
+	}
 	checksums, err := parseChecksums(filepath.Join(dir, ChecksumAsset))
 	if err != nil {
 		return manifest, "", err
@@ -328,6 +335,9 @@ func compareBinaryManifest(binary BinaryInfo, manifest ReleaseManifest) error {
 		binary.StateSchemaCurrent != manifest.StateSchemaCurrent || binary.StateSchemaMigrationFrom != manifest.StateSchemaMigrationFrom ||
 		binary.SemanticContractCurrent != manifest.SemanticContractCurrent || binary.SemanticContractMinimum != manifest.SemanticContractMinimum {
 		return errors.New("binary embedded metadata does not match release manifest")
+	}
+	if manifest.IssueLifecycleAPICurrent != "" && (binary.IssueLifecycleAPICurrent != manifest.IssueLifecycleAPICurrent || binary.IssueLifecycleAPIMinimum != manifest.IssueLifecycleAPIMinimum) {
+		return errors.New("binary Issue lifecycle API metadata does not match release manifest")
 	}
 	return nil
 }

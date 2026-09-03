@@ -8,7 +8,6 @@ func TestSubstateVocabulariesRejectUnknownValues(t *testing.T) {
 		name string
 		err  error
 	}{
-		{"resource park", ResourceParkStatus(invalidSubstate).Validate()},
 		{"request", RequestStatus(invalidSubstate).Validate()},
 		{"conflict attempt", ConflictAttemptStatus(invalidSubstate).Validate()},
 	}

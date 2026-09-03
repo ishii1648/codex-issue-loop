@@ -80,7 +80,7 @@ type workerStopTarget struct {
 }
 
 // StopWorkers terminates every saved worker group and records each Issue
-// independently. Worktrees, sessions, branches, and leases are retained so a
+// independently. Worktrees, sessions, branches, and continuations are retained so a
 // later start can reconcile and retry without losing valid work.
 func StopWorkers(ctx context.Context, store state.Store, grace time.Duration, reason string, controller ProcessGroupController) (WorkerStopReport, error) {
 	if controller == nil {
@@ -170,6 +170,13 @@ func StopWorkers(ctx context.Context, store state.Store, grace time.Duration, re
 			case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusRunning:
 				if transition == nil {
 					return fmt.Errorf("Issue #%d active worker is missing its interruption decision", issue.Number)
+				}
+				identity := state.ExecutionIdentity{RunID: item.RunID, Generation: item.Generation}
+				if !state.OwnsActiveExecution(current, item.Number, identity) {
+					return fmt.Errorf("Issue #%d does not own the active execution while stopping", issue.Number)
+				}
+				if err := state.CaptureContinuation(current, item.Number, identity, state.NewID("checkpoint"), now); err != nil {
+					return err
 				}
 				if err := state.ApplyIssueTransition(item, *transition); err != nil {
 					return err

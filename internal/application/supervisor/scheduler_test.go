@@ -69,6 +69,29 @@ type startupRateLimitObserverGitHub struct {
 	statusCalls int
 }
 
+func TestSelectReadySkipsUntrustedAuthorAndContinues(t *testing.T) {
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	fake.authorVerificationHook = func(issue gh.Issue) (gh.AuthorVerification, error) {
+		if issue.Number == 1 {
+			return gh.AuthorVerification{Login: "outsider", Reason: "permission_below_write"}, nil
+		}
+		return gh.AuthorVerification{Trusted: true, Login: "owner", Permission: "admin", Reason: "repository_owner"}, nil
+	}
+	s := &scheduler{loop: loop, active: map[int]activeJob{}}
+	issues := []gh.Issue{
+		{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.ReadyLabels[0]}},
+		{Number: 2, State: "OPEN", Labels: []string{loop.Config.GitHub.ReadyLabels[0]}},
+	}
+	selected, ok, err := s.selectReady(context.Background(), issues, state.Snapshot{Issues: map[string]*state.Issue{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || selected.Number != 2 {
+		t.Fatalf("selected=%+v ok=%v", selected, ok)
+	}
+}
+
 func TestDeliveryMaintenanceFenceDrainsWithoutDispatchOrCancellation(t *testing.T) {
 	loop, base := testLoop(t, worker.Result{})
 	counter := &countingGitHub{fakeGitHub: base}
@@ -258,11 +281,9 @@ func TestSchedulerTransitionsFromStartingBeforeResumingRetainedWorker(t *testing
 		branch := "codex/issue-1-test"
 		snapshot.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: "run_retained",
-			DeclaredResources: []string{"repo:*"},
-			LeaseGeneration:   1, Lease: &state.ResourceLease{
-				Owner: state.LeaseOwner{RunID: "run_retained", Generation: 1}, Slot: 0,
-				DeclaredResources: []string{"repo:*"}, ResolvedResources: []string{"repo:*"}, ReservedAt: now,
-			},
+			Generation: 1,
+			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_retained", CreatedAt: now,
+				RunID: "run_retained", Generation: 1, Stage: issuedomain.ContinuationStageResume},
 			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
 			Attempts: 1, ExecutionProfile: "standard", UpdatedAt: now,
 		}
@@ -277,9 +298,13 @@ func TestSchedulerTransitionsFromStartingBeforeResumingRetainedWorker(t *testing
 	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
 	select {
 	case <-pool.started:
+	case err := <-done:
+		snapshot, _ := loop.Store.Load()
+		t.Fatalf("scheduler exited before retained worker resumed: err=%v snapshot=%+v", err, snapshot)
 	case <-time.After(5 * time.Second):
 		cancel()
-		t.Fatal("retained worker did not resume")
+		snapshot, _ := loop.Store.Load()
+		t.Fatalf("retained worker did not resume: snapshot=%+v", snapshot)
 	}
 	snapshot, err := loop.Store.Load()
 	if err != nil || snapshot.Supervisor.State != state.SupervisorStateRunning {
@@ -507,9 +532,13 @@ func TestStartupReconciliationObservesRateLimitWithoutExiting(t *testing.T) {
 		},
 	}
 	loop.GitHub = client
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 7, RunID: "run_7", StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusRunning, RunID: "run_7",
-			LeaseGeneration: 1, Lease: fixtureLease("run_7")}
+		item := snapshot.Issues["7"]
+		item.Status = issuedomain.StatusRunning
+		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
 	if err != nil {
@@ -1002,9 +1031,8 @@ func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *tes
 		Labels: []string{loop.Config.GitHub.ReadyLabels[0], loop.Config.GitHub.ExcludeLabels[0]},
 	}
 	loop.GitHub = github
-	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Test", RunID: "run-1", Slot: 0,
-		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	_, _, err := loop.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: 1, Title: "Test", RunID: "run-1", StartedAt: loop.now(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1034,7 +1062,7 @@ func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *tes
 		t.Fatalf("candidates=%v acknowledged=%v rest_gets=%d err=%v", candidates, acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusBlocked || snapshot.Issues["1"].Lease != nil {
+	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil {
 		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -1045,9 +1073,8 @@ func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testin
 	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
 	github.issue = gh.Issue{Number: 1, State: "open", Labels: []string{loop.Config.GitHub.RunningLabel}}
 	loop.GitHub = github
-	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Test", RunID: "run-1", Slot: 0,
-		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	_, _, err := loop.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: 1, Title: "Test", RunID: "run-1", StartedAt: loop.now(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1074,16 +1101,15 @@ func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testin
 		t.Fatalf("acknowledged=%v rest_gets=%d err=%v", acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusRunning || snapshot.Issues["1"].Lease == nil {
+	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusRunning || snapshot.ActiveExecution == nil || snapshot.ActiveExecution.IssueNumber != 1 {
 		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
 
 func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
-	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Test", RunID: "run-1", Slot: 0,
-		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	_, identity, err := loop.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: 1, Title: "Test", RunID: "run-1", StartedAt: loop.now(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1103,7 +1129,7 @@ func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 	workerState := *snapshot.Issues["1"]
 	_, err = loop.Store.Update("webhook_terminal_reconciled", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["1"]
-		if err := state.ReleaseIssueLease(item, item.Lease.Owner); err != nil {
+		if err := state.CaptureContinuation(snapshot, item.Number, identity, state.NewID("checkpoint"), loop.now()); err != nil {
 			return err
 		}
 		item.Status = issuedomain.StatusBlocked
@@ -1120,7 +1146,7 @@ func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusBlocked || snapshot.Issues["1"].Lease != nil {
+	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil {
 		t.Fatalf("late worker result changed authoritative state: issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -1198,7 +1224,7 @@ func TestSchedulerCancellationStopsAllWorkers(t *testing.T) {
 		snapshot.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: "run_cancel",
 			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
-			LeaseGeneration: 1, Lease: fixtureLease("run_cancel"),
+			Generation: 1, Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_cancel", CreatedAt: loop.now(), RunID: "run_cancel", Generation: 1, Stage: issuedomain.ContinuationStageResume},
 			Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
 		}
 		return nil
@@ -1286,7 +1312,6 @@ func TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker(t *te
 		loop: loop, events: make(chan schedulerEvent, 2),
 		active: map[int]activeJob{
 			2: {runID: "run_2", slot: 0, cancel: func() { runningCanceled = true }},
-			3: {runID: "run_3", slot: 1, cancel: func() { runningCanceled = true }},
 		},
 		issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, terminalPoll: map[int]time.Time{},
 	}
@@ -1301,7 +1326,7 @@ func TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker(t *te
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for terminal reconciliation")
 	}
-	if runningCanceled || s.active[2].runID != "run_2" || s.active[3].runID != "run_3" {
+	if runningCanceled || s.active[2].runID != "run_2" {
 		t.Fatalf("unrelated worker changed: canceled=%v active=%v", runningCanceled, s.active)
 	}
 	snapshot, err := loop.Store.Load()
@@ -1316,7 +1341,7 @@ func (w *blockingPoolWorker) Resume(ctx context.Context, cfg config.Config, issu
 
 func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
-	loop.Config.Queue.Concurrency = 2
+	loop.Config.Queue.Concurrency = 1
 	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
 	loop.Random = fixedRandom(0.5)
 	loop.Logger = log.New(io.Discard, "", 0)
@@ -1329,10 +1354,7 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 			branch := "codex/issue-1-test"
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
 				Number: number, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: runID,
-				LeaseGeneration: 1, Lease: &state.ResourceLease{
-					Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: 0,
-					DeclaredResources: []string{}, ResolvedResources: []string{resource}, ReservedAt: loop.now(),
-				},
+				Generation: 1, Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_" + resource, CreatedAt: loop.now(), RunID: runID, Generation: 1, Stage: issuedomain.ContinuationStageResume},
 				Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
 				Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
 			}
@@ -1352,13 +1374,13 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	if err != nil || !result.dispatched {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	first, second := <-pool.started, <-pool.started
-	if first == second || len(s.active) != 2 {
-		t.Fatalf("started=%d,%d active=%d", first, second, len(s.active))
+	first := <-pool.started
+	if first != 1 || len(s.active) != 1 {
+		t.Fatalf("started=%d active=%d", first, len(s.active))
 	}
 	select {
-	case third := <-pool.started:
-		t.Fatalf("worker %d exceeded concurrency before a slot was released", third)
+	case second := <-pool.started:
+		t.Fatalf("worker %d exceeded single execution before release", second)
 	default:
 	}
 
@@ -1370,20 +1392,20 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	if _, err := s.schedule(ctx, false); err != nil {
 		t.Fatal(err)
 	}
-	third := <-pool.started
-	if third != 3 {
-		t.Fatalf("next admitted Issue=%d, want 3", third)
+	second := <-pool.started
+	if second != 2 {
+		t.Fatalf("next admitted Issue=%d, want 2", second)
 	}
 	s.cancelAndDrain()
 	pool.mu.Lock()
 	maximum := pool.maximum
 	pool.mu.Unlock()
-	if maximum != 2 {
-		t.Fatalf("maximum active workers=%d, want 2", maximum)
+	if maximum != 1 {
+		t.Fatalf("maximum active workers=%d, want 1", maximum)
 	}
 }
 
-func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
+func TestFaultSchedulerSingleExecutionResultBoundary(t *testing.T) {
 	completed := func(summary string) worker.Result {
 		return worker.Result{
 			Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: summary,
@@ -1407,53 +1429,54 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 		name    string
 		results map[int]worker.Result
 		want    map[int]string
-		leases  map[int]bool
+		active  map[int]bool
 		pending int
 	}{
 		{
-			name:    "two workers complete together",
-			results: map[int]worker.Result{1: completed("one done"), 2: completed("two done")},
-			want:    map[int]string{1: "completed", 2: "completed"}, leases: map[int]bool{1: false, 2: false},
+			name:    "worker completes",
+			results: map[int]worker.Result{1: completed("one done")},
+			want:    map[int]string{1: "completed"}, active: map[int]bool{1: false},
 		},
 		{
-			name:    "two workers fail together",
-			results: map[int]worker.Result{1: retryable("one retry"), 2: retryable("two retry")},
-			want:    map[int]string{1: "retry_wait", 2: "retry_wait"}, leases: map[int]bool{1: true, 2: true},
+			name:    "worker schedules retry",
+			results: map[int]worker.Result{1: retryable("one retry")},
+			want:    map[int]string{1: "retry_wait"}, active: map[int]bool{1: false},
 		},
 		{
-			name:    "one worker needs input while the other completes",
-			results: map[int]worker.Result{1: needsInput, 2: completed("two done")},
-			want:    map[int]string{1: "needs_input", 2: "completed"}, leases: map[int]bool{1: false, 2: false}, pending: 1,
+			name:    "worker needs input",
+			results: map[int]worker.Result{1: needsInput},
+			want:    map[int]string{1: "needs_input"}, active: map[int]bool{1: false}, pending: 1,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			loop, github := testLoop(t, worker.Result{})
-			loop.Config.Queue.Concurrency = 2
+			loop.Config.Queue.Concurrency = 1
 			loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
 			loop.Random = fixedRandom(0.5)
 			loop.Logger = log.New(io.Discard, "", 0)
 			loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
 			release := make(chan struct{})
-			barrier := &barrierPoolWorker{started: make(chan int, 2), release: release, results: test.results, errors: map[int]error{}}
+			barrier := &barrierPoolWorker{started: make(chan int, 1), release: release, results: test.results, errors: map[int]error{}}
 			loop.Worker = barrier
-			for number, resource := range map[int]string{1: "one", 2: "two"} {
+			for number, resource := range map[int]string{1: "one"} {
 				runID := "run_" + resource
-				_, owner, err := loop.Store.ReserveLease(state.LeaseReservation{
-					IssueNumber: number, Title: "Test", RunID: runID, Slot: number - 1,
-					ResolvedResources: []string{resource}, ReservedAt: loop.now(),
+				_, identity, err := loop.Store.StartExecution(state.ExecutionStart{
+					IssueNumber: number, Title: "Test", RunID: runID, StartedAt: loop.now(),
 				})
 				if err != nil {
 					t.Fatal(err)
 				}
 				_, err = loop.Store.Update("resume_pending", number, runID, nil, func(snapshot *state.Snapshot) error {
 					item := snapshot.Issues[strconv.Itoa(number)]
-					item.Status = issuedomain.StatusResumePending
 					item.Worktree = loop.Config.RepoPath
 					item.Branch = "codex/issue-1-test"
 					item.Workspace = fixtureWorkspace(loop, item.Worktree, item.Branch)
 					item.ExecutionProfile = "standard"
-					item.Lease.Owner = owner
+					if err := state.CaptureContinuation(snapshot, item.Number, identity, state.NewID("checkpoint"), loop.now()); err != nil {
+						return err
+					}
+					item.Status = issuedomain.StatusResumePending
 					return nil
 				})
 				if err != nil {
@@ -1470,19 +1493,19 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
 			started := map[int]bool{}
-			for range 2 {
+			for range 1 {
 				select {
 				case number := <-barrier.started:
 					started[number] = true
 				case <-time.After(5 * time.Second):
-					t.Fatal("timed out waiting for both workers to reach the barrier")
+					t.Fatal("timed out waiting for worker to reach the barrier")
 				}
 			}
-			if len(started) != 2 || len(s.active) != 2 {
+			if len(started) != 1 || len(s.active) != 1 {
 				t.Fatalf("started=%v active=%v", started, s.active)
 			}
 			close(release)
-			for range 2 {
+			for range 1 {
 				select {
 				case event := <-s.events:
 					if err := s.handleEvent(event); err != nil {
@@ -1501,8 +1524,8 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 			}
 			for number, want := range test.want {
 				item := snapshot.Issues[strconv.Itoa(number)]
-				if item.Status.String() != want || (item.Lease != nil) != test.leases[number] {
-					t.Fatalf("Issue #%d=%+v want_status=%s want_lease=%v", number, item, want, test.leases[number])
+				if item.Status.String() != want || (snapshot.ActiveExecution != nil && snapshot.ActiveExecution.IssueNumber == number) != test.active[number] {
+					t.Fatalf("Issue #%d=%+v want_status=%s want_active=%v", number, item, want, test.active[number])
 				}
 			}
 			if len(snapshot.PendingRequests) != test.pending {
@@ -1512,17 +1535,15 @@ func TestFaultSchedulerConcurrentResultBarrier(t *testing.T) {
 	}
 }
 
-func TestSchedulerIssueFailureDoesNotCancelOtherWorker(t *testing.T) {
+func TestSchedulerIssueFailureReleasesExecutionForNextIssue(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
 	loop.Random = fixedRandom(0.5)
 	loop.Logger = log.New(io.Discard, "", 0)
 	_, cancelOne := context.WithCancel(context.Background())
-	_, cancelTwo := context.WithCancel(context.Background())
 	s := &scheduler{
 		loop: loop, active: map[int]activeJob{
 			1: {runID: "run_1", slot: 0, cancel: cancelOne},
-			2: {runID: "run_2", slot: 1, cancel: cancelTwo},
 		},
 		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
 	}
@@ -1533,8 +1554,8 @@ func TestSchedulerIssueFailureDoesNotCancelOtherWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, active := s.active[2]; !active || len(s.active) != 1 {
-		t.Fatalf("unrelated active worker was removed: %+v", s.active)
+	if len(s.active) != 0 {
+		t.Fatalf("finished execution remained active: %+v", s.active)
 	}
 	if !s.issueRetry[1].After(loop.now()) {
 		t.Fatalf("Issue-specific retry was not scheduled: %v", s.issueRetry)
@@ -1543,9 +1564,8 @@ func TestSchedulerIssueFailureDoesNotCancelOtherWorker(t *testing.T) {
 
 func TestWorkerProcessCallbackFencesRunAndPersistsProcessGroup(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
-	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, RunID: "run_current", Slot: 0,
-		ResolvedResources: []string{state.RepositoryResource}, ReservedAt: loop.now(),
+	_, _, err := loop.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: 1, RunID: "run_current", StartedAt: loop.now(),
 	})
 	if err != nil {
 		t.Fatal(err)

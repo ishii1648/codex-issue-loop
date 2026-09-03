@@ -31,6 +31,10 @@ type restIssue struct {
 	Milestone *struct {
 		Title string `json:"title"`
 	} `json:"milestone"`
+	User struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"user"`
 }
 
 func (c CLI) GetREST(ctx context.Context, cfg config.Config, number int) (Issue, error) {
@@ -57,7 +61,7 @@ func normalizeRESTIssue(item restIssue) Issue {
 	return NormalizeIssue(Issue{
 		Number: item.Number, Title: item.Title, Body: item.Body, URL: item.HTMLURL,
 		CreatedAt: item.CreatedAt, State: item.State, Labels: labels,
-		Assignees: assignees, Milestone: milestone,
+		Assignees: assignees, Milestone: milestone, AuthorLogin: item.User.Login, AuthorType: item.User.Type,
 	})
 }
 

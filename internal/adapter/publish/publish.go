@@ -16,7 +16,6 @@ import (
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/admission"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
@@ -271,13 +270,10 @@ func boundedDetail(value string) string {
 	return value
 }
 
-func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue, worktreePath, branch, savedPRURL, summary, baseSHA string, resources publication.ResourceScope) (worker.GitResult, publication.Audit, error) {
+func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue, worktreePath, branch, savedPRURL, summary, baseSHA string) (worker.GitResult, publication.Audit, error) {
 	audit := publication.Audit{
-		BaseSHA: baseSHA, DeclaredResources: append([]string(nil), resources.Declared...),
+		BaseSHA:   baseSHA,
 		Formatter: publication.FormatterAudit{Name: "gofmt", Enabled: cfg.Formatters.Go.Enabled, Result: "disabled"},
-	}
-	if len(resources.Effective) == 0 {
-		return worker.GitResult{}, audit, fmt.Errorf("publish requires at least one effective resource")
 	}
 	if worktreePath == "" || branch == "" {
 		return worker.GitResult{}, audit, fmt.Errorf("publish requires a worktree and branch")
@@ -304,15 +300,6 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 		return worker.GitResult{}, audit, err
 	}
 	audit.ChangedPaths = paths
-	actual, err := admission.ResourcesForPaths(cfg.AdmissionSettings(), paths)
-	if err != nil {
-		return worker.GitResult{}, audit, fmt.Errorf("map changed paths to resources: %w", err)
-	}
-	audit.ActualResources = actual
-	if !admission.Covers(resources.Effective, actual) {
-		audit.Reason = publication.ReasonResourceClaimMismatch
-		return worker.GitResult{}, audit, publication.ClaimMismatchError{Declared: resources.Declared, Effective: resources.Effective, Actual: actual}
-	}
 	if savedPRURL == "" && cfg.Completion.CreateDraftPR {
 		effectiveBase, pr, validateErr := m.validateExistingPullRequest(ctx, cfg, git, worktreePath, branch, "", baseSHA)
 		if validateErr != nil {
@@ -327,15 +314,6 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 				return worker.GitResult{}, audit, err
 			}
 			audit.ChangedPaths = paths
-			actual, err = admission.ResourcesForPaths(cfg.AdmissionSettings(), paths)
-			if err != nil {
-				return worker.GitResult{}, audit, fmt.Errorf("map authoritative Pull Request paths to resources: %w", err)
-			}
-			audit.ActualResources = actual
-			if !admission.Covers(resources.Effective, actual) {
-				audit.Reason = publication.ReasonResourceClaimMismatch
-				return worker.GitResult{}, audit, publication.ClaimMismatchError{Declared: resources.Declared, Effective: resources.Effective, Actual: actual}
-			}
 		}
 	}
 	if cfg.Formatters.Go.Enabled {

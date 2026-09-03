@@ -42,12 +42,8 @@ snapshot_production() {
       repo_id: $status[0].state.repo_id,
       state_revision: $status[0].state.state_revision,
       issue_count: ($status[0].state.issues | length),
-      leases: [
-        $status[0].state.issues | to_entries[] |
-        select(.value.execution_lease != null) |
-        {issue_number:(.key | tonumber), owner:.value.execution_lease.owner, slot:.value.execution_lease.slot,
-         resources:.value.execution_lease.resolved_resources, base_sha:.value.execution_lease.base_sha}
-      ] | sort_by(.issue_number),
+      active_execution: ($status[0].state.active_execution //
+        (if $status[0].worker_pool.active == 1 then $status[0].worker_pool.issues[0] else null end)),
       pending_request_count: ($status[0].pending_requests | length),
       active_workers: $status[0].worker_pool.active,
       worker_limit: $status[0].worker_pool.limit,
@@ -56,7 +52,8 @@ snapshot_production() {
       doctor_ok: $doctor[0].ok,
       failed_diagnostic_codes: [$doctor[0].diagnostics[] | select(.ok | not) | .code] | sort
     }
-    | .doctor_safe = (.doctor_ok or (.supervisor_state == "stopped" and .active_workers == 0 and .failed_diagnostic_codes == ["SUPERVISOR_STOPPED"]))
+    | .doctor_safe = (.doctor_ok or (.supervisor_state == "stopped" and .active_workers == 0 and
+        .active_execution == null and .failed_diagnostic_codes == ["SUPERVISOR_STOPPED"]))
   ' >"$destination"
   jq -e '.doctor_schema_version == 1 and .doctor_safe == true and .worker_limit == 1 and .active_workers <= 1' "$destination" >/dev/null
 }
@@ -76,7 +73,7 @@ jq -e '
   .mode == "credentialless-offline" and
   .credentials.canary_github_token == false and .credentials.openai_api_key == false and
   .external_network == false and
-  .final.active_workers == 0 and .final.active_leases == 0 and .final.pending_requests == 0 and
+  .final.active_workers == 0 and .final.active_executions == 0 and .final.pending_requests == 0 and
   .final.orphan_pid_pgid == 0 and .final.duplicate_prs == 0 and .final.duplicate_comment_markers == 0 and
   (.sequences | length) == 2 and .supervisor_starts >= 2 and
   .webhook_fixture_replay == 1 and .transaction_crash_recovery == 1
@@ -117,7 +114,7 @@ jq -n \
       external_network:$offline_contract[0].external_network,
       lifecycle_sequences_complete:(($offline_contract[0].sequences | length) == 2),
       final_resources_clean:($offline_contract[0].final.active_workers == 0 and
-        $offline_contract[0].final.active_leases == 0 and
+        $offline_contract[0].final.active_executions == 0 and
         $offline_contract[0].final.pending_requests == 0 and
         $offline_contract[0].final.orphan_pid_pgid == 0 and
         $offline_contract[0].final.duplicate_prs == 0 and

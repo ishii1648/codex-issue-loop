@@ -12,6 +12,7 @@ import (
 	"regexp"
 
 	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/schema"
@@ -55,6 +56,7 @@ func generateManifest(artifact, version, commit, output string) error {
 		Target: "darwin/arm64", Artifact: filepath.Base(artifact), ArtifactSHA256: hex.EncodeToString(sum[:]),
 		StateSchemaCurrent: schema.Current, StateSchemaMigrationFrom: schema.Previous,
 		SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,
+		IssueLifecycleAPICurrent: issuedomain.LifecycleAPICurrent, IssueLifecycleAPIMinimum: issuedomain.LifecycleAPIMinimum,
 	}
 	if manifest.Artifact != delivery.BinaryAsset {
 		return fmt.Errorf("artifact must be named %s", delivery.BinaryAsset)

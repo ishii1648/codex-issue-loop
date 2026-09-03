@@ -131,22 +131,16 @@ func TestRestartCompletesRequestedMergedPullRequestResolution(t *testing.T) {
 	}}
 	_, err := loop.Store.Update("merged_pull_request_adopted", 1, "run_adoption_1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, Status: issuedomain.StatusCompleted, RunID: "run_adoption_1", LeaseGeneration: 1, Branch: "codex/issue-1-manual",
+			Number: 1, Status: issuedomain.StatusCompleted, RunID: "run_adoption_1", Generation: 1, Branch: "codex/issue-1-manual",
 			Worktree: "/tmp/issue-1-manual", Workspace: fixtureWorkspace(loop, "/tmp/issue-1-manual", "codex/issue-1-manual"),
 			PullRequestURL: "https://example.test/pr/17", PullRequestNumber: 17, HeadSHA: "head-17",
-			PullRequestMerged: true, GitHubSync: issuedomain.GitHubSyncDone,
-			ResourcePark: &state.ContinuationCheckpoint{
-				ID: "checkpoint_adoption_restart", Status: issuedomain.ResourceParkStatusParked, RunID: "run_adoption_1",
-				OriginalLease: state.ExecutionLease{Owner: state.LeaseOwner{RunID: "run_adoption_1", Generation: 1}, Slot: 0,
-					DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now},
-				ParkedAt: now, Stage: issuedomain.ContinuationStageResume,
-			},
+			PullRequestMerged: true,
 			Suspension: &state.Suspension{ID: "suspension_adoption_restart", Origin: "operator", Status: issuedomain.SuspensionResolved,
 				ReasonCode: "external_merge", Recoverability: issuedomain.RecoverabilityOperator, Reason: "external merge",
-				AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionAdoptPR}, CheckpointID: "checkpoint_adoption_restart",
-				SuspendedAt: now, ResolvedAt: now, Resolution: issuedomain.ResolutionAdoptPR},
+				AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionAdoptPR},
+				SuspendedAt:    now, ResolvedAt: now, Resolution: issuedomain.ResolutionAdoptPR},
 		}
-		return nil
+		return state.SetEffect(snapshot, 1, "run_adoption_1", issuedomain.EffectMarkDone, now)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +157,7 @@ func TestRestartCompletesRequestedMergedPullRequestResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	issue := snapshot.Issues["1"]
-	if github.doneCalls != 1 || github.inspectCalls != 1 || issue.GitHubSync != issuedomain.GitHubSyncNone || issue.ResourcePark != nil || issue.Suspension != nil {
+	if github.doneCalls != 1 || github.inspectCalls != 0 || state.PendingEffect(&snapshot, 1) != nil || issue.Continuation != nil || issue.Suspension != nil {
 		t.Fatalf("github=%+v issue=%+v", github, issue)
 	}
 }
@@ -184,6 +178,9 @@ type fakeGitHub struct {
 	failedErr                 error
 	listErr                   error
 	inspectHook               func()
+	authorVerification        *gh.AuthorVerification
+	authorVerificationErr     error
+	authorVerificationHook    func(gh.Issue) (gh.AuthorVerification, error)
 }
 
 func openTestIssue(issue gh.Issue) gh.Issue {
@@ -201,6 +198,18 @@ func (f *fakeGitHub) ListReady(context.Context, config.Config) ([]gh.Issue, erro
 }
 func (f *fakeGitHub) Get(context.Context, config.Config, int) (gh.Issue, error) {
 	return openTestIssue(f.issue), nil
+}
+func (f *fakeGitHub) VerifyIssueAuthor(_ context.Context, _ config.Config, issue gh.Issue) (gh.AuthorVerification, error) {
+	if f.authorVerificationHook != nil {
+		return f.authorVerificationHook(issue)
+	}
+	if f.authorVerificationErr != nil {
+		return gh.AuthorVerification{}, f.authorVerificationErr
+	}
+	if f.authorVerification != nil {
+		return *f.authorVerification, nil
+	}
+	return gh.AuthorVerification{Trusted: true, Login: "owner", Permission: "admin", Reason: "test_fixture"}, nil
 }
 func (f *fakeGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
 	f.inspectCalls++
@@ -299,13 +308,6 @@ type fakeWorker struct {
 	err    error
 }
 
-func fixtureLease(runID string) *state.ResourceLease {
-	return &state.ResourceLease{
-		Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: 0,
-		DeclaredResources: []string{}, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: time.Now().UTC(),
-	}
-}
-
 func fixtureWorkspace(loop *Loop, path, branch string) *state.WorkerWorkspace {
 	return &state.WorkerWorkspace{
 		Path: path, Branch: branch, RepoID: loop.Store.RepoID,
@@ -316,11 +318,10 @@ func fixtureWorkspace(loop *Loop, path, branch string) *state.WorkerWorkspace {
 }
 
 type fakePublisher struct {
-	called    bool
-	resources publication.ResourceScope
-	result    worker.GitResult
-	audit     publication.Audit
-	err       error
+	called bool
+	result worker.GitResult
+	audit  publication.Audit
+	err    error
 }
 
 type fakeConflictResolver struct {
@@ -342,18 +343,11 @@ func (f *fakeConflictResolver) Publish(context.Context, config.Config, gh.Issue,
 	return f.published, f.publishErr
 }
 
-func (f *fakePublisher) Publish(_ context.Context, _ config.Config, _ gh.Issue, _, _, _, _, baseSHA string, resources publication.ResourceScope) (worker.GitResult, publication.Audit, error) {
+func (f *fakePublisher) Publish(_ context.Context, _ config.Config, _ gh.Issue, _, _, _, _, baseSHA string) (worker.GitResult, publication.Audit, error) {
 	f.called = true
-	f.resources = resources
 	audit := f.audit
 	if audit.BaseSHA == "" {
 		audit.BaseSHA = baseSHA
-	}
-	if audit.DeclaredResources == nil {
-		audit.DeclaredResources = resources.Declared
-	}
-	if audit.ActualResources == nil {
-		audit.ActualResources = resources.Effective
 	}
 	return f.result, audit, f.err
 }
@@ -437,14 +431,14 @@ func testLoop(t *testing.T, result worker.Result) (*Loop, *fakeGitHub) {
 	return &Loop{Config: cfg, Store: store, GitHub: github, Worktrees: fakeWorktree{path: repo}, Worker: fakeWorker{result: result}}, github
 }
 
-func TestClosedIssueIsRejectedBeforeLeaseAndGitHubMutation(t *testing.T) {
+func TestClosedIssueIsRejectedBeforeExecutionAndGitHubMutation(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.issue.State = "CLOSED"
 	before, err := loop.Store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := loop.startIssueAtSlotWithResources(context.Background(), github.issue, "run_closed", 0); err != nil {
+	if err := loop.startIssue(context.Background(), github.issue, "run_closed"); err != nil {
 		t.Fatal(err)
 	}
 	after, err := loop.Store.Load()
@@ -470,7 +464,7 @@ func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	}
 	snapshot, _ := loop.Store.Load()
 	issue := snapshot.Issues["1"]
-	if issue.Status != issuedomain.StatusAwaitingChecks || issue.PullRequestURL == "" || issue.SessionID == "" || issue.Lease == nil {
+	if issue.Status != issuedomain.StatusAwaitingChecks || issue.PullRequestURL == "" || issue.SessionID == "" || snapshot.ActiveExecution != nil || issue.Continuation == nil {
 		t.Fatalf("unexpected Issue: %+v", issue)
 	}
 	if scripted.runs != 1 || scripted.resumes != 0 {
@@ -478,7 +472,7 @@ func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	}
 }
 
-func TestWorkerEnvironmentBlockParksLeaseAndPreservesContinuationState(t *testing.T) {
+func TestWorkerEnvironmentBlockReleasesExecutionAndPreservesContinuation(t *testing.T) {
 	result := worker.Result{
 		Version: 1, Status: "blocked", ExecutionProfile: "extended",
 		Summary: "local HTTP binding is unavailable", SessionID: "session-blocked",
@@ -492,19 +486,19 @@ func TestWorkerEnvironmentBlockParksLeaseAndPreservesContinuationState(t *testin
 		t.Fatal(err)
 	}
 	issue := snapshot.Issues["1"]
-	if issue.Status != issuedomain.StatusBlocked || issue.SessionID != "session-blocked" || issue.Session == nil || issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.Status != issuedomain.ResourceParkStatusParked {
+	if issue.Status != issuedomain.StatusBlocked || issue.SessionID != "session-blocked" || issue.Session == nil || snapshot.ActiveExecution != nil || issue.Continuation == nil {
 		t.Fatalf("continuation state was not preserved: %+v", issue)
 	}
 	if issue.Suspension == nil || issue.Suspension.ReasonCode != "environment" || issue.Suspension.Reason != result.Summary ||
 		!reflect.DeepEqual(issue.Suspension.AllowedActions, []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionResume}) {
 		t.Fatalf("generic suspension=%+v", issue.Suspension)
 	}
-	if len(issue.DeclaredResources) == 0 || len(issue.ResourcePark.OriginalLease.ResolvedResources) == 0 || issue.ResourcePark.OriginalLease.Owner.Generation != issue.LeaseGeneration || issue.ResourcePark.WorktreeSHA256 == "" {
-		t.Fatalf("resource metadata was not preserved: %+v", issue.ResourcePark)
+	if issue.Continuation.Generation != issue.Generation || issue.Continuation.WorktreeSHA256 == "" {
+		t.Fatalf("continuation evidence was not preserved: %+v", issue.Continuation)
 	}
 }
 
-func TestWorkerEnvironmentBlockParkAllowsFollowingRepositoryIssue(t *testing.T) {
+func TestWorkerEnvironmentBlockAllowsFollowingRepositoryIssue(t *testing.T) {
 	blocked := worker.Result{
 		Version: 1, Status: "blocked", ExecutionProfile: "extended",
 		Summary: "public network is unavailable", SessionID: "session-314",
@@ -519,8 +513,8 @@ func TestWorkerEnvironmentBlockParkAllowsFollowingRepositoryIssue(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue := first.Issues["314"]; issue == nil || issue.Status != issuedomain.StatusBlocked || issue.Lease != nil || issue.ResourcePark == nil || issue.SessionID != "session-314" {
-		t.Fatalf("Issue #314 was not safely parked: %+v", issue)
+	if issue := first.Issues["314"]; issue == nil || issue.Status != issuedomain.StatusBlocked || first.ActiveExecution != nil || issue.Continuation == nil || issue.SessionID != "session-314" {
+		t.Fatalf("Issue #314 was not safely suspended: %+v", issue)
 	}
 
 	github.issue = gh.Issue{Number: 448, Title: "Local follow-up", Body: "Continue queue", Labels: []string{"codex-loop:ready"}}
@@ -535,15 +529,15 @@ func TestWorkerEnvironmentBlockParkAllowsFollowingRepositoryIssue(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue := second.Issues["448"]; issue == nil || issue.Status != issuedomain.StatusAwaitingChecks || issue.Lease == nil || issue.Lease.Owner.RunID == "" {
+	if issue := second.Issues["448"]; issue == nil || issue.Status != issuedomain.StatusAwaitingChecks || issue.Continuation == nil {
 		t.Fatalf("following Issue was not admitted: %+v", issue)
 	}
-	if issue := second.Issues["314"]; issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.Status != issuedomain.ResourceParkStatusParked || issue.SessionID != "session-314" {
+	if issue := second.Issues["314"]; issue.Continuation == nil || issue.SessionID != "session-314" {
 		t.Fatalf("following Issue changed parked continuation: %+v", issue)
 	}
 }
 
-func TestFaultWorkerEnvironmentParkSurvivesGitHubSyncCrashIdempotently(t *testing.T) {
+func TestFaultWorkerEnvironmentSuspensionSurvivesGitHubSyncCrashIdempotently(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{
 		Version: 1, Status: "blocked", ExecutionProfile: "extended",
 		Summary: "network unavailable", SessionID: "session-blocked",
@@ -557,12 +551,12 @@ func TestFaultWorkerEnvironmentParkSurvivesGitHubSyncCrashIdempotently(t *testin
 		t.Fatal(err)
 	}
 	issue := parked.Issues["1"]
-	if issue.Status != issuedomain.StatusBlocked || issue.GitHubSync != issuedomain.GitHubSyncBlocked || issue.Lease != nil || issue.ResourcePark == nil {
-		t.Fatalf("write-ahead park was not retained: %+v", issue)
+	effect := state.PendingEffect(&parked, 1)
+	if issue.Status != issuedomain.StatusBlocked || effect == nil || effect.Kind != issuedomain.EffectMarkBlocked || parked.ActiveExecution != nil || issue.Continuation == nil {
+		t.Fatalf("write-ahead suspension was not retained: %+v", issue)
 	}
-	parkID := issue.ResourcePark.ID
-	parkOwner := issue.ResourcePark.OriginalLease.Owner
-	generation := issue.LeaseGeneration
+	checkpointID := issue.Continuation.ID
+	generation := issue.Generation
 	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
 		t.Fatalf("GitHub retry worked=%v err=%v", worked, err)
 	}
@@ -571,8 +565,8 @@ func TestFaultWorkerEnvironmentParkSurvivesGitHubSyncCrashIdempotently(t *testin
 		t.Fatal(err)
 	}
 	issue = converged.Issues["1"]
-	if issue.GitHubSync != issuedomain.GitHubSyncNone || issue.Lease != nil || issue.ResourcePark == nil || issue.ResourcePark.ID != parkID || issue.ResourcePark.OriginalLease.Owner != parkOwner || issue.LeaseGeneration != generation || github.failedCalls != 2 {
-		t.Fatalf("park retry duplicated or changed state: github=%+v issue=%+v", github, issue)
+	if state.PendingEffect(&converged, 1) != nil || converged.ActiveExecution != nil || issue.Continuation == nil || issue.Continuation.ID != checkpointID || issue.Generation != generation || github.failedCalls != 2 {
+		t.Fatalf("suspension retry duplicated or changed state: github=%+v issue=%+v", github, issue)
 	}
 }
 
@@ -580,9 +574,8 @@ func TestGenericResumeContinuesSameSessionAndWorktree(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "verification pending", Retry: &worker.Retry{Reason: "verification pending"}}
 	loop, _ := testLoop(t, result)
 	worktreePath := loop.Config.RepoPath
-	_, originalOwner, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Test", RunID: "run_environment", Slot: 0,
-		DeclaredResources: []string{"repo:*"}, ResolvedResources: []string{"repo:*"}, ReservedAt: time.Now().UTC(),
+	_, originalIdentity, err := loop.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: 1, Title: "Test", RunID: "run_environment", StartedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -596,6 +589,9 @@ func TestGenericResumeContinuesSameSessionAndWorktree(t *testing.T) {
 		item.ExecutionProfile = "extended"
 		item.SessionID = "session-blocked"
 		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-blocked"}
+		if err := state.CaptureContinuation(s, item.Number, originalIdentity, state.NewID("checkpoint"), time.Now().UTC()); err != nil {
+			return err
+		}
 		decision, decisionErr := issuedomain.Fail(item.Status, "CDP unavailable", "issue", true)
 		if decisionErr != nil {
 			return decisionErr
@@ -608,13 +604,13 @@ func TestGenericResumeContinuesSameSessionAndWorktree(t *testing.T) {
 	}
 	_, err = loop.Store.Update("issue_suspension_resolved", 1, "run_environment", nil, func(s *state.Snapshot) error {
 		item := s.Issues["1"]
-		if item.ResourcePark == nil || item.Suspension == nil {
+		if item.Continuation == nil || item.Suspension == nil {
 			return fmt.Errorf("terminal boundary was not captured")
 		}
-		if _, resumeErr := state.ResumeParkedLease(s, 1, item.ResourcePark.ID, 0, time.Now().UTC()); resumeErr != nil {
+		if _, resumeErr := state.ResumeContinuation(s, 1, item.Continuation.ID, time.Now().UTC()); resumeErr != nil {
 			return resumeErr
 		}
-		transition, transitionErr := issuedomain.ResolveSuspension(item.Status, issuedomain.ResolutionResume, item.ResourcePark.Stage)
+		transition, transitionErr := issuedomain.ResolveSuspension(item.Status, issuedomain.ResolutionResume, item.Continuation.Stage)
 		if transitionErr != nil {
 			return transitionErr
 		}
@@ -641,7 +637,7 @@ func TestGenericResumeContinuesSameSessionAndWorktree(t *testing.T) {
 		t.Fatalf("resume prompt=%q", recorder.resumePrompts[0])
 	}
 	snapshot, _ := loop.Store.Load()
-	if item := snapshot.Issues["1"]; item.RunID != originalOwner.RunID || item.Worktree != worktreePath || item.SessionID != "session-blocked" || item.Lease == nil {
+	if item := snapshot.Issues["1"]; item.RunID != originalIdentity.RunID || item.Worktree != worktreePath || item.SessionID != "session-blocked" || snapshot.ActiveExecution != nil || item.Continuation == nil {
 		t.Fatalf("resume replaced durable state: %+v", item)
 	}
 }
@@ -660,39 +656,48 @@ func TestResolvedCheckpointRetriesAcrossRestartAndClearsAtCompletion(t *testing.
 	loop.Config.Queue.MaxAttempts = 3
 	loop.Config.Worker.Profiles["extended"] = config.Profile{MaxContinuations: 1}
 	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
-	_, originalOwner, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Test", RunID: "run_environment", Slot: 0,
-		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
-		BaseSHA: "base-environment", ReservedAt: now,
+	_, originalIdentity, err := loop.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: 1, Title: "Test", RunID: "run_environment",
+		BaseSHA: "base-environment", StartedAt: now,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loop.Store.Update("worker_environment_blocked", 1, originalOwner.RunID, nil, func(snapshot *state.Snapshot) error {
+	if _, err := loop.Store.Update("worker_environment_blocked", 1, originalIdentity.RunID, nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["1"]
-		item.Status = issuedomain.StatusBlocked
+		item.Status = issuedomain.StatusRunning
 		item.Worktree = loop.Config.RepoPath
 		item.Branch = "codex/issue-1-test"
 		item.Workspace = fixtureWorkspace(loop, item.Worktree, item.Branch)
 		item.ExecutionProfile = "extended"
 		item.SessionID = "session-blocked"
 		item.Session = &state.WorkerSession{Backend: "codex", ID: "session-blocked"}
-		if parkErr := state.CaptureContinuationLease(item, originalOwner, "park_environment", now.Add(time.Minute)); parkErr != nil {
-			return parkErr
+		if checkpointErr := state.CaptureContinuation(snapshot, item.Number, originalIdentity, "checkpoint_environment", now.Add(time.Minute)); checkpointErr != nil {
+			return checkpointErr
 		}
+		item.Status = issuedomain.StatusBlocked
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var resumeOwner state.LeaseOwner
-	if _, err := loop.Store.Update("continuation_resume_requested", 1, originalOwner.RunID, nil, func(snapshot *state.Snapshot) error {
+	var resumeIdentity state.ExecutionIdentity
+	if _, err := loop.Store.Update("continuation_resume_requested", 1, originalIdentity.RunID, nil, func(snapshot *state.Snapshot) error {
 		var resumeErr error
-		resumeOwner, resumeErr = state.ResumeParkedLease(snapshot, 1, "park_environment", 0, now.Add(2*time.Minute))
+		resumeIdentity, resumeErr = state.ResumeContinuation(snapshot, 1, "checkpoint_environment", now.Add(2*time.Minute))
 		if resumeErr != nil {
 			return resumeErr
 		}
 		item := snapshot.Issues["1"]
-		item.Status = issuedomain.StatusResumePending
+		transition, transitionErr := issuedomain.ResolveSuspension(item.Status, issuedomain.ResolutionResume, item.Continuation.Stage)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if err := state.ApplyIssueTransition(item, transition); err != nil {
+			return err
+		}
+		item.Suspension.Status = issuedomain.SuspensionResolved
+		item.Suspension.Resolution = issuedomain.ResolutionResume
+		item.Suspension.ResolvedAt = now.Add(2 * time.Minute)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -703,7 +708,7 @@ func TestResolvedCheckpointRetriesAcrossRestartAndClearsAtCompletion(t *testing.
 	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
 		t.Fatalf("environment resume worked=%v err=%v", worked, err)
 	}
-	if _, err := loop.Store.Update("fault_retry_due", 1, originalOwner.RunID, nil, func(snapshot *state.Snapshot) error {
+	if _, err := loop.Store.Update("fault_retry_due", 1, originalIdentity.RunID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].RetryAfter = nil
 		return nil
 	}); err != nil {
@@ -717,16 +722,15 @@ func TestResolvedCheckpointRetriesAcrossRestartAndClearsAtCompletion(t *testing.
 		t.Fatal(err)
 	}
 	before := beforeRestart.Issues["1"]
-	if before.Status != issuedomain.StatusRetryWait || before.RunID != originalOwner.RunID || before.SessionID != "session-blocked" ||
-		before.Lease == nil || before.Lease.Owner != resumeOwner || before.Lease.BaseSHA != "base-environment" ||
-		before.ResourcePark == nil || before.ResourcePark.Status != issuedomain.ResourceParkStatusResumed || before.ResourcePark.ResumeOwner == nil || *before.ResourcePark.ResumeOwner != resumeOwner {
-		t.Fatalf("resumed continuation provenance before restart=%+v checkpoint=%+v", before, before.ResourcePark)
+	if before.Status != issuedomain.StatusRetryWait || before.RunID != originalIdentity.RunID || before.SessionID != "session-blocked" ||
+		beforeRestart.ActiveExecution != nil || before.Continuation == nil || before.Continuation.BaseSHA != "base-environment" || before.Generation <= resumeIdentity.Generation {
+		t.Fatalf("resumed continuation provenance before restart=%+v checkpoint=%+v", before, before.Continuation)
 	}
 	if len(scripted.states) != 2 || scripted.states[1].Worktree != loop.Config.RepoPath || scripted.states[1].SessionID != "session-blocked" ||
-		scripted.states[1].Lease == nil || scripted.states[1].Lease.Owner != resumeOwner || scripted.states[1].Lease.BaseSHA != "base-environment" {
+		scripted.states[1].Generation == 0 || scripted.states[1].Continuation == nil {
 		t.Fatalf("same-session retry did not preserve continuation boundary: %+v", scripted.states)
 	}
-	if _, err := loop.Store.Update("fault_retry_due", 1, originalOwner.RunID, nil, func(snapshot *state.Snapshot) error {
+	if _, err := loop.Store.Update("fault_retry_due", 1, originalIdentity.RunID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].RetryAfter = nil
 		return nil
 	}); err != nil {
@@ -753,15 +757,13 @@ func TestResolvedCheckpointRetriesAcrossRestartAndClearsAtCompletion(t *testing.
 		t.Fatal(err)
 	}
 	item := finished.Issues["1"]
-	if scripted.runs != 1 || scripted.resumes != 2 || item.Status != issuedomain.StatusCompleted || item.Lease != nil ||
-		item.RunID == originalOwner.RunID || item.LeaseGeneration != resumeOwner.Generation+1 || item.Worktree != loop.Config.RepoPath ||
-		item.ResourcePark != nil || item.Suspension != nil {
+	if scripted.runs != 1 || scripted.resumes != 2 || item.Status != issuedomain.StatusCompleted || finished.ActiveExecution != nil ||
+		item.RunID == originalIdentity.RunID || item.Generation <= resumeIdentity.Generation || item.Worktree != loop.Config.RepoPath ||
+		item.Continuation != nil || item.Suspension != nil {
 		t.Fatalf("retry after restart did not converge: runs=%d resumes=%d issue=%+v", scripted.runs, scripted.resumes, item)
 	}
-	if len(scripted.states) != 3 || scripted.states[2].Lease == nil || scripted.states[2].Lease.Owner.RunID != item.RunID ||
-		scripted.states[2].Lease.Owner.Generation != resumeOwner.Generation+1 || scripted.states[2].Lease.BaseSHA != "base-environment" ||
-		scripted.states[2].ResourcePark == nil || scripted.states[2].ResourcePark.ResumeOwner == nil || *scripted.states[2].ResourcePark.ResumeOwner != resumeOwner {
-		t.Fatalf("fresh retry lost active lease or park provenance: %+v", scripted.states)
+	if len(scripted.states) != 3 || scripted.states[2].Generation == 0 || scripted.states[2].Continuation == nil || scripted.states[2].Continuation.BaseSHA != "base-environment" {
+		t.Fatalf("fresh retry lost continuation provenance: %+v", scripted.states)
 	}
 }
 
@@ -903,7 +905,7 @@ func TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges(t *testing.T
 	if scripted.runs != 1 || scripted.resumes != 0 {
 		t.Fatalf("backend was invoked after rejection: runs=%d resumes=%d", scripted.runs, scripted.resumes)
 	}
-	if item.Status != issuedomain.StatusBlocked || item.Lease != nil || item.ResourcePark == nil || item.Suspension == nil || item.SessionID != "session-provenance" || item.Workspace == nil {
+	if item.Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil || item.Continuation == nil || item.Suspension == nil || item.SessionID != "session-provenance" || item.Workspace == nil {
 		t.Fatalf("rejected continuation state=%+v", item)
 	}
 	if item.Suspension.ReasonCode != "worker_workspace" || item.Suspension.Recoverability != issuedomain.RecoverabilityNone ||
@@ -921,7 +923,7 @@ func TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges(t *testing.T
 		t.Fatal(err)
 	}
 	item = afterRestart.Issues["1"]
-	if item.Lease != nil || item.ResourcePark == nil || item.Suspension == nil || item.SessionID != "session-provenance" || item.Workspace == nil {
+	if afterRestart.ActiveExecution != nil || item.Continuation == nil || item.Suspension == nil || item.SessionID != "session-provenance" || item.Workspace == nil {
 		t.Fatalf("restart discarded rejected continuation boundary: %+v", item)
 	}
 	events, err := os.ReadFile(loop.Store.EventsPath())
@@ -933,7 +935,6 @@ func TestContinuationFailsClosedWhenSavedWorkspaceProvenanceChanges(t *testing.T
 func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done"}
 	loop, github := testLoop(t, result)
-	loop.Config.Resources.Definitions = []config.ResourceDefinition{{Name: "docs", Paths: []string{"docs/**"}}}
 	publisher := &fakePublisher{result: worker.GitResult{
 		Branch: "codex/issue-1-test", Commit: "abc", PullRequestURL: "https://example.test/pr/1",
 	}}
@@ -944,9 +945,6 @@ func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
 	if !publisher.called || github.done {
 		t.Fatalf("publisher called=%v github done=%v", publisher.called, github.done)
 	}
-	if len(publisher.resources.Declared) != 0 || !reflect.DeepEqual(publisher.resources.Effective, []string{state.RepositoryResource}) {
-		t.Fatalf("publication did not retain the admission fallback: %+v", publisher.resources)
-	}
 	snapshot, err := loop.Store.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -956,21 +954,13 @@ func TestCompletedWorkerIsPublishedOutsideSandbox(t *testing.T) {
 	}
 }
 
-func TestResourceClaimMismatchPersistsAuditAndRefusesPublicationIntoNeedsInput(t *testing.T) {
+func TestPublisherFailurePersistsAuditAndSchedulesGenericRetry(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done"}
 	loop, github := testLoop(t, result)
-	loop.Config.Resources.Definitions = []config.ResourceDefinition{
-		{Name: "git", Paths: []string{"internal/git/**"}},
-		{Name: "docs", Paths: []string{"docs/**"}},
-	}
-	github.issue.Body = "<!-- agent-loop:metadata\nversion: 1\ndepends_on: []\n-->"
-	github.issue.Labels = append(github.issue.Labels, "area:git")
+	github.issue.Body = "Implement publication"
 	publisher := &fakePublisher{
-		audit: publication.Audit{
-			ChangedPaths: []string{"docs/architecture.md"}, DeclaredResources: []string{"git"},
-			ActualResources: []string{"docs"}, Reason: publication.ReasonResourceClaimMismatch,
-		},
-		err: publication.ClaimMismatchError{Declared: []string{"git"}, Effective: []string{"git"}, Actual: []string{"docs"}},
+		audit: publication.Audit{ChangedPaths: []string{"docs/architecture.md"}, Reason: "publish_failed"},
+		err:   errors.New("publication adapter failed"),
 	}
 	loop.Publisher = publisher
 	if _, err := loop.RunOnce(context.Background()); err != nil {
@@ -981,22 +971,14 @@ func TestResourceClaimMismatchPersistsAuditAndRefusesPublicationIntoNeedsInput(t
 		t.Fatal(err)
 	}
 	issue := snapshot.Issues["1"]
-	if issue.Status != issuedomain.StatusNeedsInput || issue.Lease != nil || issue.ResourcePark == nil ||
-		issue.ResourcePark.Stage != issuedomain.ContinuationStageResume || issue.ResourcePark.Evidence == nil ||
-		issue.ResourcePark.Evidence.Code != publication.ReasonResourceClaimMismatch ||
-		strings.Join(issue.DeclaredResources, ",") != "git" || strings.Join(issue.ActualResources, ",") != "docs" || len(snapshot.PendingRequests) != 1 {
+	if issue.Status != issuedomain.StatusRetryWait || snapshot.ActiveExecution != nil || issue.Continuation == nil || len(snapshot.PendingRequests) != 0 {
 		t.Fatalf("issue=%+v requests=%+v", issue, snapshot.PendingRequests)
 	}
-	for _, request := range snapshot.PendingRequests {
-		if request.ResumeStatus != issuedomain.StatusUnset || request.ResourceParkID != issue.ResourcePark.ID || request.ReleasedOwner == nil {
-			t.Fatalf("resource correction did not use generic continuation: %+v", request)
-		}
-	}
-	if !github.needsInput || issue.PullRequestURL != "" {
+	if github.needsInput || issue.PullRequestURL != "" {
 		t.Fatalf("publication was not safely refused: issue=%+v github=%+v", issue, github)
 	}
 	events, err := os.ReadFile(loop.Store.EventsPath())
-	if err != nil || !strings.Contains(string(events), publication.ReasonResourceClaimMismatch) || !strings.Contains(string(events), `"actual_resources":["docs"]`) {
+	if err != nil || !strings.Contains(string(events), `"reason":"publish_failed"`) || !strings.Contains(string(events), `"changed_paths":["docs/architecture.md"]`) {
 		t.Fatalf("audit event missing: err=%v events=%s", err, events)
 	}
 }
@@ -1044,17 +1026,14 @@ func TestTypedMissingBaseFailurePreservesRecoveryProvenanceAndSession(t *testing
 		t.Fatal(err)
 	}
 	issue := snapshot.Issues["1"]
-	if issue.Status != issuedomain.StatusFailed || issue.GitHubSync != issuedomain.GitHubSyncNone || issue.Lease != nil || issue.SessionID != "" || issue.Session != nil ||
-		issue.ResourcePark == nil || issue.ResourcePark.Session == nil || issue.ResourcePark.Session.ID != "session-publication" {
-		t.Fatalf("recoverable publication boundary was not preserved: %+v checkpoint=%+v", issue, issue.ResourcePark)
+	if issue.Status != issuedomain.StatusFailed || state.PendingEffect(&snapshot, 1) != nil || snapshot.ActiveExecution != nil || issue.SessionID != "" || issue.Session != nil ||
+		issue.Continuation == nil || issue.Continuation.Session == nil || issue.Continuation.Session.ID != "session-publication" {
+		t.Fatalf("recoverable publication boundary was not preserved: %+v checkpoint=%+v", issue, issue.Continuation)
 	}
-	if issue.ResourcePark == nil || issue.ResourcePark.Stage != issuedomain.ContinuationStagePublish || issue.ResourcePark.Evidence == nil ||
-		issue.ResourcePark.Evidence.Origin != publication.FailureOriginPublisher || issue.ResourcePark.Evidence.Phase != publication.FailurePhasePrePublication ||
-		issue.ResourcePark.Evidence.Code != publication.FailureCodeDurableBaseMissing {
-		t.Fatalf("generic publication provenance missing: %+v", issue.ResourcePark)
-	}
-	if len(issue.ResourcePark.OriginalLease.ResolvedResources) != 1 || issue.ResourcePark.OriginalLease.ResolvedResources[0] != state.RepositoryResource {
-		t.Fatalf("publication resource metadata was not retained: %+v", issue.ResourcePark)
+	if issue.Continuation == nil || issue.Continuation.Stage != issuedomain.ContinuationStagePublish || issue.Continuation.Evidence == nil ||
+		issue.Continuation.Evidence.Origin != publication.FailureOriginPublisher || issue.Continuation.Evidence.Phase != publication.FailurePhasePrePublication ||
+		issue.Continuation.Evidence.Code != publication.FailureCodeDurableBaseMissing {
+		t.Fatalf("generic publication provenance missing: %+v", issue.Continuation)
 	}
 }
 
@@ -1107,7 +1086,7 @@ func TestPullRequestLifecycleAnomaliesBlockWithCheckpointAndNoExecutionLease(t *
 				t.Fatal(err)
 			}
 			issue := snapshot.Issues["1"]
-			if issue.Status != issuedomain.StatusBlocked || issue.Lease != nil || issue.ResourcePark == nil || issue.Suspension == nil || !strings.Contains(issue.LastError, test.want) {
+			if issue.Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil || issue.Continuation == nil || issue.Suspension == nil || !strings.Contains(issue.LastError, test.want) {
 				t.Fatalf("issue=%+v", issue)
 			}
 		})
@@ -1268,10 +1247,8 @@ func TestPullRequestChecksFailureUsesGenericContinuationEvidence(t *testing.T) {
 	runID := "run_checks_recovery"
 	branch := "codex/issue-1-checks"
 	prURL := "https://example.test/pr/1"
-	_, _, err := loop.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: 1, Title: "Test", RunID: runID, Slot: 0,
-		DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
-		ReservedAt: time.Now().UTC(),
+	_, _, err := loop.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: 1, Title: "Test", RunID: runID, StartedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1300,24 +1277,12 @@ func TestPullRequestChecksFailureUsesGenericContinuationEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	failed, _ := loop.issueState(1)
-	if failed.Status != issuedomain.StatusFailed || failed.Lease != nil || failed.ResourcePark == nil || failed.ResourcePark.Stage != issuedomain.ContinuationStageChecks ||
-		failed.ResourcePark.HeadSHA != "old-head" || failed.ResourcePark.Evidence == nil || failed.ResourcePark.Evidence.Origin != "pull_request_lifecycle" ||
-		failed.ResourcePark.Evidence.Phase != "required_checks" || failed.ResourcePark.Evidence.Code != "checks_retry_exhausted" ||
-		failed.ResourcePark.Evidence.Status != "failure" || failed.Suspension == nil ||
+	if failed.Status != issuedomain.StatusFailed || failed.Continuation == nil || failed.Continuation.Stage != issuedomain.ContinuationStageChecks ||
+		failed.Continuation.HeadSHA != "old-head" || failed.Continuation.Evidence == nil || failed.Continuation.Evidence.Origin != "pull_request_lifecycle" ||
+		failed.Continuation.Evidence.Phase != "required_checks" || failed.Continuation.Evidence.Code != "checks_retry_exhausted" ||
+		failed.Continuation.Evidence.Status != "failure" || failed.Suspension == nil ||
 		!reflect.DeepEqual(failed.Suspension.AllowedActions, []issuedomain.ResolutionAction{issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel, issuedomain.ResolutionRetryStage}) {
 		t.Fatalf("generic checks boundary was not preserved: %+v", failed)
-	}
-}
-
-func TestQueueOnlyWaitsForMergeWhenAutoMergeIsEnabled(t *testing.T) {
-	snapshot := state.Snapshot{Issues: map[string]*state.Issue{
-		"1": {Number: 1, Status: issuedomain.StatusAwaitingMerge},
-	}}
-	if queueBlockedByPullRequest(snapshot, false) {
-		t.Fatal("manual merge wait blocked the Issue queue")
-	}
-	if !queueBlockedByPullRequest(snapshot, true) {
-		t.Fatal("auto merge wait did not retain queue ownership")
 	}
 }
 
@@ -1352,8 +1317,9 @@ func TestDirtyPullRequestStartsConflictRecoveryWithoutCheckRuns(t *testing.T) {
 				s.Issues["1"] = &state.Issue{
 					Number: 1, Title: "Test", Status: issuedomain.StatusAwaitingChecks, RunID: "run_1",
 					Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
-					LeaseGeneration: 1, Lease: fixtureLease("run_1"), PullRequestURL: prURL,
-					Attempts: 1, UpdatedAt: time.Now().UTC(),
+					Generation: 1, PullRequestURL: prURL,
+					Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_dirty", CreatedAt: time.Now().UTC(), RunID: "run_1", Generation: 1, Stage: issuedomain.ContinuationStageChecks},
+					Attempts:     1, UpdatedAt: time.Now().UTC(),
 				}
 				return nil
 			})
@@ -1446,18 +1412,18 @@ func TestDirtyPullRequestRunsDurableConflictWorkerAndReturnsToChecks(t *testing.
 	loop, github := testLoop(t, worker.Result{})
 	loop.Config.Completion.AutoMerge = true
 	prURL := "https://example.test/pr/1"
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, Title: "Test", RunID: "run_1", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(s *state.Snapshot) error {
 		branch := "codex/issue-1-test"
-		s.Issues["1"] = &state.Issue{
-			Number: 1, Title: "Test", Status: issuedomain.StatusAwaitingChecks, RunID: "run_1",
-			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch), PullRequestURL: prURL,
-			LeaseGeneration: 1, Lease: fixtureLease("run_1"),
-			Attempts: 1, UpdatedAt: time.Now().UTC(),
-			ConflictRecovery: &state.ConflictRecovery{
-				PullRequestURL: prURL, TargetBaseSHA: "base-old", OriginalHeadSHA: "older-head",
-				ConflictFiles: []string{"older.txt"}, AllowedPaths: []string{"older.txt"}, Attempts: 1, BaseUpdates: 1,
-				History: []state.ConflictAttempt{{Number: 1, BaseSHA: "base-old", Status: issuedomain.ConflictAttemptStatusCompleted}},
-			},
+		item := s.Issues["1"]
+		item.Status, item.Branch, item.Worktree = issuedomain.StatusAwaitingChecks, branch, loop.Config.RepoPath
+		item.Workspace, item.PullRequestURL, item.UpdatedAt = fixtureWorkspace(loop, loop.Config.RepoPath, branch), prURL, time.Now().UTC()
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: prURL, TargetBaseSHA: "base-old", OriginalHeadSHA: "older-head",
+			ConflictFiles: []string{"older.txt"}, AllowedPaths: []string{"older.txt"}, Attempts: 1, BaseUpdates: 1,
+			History: []state.ConflictAttempt{{Number: 1, BaseSHA: "base-old", Status: issuedomain.ConflictAttemptStatusCompleted}},
 		}
 		return nil
 	})
@@ -1502,6 +1468,8 @@ func TestDirtyPullRequestRunsDurableConflictWorkerAndReturnsToChecks(t *testing.
 }
 
 func legacyTestZeitreise442V0619ResumedNeedsInputStartsFencedConflictWorker(t *testing.T) {
+	/* Historical resource-lease fixture. Generation-4 input is now covered by
+	the v4 migration decoder tests and is intentionally rejected at runtime.
 	fixtureState, err := os.ReadFile("testdata/zeitreise-442-v0619-needs-input-conflict-state.json")
 	if err != nil {
 		t.Fatal(err)
@@ -1580,22 +1548,25 @@ func legacyTestZeitreise442V0619ResumedNeedsInputStartsFencedConflictWorker(t *t
 		!strings.Contains(string(events), `"lease_owner":{"generation":5,"run_id":"`+item.RunID+`"}`) {
 		t.Fatalf("fenced conflict attempt event was not persisted: %s", events)
 	}
+	*/
+	t.Skip("legacy lease fixture is covered by migration decoder tests")
 }
 
 func TestConflictRecoveryRestartRecognizesPublishedCommitWithoutDuplicateWorkerOrPush(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	prURL := "https://example.test/pr/1"
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "conflict_1", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := loop.Store.Update("fixture", 1, "conflict_1", nil, func(s *state.Snapshot) error {
-		s.Issues["1"] = &state.Issue{
-			Number: 1, Status: issuedomain.StatusResolvingConflict, RunID: "conflict_1", Branch: "codex/issue-1-test",
-			Worktree: loop.Config.RepoPath, PullRequestURL: prURL, UpdatedAt: time.Now().UTC(),
-			LeaseGeneration: 1, Lease: fixtureLease("conflict_1"),
-			ConflictRecovery: &state.ConflictRecovery{
-				PullRequestURL: prURL, TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
-				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 1, BaseUpdates: 1,
-			},
+		item := s.Issues["1"]
+		item.Status, item.Branch, item.Worktree = issuedomain.StatusResolvingConflict, "codex/issue-1-test", loop.Config.RepoPath
+		item.PullRequestURL, item.UpdatedAt = prURL, time.Now().UTC()
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: prURL, TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+			ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 1, BaseUpdates: 1,
 		}
-		setSupervisorTestWorkspace(s, s.Issues["1"])
+		setSupervisorTestWorkspace(s, item)
 		return nil
 	})
 	if err != nil {
@@ -1616,18 +1587,19 @@ func TestConflictRecoveryRestartRecognizesPublishedCommitWithoutDuplicateWorkerO
 func TestConflictRecoveryBlocksOnlyAfterPerBaseBudgetIsExhausted(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	loop.Config.ConflictRecovery.MaxAttemptsPerBase = 3
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "conflict_3", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := loop.Store.Update("fixture", 1, "conflict_3", nil, func(s *state.Snapshot) error {
-		s.Issues["1"] = &state.Issue{
-			Number: 1, Status: issuedomain.StatusResolvingConflict, RunID: "conflict_3", Branch: "codex/issue-1-test",
-			Worktree: loop.Config.RepoPath, PullRequestURL: "https://example.test/pr/1", UpdatedAt: time.Now().UTC(),
-			LeaseGeneration: 1, Lease: fixtureLease("conflict_3"),
-			ConflictRecovery: &state.ConflictRecovery{
-				PullRequestURL: "https://example.test/pr/1", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
-				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 3, BaseUpdates: 1,
-				History: []state.ConflictAttempt{{Number: 1, BaseSHA: "base-new", Status: issuedomain.ConflictAttemptStatusRetryableFailure}},
-			},
+		item := s.Issues["1"]
+		item.Status, item.Branch, item.Worktree = issuedomain.StatusResolvingConflict, "codex/issue-1-test", loop.Config.RepoPath
+		item.PullRequestURL, item.UpdatedAt = "https://example.test/pr/1", time.Now().UTC()
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: "https://example.test/pr/1", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+			ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, Attempts: 3, BaseUpdates: 1,
+			History: []state.ConflictAttempt{{Number: 1, BaseSHA: "base-new", Status: issuedomain.ConflictAttemptStatusRetryableFailure}},
 		}
-		setSupervisorTestWorkspace(s, s.Issues["1"])
+		setSupervisorTestWorkspace(s, item)
 		return nil
 	})
 	if err != nil {
@@ -1647,16 +1619,17 @@ func TestConflictRecoveryBlocksOnlyAfterPerBaseBudgetIsExhausted(t *testing.T) {
 func TestConflictWorkerNeedsInputKeepsConflictResumeTarget(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "conflict_1", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := loop.Store.Update("fixture", 1, "conflict_1", nil, func(s *state.Snapshot) error {
 		branch := "codex/issue-1-test"
-		s.Issues["1"] = &state.Issue{
-			Number: 1, Status: issuedomain.StatusResolvingConflict, RunID: "conflict_1", Branch: branch,
-			Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
-			LeaseGeneration: 1, Lease: fixtureLease("conflict_1"), PullRequestURL: "https://example.test/pr/1", UpdatedAt: time.Now().UTC(),
-			ConflictRecovery: &state.ConflictRecovery{
-				PullRequestURL: "https://example.test/pr/1", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
-				ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, BaseUpdates: 1,
-			},
+		item := s.Issues["1"]
+		item.Status, item.Branch, item.Worktree = issuedomain.StatusResolvingConflict, branch, loop.Config.RepoPath
+		item.Workspace, item.PullRequestURL, item.UpdatedAt = fixtureWorkspace(loop, loop.Config.RepoPath, branch), "https://example.test/pr/1", time.Now().UTC()
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: "https://example.test/pr/1", TargetBaseSHA: "base-new", OriginalHeadSHA: "head-pr",
+			ConflictFiles: []string{"shared.txt"}, AllowedPaths: []string{"shared.txt"}, BaseUpdates: 1,
 		}
 		return nil
 	})
@@ -1713,20 +1686,22 @@ func TestRunOncePersistsQuestion(t *testing.T) {
 		t.Fatal("GitHub was not marked needs-input")
 	}
 	snapshot, _ := loop.Store.Load()
-	if snapshot.Issues["1"].Status != issuedomain.StatusNeedsInput || snapshot.Issues["1"].Lease != nil || snapshot.Issues["1"].ResourcePark == nil || snapshot.Issues["1"].ResourcePark.Kind != state.ResourceParkKindNeedsInput {
+	if snapshot.Issues["1"].Status != issuedomain.StatusNeedsInput || snapshot.ActiveExecution != nil || snapshot.Issues["1"].Continuation == nil || snapshot.Issues["1"].Continuation.Kind != state.ContinuationKindNeedsInput {
 		t.Fatalf("issue=%+v", snapshot.Issues["1"])
 	}
 	if len(snapshot.PendingRequests) != 1 {
 		t.Fatalf("requests=%d", len(snapshot.PendingRequests))
 	}
 	for id, request := range snapshot.PendingRequests {
-		if request.ID != id || request.Question != "Choose?" || request.ResourceParkID != snapshot.Issues["1"].ResourcePark.ID || request.ReleasedOwner == nil {
+		if request.ID != id || request.Question != "Choose?" || request.CheckpointID != snapshot.Issues["1"].Continuation.ID || request.ReleasedExecution == nil {
 			t.Fatalf("request=%+v", request)
 		}
 	}
 }
 
 func TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce(t *testing.T) {
+	/* Replaced below by the generic execution/continuation contract. The old
+	lease-specific scenario must not remain executable after the v4 decoder.
 	loop, github := testLoop(t, worker.Result{})
 	loop.Config.Queue.Concurrency = 1
 	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.NeedsInputLabel}}
@@ -1805,6 +1780,46 @@ func TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce(t *testing.T) {
 		!reflect.DeepEqual(item.Suspension.AllowedActions, []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}) {
 		t.Fatalf("answered suspension=%+v", item.Suspension)
 	}
+	*/
+	loop, _ := testLoop(t, worker.Result{})
+	now := time.Date(2026, 8, 18, 6, 0, 0, 0, time.UTC)
+	_, err := loop.Store.Update("generic_answer_wait", 0, "", nil, func(snapshot *state.Snapshot) error {
+		branch := "codex/issue-1-test"
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "answered", Status: issuedomain.StatusResumePending, RunID: "run_1", Generation: 1,
+			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_1", CreatedAt: now, RunID: "run_1", Generation: 1, Stage: issuedomain.ContinuationStageResume},
+		}
+		snapshot.Issues["2"] = &state.Issue{Number: 2, Title: "active", Status: issuedomain.StatusRunning, RunID: "run_2", Generation: 1}
+		snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: 2, RunID: "run_2", Generation: 1, StartedAt: now}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ := loop.issueState(1)
+	if _, err := loop.ensurePendingExecution(current); failure.KindOf(err) != failure.Transient {
+		t.Fatalf("occupied execution should defer the answered Issue: %v", err)
+	}
+	waiting, _ := loop.Store.Load()
+	if waiting.ActiveExecution == nil || waiting.ActiveExecution.IssueNumber != 2 || waiting.Issues["1"].Generation != 1 {
+		t.Fatalf("answered Issue stole active execution: %+v", waiting)
+	}
+	_, err = loop.Store.Update("active_completed", 2, "run_2", nil, func(snapshot *state.Snapshot) error {
+		if err := state.ReleaseExecution(snapshot, 2, state.ExecutionIdentity{RunID: "run_2", Generation: 1}); err != nil {
+			return err
+		}
+		snapshot.Issues["2"].Status = issuedomain.StatusCompleted
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ = loop.issueState(1)
+	resumed, err := loop.ensurePendingExecution(current)
+	if err != nil || resumed.Generation != 2 {
+		t.Fatalf("answered Issue did not acquire the released execution: issue=%+v err=%v", resumed, err)
+	}
 }
 
 func TestRunOnceDefaultsAmbiguousFailureToExtended(t *testing.T) {
@@ -1816,7 +1831,7 @@ func TestRunOnceDefaultsAmbiguousFailureToExtended(t *testing.T) {
 	}
 	snapshot, _ := loop.Store.Load()
 	issue := snapshot.Issues["1"]
-	if issue.ExecutionProfile != "extended" || issue.Status != issuedomain.StatusRetryWait || issue.Lease == nil {
+	if issue.ExecutionProfile != "extended" || issue.Status != issuedomain.StatusRetryWait || snapshot.ActiveExecution != nil || issue.Continuation == nil {
 		t.Fatalf("issue=%+v", issue)
 	}
 }
@@ -1839,8 +1854,8 @@ func TestWorkerTimeoutStageIsPersistedForRetry(t *testing.T) {
 func TestFaultGitHubSyncPartialFailureIsRetried(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	_, err := loop.Store.Update("completion_pending_sync", 1, "run_1", nil, func(s *state.Snapshot) error {
-		s.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusCompleted, RunID: "run_1", PullRequestURL: "https://example.test/pr/1", GitHubSync: issuedomain.GitHubSyncDone}
-		return nil
+		s.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusCompleted, RunID: "run_1", PullRequestURL: "https://example.test/pr/1"}
+		return state.SetEffect(s, 1, "run_1", issuedomain.EffectMarkDone, time.Now().UTC())
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1850,14 +1865,14 @@ func TestFaultGitHubSyncPartialFailureIsRetried(t *testing.T) {
 		t.Fatal("expected initial sync error")
 	}
 	snapshot, _ := loop.Store.Load()
-	if snapshot.Issues["1"].GitHubSync != issuedomain.GitHubSyncDone {
-		t.Fatalf("sync=%q", snapshot.Issues["1"].GitHubSync)
+	if effect := state.PendingEffect(&snapshot, 1); effect == nil || effect.Kind != issuedomain.EffectMarkDone {
+		t.Fatalf("pending effect=%+v", effect)
 	}
 	if _, err := loop.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ = loop.Store.Load()
-	if snapshot.Issues["1"].GitHubSync != issuedomain.GitHubSyncNone || !github.done {
+	if state.PendingEffect(&snapshot, 1) != nil || !github.done {
 		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
 	}
 }
@@ -1870,14 +1885,14 @@ func TestFaultInterruptedClaimIsRecovered(t *testing.T) {
 		t.Fatal("expected claim error")
 	}
 	snapshot, _ := loop.Store.Load()
-	if snapshot.Issues["1"].Status != issuedomain.StatusClaiming || snapshot.Issues["1"].Lease == nil {
+	if snapshot.Issues["1"].Status != issuedomain.StatusClaiming || snapshot.ActiveExecution == nil {
 		t.Fatalf("status=%s", snapshot.Issues["1"].Status)
 	}
 	if _, err := loop.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, _ = loop.Store.Load()
-	if snapshot.Issues["1"].Status != issuedomain.StatusCompleted || snapshot.Issues["1"].Lease != nil || !github.claimed {
+	if snapshot.Issues["1"].Status != issuedomain.StatusCompleted || snapshot.ActiveExecution != nil || !github.claimed {
 		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
 	}
 }
@@ -1895,8 +1910,10 @@ func TestFaultSupervisorWakesOnRecordedAnswer(t *testing.T) {
 	done := make(chan struct{})
 	go func() { loop.waitForWork(context.Background(), time.Second, watcher); close(done) }()
 	_, err = loop.Store.Update("answer_recorded", 1, "run", nil, func(s *state.Snapshot) error {
+		branch := "codex/issue-1-test"
 		s.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusResumePending, RunID: "run",
-			LeaseGeneration: 1, Lease: fixtureLease("run")}
+			Generation: 1, Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_wake", CreatedAt: time.Now().UTC(), RunID: "run", Generation: 1, Stage: issuedomain.ContinuationStageResume}}
 		return nil
 	})
 	if err != nil {
@@ -1954,7 +1971,8 @@ func TestFaultSupervisorRestartResumesWithDurableAnswers(t *testing.T) {
 		s.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: issuedomain.StatusResumePending, RunID: "run_1",
 			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
-			SessionID: "session-123", Attempts: 1, LeaseGeneration: 1, Lease: fixtureLease("run_1"),
+			SessionID: "session-123", Attempts: 1, Generation: 1,
+			Continuation:     &state.ContinuationCheckpoint{ID: "checkpoint_answers", CreatedAt: now, RunID: "run_1", Generation: 1, Stage: issuedomain.ContinuationStageResume},
 			ExecutionProfile: "extended", UpdatedAt: now,
 			Answers: []state.AnswerRecord{
 				{RequestID: "req_1", Question: "Which API?", Answer: "Use v2", AnsweredAt: now},
@@ -2084,22 +2102,11 @@ func TestPublicationCheckpointPublishesSavedCompletedResultWithoutWorker(t *test
 	digest := fmt.Sprintf("%x", sha256.Sum256(resultData))
 	now := time.Now().UTC()
 	_, err := loop.Store.Update("issue_suspension_resolved", 1, runID, nil, func(snapshot *state.Snapshot) error {
-		owner := state.LeaseOwner{RunID: runID, Generation: 2}
 		snapshot.Issues["1"] = &state.Issue{
 			Number: 1, Title: "Test", Status: issuedomain.StatusResumePending, RunID: runID,
-			Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, Attempts: 3,
-			LeaseGeneration: 2,
-			Lease: &state.ResourceLease{
-				Owner: owner, Slot: 0,
-				DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource},
-				BaseSHA: "base-sha", ReservedAt: now,
-			},
-			DeclaredResources: []string{state.RepositoryResource},
-			ResourcePark: &state.ContinuationCheckpoint{
-				ID: "checkpoint_1", Status: issuedomain.ResourceParkStatusResuming, RunID: runID,
-				OriginalLease: state.ExecutionLease{Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: 0,
-					DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, BaseSHA: "base-sha", ReservedAt: now},
-				ResumeOwner: &owner, ResumedAt: now, ParkedAt: now.Add(-time.Minute), Stage: issuedomain.ContinuationStagePublish,
+			Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, Attempts: 3, Generation: 1,
+			Continuation: &state.ContinuationCheckpoint{
+				ID: "checkpoint_1", CreatedAt: now.Add(-time.Minute), RunID: runID, Generation: 1, BaseSHA: "base-sha", Stage: issuedomain.ContinuationStagePublish,
 				ResultSHA256: digest, Summary: "verified implementation",
 			},
 			Suspension: &state.Suspension{ID: "suspension_1", Status: issuedomain.SuspensionResolved, ReasonCode: "publication",
@@ -2132,7 +2139,7 @@ func TestPublicationCheckpointPublishesSavedCompletedResultWithoutWorker(t *test
 	if !publisher.called || issue.Status != issuedomain.StatusAwaitingChecks || issue.PullRequestURL != "https://example.test/pr/1" || issue.Attempts != 3 {
 		t.Fatalf("publication-only recovery did not converge: publisher=%+v issue=%+v", publisher, issue)
 	}
-	if issue.PublicationAudit == nil || issue.PublicationAudit.BaseSHA != "base-sha" || issue.ResourcePark == nil || issue.ResourcePark.ResultSHA256 != digest {
+	if issue.PublicationAudit == nil || issue.PublicationAudit.BaseSHA != "base-sha" || issue.Continuation == nil || issue.Continuation.ResultSHA256 != digest {
 		t.Fatalf("publication checkpoint audit missing: %+v", issue)
 	}
 	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{
@@ -2158,7 +2165,7 @@ func TestPublicationCheckpointPublishesSavedCompletedResultWithoutWorker(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue = snapshot.Issues["1"]; issue.Status != issuedomain.StatusCompleted || issue.Lease != nil || !issue.PullRequestMerged || !github.done {
+	if issue = snapshot.Issues["1"]; issue.Status != issuedomain.StatusCompleted || snapshot.ActiveExecution != nil || !issue.PullRequestMerged || !github.done {
 		t.Fatalf("recovered publication did not reach done: issue=%+v github=%+v", issue, github)
 	}
 }
@@ -2167,17 +2174,11 @@ func TestIssueResolutionSyncRevalidatesContinuationAuthority(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	now := time.Now().UTC()
 	runID := "run_resolution_sync"
-	owner := state.LeaseOwner{RunID: runID, Generation: 2}
 	issue := state.Issue{
-		Number: 1, Title: "Test", Status: issuedomain.StatusResumePending, RunID: runID,
-		Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath, LeaseGeneration: 2,
-		Lease: &state.ExecutionLease{Owner: owner, Slot: 0, DeclaredResources: []string{state.RepositoryResource},
-			ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now},
-		ResourcePark: &state.ContinuationCheckpoint{
-			ID: "checkpoint_resolution", Status: issuedomain.ResourceParkStatusResuming, RunID: runID,
-			OriginalLease: state.ExecutionLease{Owner: state.LeaseOwner{RunID: runID, Generation: 1}, Slot: 0,
-				DeclaredResources: []string{state.RepositoryResource}, ResolvedResources: []string{state.RepositoryResource}, ReservedAt: now.Add(-time.Minute)},
-			ResumeOwner: &owner, ResumedAt: now, ParkedAt: now.Add(-time.Minute), Stage: issuedomain.ContinuationStageResume,
+		Number: 1, Title: "Test", Status: issuedomain.StatusRunning, RunID: runID, Generation: 2,
+		Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath,
+		Continuation: &state.ContinuationCheckpoint{
+			ID: "checkpoint_resolution", CreatedAt: now.Add(-time.Minute), RunID: runID, Generation: 1, Stage: issuedomain.ContinuationStageResume,
 		},
 		Suspension: &state.Suspension{
 			ID: "suspension_resolution", Status: issuedomain.SuspensionResolved, ReasonCode: "environment",
@@ -2185,12 +2186,13 @@ func TestIssueResolutionSyncRevalidatesContinuationAuthority(t *testing.T) {
 			AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionResume}, CheckpointID: "checkpoint_resolution",
 			SuspendedAt: now.Add(-time.Minute), ResolvedAt: now, Resolution: issuedomain.ResolutionResume,
 		},
-		GitHubSync: issuedomain.GitHubSyncIssueResolution, UpdatedAt: now,
+		UpdatedAt: now,
 	}
 	_, err := loop.Store.Update("issue_suspension_resolved", 1, runID, nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"] = &issue
+		snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: 1, RunID: runID, Generation: 2, StartedAt: now}
 		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
-		return nil
+		return state.SetEffect(snapshot, 1, runID, issuedomain.EffectApplyResolution, now)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2203,22 +2205,28 @@ func TestIssueResolutionSyncRevalidatesContinuationAuthority(t *testing.T) {
 	if err := loop.syncGitHub(context.Background(), current); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := loop.issueState(1)
-	if err != nil || !github.markedRunning || updated.GitHubSync != issuedomain.GitHubSyncNone {
+	updatedSnapshot, err := loop.Store.Load()
+	updated := updatedSnapshot.Issues["1"]
+	if err != nil || !github.markedRunning || state.PendingEffect(&updatedSnapshot, 1) != nil {
 		t.Fatalf("github=%+v issue=%+v err=%v", github, updated, err)
 	}
 
 	github.markedRunning = false
 	github.remote.Issue.Labels = []string{loop.Config.GitHub.RunningLabel}
-	current.GitHubSync = issuedomain.GitHubSyncIssueResolution
+	_, err = loop.Store.Update("resolution_effect_requeued", 1, runID, nil, func(snapshot *state.Snapshot) error {
+		return state.SetEffect(snapshot, 1, runID, issuedomain.EffectApplyResolution, now.Add(time.Second))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := loop.syncGitHub(context.Background(), current); err == nil || github.markedRunning {
 		t.Fatalf("changed authoritative labels were accepted: err=%v", err)
 	}
 
 	answered := current
-	checkpoint := *current.ResourcePark
-	checkpoint.Kind, checkpoint.RequestID = state.ResourceParkKindNeedsInput, "req_1"
-	answered.ResourcePark = &checkpoint
+	checkpoint := *current.Continuation
+	checkpoint.Kind, checkpoint.RequestID = state.ContinuationKindNeedsInput, "req_1"
+	answered.Continuation = &checkpoint
 	answered.LastError = "answered continuation failed"
 	answered.Answers = []state.AnswerRecord{{RequestID: "req_1", Question: "Continue?", Answer: "yes", AnsweredAt: now}}
 	digest := sha256.Sum256([]byte(answered.LastError))

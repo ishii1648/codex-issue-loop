@@ -70,7 +70,7 @@ jobs:
             .stable_binary_sha256 == $digest and .rollout_mode == "per-repository-stable-assignment" and
             .rollback_drill.typed_rollback == true and .rollback_drill.same_artifact_reapplied == true and
             .rollback_drill.preserved.state == true and .rollback_drill.preserved.issues == true and
-            .rollback_drill.preserved.leases == true and .rollback_drill.preserved.worktrees == true and
+            .rollback_drill.preserved.execution == true and .rollback_drill.preserved.worktrees == true and
             .rollback_drill.other_repository_unchanged.assignment == true and
             .rollback_drill.other_repository_unchanged.pid == true and
             .rollback_drill.other_repository_unchanged.binary == true and

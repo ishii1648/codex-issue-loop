@@ -1,8 +1,8 @@
 # 永続state schema / semantic migration runbook
 
-現行artifactのstorage schemaはv5、semantic contractはv3である。storageはv4からv5へのforward migrationと、v5 semantic v2からv3へのin-schema migrationをサポートする。binaryの`version --json`、install manifest、`migrate --json`はstorage schemaのcurrent/migration-fromとsemantic contractのcurrent/minimumを表示する。
+現行artifactのstorage schemaはv5、semantic contractはv4、Issue lifecycle APIはv2.0である。storageはv4からv5へのforward migrationをサポートし、v5に旧runtime fieldまたは旧statusが残る入力は拒否する。binaryの`version --json`、install manifest、`migrate --json`はstorage schema、semantic contract、Issue lifecycle APIのcurrent/minimumを表示する。
 
-contract v3はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。`issues[].workspace`と実行statusの`issues[].execution_lease`を検査し、terminal capacityと中断provenanceを`ExecutionLease`、`ContinuationCheckpoint`、`Suspension`へ分離する。v2からはgeneric checkpointのstageだけを`resume|publish|checks|conflict`へ正規化し、evidenceとsuspensionを保持する。宣言、対象status、validator、migration ruleは`internal/domain/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
+contract v4はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。実行statusではroot `active_execution`、Issue `generation`、`workspace`の一致を要求し、待機時の再開材料をIssue-localな`continuation`、`continuation.evidence`、`suspension`へ分離する。宣言、対象status、validator、migration ruleは`internal/domain/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
 
 ## Read-only preview
 
@@ -21,7 +21,7 @@ agent-loop migrate --json
 | `SEMANTIC_COMPATIBLE` | 現releaseの実行不変条件を満たす |
 | `EXECUTION_REQUIRED_WORKSPACE_PROVENANCE_MISSING` | 実行済みrecovery stateにWorkspace authorityがない。自動合成しない |
 | `EXECUTION_REQUIRED_WORKSPACE_PROVENANCE_INVALID` | 保存provenanceがIssue/repository identityと不整合 |
-| `EXECUTION_REQUIRED_LEASE_MISSING` | 実行statusにfenced ExecutionLeaseがない |
+| `EXECUTION_REQUIRED_ACTIVE_EXECUTION_MISSING` | 実行statusに一致するroot active executionがない |
 | `PREPARED_TRANSACTION_REQUIRES_OLD_RUNTIME_RECOVERY` | 旧runtimeでprepared transactionを完了してから再previewする |
 
 unknown storage/contract version、decode error、non-migratable findingがある場合はapplyしない。versionやWorkspaceを手編集しない。
@@ -30,7 +30,7 @@ unknown storage/contract version、decode error、non-migratable findingがあ�
 
 ## v4 recovery recordの変換
 
-v4のscenario別recovery fieldは、status、lease/park、workspace、session、PR、request/answer、generationを同じsnapshotから読み、決定的に`ContinuationCheckpoint`と`Suspension`へfoldする。event件数・順序はauthorityにしない。実行再開を一意に証明できないIssueだけを`recoverability=ambiguous`かつ`suspension.status=quarantined`にし、他Issueのmigrationとqueue進行は継続する。
+v4のscenario別recovery fieldは、status、旧lease/park、workspace、session、PR、request/answer、generationを同じsnapshotから読み、決定的にroot `active_execution`とIssue-local `continuation`、`suspension`へfoldする。event件数・順序はauthorityにしない。実行再開を一意に証明できないIssueだけを`recoverability=ambiguous`かつ`suspension.status=quarantined`にし、他Issueのmigrationとqueue進行は継続する。
 
 migration後のoperator操作は共通CLIだけを使う。
 
@@ -55,7 +55,7 @@ applyは全登録LaunchAgentの停止を確認し、対象config/registry/state/
 
 fileごとの置換はatomicで、同じprepared journalを使う再実行は同じmigration ID/event IDへ収束する。completed後の再applyは`changed:false`である。process crash後は同じartifactでpreviewしてからapplyを再実行し、別backupや別identityを作らない。fault後に旧versionへ戻す場合は下記rollbackを使う。
 
-v4→v5 migrationは11 Issue・14 legacy recovery substateのproduction由来matrixで、Issue、request/answer、lease generation、session、publication/PR auditの件数とidentityを保存する。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、current aggregate validatorを通す。
+v4→v5 migrationは11 Issue・14 legacy recovery substateのproduction由来matrixで、Issue、request/answer、execution generation、session、publication/PR auditの件数とidentityを保存する。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、current aggregate validatorを通す。
 
 ## Paired rollback
 
@@ -66,6 +66,6 @@ agent-loop rollback --backup '/absolute/install-backup' --json
 agent-loop doctor --json
 ```
 
-rollbackは管理対象backup、restore先、全SHA-256を検証して全artifactを復元する。migrationが新規作成した空state用event logは削除する。active leaseまたはparked continuationがあれば拒否する。storage versionを跨ぐ場合はschema backupを先、install backupを後に戻す。途中失敗、backup不足、version不一致では片方だけを推測で戻さず停止を維持する。
+rollbackは管理対象backup、restore先、全SHA-256を検証して全artifactを復元する。migrationが新規作成した空state用event logは削除する。active executionまたは未完了continuationがあれば拒否する。storage versionを跨ぐ場合はschema backupを先、install backupを後に戻す。途中失敗、backup不足、version不一致では片方だけを推測で戻さず停止を維持する。
 
 旧外部配送用`notification-token`はmigration/backup/rollback対象外であり、暗黙削除しない。

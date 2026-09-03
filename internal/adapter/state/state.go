@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
+	queuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/queue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
@@ -76,52 +78,51 @@ type WorkerIdentity struct {
 	Variant        string `json:"variant,omitempty"`
 }
 
-// LeaseOwner fences lease mutations to one Issue run and one monotonically
-// increasing generation. Run IDs alone are not sufficient because restored or
-// retried state may reuse durable Issue records.
-type LeaseOwner struct {
+// ExecutionIdentity fences mutations to one Issue run and one monotonically
+// increasing generation. Run IDs alone are not sufficient after a restart.
+type ExecutionIdentity struct {
 	RunID      string `json:"run_id"`
 	Generation uint64 `json:"generation"`
 }
 
-// ExecutionLease is the write-ahead reservation that must exist before a worker
-// is started. A lease has no wall-clock expiry; ReservedAt is audit metadata.
-type ExecutionLease struct {
-	Owner             LeaseOwner `json:"owner"`
-	Slot              int        `json:"slot"`
-	DeclaredResources []string   `json:"declared_resources"`
-	ResolvedResources []string   `json:"resolved_resources"`
-	ActualResources   []string   `json:"actual_resources,omitempty"`
-	BaseSHA           string     `json:"base_sha,omitempty"`
-	ReservedAt        time.Time  `json:"reserved_at"`
+// ActiveExecution is the repository's only execution authority. Waiting,
+// suspended, and Pull Request lifecycle records never occupy it.
+type ActiveExecution struct {
+	IssueNumber int       `json:"issue_number"`
+	RunID       string    `json:"run_id"`
+	Generation  uint64    `json:"generation"`
+	BaseSHA     string    `json:"base_sha,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
 }
 
-// ResourceLease remains an internal source compatibility alias during the v5
-// migration. It is not a distinct durable concept.
-type ResourceLease = ExecutionLease
+type EffectIntent struct {
+	ID          string                 `json:"id"`
+	IssueNumber int                    `json:"issue_number"`
+	RunID       string                 `json:"run_id"`
+	Kind        issuedomain.EffectKind `json:"kind"`
+	CreatedAt   time.Time              `json:"created_at"`
+}
 
 // ContinuationCheckpoint is the durable boundary between released execution
 // capacity and a later, explicitly validated continuation.
 type ContinuationCheckpoint struct {
-	ID                string                         `json:"id"`
-	Kind              string                         `json:"kind,omitempty"`
-	RequestID         string                         `json:"request_id,omitempty"`
-	Status            issuedomain.ResourceParkStatus `json:"status"`
-	OriginalLease     ExecutionLease                 `json:"original_execution_lease"`
-	ParkedAt          time.Time                      `json:"parked_at"`
-	ResumedAt         time.Time                      `json:"resumed_at,omitempty"`
-	ResumeOwner       *LeaseOwner                    `json:"resume_owner,omitempty"`
-	RunID             string                         `json:"run_id"`
-	Workspace         *WorkerWorkspace               `json:"workspace,omitempty"`
-	Session           *WorkerSession                 `json:"session,omitempty"`
-	HeadSHA           string                         `json:"head_sha,omitempty"`
-	WorktreeSHA256    string                         `json:"worktree_sha256,omitempty"`
-	PullRequestURL    string                         `json:"pull_request_url,omitempty"`
-	PullRequestNumber int                            `json:"pull_request_number,omitempty"`
-	Stage             issuedomain.ContinuationStage  `json:"stage,omitempty"`
-	ResultSHA256      string                         `json:"result_sha256,omitempty"`
-	Summary           string                         `json:"summary,omitempty"`
-	Evidence          *ContinuationEvidence          `json:"evidence,omitempty"`
+	ID                string                        `json:"id"`
+	Kind              string                        `json:"kind,omitempty"`
+	RequestID         string                        `json:"request_id,omitempty"`
+	CreatedAt         time.Time                     `json:"created_at"`
+	RunID             string                        `json:"run_id"`
+	Generation        uint64                        `json:"generation"`
+	BaseSHA           string                        `json:"base_sha,omitempty"`
+	Workspace         *WorkerWorkspace              `json:"workspace,omitempty"`
+	Session           *WorkerSession                `json:"session,omitempty"`
+	HeadSHA           string                        `json:"head_sha,omitempty"`
+	WorktreeSHA256    string                        `json:"worktree_sha256,omitempty"`
+	PullRequestURL    string                        `json:"pull_request_url,omitempty"`
+	PullRequestNumber int                           `json:"pull_request_number,omitempty"`
+	Stage             issuedomain.ContinuationStage `json:"stage,omitempty"`
+	ResultSHA256      string                        `json:"result_sha256,omitempty"`
+	Summary           string                        `json:"summary,omitempty"`
+	Evidence          *ContinuationEvidence         `json:"evidence,omitempty"`
 }
 
 // ContinuationEvidence records the immutable observation that caused a stage
@@ -212,40 +213,49 @@ func (w WorkerWorkspace) Matches(path, branch, repoID, repository string, reposi
 }
 
 type Issue struct {
-	Number            int                     `json:"number"`
-	Title             string                  `json:"title"`
-	Status            issuedomain.Status      `json:"status"`
-	RunID             string                  `json:"run_id,omitempty"`
-	LeaseGeneration   uint64                  `json:"lease_generation,omitempty"`
-	Lease             *ExecutionLease         `json:"execution_lease,omitempty"`
-	ResourcePark      *ContinuationCheckpoint `json:"continuation_checkpoint,omitempty"`
-	Suspension        *Suspension             `json:"suspension,omitempty"`
-	DeclaredResources []string                `json:"declared_resources,omitempty"`
-	ActualResources   []string                `json:"actual_resources,omitempty"`
-	PublicationAudit  *publication.Audit      `json:"publication_audit,omitempty"`
-	Branch            string                  `json:"branch,omitempty"`
-	Worktree          string                  `json:"worktree,omitempty"`
-	Workspace         *WorkerWorkspace        `json:"workspace,omitempty"`
-	Attempts          int                     `json:"attempts"`
-	Continuations     int                     `json:"continuations"`
-	ExecutionProfile  string                  `json:"execution_profile,omitempty"`
-	SessionID         string                  `json:"session_id,omitempty"`
-	Session           *WorkerSession          `json:"session,omitempty"`
-	WorkerIdentity    WorkerIdentity          `json:"worker_identity,omitempty"`
-	WorkerPID         int                     `json:"worker_pid,omitempty"`
-	WorkerPGID        int                     `json:"worker_pgid,omitempty"`
-	PullRequestURL    string                  `json:"pull_request_url,omitempty"`
-	PullRequestNumber int                     `json:"pull_request_number,omitempty"`
-	HeadSHA           string                  `json:"head_sha,omitempty"`
-	ReviewDecision    string                  `json:"review_decision,omitempty"`
-	PullRequestMerged bool                    `json:"pull_request_merged,omitempty"`
-	GitHubSync        issuedomain.GitHubSync  `json:"github_sync,omitempty"`
-	FailureKind       string                  `json:"failure_kind,omitempty"`
-	LastError         string                  `json:"last_error,omitempty"`
-	RetryAfter        *time.Time              `json:"retry_after,omitempty"`
-	Answers           []AnswerRecord          `json:"answers,omitempty"`
-	ConflictRecovery  *ConflictRecovery       `json:"conflict_recovery,omitempty"`
-	UpdatedAt         time.Time               `json:"updated_at"`
+	Number             int                             `json:"number"`
+	Title              string                          `json:"title"`
+	AuthorVerification *queuedomain.AuthorVerification `json:"author_verification,omitempty"`
+	Status             issuedomain.Status              `json:"status"`
+	RunID              string                          `json:"run_id,omitempty"`
+	Generation         uint64                          `json:"generation,omitempty"`
+	Continuation       *ContinuationCheckpoint         `json:"continuation,omitempty"`
+	Suspension         *Suspension                     `json:"suspension,omitempty"`
+	PublicationAudit   *publication.Audit              `json:"publication_audit,omitempty"`
+	Branch             string                          `json:"branch,omitempty"`
+	Worktree           string                          `json:"worktree,omitempty"`
+	Workspace          *WorkerWorkspace                `json:"workspace,omitempty"`
+	Attempts           int                             `json:"attempts"`
+	Continuations      int                             `json:"continuations"`
+	ExecutionProfile   string                          `json:"execution_profile,omitempty"`
+	SessionID          string                          `json:"session_id,omitempty"`
+	Session            *WorkerSession                  `json:"session,omitempty"`
+	WorkerIdentity     WorkerIdentity                  `json:"worker_identity,omitempty"`
+	WorkerPID          int                             `json:"worker_pid,omitempty"`
+	WorkerPGID         int                             `json:"worker_pgid,omitempty"`
+	PullRequestURL     string                          `json:"pull_request_url,omitempty"`
+	PullRequestNumber  int                             `json:"pull_request_number,omitempty"`
+	HeadSHA            string                          `json:"head_sha,omitempty"`
+	ReviewDecision     string                          `json:"review_decision,omitempty"`
+	PullRequestMerged  bool                            `json:"pull_request_merged,omitempty"`
+	FailureKind        string                          `json:"failure_kind,omitempty"`
+	LastError          string                          `json:"last_error,omitempty"`
+	RetryAfter         *time.Time                      `json:"retry_after,omitempty"`
+	Answers            []AnswerRecord                  `json:"answers,omitempty"`
+	ConflictRecovery   *ConflictRecovery               `json:"conflict_recovery,omitempty"`
+	UpdatedAt          time.Time                       `json:"updated_at"`
+}
+
+type QuarantineRecord struct {
+	IssueNumber    int                `json:"issue_number"`
+	RunID          string             `json:"run_id,omitempty"`
+	Generation     uint64             `json:"generation,omitempty"`
+	RejectedStatus issuedomain.Status `json:"rejected_status,omitempty"`
+	ReasonCode     string             `json:"reason_code"`
+	Reason         string             `json:"reason"`
+	QuarantinedAt  time.Time          `json:"quarantined_at"`
+	LastValid      *Issue             `json:"last_valid,omitempty"`
+	Requests       []*Request         `json:"requests,omitempty"`
 }
 
 type Option struct {
@@ -254,21 +264,21 @@ type Option struct {
 }
 
 type Request struct {
-	ID             string                    `json:"id"`
-	IssueNumber    int                       `json:"issue_number"`
-	Question       string                    `json:"question"`
-	Reason         string                    `json:"reason,omitempty"`
-	Recommended    string                    `json:"recommended_option,omitempty"`
-	Options        []Option                  `json:"options,omitempty"`
-	AllowFreeText  bool                      `json:"allow_free_text"`
-	ResumeStatus   issuedomain.Status        `json:"resume_status,omitempty"`
-	RunID          string                    `json:"run_id,omitempty"`
-	ResourceParkID string                    `json:"resource_park_id,omitempty"`
-	ReleasedOwner  *LeaseOwner               `json:"released_owner,omitempty"`
-	Status         issuedomain.RequestStatus `json:"status"`
-	Answer         string                    `json:"answer,omitempty"`
-	CreatedAt      time.Time                 `json:"created_at"`
-	AnsweredAt     *time.Time                `json:"answered_at,omitempty"`
+	ID                string                    `json:"id"`
+	IssueNumber       int                       `json:"issue_number"`
+	Question          string                    `json:"question"`
+	Reason            string                    `json:"reason,omitempty"`
+	Recommended       string                    `json:"recommended_option,omitempty"`
+	Options           []Option                  `json:"options,omitempty"`
+	AllowFreeText     bool                      `json:"allow_free_text"`
+	ResumeStatus      issuedomain.Status        `json:"resume_status,omitempty"`
+	RunID             string                    `json:"run_id,omitempty"`
+	CheckpointID      string                    `json:"checkpoint_id,omitempty"`
+	ReleasedExecution *ExecutionIdentity        `json:"released_execution,omitempty"`
+	Status            issuedomain.RequestStatus `json:"status"`
+	Answer            string                    `json:"answer,omitempty"`
+	CreatedAt         time.Time                 `json:"created_at"`
+	AnsweredAt        *time.Time                `json:"answered_at,omitempty"`
 }
 
 type Recovery struct {
@@ -279,15 +289,20 @@ type Recovery struct {
 }
 
 type Snapshot struct {
-	Version                 int                 `json:"version"`
-	SemanticContractVersion int                 `json:"semantic_contract_version"`
-	RepoID                  string              `json:"repo_id"`
-	RepoPath                string              `json:"repo_path"`
-	StateRevision           uint64              `json:"state_revision"`
-	Supervisor              Supervisor          `json:"supervisor"`
-	Issues                  map[string]*Issue   `json:"issues"`
-	PendingRequests         map[string]*Request `json:"pending_requests"`
-	Recovery                *Recovery           `json:"recovery,omitempty"`
+	Version                  int                                        `json:"version"`
+	SemanticContractVersion  int                                        `json:"semantic_contract_version"`
+	IssueLifecycleAPIVersion string                                     `json:"issue_lifecycle_api_version"`
+	RepoID                   string                                     `json:"repo_id"`
+	RepoPath                 string                                     `json:"repo_path"`
+	StateRevision            uint64                                     `json:"state_revision"`
+	Supervisor               Supervisor                                 `json:"supervisor"`
+	ActiveExecution          *ActiveExecution                           `json:"active_execution,omitempty"`
+	Issues                   map[string]*Issue                          `json:"issues"`
+	PendingEffects           map[string]*EffectIntent                   `json:"pending_effects"`
+	QuarantinedIssues        map[string]*QuarantineRecord               `json:"quarantined_issues"`
+	IntakeVerifications      map[string]*queuedomain.AuthorVerification `json:"intake_verifications"`
+	PendingRequests          map[string]*Request                        `json:"pending_requests"`
+	Recovery                 *Recovery                                  `json:"recovery,omitempty"`
 }
 
 // UnmarshalJSON rejects scenario-specific recovery state when it is already
@@ -305,7 +320,7 @@ func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
 	if envelope.Version == CurrentVersion && envelope.SemanticContractVersion == statecontract.CurrentVersion {
 		for number, issue := range envelope.Issues {
 			for _, field := range []string{
-				"lease", "resource_park", "blocked_cause", "environment_resume", "answered_workspace_recovery",
+				"lease", "resource_park", "execution_lease", "lease_generation", "continuation_checkpoint", "blocked_cause", "environment_resume", "answered_workspace_recovery",
 				"workspace_provenance_recovery", "publication_failure", "publication_recovery",
 				"pull_request_checks_failure", "pull_request_checks_recovery", "merged_pull_request_adoption",
 			} {
@@ -313,24 +328,13 @@ func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
 					return fmt.Errorf("Issue %s uses removed v5 field %q; migrate the original v4 input instead", number, field)
 				}
 			}
-			if raw := issue["continuation_checkpoint"]; len(raw) > 0 && string(raw) != "null" {
-				var checkpoint map[string]json.RawMessage
-				if err := json.Unmarshal(raw, &checkpoint); err != nil {
-					return fmt.Errorf("decode Issue %s continuation checkpoint: %w", number, err)
-				}
-				if _, exists := checkpoint["original_lease"]; exists {
-					return fmt.Errorf("Issue %s uses removed v5 continuation field %q; migrate the original v4 input instead", number, "original_lease")
-				}
-			}
 			var status string
 			_ = json.Unmarshal(issue["status"], &status)
 			if status == "environment_resume_pending" || status == "publication_recovery_pending" || status == "pull_request_checks_recovery_pending" {
 				return fmt.Errorf("Issue %s uses removed v5 status %q", number, status)
 			}
-			var sync string
-			_ = json.Unmarshal(issue["github_sync"], &sync)
-			if sync == "environment_resume" || sync == "answered_workspace_recovery" || sync == "publication_recovery" || sync == "pull_request_checks_recovery" {
-				return fmt.Errorf("Issue %s uses removed v5 GitHub sync %q", number, sync)
+			if _, exists := issue["github_sync"]; exists {
+				return fmt.Errorf("Issue %s uses removed v5 field %q; effects belong to the repository aggregate", number, "github_sync")
 			}
 		}
 	}
@@ -340,6 +344,21 @@ func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*snapshot = Snapshot(decoded)
+	if snapshot.Issues == nil {
+		snapshot.Issues = map[string]*Issue{}
+	}
+	if snapshot.QuarantinedIssues == nil {
+		snapshot.QuarantinedIssues = map[string]*QuarantineRecord{}
+	}
+	if snapshot.IntakeVerifications == nil {
+		snapshot.IntakeVerifications = map[string]*queuedomain.AuthorVerification{}
+	}
+	if snapshot.PendingRequests == nil {
+		snapshot.PendingRequests = map[string]*Request{}
+	}
+	if snapshot.PendingEffects == nil {
+		snapshot.PendingEffects = map[string]*EffectIntent{}
+	}
 	return nil
 }
 
@@ -406,16 +425,27 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == RecoveryStateBlocked {
 		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
 	}
+	var lastValid *Issue
+	if issueNumber > 0 {
+		lastValid = cloneIssue(snapshot.Issues[strconv.Itoa(issueNumber)])
+	}
 	if err := mutate(&snapshot); err != nil {
 		return Snapshot{}, err
 	}
 	normalizeSnapshot(&snapshot)
-	finalizeLifecycleBoundaries(&snapshot, time.Now().UTC())
-	if err := snapshot.Validate(); err != nil {
-		return Snapshot{}, fmt.Errorf("validate snapshot before event %q: %w", eventType, err)
+	now := time.Now().UTC()
+	finalizeLifecycleBoundaries(&snapshot, now)
+	if validationErr := snapshot.Validate(); validationErr != nil {
+		if issueNumber < 1 || !isolateInvalidIssue(&snapshot, issueNumber, lastValid, validationErr, now) {
+			return Snapshot{}, fmt.Errorf("validate snapshot before event %q: %w", eventType, validationErr)
+		}
+		if err := snapshot.Validate(); err != nil {
+			return Snapshot{}, fmt.Errorf("validate repository after quarantining Issue #%d: %w", issueNumber, err)
+		}
+		payload = map[string]any{"rejected_event": eventType, "reason_code": "issue_invariant_violation", "reason": validationErr.Error()}
+		eventType = "issue_quarantined"
 	}
 	snapshot.StateRevision++
-	now := time.Now().UTC()
 	snapshot.Supervisor.UpdatedAt = now
 	snapshotJSON, err := redact.Marshal(snapshot, s.Secrets)
 	if err != nil {
@@ -447,6 +477,55 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func isolateInvalidIssue(snapshot *Snapshot, issueNumber int, lastValid *Issue, cause error, now time.Time) bool {
+	if snapshot == nil || issueNumber < 1 || cause == nil {
+		return false
+	}
+	key := strconv.Itoa(issueNumber)
+	rejected := snapshot.Issues[key]
+	record := &QuarantineRecord{
+		IssueNumber: issueNumber, ReasonCode: "issue_invariant_violation", Reason: cause.Error(),
+		QuarantinedAt: now.UTC(), LastValid: cloneIssue(lastValid),
+	}
+	if rejected != nil {
+		record.RunID, record.Generation, record.RejectedStatus = rejected.RunID, rejected.Generation, rejected.Status
+	} else if lastValid != nil {
+		record.RunID, record.Generation, record.RejectedStatus = lastValid.RunID, lastValid.Generation, lastValid.Status
+	}
+	delete(snapshot.Issues, key)
+	for id, request := range snapshot.PendingRequests {
+		if request == nil || request.IssueNumber != issueNumber {
+			continue
+		}
+		copy := *request
+		copy.Options = append([]Option(nil), request.Options...)
+		record.Requests = append(record.Requests, &copy)
+		delete(snapshot.PendingRequests, id)
+	}
+	delete(snapshot.PendingEffects, key)
+	sort.Slice(record.Requests, func(i, j int) bool { return record.Requests[i].ID < record.Requests[j].ID })
+	if snapshot.ActiveExecution != nil && snapshot.ActiveExecution.IssueNumber == issueNumber {
+		snapshot.ActiveExecution = nil
+	}
+	snapshot.QuarantinedIssues[key] = record
+	return true
+}
+
+func cloneIssue(issue *Issue) *Issue {
+	if issue == nil {
+		return nil
+	}
+	data, err := json.Marshal(issue)
+	if err != nil {
+		return nil
+	}
+	var cloned Issue
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return nil
+	}
+	return &cloned
 }
 
 func (s Store) rotateEventsUnlocked(snapshot Snapshot) error {
@@ -621,19 +700,14 @@ func (s Snapshot) Attention(untilIdle bool) (string, bool) {
 			return "blocked", true
 		}
 	}
-	for _, issue := range s.Issues {
-		if issue != nil && issue.Status == issuedomain.StatusAnswerClaimWaiting {
-			return "answer_claim_waiting", true
-		}
-	}
 	if s.Supervisor.State == SupervisorStateBlocked || s.Supervisor.State == SupervisorStateStopped {
 		return string(s.Supervisor.State), true
 	}
 	if untilIdle && s.Supervisor.State == SupervisorStatePolling {
+		if len(s.PendingEffects) > 0 {
+			return "", false
+		}
 		for _, issue := range s.Issues {
-			if issue.GitHubSync.Pending() {
-				return "", false
-			}
 			if issue.Status.PreventsIdle() {
 				return "", false
 			}

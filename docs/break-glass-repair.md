@@ -30,7 +30,7 @@ fallbackはregistryに存在するexact repository IDと、Labelが一致するr
 scripts/break-glass-stop.sh --repo-id '<exact-repository-id>'
 ```
 
-このscriptはdurable state、registry、lease、session、worktree、delivery configを変更しない。他repositoryのLaunchAgentを停止しない。入力ID、registry、plistのどれかが一致しなければ何も推測せず失敗する。
+このscriptはdurable state、registry、active execution、continuation、session、worktree、delivery configを変更しない。他repositoryのLaunchAgentを停止しない。入力ID、registry、plistのどれかが一致しなければ何も推測せず失敗する。
 
 ## 4. PatchとRelease
 
@@ -41,4 +41,4 @@ scripts/break-glass-stop.sh --repo-id '<exact-repository-id>'
 5. `delivery assignment preview/apply`で`codex-issue-loop`だけをpatchへ更新する。
 6. scoped doctor、status、assignment verifyの成功後にdelivery controllerを再開する。
 
-state、registry、lease、session、managed worktree、backupを手編集または削除しない。これらの修復が必要なら通常のtyped recovery runbookへ戻る。
+state、registry、active execution、continuation、session、managed worktree、backupを手編集または削除しない。これらの修復が必要なら通常のtyped recovery runbookへ戻る。

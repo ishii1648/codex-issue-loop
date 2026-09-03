@@ -21,7 +21,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/admission"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
@@ -38,7 +37,7 @@ type WorktreeManager interface {
 }
 
 type Publisher interface {
-	Publish(context.Context, config.Config, gh.Issue, string, string, string, string, string, publication.ResourceScope) (worker.GitResult, publication.Audit, error)
+	Publish(context.Context, config.Config, gh.Issue, string, string, string, string, string) (worker.GitResult, publication.Audit, error)
 }
 
 type ConflictResolver interface {
@@ -317,27 +316,19 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	if issueState := nextPending(snapshot, l.now()); issueState != nil {
 		return true, l.processExisting(ctx, *issueState)
 	}
-	if queueBlockedByPullRequest(snapshot, l.Config.Completion.AutoMerge) {
-		return false, l.markPolling("waiting for Pull Request checks or merge")
-	}
-	if !l.Config.Queue.ContinueAfterNeedsInput {
-		if hasPendingRequests(snapshot) {
-			return false, l.markPolling("waiting for user input")
-		}
-	}
 	issues, err := l.GitHub.ListReady(ctx, l.Config)
 	if err != nil {
 		return false, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
 	}
 	selector := &scheduler{loop: l, active: map[int]activeJob{}}
-	selected, _, ok, err := selector.selectReady(ctx, issues, snapshot)
+	selected, ok, err := selector.selectReady(ctx, issues, snapshot)
 	if err != nil {
 		return false, failure.Wrap(failure.Supervisor, "select Issue admission", err)
 	}
 	if !ok {
 		return false, l.markPolling("")
 	}
-	return true, l.startIssueAtSlotWithResources(ctx, selected, state.NewID("run"), 0)
+	return true, l.startIssue(ctx, selected, state.NewID("run"))
 }
 
 func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
@@ -363,7 +354,7 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	var selected *state.Issue
 	for _, issue := range snapshot.Issues {
-		if !issue.Status.DispatchPending(issue.GitHubSync) {
+		if !issue.Status.DispatchPending(state.PendingEffect(&snapshot, issue.Number) != nil) {
 			continue
 		}
 		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
@@ -377,16 +368,7 @@ func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
 	return selected
 }
 
-func queueBlockedByPullRequest(snapshot state.Snapshot, autoMerge bool) bool {
-	for _, issue := range snapshot.Issues {
-		if issue.Status.BlocksQueueForPullRequest(autoMerge) {
-			return true
-		}
-	}
-	return false
-}
-
-func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue, runID string, slot int) error {
+func (l *Loop) startIssue(ctx context.Context, issue gh.Issue, runID string) error {
 	latest, err := l.getIssue(ctx, issue.Number)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "refresh GitHub Issue before claim", err)
@@ -395,19 +377,25 @@ func (l *Loop) startIssueAtSlotWithResources(ctx context.Context, issue gh.Issue
 		return nil
 	}
 	issue = latest
-	// Re-evaluate the authoritative body immediately before the first durable
-	// write. A metadata or resource-label edit between queue collection and
-	// dispatch must not reserve a lease or mutate GitHub under stale claims.
-	evaluation, err := admission.EvaluateCandidate(l.Config.AdmissionSettings(), admission.Candidate{
-		Number: issue.Number, CreatedAt: issue.CreatedAt, Labels: issue.Labels, Body: issue.Body,
-	})
+	verification, err := l.GitHub.VerifyIssueAuthor(ctx, l.Config, issue)
 	if err != nil {
-		return failure.Wrap(failure.Supervisor, "evaluate refreshed Issue admission", err)
+		if verification.Reason != "" {
+			_ = l.Store.RecordAuthorVerification(issue.Number, verification)
+		}
+		return failure.Wrap(failure.Issue, "verify refreshed Issue author", err)
+	}
+	if !verification.Trusted {
+		if recordErr := l.Store.RecordAuthorVerification(issue.Number, verification); recordErr != nil {
+			return failure.Wrap(failure.Supervisor, "record refreshed Issue author verification", recordErr)
+		}
+		l.Logger.Printf("Issue #%d author rejected before worker start (reason=%s)", issue.Number, verification.Reason)
+		return nil
 	}
 	now := l.now()
-	_, _, err = l.Store.ReserveLease(state.LeaseReservation{
-		IssueNumber: issue.Number, Title: issue.Title, RunID: runID, Slot: slot,
-		DeclaredResources: evaluation.DeclaredResources, ResolvedResources: evaluation.Resources, BaseSHA: localBaseSHA(ctx, l.Config), ReservedAt: now,
+	_, _, err = l.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: issue.Number, Title: issue.Title, RunID: runID,
+		BaseSHA: localBaseSHA(ctx, l.Config), StartedAt: now,
+		AuthorVerification: &verification,
 	})
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "persist claim start", err)
@@ -461,13 +449,25 @@ func localBaseSHA(ctx context.Context, cfg config.Config) string {
 }
 
 func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
-	if current.GitHubSync.Pending() {
+	snapshot, err := l.Store.Load()
+	if err != nil {
+		return err
+	}
+	if state.PendingEffect(&snapshot, current.Number) != nil {
 		return l.syncGitHub(ctx, current)
 	}
 	if current.Status == issuedomain.StatusAwaitingChecks || current.Status == issuedomain.StatusAwaitingMerge {
 		return l.processPullRequest(ctx, current)
 	}
-	if current.Status == issuedomain.StatusResolvingConflict {
+	pendingStatus := current.Status
+	if pendingStatus == issuedomain.StatusResumePending || pendingStatus == issuedomain.StatusRetryWait || pendingStatus == issuedomain.StatusResolvingConflict {
+		resumed, err := l.ensurePendingExecution(current)
+		if err != nil {
+			return err
+		}
+		current = resumed
+	}
+	if pendingStatus == issuedomain.StatusResolvingConflict {
 		return l.processConflictRecovery(ctx, current)
 	}
 	issue, err := l.getIssue(ctx, current.Number)
@@ -477,18 +477,11 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 	if current.Status == issuedomain.StatusClaiming {
 		return l.claimAndRun(ctx, issue, current.RunID)
 	}
-	if current.Status == issuedomain.StatusAnswerClaimWaiting {
-		return l.reacquireAnsweredClaim(ctx, issue, current)
-	}
-	if current.Status == issuedomain.StatusResumePending {
-		if current.ResourcePark != nil && current.ResourcePark.Stage == issuedomain.ContinuationStagePublish {
+	if pendingStatus == issuedomain.StatusResumePending {
+		if current.Continuation != nil && current.Continuation.Stage == issuedomain.ContinuationStagePublish {
 			return l.processPublicationCheckpoint(ctx, current)
 		}
-		resumeTransition, transitionErr := issuedomain.StartAnsweredResume(current.Status)
-		if transitionErr != nil {
-			return failure.Wrap(failure.Issue, "decide answered resume start", transitionErr)
-		}
-		if current.ResourcePark != nil && current.ResourcePark.Kind == state.ResourceParkKindNeedsInput {
+		if current.Continuation != nil && current.Continuation.Kind == state.ContinuationKindNeedsInput {
 			if reason := l.answeredResumeRemoteMismatch(issue, current); reason != "" {
 				return l.rejectAnsweredContinuation(current, reason)
 			}
@@ -496,32 +489,11 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if err := l.GitHub.MarkRunning(ctx, l.Config, current.Number); err != nil {
 			return failure.Wrap(failure.Transient, "mark resumed Issue running", err)
 		}
-		if err := state.ApplyIssueTransition(&current, resumeTransition); err != nil {
-			return err
-		}
 		current.RetryAfter = nil
-		_, err = l.Store.Update("worker_started", current.Number, current.RunID, map[string]string{"mode": "user_answer_resume"}, func(s *state.Snapshot) error {
-			item := s.Issues[strconv.Itoa(current.Number)]
-			if item == nil || item.Status != issuedomain.StatusResumePending || item.GitHubSync != issuedomain.GitHubSyncNone || item.Lease == nil {
-				return fmt.Errorf("Issue #%d answered continuation is no longer pending", current.Number)
-			}
-			if err := state.ApplyIssueTransition(item, resumeTransition); err != nil {
-				return err
-			}
-			item.RetryAfter = nil
-			if item.ResourcePark != nil && item.ResourcePark.Status == issuedomain.ResourceParkStatusResuming {
-				item.ResourcePark.Status = issuedomain.ResourceParkStatusResumed
-			}
-			item.UpdatedAt = l.now()
-			return nil
-		})
-		if err != nil {
-			return failure.Wrap(failure.Supervisor, "persist answer resume", err)
-		}
 		workerCfg := l.Config
 		workerCfg.RepoPath = current.Worktree
 		instruction := "Continue from the operator-resolved checkpoint in the existing worktree, preserve valid work and prior metadata, rerun the blocked verification, and return the schema-conforming result."
-		if current.ResourcePark != nil && current.ResourcePark.Kind == state.ResourceParkKindNeedsInput {
+		if current.Continuation != nil && current.Continuation.Kind == state.ContinuationKindNeedsInput {
 			instruction = "Continue after the user's recorded answer. Implement the decision, verify the work, and return the schema-conforming result."
 		} else if current.Suspension != nil && current.Suspension.Reason != "" {
 			instruction += " Previous block: " + current.Suspension.Reason
@@ -537,14 +509,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
-	retryTransition, transitionErr := issuedomain.StartRetry(current.Status)
-	if transitionErr != nil {
-		return failure.Wrap(failure.Issue, "decide retry start", transitionErr)
-	}
 	current.RetryAfter = nil
-	if err := state.ApplyIssueTransition(&current, retryTransition); err != nil {
-		return err
-	}
 	workerCfg := l.Config
 	workerCfg.RepoPath = current.Worktree
 	var result worker.Result
@@ -552,8 +517,9 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		current.Continuations++
 		_, err = l.Store.Update("worker_continuation_started", current.Number, current.RunID, map[string]int{"continuation": current.Continuations}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			if err := state.ApplyIssueTransition(item, retryTransition); err != nil {
-				return err
+			identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
+			if item == nil || item.Status != issuedomain.StatusRunning || !state.OwnsActiveExecution(s, current.Number, identity) {
+				return fmt.Errorf("Issue #%d retry execution changed before worker continuation", current.Number)
 			}
 			item.Continuations = current.Continuations
 			item.RetryAfter = nil
@@ -568,10 +534,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
 	} else {
-		previousOwner := state.LeaseOwner{}
-		if current.Lease != nil {
-			previousOwner = current.Lease.Owner
-		}
+		previousIdentity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 		current.Attempts++
 		current.RunID = state.NewID("run")
 		current.SessionID = ""
@@ -579,15 +542,13 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		payload := map[string]any{"attempt": current.Attempts}
 		_, err = l.Store.Update("worker_started", current.Number, current.RunID, payload, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
-			owner, transferErr := state.TransferIssueLease(item, previousOwner, current.RunID)
+			identity, transferErr := state.TransferExecution(s, current.Number, previousIdentity, current.RunID, l.now())
 			if transferErr != nil {
 				return transferErr
 			}
-			if owner != (state.LeaseOwner{}) {
-				payload["lease_owner"] = owner
-			}
-			if err := state.ApplyIssueTransition(item, retryTransition); err != nil {
-				return err
+			payload["execution_identity"] = identity
+			if item.Status != issuedomain.StatusRunning {
+				return fmt.Errorf("Issue #%d retry execution is not running", current.Number)
 			}
 			item.RunID, item.Attempts, item.SessionID = current.RunID, current.Attempts, ""
 			item.Session = nil
@@ -608,6 +569,56 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
 	}
 	return l.handleResult(ctx, issue, current, result, err)
+}
+
+func (l *Loop) ensurePendingExecution(current state.Issue) (state.Issue, error) {
+	snapshot, err := l.Store.Load()
+	if err != nil {
+		return state.Issue{}, failure.Wrap(failure.Supervisor, "load pending execution", err)
+	}
+	if active := snapshot.ActiveExecution; active != nil {
+		if active.IssueNumber == current.Number && active.RunID == current.RunID && active.Generation == current.Generation {
+			return current, nil
+		}
+		return state.Issue{}, failure.Wrap(failure.Transient, "acquire pending execution", fmt.Errorf("active execution belongs to Issue #%d", active.IssueNumber))
+	}
+	if current.Continuation == nil {
+		return state.Issue{}, failure.Wrap(failure.Issue, "acquire pending execution", fmt.Errorf("Issue #%d has no continuation checkpoint", current.Number))
+	}
+	_, err = l.Store.Update("execution_resumed", current.Number, current.RunID, map[string]any{"checkpoint_id": current.Continuation.ID}, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(current.Number)]
+		if item == nil || item.RunID != current.RunID || item.Generation != current.Generation || item.Continuation == nil || item.Continuation.ID != current.Continuation.ID {
+			return fmt.Errorf("Issue #%d continuation changed before execution resume", current.Number)
+		}
+		if _, resumeErr := state.ResumeContinuation(snapshot, item.Number, item.Continuation.ID, l.now()); resumeErr != nil {
+			return resumeErr
+		}
+		var transition issuedomain.Transition
+		var transitionErr error
+		switch item.Status {
+		case issuedomain.StatusResumePending:
+			transition, transitionErr = issuedomain.StartAnsweredResume(item.Status)
+		case issuedomain.StatusRetryWait:
+			transition, transitionErr = issuedomain.StartRetry(item.Status)
+		case issuedomain.StatusResolvingConflict:
+			return nil
+		default:
+			return fmt.Errorf("Issue #%d status %s cannot resume execution", item.Number, item.Status)
+		}
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if err := state.ApplyIssueTransition(item, transition); err != nil {
+			return err
+		}
+		item.RetryAfter = nil
+		item.UpdatedAt = l.now()
+		return nil
+	})
+	if err != nil {
+		return state.Issue{}, failure.Wrap(failure.Issue, "resume pending execution", err)
+	}
+	return l.issueState(current.Number)
 }
 
 func (l *Loop) reconcileTerminalPullRequest(ctx context.Context, scheduled state.Issue) error {
@@ -651,8 +662,6 @@ func (l *Loop) reconcileTerminalPullRequest(ctx context.Context, scheduled state
 	})
 	return failure.Wrap(failure.Supervisor, "persist terminal Pull Request reconciliation", err)
 }
-
-var errAnsweredClaimWaiting = errors.New("answered needs-input claim is still waiting")
 
 var errWorkerResultSuperseded = errors.New("worker result superseded by authoritative state")
 

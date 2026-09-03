@@ -31,14 +31,18 @@ printf '%s\n' "$version_json" | grep -Fq '"delivery_protocol":1'
 printf '%s\n' "$version_json" | grep -Fq '"assignment_protocol":1'
 printf '%s\n' "$version_json" | grep -Fq '"state_schema_current":5'
 printf '%s\n' "$version_json" | grep -Fq '"state_schema_migration_from":4'
-printf '%s\n' "$version_json" | grep -Fq '"semantic_contract_current":3'
+printf '%s\n' "$version_json" | grep -Fq '"semantic_contract_current":4'
+printf '%s\n' "$version_json" | grep -Fq '"issue_lifecycle_api_current":"2.0"'
+printf '%s\n' "$version_json" | grep -Fq '"issue_lifecycle_api_minimum":"1.0"'
 grep -Fq "\"artifact_sha256\": \"$(shasum -a 256 "$temporary_root/first/agent-loop_Darwin_arm64" | awk '{print $1}')\"" "$temporary_root/first/release-manifest.json"
 grep -Fq '"delivery_protocol": 1' "$temporary_root/first/release-manifest.json"
 grep -Fq '"assignment_protocol": 1' "$temporary_root/first/release-manifest.json"
 grep -Fq '"target": "darwin/arm64"' "$temporary_root/first/release-manifest.json"
 grep -Fq '"state_schema_current": 5' "$temporary_root/first/release-manifest.json"
 grep -Fq '"state_schema_migration_from": 4' "$temporary_root/first/release-manifest.json"
-grep -Fq '"semantic_contract_current": 3' "$temporary_root/first/release-manifest.json"
+grep -Fq '"semantic_contract_current": 4' "$temporary_root/first/release-manifest.json"
+grep -Fq '"issue_lifecycle_api_current": "2.0"' "$temporary_root/first/release-manifest.json"
+grep -Fq '"issue_lifecycle_api_minimum": "1.0"' "$temporary_root/first/release-manifest.json"
 grep -Fq '"semantic_contract_minimum": 1' "$temporary_root/first/release-manifest.json"
 
 # A new execution-required field without an explicit compatibility or

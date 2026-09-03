@@ -20,7 +20,7 @@ jq -e 'type == "array" and length >= 1 and all(.[]; (.repo_id | type == "string"
 jq -e --arg tag "$release_tag" '
   .schema_version == 1 and .typed_rollback == true and .same_artifact_reapplied == true and
   .before.version == $tag and .rollback.result == "succeeded" and .reapplied.version == $tag and
-  .preserved.state == true and .preserved.issues == true and .preserved.leases == true and
+  .preserved.state == true and .preserved.issues == true and .preserved.execution == true and
   .preserved.worktrees == true and
   .other_repository_unchanged.assignment == true and .other_repository_unchanged.pid == true and
   .other_repository_unchanged.binary == true and .other_repository_unchanged.state_revision == true
@@ -64,7 +64,7 @@ capture_sample() {
           failed_diagnostic_codes:[$doctor[0].diagnostics[] | select(.ok | not) | .code] | sort},
         status:{state_revision:$status[0].state.state_revision,supervisor_state:$status[0].state.supervisor.state,
           issue_count:($status[0].state.issues | length),active_workers:$status[0].worker_pool.active,
-          worker_limit:$status[0].worker_pool.limit,active_leases:([$status[0].state.issues[] | select(.execution_lease != null)] | length),
+          worker_limit:$status[0].worker_pool.limit,active_executions:(if $status[0].state.active_execution == null then 0 else 1 end),
           pending_requests:($status[0].pending_requests | length)},
         verified:$verify[0].verified,
         healthy:($a.assignment.version == $tag and $a.assignment.commit == $commit and

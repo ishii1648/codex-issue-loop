@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"time"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	queuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/queue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
@@ -148,9 +150,10 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 func (s Store) emptySnapshot() Snapshot {
 	now := time.Now().UTC()
 	return Snapshot{
-		Version: CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion, RepoID: s.RepoID, RepoPath: s.RepoPath,
+		Version: CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion, IssueLifecycleAPIVersion: issuedomain.LifecycleAPICurrent, RepoID: s.RepoID, RepoPath: s.RepoPath,
 		Supervisor: Supervisor{State: "stopped", UpdatedAt: now},
-		Issues:     map[string]*Issue{}, PendingRequests: map[string]*Request{},
+		Issues:     map[string]*Issue{}, QuarantinedIssues: map[string]*QuarantineRecord{},
+		IntakeVerifications: map[string]*queuedomain.AuthorVerification{}, PendingRequests: map[string]*Request{},
 	}
 }
 
@@ -182,6 +185,15 @@ func normalizeSnapshot(snapshot *Snapshot) {
 	}
 	if snapshot.PendingRequests == nil {
 		snapshot.PendingRequests = map[string]*Request{}
+	}
+	if snapshot.PendingEffects == nil {
+		snapshot.PendingEffects = map[string]*EffectIntent{}
+	}
+	if snapshot.QuarantinedIssues == nil {
+		snapshot.QuarantinedIssues = map[string]*QuarantineRecord{}
+	}
+	if snapshot.IntakeVerifications == nil {
+		snapshot.IntakeVerifications = map[string]*queuedomain.AuthorVerification{}
 	}
 	for _, issue := range snapshot.Issues {
 		if issue == nil {
