@@ -49,6 +49,21 @@ func TestPublishedIncidentSchemasAreVersionedDraft202012Contracts(t *testing.T) 
 	}
 }
 
+func TestSchedulerCycleContractAcceptsEveryRuntimeWakeTrigger(t *testing.T) {
+	for _, trigger := range []string{"startup", "poll_timer", "retry_timer", "reconciliation_timer", "worker_finished", "webhook", "fsnotify"} {
+		t.Run(trigger, func(t *testing.T) {
+			signal := Signal{
+				Version: SchemaVersion, ID: "signal-" + trigger, Timestamp: time.Now().UTC(), Repository: "owner/repo",
+				CorrelationID: "correlation-1", RunID: "run-1", CycleID: "cycle-1", Kind: "event", Name: "scheduler_cycle",
+				Component: "scheduler", Phase: "poll", OutcomeCode: "started", ReasonCode: "scheduler_wake", Trigger: trigger,
+			}
+			if err := signal.Validate(); err != nil {
+				t.Fatalf("runtime trigger rejected by incident contract: %v", err)
+			}
+		})
+	}
+}
+
 func TestStateEventCollectorIsIdempotentAndLinksFixLifecycle(t *testing.T) {
 	now := time.Date(2026, 9, 2, 7, 0, 0, 0, time.UTC)
 	sourceDir := t.TempDir()

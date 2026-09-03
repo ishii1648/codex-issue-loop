@@ -640,6 +640,7 @@ type webhookFakeGitHub struct {
 	*fakeGitHub
 	listCalls        int
 	restGets         int
+	restErr          error
 	conditionalCalls int
 	conditionalETags []string
 }
@@ -660,6 +661,9 @@ func (f *webhookFakeGitHub) ListReady(ctx context.Context, cfg config.Config) ([
 
 func (f *webhookFakeGitHub) GetREST(context.Context, config.Config, int) (gh.Issue, error) {
 	f.restGets++
+	if f.restErr != nil {
+		return gh.Issue{}, f.restErr
+	}
 	return openTestIssue(f.issue), nil
 }
 
@@ -742,6 +746,41 @@ func TestWebhookMailboxRetainsOnlyNewestUnadmittedIssueIntent(t *testing.T) {
 	remaining, err := webhook.ReadMailbox(loop.Store.Dir)
 	if err != nil || len(remaining) != 1 || remaining[0].DeliveryID != "delivery-2" {
 		t.Fatalf("remaining=%v err=%v", remaining, err)
+	}
+}
+
+func TestWebhookMailboxCompactsSafeIntentsBeforeTargetReconciliationFailure(t *testing.T) {
+	loop, baseGitHub := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	github := &webhookFakeGitHub{fakeGitHub: baseGitHub, restErr: errors.New("temporary targeted read failure")}
+	loop.GitHub = github
+	_, err := loop.Store.Update("terminal_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusFailed, RunID: "run-1"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, delivery := range []webhook.Delivery{
+		{Version: webhook.InboxVersion, DeliveryID: "issue-old", Event: "issues", Action: "reconciled", RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: now},
+		{Version: webhook.InboxVersion, DeliveryID: "issue-new", Event: "issues", Action: "reconciled", RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: now.Add(time.Second)},
+		{Version: webhook.InboxVersion, DeliveryID: "unmapped-pr", Event: "pull_request", Action: "closed", RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, PullRequestNumber: 999, AcceptedAt: now.Add(2 * time.Second)},
+	} {
+		if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &scheduler{loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	if _, err := s.schedule(context.Background(), false); err == nil || !strings.Contains(err.Error(), "temporary targeted read failure") {
+		t.Fatalf("schedule error=%v", err)
+	}
+	remaining, err := webhook.ReadMailbox(loop.Store.Dir)
+	if err != nil || len(remaining) != 1 || remaining[0].DeliveryID != "issue-new" {
+		t.Fatalf("remaining=%v err=%v", remaining, err)
+	}
+	if github.restGets != 1 {
+		t.Fatalf("targeted reads=%d want=1", github.restGets)
 	}
 }
 
