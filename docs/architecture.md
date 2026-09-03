@@ -178,7 +178,7 @@ reconcilerは「workerが消えた」「PRが既に存在する」「merge済み
 
 | 範囲 | 例 | 設計上の処理 |
 | --- | --- | --- |
-| Issue-local | worker失敗、provenance不足、PR不一致、個別aggregate違反、author不一致 | 対象Issueをretry、suspend、terminalまたはquarantineへ移し、実行枠を解放してqueueを継続 |
+| Issue-local | worker失敗、provenance不足、PR不一致、個別aggregate違反、author不一致 | 対象Issueをretry、suspend、terminalまたはquarantineへ移し、再admissionを拒否して実行枠を解放し、後続候補からqueueを継続 |
 | Transient shared dependency | GitHub 5xx、rate limit、短時間のnetwork断 | durable deadlineまでbackoffし、repository stateを維持 |
 | Repository-wide | root snapshotを解釈不能、transaction chain破損、global config不正、全Issueに共通するauthority消失 | 新規effectを止めてrepositoryを`blocked`にする |
 

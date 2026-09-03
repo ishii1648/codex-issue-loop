@@ -1,12 +1,43 @@
 package state
 
 import (
+	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 )
+
+func TestStartExecutionRejectsQuarantinedIssueWithoutChangingIsolationRecord(t *testing.T) {
+	store := newStore(t)
+	now := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
+	record := &QuarantineRecord{
+		IssueNumber: 1, RunID: "old_run", Generation: 3, RejectedStatus: issuedomain.StatusRunning,
+		ReasonCode: "fixture", Reason: "ambiguous prior execution", QuarantinedAt: now,
+	}
+	before, err := store.Update("fixture_quarantine", 1, record.RunID, nil, func(snapshot *Snapshot) error {
+		snapshot.QuarantinedIssues["1"] = record
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, identity, err := store.StartExecution(ExecutionStart{IssueNumber: 1, RunID: "new_run", StartedAt: now.Add(time.Minute)})
+	var quarantined IssueQuarantinedError
+	if !errors.As(err, &quarantined) || identity != (ExecutionIdentity{}) {
+		t.Fatalf("identity=%+v error=%v", identity, err)
+	}
+	after, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.StateRevision != before.StateRevision || after.ActiveExecution != nil || after.Issues["1"] != nil ||
+		!reflect.DeepEqual(after.QuarantinedIssues["1"], record) {
+		t.Fatalf("quarantine changed: before=%+v after=%+v", before.QuarantinedIssues["1"], after.QuarantinedIssues["1"])
+	}
+}
 
 func newStore(t *testing.T) Store {
 	t.Helper()

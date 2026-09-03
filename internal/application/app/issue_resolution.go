@@ -36,6 +36,7 @@ type issuePlanReport struct {
 	IssueNumber   int                           `json:"issue_number"`
 	StateRevision uint64                        `json:"state_revision"`
 	Status        issuedomain.Status            `json:"status"`
+	Quarantine    *state.QuarantineRecord       `json:"quarantine,omitempty"`
 	Suspension    *state.Suspension             `json:"suspension,omitempty"`
 	Checkpoint    *state.ContinuationCheckpoint `json:"continuation_checkpoint,omitempty"`
 	Observations  map[string]any                `json:"observations"`
@@ -49,6 +50,7 @@ type issuePlanningContext struct {
 	store             state.Store
 	snapshot          state.Snapshot
 	issue             *state.Issue
+	quarantine        *state.QuarantineRecord
 	remote            gh.RemoteState
 	remoteErr         error
 	launch            worktree.LaunchValidation
@@ -130,6 +132,26 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 	}
 	item := snapshot.Issues[strconv.Itoa(number)]
 	if item == nil {
+		quarantine := snapshot.QuarantinedIssues[strconv.Itoa(number)]
+		if quarantine != nil {
+			after, readErr := os.ReadFile(store.StatePath())
+			report := issuePlanReport{
+				SchemaVersion: 1, IssueNumber: number, StateRevision: snapshot.StateRevision,
+				Quarantine: quarantine,
+				Observations: map[string]any{
+					"quarantined": true, "reason_code": quarantine.ReasonCode,
+					"rejected_status": quarantine.RejectedStatus,
+				},
+				Actions: []issueActionPlan{
+					{Action: issuedomain.ResolutionResume, Eligible: false, Reasons: []string{"Issue is quarantined"}},
+					{Action: issuedomain.ResolutionRetryStage, Eligible: false, Reasons: []string{"Issue is quarantined"}},
+					{Action: issuedomain.ResolutionAdoptPR, Eligible: false, Reasons: []string{"Issue is quarantined"}},
+					{Action: issuedomain.ResolutionCancel, Eligible: true},
+				},
+				ReadOnly: readErr == nil && bytes.Equal(before, after),
+			}
+			return issuePlanningContext{cfg: cfg, store: store, snapshot: snapshot, quarantine: quarantine, report: report}, nil
+		}
 		return issuePlanningContext{}, exitError{4, fmt.Errorf("Issue #%d is missing from canonical state", number)}
 	}
 	controller := a.ProcessController
@@ -307,6 +329,13 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	if err != nil {
 		return err
 	}
+	quarantineOnly := planned.issue == nil && planned.quarantine != nil
+	if quarantineOnly && action != issuedomain.ResolutionCancel {
+		return exitError{4, fmt.Errorf("Issue #%d is quarantined; only cancel is eligible", *number)}
+	}
+	if quarantineOnly {
+		return a.resolveQuarantinedIssue(ctx, l, *repo, *number, action, *jsonOut, planned)
+	}
 	if action == issuedomain.ResolutionAdoptPR && planned.issue.Status == issuedomain.StatusCompleted && planned.issue.PullRequestMerged {
 		if effect := state.PendingEffect(&planned.snapshot, planned.issue.Number); effect != nil && effect.Kind == issuedomain.EffectMarkDone {
 			if err := a.synchronizeIssueResolution(ctx, planned, action, *number); err != nil {
@@ -469,6 +498,33 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	}
 	return a.output(*jsonOut, map[string]any{"schema_version": 1, "issue_number": *number, "action": action,
 		"status": result.Issues[strconv.Itoa(*number)].Status, "state_revision": result.StateRevision, "idempotent": false})
+}
+
+func (a App) resolveQuarantinedIssue(ctx context.Context, l layout.Layout, repo string, number int,
+	action issuedomain.ResolutionAction, jsonOut bool, planned issuePlanningContext,
+) error {
+	revalidated, err := a.buildIssuePlan(ctx, l, repo, number)
+	if err != nil {
+		return err
+	}
+	if revalidated.snapshot.StateRevision != planned.snapshot.StateRevision ||
+		!reflect.DeepEqual(revalidated.quarantine, planned.quarantine) {
+		return exitError{4, fmt.Errorf("Issue #%d quarantine changed after planning", number)}
+	}
+	result, err := planned.store.Update("issue_quarantine_resolved", number, planned.quarantine.RunID,
+		map[string]any{"action": action, "planned_state_revision": planned.snapshot.StateRevision}, func(snapshot *state.Snapshot) error {
+			if snapshot.StateRevision != planned.snapshot.StateRevision ||
+				!reflect.DeepEqual(snapshot.QuarantinedIssues[strconv.Itoa(number)], planned.quarantine) {
+				return fmt.Errorf("Issue #%d quarantine changed after planning", number)
+			}
+			delete(snapshot.QuarantinedIssues, strconv.Itoa(number))
+			return nil
+		})
+	if err != nil {
+		return exitError{4, err}
+	}
+	return a.output(jsonOut, map[string]any{"schema_version": 1, "issue_number": number, "action": action,
+		"status": "quarantine_cleared", "state_revision": result.StateRevision, "idempotent": false})
 }
 
 func pendingRequestIDs(snapshot state.Snapshot, issueNumber int) []string {

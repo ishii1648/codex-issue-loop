@@ -450,6 +450,27 @@ func TestClosedIssueIsRejectedBeforeExecutionAndGitHubMutation(t *testing.T) {
 	}
 }
 
+func TestStartIssueTreatsQuarantineAsIssueLocalAndDoesNotClaimGitHub(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	now := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
+	if _, err := loop.Store.Update("fixture_quarantine", 1, "old_run", nil, func(snapshot *state.Snapshot) error {
+		snapshot.QuarantinedIssues["1"] = &state.QuarantineRecord{
+			IssueNumber: 1, RunID: "old_run", ReasonCode: "fixture", Reason: "ambiguous prior execution", QuarantinedAt: now,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := loop.startIssue(context.Background(), github.issue, "new_run")
+	if err == nil || failure.KindOf(err) != failure.Issue || github.claimed {
+		t.Fatalf("error=%v kind=%s claimed=%v", err, failure.KindOf(err), github.claimed)
+	}
+	snapshot, loadErr := loop.Store.Load()
+	if loadErr != nil || snapshot.QuarantinedIssues["1"] == nil || snapshot.Issues["1"] != nil || snapshot.ActiveExecution != nil {
+		t.Fatalf("snapshot=%+v load_error=%v", snapshot, loadErr)
+	}
+}
+
 func TestFaultStandardWorkerCompletesWithoutAdditionalRun(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
 	loop, github := testLoop(t, result)

@@ -806,6 +806,9 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 		if !gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
 			continue
 		}
+		if snapshot.QuarantinedIssues[fmt.Sprint(candidate.Number)] != nil {
+			continue
+		}
 		if current := snapshot.Issues[fmt.Sprint(candidate.Number)]; current != nil && current.Status.IneligibleForAdmission() {
 			continue
 		}
