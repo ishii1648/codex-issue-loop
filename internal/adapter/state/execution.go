@@ -23,6 +23,18 @@ type ExecutionStart struct {
 	AuthorVerification *queuedomain.AuthorVerification
 }
 
+// IssueQuarantinedError reports that an Issue-local invariant boundary rejected
+// execution without making the repository supervisor unhealthy.
+type IssueQuarantinedError struct {
+	IssueNumber int
+	ReasonCode  string
+	Reason      string
+}
+
+func (e IssueQuarantinedError) Error() string {
+	return fmt.Sprintf("Issue #%d is quarantined (%s): %s", e.IssueNumber, e.ReasonCode, e.Reason)
+}
+
 func (s Store) StartExecution(start ExecutionStart) (Snapshot, ExecutionIdentity, error) {
 	if start.IssueNumber < 1 || strings.TrimSpace(start.RunID) == "" {
 		return Snapshot{}, ExecutionIdentity{}, fmt.Errorf("execution requires a positive Issue number and non-empty run ID")
@@ -35,6 +47,10 @@ func (s Store) StartExecution(start ExecutionStart) (Snapshot, ExecutionIdentity
 	var identity ExecutionIdentity
 	payload := map[string]any{"base_sha": start.BaseSHA, "started_at": start.StartedAt}
 	snapshot, err := s.Update("execution_started", start.IssueNumber, start.RunID, payload, func(snapshot *Snapshot) error {
+		key := strconv.Itoa(start.IssueNumber)
+		if record := snapshot.QuarantinedIssues[key]; record != nil {
+			return IssueQuarantinedError{IssueNumber: start.IssueNumber, ReasonCode: record.ReasonCode, Reason: record.Reason}
+		}
 		if active := snapshot.ActiveExecution; active != nil {
 			if active.IssueNumber != start.IssueNumber || active.RunID != start.RunID {
 				return fmt.Errorf("repository active execution is owned by Issue #%d run %s generation %d", active.IssueNumber, active.RunID, active.Generation)
@@ -42,7 +58,6 @@ func (s Store) StartExecution(start ExecutionStart) (Snapshot, ExecutionIdentity
 			identity = ExecutionIdentity{RunID: active.RunID, Generation: active.Generation}
 			return nil
 		}
-		key := strconv.Itoa(start.IssueNumber)
 		issue := snapshot.Issues[key]
 		if issue == nil {
 			issue = &Issue{Number: start.IssueNumber}
@@ -75,6 +90,13 @@ func (s Store) StartExecution(start ExecutionStart) (Snapshot, ExecutionIdentity
 		payload["identity"] = identity
 		return nil
 	})
+	if err == nil {
+		if record := snapshot.QuarantinedIssues[strconv.Itoa(start.IssueNumber)]; record != nil {
+			return snapshot, ExecutionIdentity{}, IssueQuarantinedError{
+				IssueNumber: start.IssueNumber, ReasonCode: record.ReasonCode, Reason: record.Reason,
+			}
+		}
+	}
 	return snapshot, identity, err
 }
 

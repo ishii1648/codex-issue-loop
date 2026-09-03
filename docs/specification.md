@@ -367,11 +367,11 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action cancel --json
 ```
 
-`issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`と、現在のprocess、managed worktree、content SHA-256、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。`resume`とpublicationの`retry-stage`は保存時と現在のworktree HEAD・content SHA-256・base ancestryが一致しなければ拒否し、checksの`retry-stage`はcleanかつfully pushedなlocal/remote/PR HEAD一致を要求する。
+`issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`またはIssue-local quarantine envelopeと、現在のprocess、managed worktree、content SHA-256、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。`resume`とpublicationの`retry-stage`は保存時と現在のworktree HEAD・content SHA-256・base ancestryが一致しなければ拒否し、checksの`retry-stage`はcleanかつfully pushedなlocal/remote/PR HEAD一致を要求する。quarantine envelopeだけが残るIssueは`cancel`だけを許可し、そのenvelopeのrevisionと内容が一致する場合に限り解消する。
 
 `issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`はrepositoryの実行枠が空であることを再検査し、generationを一度だけ進めて現在の実行として記録する。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずpending requestをcanceledへ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
 
-ambiguousなIssueはその`suspension`だけをquarantineする。terminal `blocked` / `failed`はPID/PGIDとrepositoryの実行枠を保持せず、他Issueの選択を妨げない。durable state、label、checkpointを手編集して判定を通してはならない。
+ambiguousなIssueはその`suspension`またはIssue-local envelopeだけをquarantineする。schedulerはquarantine中のIssueを再admitせず、後続候補の選択を続ける。terminal `blocked` / `failed`はPID/PGIDとrepositoryの実行枠を保持せず、他Issueの選択を妨げない。durable state、label、checkpointを手編集して判定を通してはならない。
 
 ### 6.7 legacy v4 recovery（migration入力のみ）
 

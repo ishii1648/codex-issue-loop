@@ -115,6 +115,63 @@ func TestIssuePlanIgnoresEventsAndCancelIsFencedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestIssuePlanAndResolveCancelQuarantineOnlyRecord(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, repo)
+	entry := registry.Entry{
+		RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, GitHubRepo: cfg.GitHub.Repo,
+		Commands: map[string]string{"git": "/usr/bin/git", "gh": "/usr/bin/false"},
+	}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
+	if _, err := store.Update("fixture_quarantine", 185, "old_run", nil, func(snapshot *state.Snapshot) error {
+		snapshot.QuarantinedIssues["185"] = &state.QuarantineRecord{
+			IssueNumber: 185, RunID: "old_run", Generation: 1, RejectedStatus: issuedomain.StatusClaiming,
+			ReasonCode: "issue_invariant_violation", Reason: "ambiguous old run", QuarantinedAt: now,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	if code := a.Run(context.Background(), []string{"issue", "plan", "--repo", repo, "--issue", "185", "--json"}); code != 0 {
+		t.Fatalf("plan code=%d stderr=%s", code, stderr.String())
+	}
+	var report issuePlanReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil || report.Quarantine == nil || !report.ReadOnly ||
+		!actionEligibility(report.Actions, issuedomain.ResolutionCancel) {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	stateAfterPlan, _ := os.ReadFile(store.StatePath())
+	if !bytes.Equal(stateBefore, stateAfterPlan) {
+		t.Fatal("quarantine plan changed durable state")
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", repo, "--issue", "185", "--action", "cancel", "--json"}); code != 0 {
+		t.Fatalf("resolve code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	resolved, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.QuarantinedIssues["185"] != nil || resolved.Issues["185"] != nil || resolved.ActiveExecution != nil {
+		t.Fatalf("quarantine was not cleared: %+v", resolved)
+	}
+}
+
 func TestIssueResolveResumeRetriesGitHubWithoutRefencing(t *testing.T) {
 	fixture := newIssueResolutionFixture(t, 449, "OPEN", nil)
 	failureMarker := filepath.Join(t.TempDir(), "fail-edit-once")

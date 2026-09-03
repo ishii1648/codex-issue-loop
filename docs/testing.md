@@ -20,7 +20,7 @@ scripts/check-release.sh
 | Issue番号・run ID・generationのfence | `internal/adapter/state/execution_test.go` |
 | waiting・terminal・quarantineで実行枠解放 | lifecycle boundary、supervisor reconciliation suite |
 | needs-input回答後の同一continuation再開 | `TestRunOncePersistsQuestion`、`TestAnswerDurablyWaitsWithoutStealingActiveExecution` |
-| 1 Issueの失敗・入力待ち・PR/check待ち後も後続を取得 | scheduler fault/conformance suite |
+| 1 Issueの失敗・入力待ち・PR/check待ち・quarantine後もそのIssueを再admitせず後続を取得 | scheduler fault/conformance suite |
 | 作成者がtrusted ownerであるIssueだけを受理 | `internal/adapter/github/author_test.go`、`internal/domain/queue`、scheduler author verification suite |
 | root pending effectによるGitHub副作用の冪等性 | publication、GitHub sync、partial failure suite |
 | stop/restartとorphan process回収 | process controller、scheduler cancellation、fault suite |

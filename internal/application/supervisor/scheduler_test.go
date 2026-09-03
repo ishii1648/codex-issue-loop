@@ -92,6 +92,29 @@ func TestSelectReadySkipsUntrustedAuthorAndContinues(t *testing.T) {
 	}
 }
 
+func TestSelectReadySkipsQuarantinedIssueAndContinues(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	s := &scheduler{loop: loop, active: map[int]activeJob{}}
+	issues := []gh.Issue{
+		{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.ReadyLabels[0]}},
+		{Number: 2, State: "OPEN", Labels: []string{loop.Config.GitHub.ReadyLabels[0]}},
+	}
+	snapshot := state.Snapshot{
+		Issues: map[string]*state.Issue{},
+		QuarantinedIssues: map[string]*state.QuarantineRecord{"1": {
+			IssueNumber: 1, ReasonCode: "fixture", Reason: "ambiguous prior execution", QuarantinedAt: time.Now().UTC(),
+		}},
+	}
+	selected, ok, err := s.selectReady(context.Background(), issues, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || selected.Number != 2 {
+		t.Fatalf("selected=%+v ok=%v", selected, ok)
+	}
+}
+
 func TestDeliveryMaintenanceFenceDrainsWithoutDispatchOrCancellation(t *testing.T) {
 	loop, base := testLoop(t, worker.Result{})
 	counter := &countingGitHub{fakeGitHub: base}

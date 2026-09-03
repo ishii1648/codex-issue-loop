@@ -398,6 +398,10 @@ func (l *Loop) startIssue(ctx context.Context, issue gh.Issue, runID string) err
 		AuthorVerification: &verification,
 	})
 	if err != nil {
+		var quarantined state.IssueQuarantinedError
+		if errors.As(err, &quarantined) {
+			return failure.Wrap(failure.Issue, "reject quarantined Issue admission", err)
+		}
 		return failure.Wrap(failure.Supervisor, "persist claim start", err)
 	}
 	return l.claimAndRun(ctx, issue, runID)
