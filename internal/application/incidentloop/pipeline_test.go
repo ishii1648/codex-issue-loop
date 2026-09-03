@@ -115,6 +115,9 @@ func TestDryRunPersistsExactIssueDraftWithoutGitHub(t *testing.T) {
 	if len(report.IssueDrafts) != 1 || len(report.IssuesCreated) != 0 || report.IssueDrafts[0].Labels[0] != "codex-loop:ready" {
 		t.Fatalf("dry-run report=%+v", report)
 	}
+	if len(report.Decisions) != 1 || report.Decisions[0].Outcome != "dry_run" || report.Decisions[0].ReasonCode != "eligible_dry_run" {
+		t.Fatalf("dry-run decision=%+v", report.Decisions)
+	}
 	data, err := os.ReadFile(store.DryRunPath())
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +133,41 @@ func TestDryRunPersistsExactIssueDraftWithoutGitHub(t *testing.T) {
 	}
 	if len(liveReport.IssuesCreated) != 1 || len(issues.drafts) != 1 {
 		t.Fatalf("dry-run prevented later live creation: report=%+v drafts=%d", liveReport, len(issues.drafts))
+	}
+	decisions, err := store.ReadDecisions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 2 || decisions[0].Outcome != "dry_run" || decisions[1].Outcome != "created" {
+		t.Fatalf("persisted decisions=%+v", decisions)
+	}
+}
+
+func TestExistingIssueReuseIsRecordedAsDecision(t *testing.T) {
+	now := time.Date(2026, 9, 2, 4, 25, 0, 0, time.UTC)
+	store := testStore(t)
+	recordSignals(t, store,
+		signalAt(now, "reuse-1", "reuse", "failure_classified", "failed", func(s *Signal) {
+			s.EpisodeID, s.RunID, s.FailureKind, s.FailureCode, s.InvariantViolation = "episode-reuse", "run-1", "product", "invariant", true
+		}),
+		signalAt(now.Add(time.Second), "reuse-2", "reuse", "failure_classified", "failed", func(s *Signal) {
+			s.EpisodeID, s.RunID, s.FailureKind, s.FailureCode, s.InvariantViolation = "episode-reuse", "run-2", "product", "invariant", true
+		}),
+	)
+	dryRun, err := testPipeline(store, &fakeAnalyzer{issue: true}, nil, &now, true).RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := dryRun.IssueDrafts[0].Fingerprint
+	existing := IssueRef{Number: 42, URL: "https://github.com/owner/repo/issues/42", Labels: []string{"codex-loop:ready"}, Fingerprint: fingerprint, Status: "existing", CreatedAt: now.Add(-time.Hour)}
+	issues := &fakeIssues{byFingerprint: map[string]IssueRef{fingerprint: existing}}
+	now = now.Add(time.Minute)
+	report, err := testPipeline(store, &fakeAnalyzer{issue: true}, issues, &now, false).RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.IssuesReused) != 1 || len(report.IssuesCreated) != 0 || len(report.Decisions) != 1 || report.Decisions[0].Outcome != "reused" || report.Decisions[0].ReasonCode != "issue_reused" || report.Decisions[0].Issue == nil || report.Decisions[0].Issue.Number != 42 {
+		t.Fatalf("reuse report=%+v", report)
 	}
 }
 
@@ -186,6 +224,9 @@ func TestExpectedTransientNeverReachesAIOrIssue(t *testing.T) {
 	}
 	if analyzer.calls != 0 || len(issues.drafts) != 0 || len(report.IssuesCreated) != 0 {
 		t.Fatalf("expected transient crossed an automation boundary: report=%+v calls=%d", report, analyzer.calls)
+	}
+	if len(report.Decisions) != 1 || report.Decisions[0].ReasonCode != "expected_transient" {
+		t.Fatalf("expected transient decision=%+v", report.Decisions)
 	}
 	state, _ := store.LoadState()
 	for _, episode := range state.Episodes {
@@ -252,6 +293,9 @@ func TestSuspectedBugCreatesExactlyOneIssueAcrossRestart(t *testing.T) {
 	if len(third.IssuesCreated) != 0 || len(issues.drafts) != 1 || analyzer.calls != 2 {
 		t.Fatalf("restart duplicated work: third=%+v drafts=%d calls=%d", third, len(issues.drafts), analyzer.calls)
 	}
+	if len(third.Decisions) != 1 || third.Decisions[0].ReasonCode != "issue_already_linked" {
+		t.Fatalf("restart decision=%+v", third.Decisions)
+	}
 }
 
 func TestNonBugClassificationsCannotCreateIssue(t *testing.T) {
@@ -270,7 +314,8 @@ func TestNonBugClassificationsCannotCreateIssue(t *testing.T) {
 			recordSignals(t, store, signalAt(now, "signal-"+test.name, "scope-"+test.name, "progress", "observed", test.set))
 			analyzer := &fakeAnalyzer{issue: true}
 			issues := &fakeIssues{byFingerprint: map[string]IssueRef{}}
-			if _, err := testPipeline(store, analyzer, issues, &now, false).RunOnce(context.Background()); err != nil {
+			report, err := testPipeline(store, analyzer, issues, &now, false).RunOnce(context.Background())
+			if err != nil {
 				t.Fatal(err)
 			}
 			state, _ := store.LoadState()
@@ -281,6 +326,9 @@ func TestNonBugClassificationsCannotCreateIssue(t *testing.T) {
 			}
 			if len(issues.drafts) != 0 {
 				t.Fatal("non-bug classification created an Issue")
+			}
+			if len(report.Decisions) > 1 || len(report.Decisions) == 1 && report.Decisions[0].ReasonCode != "classification_not_issue_eligible" {
+				t.Fatalf("non-bug decision=%+v", report.Decisions)
 			}
 		})
 	}

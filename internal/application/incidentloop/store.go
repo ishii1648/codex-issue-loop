@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,16 +21,21 @@ import (
 
 var ErrAlreadyRunning = errors.New("incident analysis is already running for this repository")
 
+// File locks provide the cross-process boundary; this keyed lock prevents
+// same-process goroutines from entering platform-dependent flock contention.
+var decisionProcessLocks sync.Map
+
 type Store struct {
 	Dir       string
 	Secrets   []string
 	Retention retention.Policy
 }
 
-func (s Store) SignalsPath() string { return filepath.Join(s.Dir, "signals.jsonl") }
-func (s Store) StatePath() string   { return filepath.Join(s.Dir, "state.json") }
-func (s Store) MetricsPath() string { return filepath.Join(s.Dir, "metrics.json") }
-func (s Store) DryRunPath() string  { return filepath.Join(s.Dir, "issue-dry-run.json") }
+func (s Store) SignalsPath() string   { return filepath.Join(s.Dir, "signals.jsonl") }
+func (s Store) DecisionsPath() string { return filepath.Join(s.Dir, "decisions.jsonl") }
+func (s Store) StatePath() string     { return filepath.Join(s.Dir, "state.json") }
+func (s Store) MetricsPath() string   { return filepath.Join(s.Dir, "metrics.json") }
+func (s Store) DryRunPath() string    { return filepath.Join(s.Dir, "issue-dry-run.json") }
 
 func (s Store) Ensure() error {
 	if s.Dir == "" {
@@ -139,6 +145,204 @@ func (s Store) ReadSignals() ([]Signal, error) {
 	}
 	defer unlockFile(lock)
 	return s.readSignalsUnlocked()
+}
+
+// AppendDecisions preserves existing records byte-for-byte during normal
+// operation. It atomically rewrites the file only to remove records strictly
+// older than DecisionRetention.
+func (s Store) AppendDecisions(decisions []IssueDecision, now time.Time) error {
+	if now.IsZero() {
+		return errors.New("decision retention timestamp is required")
+	}
+	if err := s.Ensure(); err != nil {
+		return err
+	}
+	safe := make([]IssueDecision, len(decisions))
+	for index, decision := range decisions {
+		item, err := sanitizeDecision(decision, s.Secrets)
+		if err != nil {
+			return fmt.Errorf("sanitize Issue decision %d: %w", index, err)
+		}
+		safe[index] = item
+	}
+	processLock := decisionProcessLock(s.DecisionsPath())
+	processLock.Lock()
+	defer processLock.Unlock()
+	lock, err := s.lock("data.lock", true)
+	if err != nil {
+		return err
+	}
+	defer unlockFile(lock)
+
+	existing, err := s.readDecisionRecordsUnlocked()
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]IssueDecision, len(existing)+len(safe))
+	for _, record := range existing {
+		seen[record.Decision.ID] = record.Decision
+	}
+	cutoff := now.UTC().Add(-DecisionRetention)
+	var retained bytes.Buffer
+	expired := false
+	for _, record := range existing {
+		if record.Decision.DecidedAt.Before(cutoff) {
+			expired = true
+			continue
+		}
+		retained.Write(record.Line)
+	}
+	newRecords := make([]IssueDecision, 0, len(safe))
+	for _, decision := range safe {
+		if previous, exists := seen[decision.ID]; exists {
+			if !decisionsEqual(previous, decision) {
+				return fmt.Errorf("Issue decision %s was replayed with different content", decision.ID)
+			}
+			continue
+		}
+		seen[decision.ID] = decision
+		if decision.DecidedAt.Before(cutoff) {
+			continue
+		}
+		newRecords = append(newRecords, decision)
+	}
+	if !expired {
+		if len(newRecords) == 0 {
+			return nil
+		}
+		var appended bytes.Buffer
+		for _, decision := range newRecords {
+			line, err := json.Marshal(decision)
+			if err != nil {
+				return err
+			}
+			appended.Write(line)
+			appended.WriteByte('\n')
+		}
+		if _, err := os.Stat(s.DecisionsPath()); errors.Is(err, os.ErrNotExist) {
+			if err := fsutil.WriteFile(s.DecisionsPath(), nil, 0o600); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+		file, err := os.OpenFile(s.DecisionsPath(), os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return err
+		}
+		if err := os.Chmod(s.DecisionsPath(), 0o600); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if _, err := file.Write(appended.Bytes()); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			return err
+		}
+		return file.Close()
+	}
+	for _, decision := range newRecords {
+		line, err := json.Marshal(decision)
+		if err != nil {
+			return err
+		}
+		retained.Write(line)
+		retained.WriteByte('\n')
+	}
+	return fsutil.WriteFile(s.DecisionsPath(), retained.Bytes(), 0o600)
+}
+
+func (s Store) ReadDecisions() ([]IssueDecision, error) {
+	if err := s.Ensure(); err != nil {
+		return nil, err
+	}
+	processLock := decisionProcessLock(s.DecisionsPath())
+	processLock.Lock()
+	defer processLock.Unlock()
+	lock, err := s.lock("data.lock", false)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockFile(lock)
+	records, err := s.readDecisionRecordsUnlocked()
+	if err != nil {
+		return nil, err
+	}
+	decisions := make([]IssueDecision, 0, len(records))
+	seen := map[string]bool{}
+	for _, record := range records {
+		if seen[record.Decision.ID] {
+			continue
+		}
+		seen[record.Decision.ID] = true
+		decisions = append(decisions, record.Decision)
+	}
+	return decisions, nil
+}
+
+func decisionProcessLock(path string) *sync.Mutex {
+	value, _ := decisionProcessLocks.LoadOrStore(filepath.Clean(path), &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+
+type decisionLogRecord struct {
+	Decision IssueDecision
+	Line     []byte
+}
+
+func (s Store) readDecisionRecordsUnlocked() ([]decisionLogRecord, error) {
+	raw, err := os.ReadFile(s.DecisionsPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return []decisionLogRecord{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(bytes.NewReader(raw))
+	records := make([]decisionLogRecord, 0)
+	seen := map[string]IssueDecision{}
+	for lineNumber := 1; ; lineNumber++ {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if errors.Is(readErr, io.EOF) {
+				return nil, errors.New("decisions.jsonl has a partial final record")
+			}
+			if len(bytes.TrimSpace(line)) == 0 {
+				return nil, fmt.Errorf("decode Issue decision line %d: blank record", lineNumber)
+			}
+			var decision IssueDecision
+			decoder := json.NewDecoder(bytes.NewReader(line))
+			decoder.DisallowUnknownFields()
+			if decodeErr := decoder.Decode(&decision); decodeErr != nil {
+				return nil, fmt.Errorf("decode Issue decision line %d: %w", lineNumber, decodeErr)
+			}
+			var trailing any
+			if decodeErr := decoder.Decode(&trailing); !errors.Is(decodeErr, io.EOF) {
+				return nil, fmt.Errorf("decode Issue decision line %d: trailing JSON", lineNumber)
+			}
+			if validateErr := decision.Validate(); validateErr != nil {
+				return nil, fmt.Errorf("validate Issue decision line %d: %w", lineNumber, validateErr)
+			}
+			if previous, exists := seen[decision.ID]; exists {
+				if !decisionsEqual(previous, decision) {
+					return nil, fmt.Errorf("Issue decision %s was replayed with different content", decision.ID)
+				}
+			} else {
+				seen[decision.ID] = decision
+			}
+			records = append(records, decisionLogRecord{Decision: decision, Line: append([]byte(nil), line...)})
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+	return records, nil
 }
 
 func (s Store) readSignalsUnlocked() ([]Signal, error) {

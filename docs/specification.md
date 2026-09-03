@@ -237,6 +237,7 @@ webhook:
 - supervisorとworkerのstream logは書込前に閾値を検査し、close、gzip、active file再作成の順でrotationする。
 - launchdが直接開くstdout/stderrは起動時にrotationする。常時の運用logはprocess管理の`supervisor.log`へ出力し、`logs`はgzip archiveからactive fileまで時系列で表示する。
 - terminal worker runを削除した場合は`worker_logs_pruned`監査eventを残す。未回答requestとactive/retry中のrunは保持する。
+- Incident起票判定はrepositoryごとの`decisions.jsonl`へappend-onlyで保存する。通常追記は既存byte列を変更せず、各analysis cycleで現在時刻から厳密に7日より古い完全なrecordだけをlock下のatomic compactionで削除する。ちょうど7日前は保持し、破損・partial record・同一IDの内容不一致があれば変更せずfail-closedとする。
 - 利用可能容量がrotation閾値の2倍未満なら、新しいworkerを起動する前にsupervisorを`blocked`へ移し、`doctor`と容量復旧手順で扱う。
 
 ## 6. CLI仕様
@@ -272,6 +273,7 @@ agent-loop <command> [options]
 | `export-recovery-fixture` | 対象Issueのstate/event/worktree/GitHub recovery evidenceをread-only取得し決定的にsanitizationする |
 | `verify-recovery-fixture` | fixtureのscope、completeness metadata、record shape/value、hashをfail closedで検証する |
 | `logs` | supervisorまたはIssue別ログを表示する |
+| `incident analyze-once\|status\|decisions\|seed-canary\|retry` | Incident分類・起票automationの実行、判定ログ確認、限定的復旧を行う |
 | `cleanup --repo PATH [--apply]` | worktreeの保持・安全性planを表示し、停止中かつ安全な期限切れ対象だけを削除する |
 | `purge --repo PATH --issue N --confirm TOKEN` | 停止中の単一worktreeを完全一致token付きで強制削除する |
 | `doctor` | 依存関係、認証、設定、電源条件、状態整合性を検査する |
