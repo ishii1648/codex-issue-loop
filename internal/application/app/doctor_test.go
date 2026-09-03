@@ -13,6 +13,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
+	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
@@ -104,6 +105,34 @@ esac
 	diagnostics = diagnoseWebhook(context.Background(), l, entry, cfg)
 	if !diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_RUNNING").OK || !diagnosticByCode(t, diagnostics, "WEBHOOK_BROKER_STATUS_FRESH").OK {
 		t.Fatalf("healthy broker failed: %+v", diagnostics)
+	}
+}
+
+func TestQueueHealthDefersOnlyForValidRepositoryAssignmentMaintenance(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root}
+	entry := registry.Entry{RepoID: "repo"}
+	health := queueHealth{OK: false, Code: "mailbox_unbounded"}
+	if item := diagnoseQueueProgress(l, entry, health, "mailbox=100"); item.OK || item.Code != "WEBHOOK_QUEUE_STALLED" {
+		t.Fatalf("queue failure was hidden without maintenance: %+v", item)
+	}
+	fencePath := l.DeliveryAssignmentFencePath(entry.RepoID)
+	if err := os.MkdirAll(filepath.Dir(fencePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.WriteMaintenance(fencePath, delivery.Maintenance{
+		Generation: "assignment-2", Desired: delivery.VersionRef{Version: "v0.11.12", Commit: strings.Repeat("a", 40)}, RequestedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnoseQueueProgress(l, entry, health, "mailbox=100"); !item.OK || item.Code != "WEBHOOK_QUEUE_DEFERRED_MAINTENANCE" {
+		t.Fatalf("typed maintenance did not defer queue liveness: %+v", item)
+	}
+	if err := os.WriteFile(fencePath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if item := diagnoseQueueProgress(l, entry, health, "mailbox=100"); item.OK || item.Code != "WEBHOOK_QUEUE_STALLED" {
+		t.Fatalf("invalid maintenance fence hid queue failure: %+v", item)
 	}
 }
 

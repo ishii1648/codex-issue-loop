@@ -18,6 +18,7 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
+	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	schema "github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/compat"
@@ -469,11 +470,7 @@ func diagnoseWebhook(ctx context.Context, l layout.Layout, entry registry.Entry,
 	} else {
 		health := assessQueueHealth(time.Now().UTC(), cfg.Watch.ReconcileInterval.Duration, snapshot, sweep, deliveries)
 		detail := fmt.Sprintf("code=%s ready=%v stalled=%v mailbox=%d distinct_targets=%d", health.Code, health.ReadyIssues, health.StalledIssues, health.MailboxDepth, health.DistinctTargets)
-		if health.OK {
-			diagnostics = append(diagnostics, passedDiagnostic("WEBHOOK_QUEUE_PROGRESSING", "repository", entry.RepoID, "実装queueはboundedで進行可能です", detail))
-		} else {
-			diagnostics = append(diagnostics, failedDiagnostic("WEBHOOK_QUEUE_STALLED", "repository", entry.RepoID, "ready Issueが2 safety sweep interval以内にclaimされていません", detail, instruction("status --jsonのbroker.queue_healthと阻害中のactive leaseを確認してください")))
-		}
+		diagnostics = append(diagnostics, diagnoseQueueProgress(l, entry, health, detail))
 	}
 	source := cfg.Webhook.SecretSource
 	switch {
@@ -514,6 +511,19 @@ func diagnoseWebhook(ctx context.Context, l layout.Layout, entry registry.Entry,
 		}
 	}
 	return diagnostics
+}
+
+func diagnoseQueueProgress(l layout.Layout, entry registry.Entry, health queueHealth, detail string) diagnostic {
+	if health.OK {
+		return passedDiagnostic("WEBHOOK_QUEUE_PROGRESSING", "repository", entry.RepoID, "実装queueはboundedで進行可能です", detail)
+	}
+	if fence, err := delivery.LoadMaintenance(l.DeliveryAssignmentFencePath(entry.RepoID)); err == nil {
+		return passedDiagnostic("WEBHOOK_QUEUE_DEFERRED_MAINTENANCE", "repository", entry.RepoID,
+			"typed assignment maintenance中のためqueue進行判定をdeferします", detail+" generation="+fence.Generation)
+	}
+	return failedDiagnostic("WEBHOOK_QUEUE_STALLED", "repository", entry.RepoID,
+		"ready Issueが2 local reconciliation interval以内にclaimされていません", detail,
+		instruction("status --jsonのbroker.queue_healthと阻害中のactive leaseを確認してください"))
 }
 
 func diagnoseFormatters(ctx context.Context, entry registry.Entry, cfg config.Config) []diagnostic {

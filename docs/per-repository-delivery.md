@@ -43,6 +43,8 @@ previewはfileを変更しない。applyは現在binaryをimmutable slotへcopy�
 
 artifactはchecksum、annotated tagのpeeled commit、release manifest、binary metadata、GitHub attestationを照合してからslotへstageする。tagが検証中に移動した場合、またはpreview後にgenerationが変わった場合は適用しない。
 
+validation中は対象repositoryのtyped maintenance fenceがadmissionを停止するため、doctorはqueue livenessだけを`WEBHOOK_QUEUE_DEFERRED_MAINTENANCE`としてdeferする。artifact、schema、LaunchAgent、GitHub、brokerなど他の診断は通常どおり必須である。assignment確定後はfenceを解除してschedulerをwakeし、通常doctorとrollout healthでqueue livenessを再び必須にする。
+
 ## Rollback
 
 rollback先はconfigに記録されたpreviousだけである。
