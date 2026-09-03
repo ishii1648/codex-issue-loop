@@ -72,7 +72,7 @@ Goを採用する。
 
 各コマンドは絶対パスを登録時に解決し、LaunchAgentの限定されたPATHに依存しない。
 
-登録時には`git`、`gh`、`codex`、`launchctl`の絶対パスと実行時PATHをregistryへ保存する。LaunchAgentはこのPATHを引き継ぐが、credential値は環境へ追加しない。
+登録時には`git`、`gh`、worker backend、`launchctl`のcanonical absolute pathと実行時PATHをregistryへ保存する。登録時のcommand probeはLaunchAgentへ保存するPATHとHOME以外のoperator環境を継承しない。PATH上のAqua shimが未保存の環境変数なしでは動作しない場合は、登録時だけ`aqua which`で実体をread-only解決して同じprobeを行う。それでも解決できず、他の登録済みrepositoryに同名の検証済み実体があればその実体を再利用し、安全な実体がなければ登録をfail closedにする。LaunchAgentは保存済みPATHを引き継ぐが、credential値は環境へ追加しない。
 
 ## 4. ディレクトリ構成
 

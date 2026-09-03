@@ -495,6 +495,10 @@ func (f *issueResolutionFixture) writeGH(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'gh version 2.69.0\n'
+  exit 0
+fi
 case "$1 $2" in
   "issue view")
     case "$*" in *--jq*) exit 0 ;; *) printf '%%s\n' '%s' ;; esac ;;
