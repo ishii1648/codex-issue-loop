@@ -6,16 +6,19 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
+	"github.com/ishii1648/codex-issue-loop/internal/application/operatorcontrol"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 )
 
 type statusResult struct {
-	Launchd         launchd.Status   `json:"launchd"`
-	WorkerPool      workerPoolStatus `json:"worker_pool"`
-	PendingRequests []*state.Request `json:"pending_requests"`
-	State           state.Snapshot   `json:"state"`
-	Broker          *brokerStatus    `json:"broker,omitempty"`
+	Launchd         launchd.Status               `json:"launchd"`
+	WorkerPool      workerPoolStatus             `json:"worker_pool"`
+	PendingRequests []*state.Request             `json:"pending_requests"`
+	State           state.Snapshot               `json:"state"`
+	Broker          *brokerStatus                `json:"broker,omitempty"`
+	OperatorControl *operatorcontrol.Transaction `json:"operator_control,omitempty"`
+	OperatorFence   bool                         `json:"operator_maintenance_fence"`
 }
 
 type brokerStatus struct {

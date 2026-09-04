@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
@@ -784,12 +785,7 @@ func (c AssignmentController) waitForDrain(ctx context.Context, cfg Config, entr
 	for {
 		snapshot, err := (state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}).Load()
 		if err == nil {
-			ready := snapshot.Supervisor.State == state.SupervisorStateMaintenance
-			for _, issue := range snapshot.Issues {
-				if issue != nil && (issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
-					ready = false
-				}
-			}
+			ready := drain.Ready(snapshot)
 			if ready {
 				return nil
 			}
@@ -872,12 +868,7 @@ func (c AssignmentController) assignmentProtocol(ctx context.Context, program st
 }
 
 func snapshotHasWorker(snapshot state.Snapshot) bool {
-	for _, issue := range snapshot.Issues {
-		if issue != nil && (issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
-			return true
-		}
-	}
-	return false
+	return drain.HasWorker(snapshot)
 }
 
 func (c AssignmentController) health(ctx context.Context, entry registry.Entry, ref AssignmentRef, wasLoaded bool) error {
