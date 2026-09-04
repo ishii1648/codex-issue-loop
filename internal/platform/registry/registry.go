@@ -144,6 +144,12 @@ func resolveServiceCommand(ctx context.Context, name, discovered, environmentPat
 			return candidate, nil
 		}
 	}
+	absolute, absoluteErr := absoluteExecutable(discovered)
+	if absoluteErr == nil && absolute != candidate {
+		if err := probeServiceCommand(ctx, name, absolute, environmentPath); err == nil {
+			return absolute, nil
+		}
+	}
 	if managed, err := resolveAquaCommand(ctx, name, environmentPath); err == nil {
 		return managed, nil
 	}
@@ -240,7 +246,7 @@ func resolveGofmt(ctx context.Context, discovered string) (string, error) {
 }
 
 func canonicalExecutable(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
+	absolute, err := absoluteExecutable(path)
 	if err != nil {
 		return "", err
 	}
@@ -248,14 +254,22 @@ func canonicalExecutable(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(resolved)
+	return absoluteExecutable(resolved)
+}
+
+func absoluteExecutable(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absolute)
 	if err != nil {
 		return "", err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
-		return "", fmt.Errorf("command is not an executable regular file: %s", resolved)
+		return "", fmt.Errorf("command is not an executable regular file: %s", absolute)
 	}
-	return resolved, nil
+	return absolute, nil
 }
 
 // SameExecutable reports identity after resolving both paths to executable

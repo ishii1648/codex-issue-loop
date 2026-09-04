@@ -293,6 +293,39 @@ func TestRegistryPinsAquaManagedCommandToResolvedExecutable(t *testing.T) {
 	}
 }
 
+func TestRegistryPreservesRuntimeProbedMulticallSymlink(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "codex", "launchctl"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	multicall := filepath.Join(root, "offline-contract-stub")
+	if err := os.WriteFile(multicall, []byte("#!/bin/sh\ntest \"${0##*/} $1\" = \"gh --version\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ghLink := filepath.Join(binDir, "gh")
+	if err := os.Symlink(multicall, ghLink); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (Store{Path: filepath.Join(root, "registry.json")}).Add(testRegistryConfig(t, repo, "owner/repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Commands["gh"] != ghLink {
+		t.Fatalf("registered gh=%q, want runtime-probed multicall link %q", entry.Commands["gh"], ghLink)
+	}
+}
+
 func TestRegistryRejectsEnvironmentDependentCommandWithoutSafeFallback(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
