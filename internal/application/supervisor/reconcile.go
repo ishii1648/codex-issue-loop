@@ -85,9 +85,43 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			if current == nil || !startupRemoteInspectionRequired(latest, current, l.now()) {
 				break
 			}
-			remote, err := l.inspectIssue(ctx, *current)
+			remote, err := l.inspectReconciliationIssue(ctx, *current)
 			if err != nil {
 				return fmt.Errorf("reconcile GitHub state for Issue #%d: %w", number, err)
+			}
+			considered, canceled, cancelErr := l.reconcileNotPlannedCancellation(latest, *current, remote, "startup_reconciliation", nil)
+			if cancelErr != nil {
+				return fmt.Errorf("cancel not planned Issue #%d during startup reconciliation: %w", number, cancelErr)
+			}
+			if canceled {
+				break
+			}
+			if terminalReconciliationCandidate(*current) && !terminalPullRequestCandidate(*current) {
+				reason := "terminal Issue remains sticky"
+				if considered {
+					currentState, observation := l.reconciliationInputs(latest, *current, remote, worktree.Inspection{})
+					decision, _ := issuedomain.DecideNotPlannedCancellation(currentState, observation)
+					reason = decision.Reason
+				}
+				_, err = l.Store.Update("startup_reconciled", number, current.RunID, map[string]any{
+					"previous_status": current.Status, "status": current.Status, "reason": reason,
+					"github_state_reason": remote.Issue.StateReason,
+				}, func(s *state.Snapshot) error {
+					item := s.Issues[strconv.Itoa(number)]
+					if !reflect.DeepEqual(item, current) {
+						return errReconciliationStateChanged
+					}
+					item.GitHubStateReason = remote.Issue.StateReason
+					item.UpdatedAt = l.now()
+					return nil
+				})
+				if errors.Is(err, errReconciliationStateChanged) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				break
 			}
 			inspection := worktree.Inspection{}
 			if current.Worktree != "" {
@@ -156,6 +190,7 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					return err
 				}
 				item.LastError = decision.lastError
+				item.GitHubStateReason = remote.Issue.StateReason
 				item.Branch = decision.branch
 				item.PullRequestURL = decision.pullRequest
 				item.PullRequestNumber = decision.prNumber
@@ -227,7 +262,7 @@ func startupRemoteInspectionRequired(snapshot state.Snapshot, item *state.Issue,
 	case issuedomain.StatusRetryWait:
 		return item.RetryAfter == nil || !item.RetryAfter.After(now)
 	case issuedomain.StatusBlocked, issuedomain.StatusFailed:
-		return terminalPullRequestCandidate(*item)
+		return true
 	case issuedomain.StatusNeedsInput:
 		return false
 	default:
@@ -241,7 +276,10 @@ func startupRemoteInspectionRequired(snapshot state.Snapshot, item *state.Issue,
 // Unsupported/non-authoritative transitions are considered safely inspected
 // while preserving the local terminal state.
 func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
-	remote, err := l.inspectIssue(ctx, current)
+	if current.Status == issuedomain.StatusCanceled {
+		return true, nil
+	}
+	remote, err := l.inspectReconciliationIssue(ctx, current)
 	if err != nil {
 		return false, fmt.Errorf("inspect terminal Issue #%d for webhook %s: %w", current.Number, delivery.DeliveryID, err)
 	}
@@ -252,7 +290,7 @@ func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue
 // with an authoritative targeted read. A normal claim also removes the ready
 // label, so an aligned running/needs-input label is not treated as exclusion.
 func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
-	remote, err := l.inspectIssue(ctx, current)
+	remote, err := l.inspectReconciliationIssue(ctx, current)
 	if err != nil {
 		return false, fmt.Errorf("inspect collection exit for Issue #%d from webhook %s: %w", current.Number, delivery.DeliveryID, err)
 	}
@@ -263,15 +301,35 @@ func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue,
 }
 
 func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Issue, delivery webhook.Delivery, remote gh.RemoteState, forceTerminal bool) (bool, error) {
+	latest, err := l.Store.Load()
+	if err != nil {
+		return false, err
+	}
+	latestItem := latest.Issues[strconv.Itoa(current.Number)]
+	if latestItem == nil || !reflect.DeepEqual(latestItem, &current) {
+		return false, nil
+	}
+	source := "webhook_reconciliation"
+	if delivery.Event == "issues" && delivery.Action == "collection_exited" {
+		source = "safety_sweep_reconciliation"
+	}
+	_, canceled, cancelErr := l.reconcileNotPlannedCancellation(latest, current, remote, source, map[string]any{
+		"delivery_id": delivery.DeliveryID, "event": delivery.Event, "action": delivery.Action,
+	})
+	if cancelErr != nil {
+		return false, cancelErr
+	}
+	if canceled {
+		return true, nil
+	}
 	inspection := worktree.Inspection{}
-	var err error
 	if current.Worktree != "" {
 		inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
 		if err != nil {
 			return false, fmt.Errorf("inspect terminal worktree for Issue #%d: %w", current.Number, err)
 		}
 	}
-	decision := l.decideReconciliation(state.Snapshot{}, current, remote, inspection)
+	decision := l.decideReconciliation(latest, current, remote, inspection)
 	if forceTerminal && !decision.status.TerminalForWebhook() {
 		decision = blockDecision(decision, "GitHub Issue left the configured ready collection")
 	}
@@ -303,6 +361,7 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 			return err
 		}
 		item.LastError = decision.lastError
+		item.GitHubStateReason = remote.Issue.StateReason
 		item.Branch = decision.branch
 		item.PullRequestURL = decision.pullRequest
 		item.PullRequestNumber = decision.prNumber
@@ -326,6 +385,38 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		return false, nil
 	}
 	return err == nil, err
+}
+
+func (l *Loop) reconcileNotPlannedCancellation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, source string, extra map[string]any) (bool, bool, error) {
+	currentState, observation := l.reconciliationInputs(snapshot, current, remote, worktree.Inspection{})
+	decision, considered := issuedomain.DecideNotPlannedCancellation(currentState, observation)
+	if !considered || decision.Status != issuedomain.StatusCanceled {
+		return considered, false, nil
+	}
+	now := l.now()
+	payload := map[string]any{
+		"issue_number": current.Number, "run_id": current.RunID, "github_state_reason": remote.Issue.StateReason,
+		"previous_status": current.Status, "execution_release_result": "not_present", "canceled_at": now,
+		"source": source,
+		"pull_request": map[string]any{
+			"number": current.PullRequestNumber, "url": current.PullRequestURL, "head_sha": current.HeadSHA, "branch": current.Branch,
+		},
+	}
+	for key, value := range extra {
+		payload[key] = value
+	}
+	_, err := l.Store.Update("issue_canceled", current.Number, current.RunID, payload, func(latest *state.Snapshot) error {
+		item := latest.Issues[strconv.Itoa(current.Number)]
+		if item == nil || !reflect.DeepEqual(item, &current) {
+			return errReconciliationStateChanged
+		}
+		item.GitHubStateReason = remote.Issue.StateReason
+		return state.ApplyNotPlannedCancellation(latest, current.Number, &current, now)
+	})
+	if errors.Is(err, errReconciliationStateChanged) {
+		return true, false, nil
+	}
+	return true, err == nil, err
 }
 
 func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg config.GitHub) bool {
@@ -380,18 +471,26 @@ func reconciledPullRequestIdentity(pullRequests []gh.PullRequest, url string) (i
 
 func (l *Loop) reconciliationInputs(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) (issuedomain.ReconciliationState, issuedomain.ReconciliationObservation) {
 	currentState := issuedomain.ReconciliationState{
-		Number: current.Number, Status: current.Status, LastError: current.LastError, Branch: current.Branch,
-		PullRequest: current.PullRequestURL, Effect: issuedomain.EffectNone, RetryAt: current.RetryAfter,
+		Number: current.Number, RunID: current.RunID, Generation: current.Generation,
+		Status: current.Status, LastError: current.LastError, Branch: current.Branch,
+		PullRequest: current.PullRequestURL, PullRequestNumber: current.PullRequestNumber, HeadSHA: current.HeadSHA,
+		Effect: issuedomain.EffectNone, RetryAt: current.RetryAfter,
 		WorkerPID: current.WorkerPID, WorkerPGID: current.WorkerPGID, PullRequestMerged: current.PullRequestMerged,
-		WorktreeSaved: current.Worktree != "",
+		WorktreeSaved: current.Worktree != "", PendingRequest: pendingRequest(snapshot, current.Number) != nil,
+	}
+	if active := snapshot.ActiveExecution; active != nil {
+		currentState.ActiveExecutionIssueNumber = active.IssueNumber
+		currentState.ActiveExecutionRunID = active.RunID
+		currentState.ActiveExecutionGeneration = active.Generation
 	}
 	if effect := state.PendingEffect(&snapshot, current.Number); effect != nil {
 		currentState.Effect = effect.Kind
 	}
 	labels := labelSet(remote.Issue.Labels)
 	observation := issuedomain.ReconciliationObservation{
-		Now: l.now(), IssueOpen: strings.EqualFold(remote.Issue.State, "open"),
-		Ready: hasAnyLabel(labels, l.Config.GitHub.ReadyLabels), Running: labels[l.Config.GitHub.RunningLabel],
+		Now: l.now(), IssueOpen: strings.EqualFold(remote.Issue.State, "open"), IssueClosed: strings.EqualFold(remote.Issue.State, "closed"),
+		IssueStateReason: remote.Issue.StateReason,
+		Ready:            hasAnyLabel(labels, l.Config.GitHub.ReadyLabels), Running: labels[l.Config.GitHub.RunningLabel],
 		NeedsInput: labels[l.Config.GitHub.NeedsInputLabel], Done: labels[l.Config.GitHub.DoneLabel],
 		Failed: labels[l.Config.GitHub.FailedLabel], Excluded: hasAnyLabel(labels, l.Config.GitHub.ExcludeLabels),
 		OnlyBlockedExclusion: l.hasOnlyBlockedExclusion(labels), ManualExclusion: l.hasManualExclusion(remote.Issue, current),
@@ -407,7 +506,8 @@ func (l *Loop) reconciliationInputs(snapshot state.Snapshot, current state.Issue
 	}
 	for _, pr := range remote.PullRequests {
 		observation.PullRequests = append(observation.PullRequests, issuedomain.ReconciliationPullRequest{
-			URL: pr.URL, State: pr.State, HeadRefName: pr.HeadRefName, Draft: pr.IsDraft, Merged: pr.MergedAt != nil,
+			Number: pr.Number, URL: pr.URL, State: pr.State, HeadRefName: pr.HeadRefName, HeadSHA: pr.HeadSHA,
+			Draft: pr.IsDraft, Merged: pr.MergedAt != nil,
 		})
 	}
 	processes := l.Processes
@@ -486,6 +586,10 @@ func terminalPullRequestCandidate(issue state.Issue) bool {
 	return issuedomain.TerminalPullRequestCandidate(issuedomain.ReconciliationState{
 		Status: issue.Status, PullRequest: issue.PullRequestURL, PullRequestMerged: issue.PullRequestMerged, Effect: issuedomain.EffectNone,
 	})
+}
+
+func terminalReconciliationCandidate(issue state.Issue) bool {
+	return issuedomain.TerminalReconciliationCandidate(issuedomain.ReconciliationState{Status: issue.Status})
 }
 
 func labelSet(labels []string) map[string]bool {

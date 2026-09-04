@@ -309,7 +309,7 @@ func TestIssueResolveCancelClearsPendingAttentionWithoutExecution(t *testing.T) 
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["183"]
-	if snapshot.ActiveExecution != nil || item.Status != issuedomain.StatusBlocked || item.Suspension == nil ||
+	if snapshot.ActiveExecution != nil || item.Status != issuedomain.StatusCanceled || item.Suspension == nil || item.Cancellation == nil ||
 		item.Suspension.Resolution != issuedomain.ResolutionCancel || snapshot.PendingRequests["req_cancel"].Status != issuedomain.RequestStatusCanceled {
 		t.Fatalf("canceled Issue=%+v request=%+v", item, snapshot.PendingRequests["req_cancel"])
 	}

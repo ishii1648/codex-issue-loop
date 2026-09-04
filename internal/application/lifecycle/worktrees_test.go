@@ -35,7 +35,7 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	worktrees := worktree.Manager{StateRoot: stateRoot, GitPath: "git"}
 	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
 	issues := map[string]*state.Issue{}
-	for number, status := range map[int]string{1: "completed", 2: "completed", 3: "failed", 4: "completed", 5: "needs_input", 6: "resume_pending"} {
+	for number, status := range map[int]string{1: "completed", 2: "completed", 3: "failed", 4: "completed", 5: "needs_input", 6: "resume_pending", 7: "canceled"} {
 		result, err := worktrees.Ensure(ctx, cfg, "repo-id", number, fmt.Sprintf("Issue %d", number))
 		if err != nil {
 			t.Fatalf("ensure #%d: %v", number, err)
@@ -47,6 +47,12 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 		issues[fmt.Sprint(number)].Workspace = &state.WorkerWorkspace{
 			Path: result.Path, Branch: result.Branch, RepoID: "repo-id", Repository: cfg.GitHub.Repo,
 			GitCommonDir: filepath.Join(cfg.RepoPath, ".git"), MainCheckout: cfg.RepoPath, CapturedAt: now,
+		}
+		if number == 7 {
+			issues[fmt.Sprint(number)].Cancellation = &state.Cancellation{
+				Source: "operator_resolution", PreviousStatus: issuedomain.StatusBlocked,
+				ExecutionReleaseResult: "not_present", CanceledAt: now.Add(-48 * time.Hour),
+			}
 		}
 	}
 	if err := os.WriteFile(filepath.Join(issues["2"].Worktree, "dirty.txt"), []byte("dirty\n"), 0o600); err != nil {
@@ -85,6 +91,7 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	assertPlan(t, preview, 4, false, "open_pull_request")
 	assertPlan(t, preview, 5, false, "status_retained_indefinitely")
 	assertPlan(t, preview, 6, false, "status_retained_indefinitely")
+	assertPlan(t, preview, 7, false, "status_retained_indefinitely")
 	if preview.Applied {
 		t.Fatal("preview unexpectedly applied")
 	}

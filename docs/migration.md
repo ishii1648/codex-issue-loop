@@ -1,6 +1,6 @@
 # 永続state schema / semantic migration runbook
 
-現行artifactのstorage schemaはv5、semantic contractはv4、Issue lifecycle APIはv2.0である。storageはv4からv5へのforward migrationをサポートし、v5に旧runtime fieldまたは旧statusが残る入力は拒否する。binaryの`version --json`、install manifest、`migrate --json`はstorage schema、semantic contract、Issue lifecycle APIのcurrent/minimumを表示する。
+現行artifactのstorage schemaはv5、semantic contractはv4、Issue lifecycle APIはv2.1である。v2.1 runtimeは同一majorのv2.0 snapshotとprepared transactionを読み取り時に互換正規化し、次のstate更新でv2.1として保存する。storageはv4からv5へのforward migrationをサポートし、v5に旧runtime fieldまたは旧statusが残る入力は拒否する。binaryの`version --json`、install manifest、`migrate --json`はstorage schema、semantic contract、Issue lifecycle APIのcurrent/minimumを表示する。
 
 contract v4はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。実行statusではroot `active_execution`、Issue `generation`、`workspace`の一致を要求し、待機時の再開材料をIssue-localな`continuation`、`continuation.evidence`、`suspension`へ分離する。宣言、対象status、validator、migration ruleは`internal/domain/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
 

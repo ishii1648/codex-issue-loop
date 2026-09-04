@@ -1021,6 +1021,26 @@ func TestDurableStateRejectsUnknownIssueStatus(t *testing.T) {
 	}
 }
 
+func TestLifecycleAPIPreviousMinorNormalizesCompatibly(t *testing.T) {
+	store := newStore(t)
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(string(encoded), `"issue_lifecycle_api_version":"`+issuedomain.LifecycleAPICurrent+`"`, `"issue_lifecycle_api_version":"`+issuedomain.LifecycleAPIPreviousMinor+`"`, 1)
+	var decoded Snapshot
+	if err := json.Unmarshal([]byte(legacy), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.IssueLifecycleAPIVersion != issuedomain.LifecycleAPICurrent || decoded.Validate() != nil {
+		t.Fatalf("version=%q validation=%v", decoded.IssueLifecycleAPIVersion, decoded.Validate())
+	}
+}
+
 func TestAttentionReportsOneBlockedIssueWhileAnotherWorkerIsActive(t *testing.T) {
 	snapshot := Snapshot{
 		Supervisor: Supervisor{State: "running"},
@@ -1033,6 +1053,25 @@ func TestAttentionReportsOneBlockedIssueWhileAnotherWorkerIsActive(t *testing.T)
 		t.Fatalf("reason=%q ok=%v", reason, ok)
 	}
 	if reason, ok := snapshot.Attention(true); !ok || reason != "blocked" {
+		t.Fatalf("until-idle reason=%q ok=%v", reason, ok)
+	}
+}
+
+func TestCanceledIssueIsTerminalWithoutStickyAttention(t *testing.T) {
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	snapshot := Snapshot{
+		Supervisor: Supervisor{State: SupervisorStatePolling},
+		Issues: map[string]*Issue{"93": {
+			Number: 93, Status: issuedomain.StatusCanceled,
+			Cancellation:      &Cancellation{Source: "github_not_planned", GitHubStateReason: "NOT_PLANNED", PreviousStatus: issuedomain.StatusBlocked, ExecutionReleaseResult: "not_present", CanceledAt: now},
+			GitHubStateReason: "NOT_PLANNED",
+		}},
+		PendingEffects: map[string]*EffectIntent{}, PendingRequests: map[string]*Request{},
+	}
+	if reason, ok := snapshot.Attention(false); ok {
+		t.Fatalf("reason=%q ok=%v", reason, ok)
+	}
+	if reason, ok := snapshot.Attention(true); !ok || reason != "idle" {
 		t.Fatalf("until-idle reason=%q ok=%v", reason, ok)
 	}
 }
@@ -1082,6 +1121,61 @@ func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 			}
 			events, _, partial, err := store.readEventsUnlocked()
 			if err != nil || partial || len(events) != 2 || events[1].Type != "second" {
+				t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
+			}
+		})
+	}
+}
+
+func TestFaultNotPlannedCancellationRecoversOnceAtEveryTransactionPoint(t *testing.T) {
+	for _, crashPoint := range []string{"prepared", "event_appended", "snapshot_written"} {
+		t.Run(crashPoint, func(t *testing.T) {
+			store := newStore(t)
+			base, err := store.Update("blocked", 93, "run_93", nil, func(snapshot *Snapshot) error {
+				snapshot.Issues["93"] = &Issue{Number: 93, Status: issuedomain.StatusBlocked, RunID: "run_93", LastError: "superseded"}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := base
+			expected := *next.Issues["93"]
+			next.Issues["93"].GitHubStateReason = "NOT_PLANNED"
+			canceledAt := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+			if err := ApplyNotPlannedCancellation(&next, 93, &expected, canceledAt); err != nil {
+				t.Fatal(err)
+			}
+			next.StateRevision++
+			next.Supervisor.UpdatedAt = canceledAt
+			if err := next.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			event := Event{
+				Version: CurrentVersion, EventID: "evt_issue_canceled", Sequence: next.StateRevision, Timestamp: canceledAt,
+				RepoID: store.RepoID, IssueNumber: 93, RunID: "run_93", Type: "issue_canceled",
+			}
+			if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: next, Event: event}, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if crashPoint == "event_appended" || crashPoint == "snapshot_written" {
+				if err := store.appendEventUnlocked(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if crashPoint == "snapshot_written" {
+				if err := fsutil.WriteJSON(store.StatePath(), next, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			loaded, err := store.Load()
+			if err != nil || loaded.Issues["93"].Status != issuedomain.StatusCanceled {
+				t.Fatalf("loaded=%+v err=%v", loaded.Issues["93"], err)
+			}
+			if _, err := store.Load(); err != nil {
+				t.Fatal(err)
+			}
+			events, _, partial, err := store.readEventsUnlocked()
+			if err != nil || partial || len(events) != 2 || events[1].Type != "issue_canceled" {
 				t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
 			}
 		})

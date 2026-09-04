@@ -35,13 +35,14 @@ const (
 	StatusBlocked           Status = "blocked"
 	StatusFailed            Status = "failed"
 	StatusCompleted         Status = "completed"
+	StatusCanceled          Status = "canceled"
 )
 
 var allStatuses = [...]Status{
 	StatusUnset, StatusClaiming, StatusClaimed, StatusRunning,
 	StatusResumePending, StatusRetryWait,
 	StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
-	StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted,
+	StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted, StatusCanceled,
 }
 
 var knownStatuses = func() map[Status]struct{} {
@@ -68,7 +69,7 @@ func (s Status) Validate() error {
 }
 
 func (s Status) Terminal() bool {
-	return s == StatusCompleted || s == StatusFailed || s == StatusBlocked
+	return s == StatusCompleted || s == StatusFailed || s == StatusBlocked || s == StatusCanceled
 }
 
 func (s Status) WorktreeRetentionClass() WorktreeRetentionClass {
@@ -79,6 +80,8 @@ func (s Status) WorktreeRetentionClass() WorktreeRetentionClass {
 		return WorktreeRetainFailed
 	case StatusBlocked:
 		return WorktreeRetainBlocked
+	case StatusCanceled:
+		return WorktreeRetainIndefinitely
 	case StatusNeedsInput, StatusResumePending:
 		return WorktreeRetainAttention
 	default:
