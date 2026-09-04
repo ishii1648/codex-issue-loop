@@ -523,7 +523,7 @@ func diagnoseQueueProgress(l layout.Layout, entry registry.Entry, health queueHe
 	}
 	return failedDiagnostic("WEBHOOK_QUEUE_STALLED", "repository", entry.RepoID,
 		"ready Issueが2 local reconciliation interval以内にclaimされていません", detail,
-		instruction("status --jsonのbroker.queue_healthと阻害中のactive leaseを確認してください"))
+		instruction("status --jsonのbroker.queue_health、state.active_execution、Issue-local suspensionを確認してください"))
 }
 
 func diagnoseFormatters(ctx context.Context, entry registry.Entry, cfg config.Config) []diagnostic {
