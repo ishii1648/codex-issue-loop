@@ -34,6 +34,10 @@ Issueを実行枠から外した理由、recoverability、許可されたoperato
 
 ユーザーまたはoperatorへ提示すべき`needs_input`、`blocked`、`stopped`などの永続状態。回答または定義済みresolutionまでstickyに保持する。
 
+### canceled
+
+operatorの明示cancel、またはGitHubのauthoritativeな`NOT_PLANNED` closeへ安全に収束した解消済みterminal状態。実行枠とsticky attentionを持たず、保存済みworktree、session、回答、continuation、Pull Request identityを保持する。
+
 ### publication
 
 worker完了後の差分を検証し、commit、push、Pull Request作成または再利用を行う決定論的処理。外部副作用のintent/resultはroot `pending_effects`へ保存し、再実行を冪等にする。

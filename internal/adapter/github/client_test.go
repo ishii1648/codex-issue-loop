@@ -46,7 +46,7 @@ func TestFaultCLIInspectReturnsIssueAndPullRequests(t *testing.T) {
 	script := `#!/bin/sh
 case "$1 $2" in
   "issue view")
-    printf '%s\n' '{"number":7,"title":"Test","body":"Body","url":"https://example.test/issues/7","state":"OPEN","labels":[{"name":"codex-loop:running"}],"assignees":[],"milestone":null,"comments":[{"body":"claim"}]}'
+    printf '%s\n' '{"number":7,"title":"Test","body":"Body","url":"https://example.test/issues/7","state":"CLOSED","stateReason":"NOT_PLANNED","labels":[{"name":"codex-loop:running"}],"assignees":[],"milestone":null,"comments":[{"body":"claim"}]}'
     ;;
   "pr list")
     case " $* " in
@@ -67,8 +67,15 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remote.Issue.State != "OPEN" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" || remote.PullRequests[0].BaseRefName != "main" || remote.PullRequests[0].ChecksStatus != "success" || remote.PullRequests[0].MergeCommitSHA != "merge123" || remote.PullRequests[0].HeadRepository != "owner/repo" {
+	if remote.Issue.State != "CLOSED" || remote.Issue.StateReason != "NOT_PLANNED" || len(remote.PullRequests) != 1 || remote.PullRequests[0].Number != 11 || remote.PullRequests[0].HeadRefName != "codex/issue-7-test" || remote.PullRequests[0].BaseRefName != "main" || remote.PullRequests[0].ChecksStatus != "success" || remote.PullRequests[0].MergeCommitSHA != "merge123" || remote.PullRequests[0].HeadRepository != "owner/repo" {
 		t.Fatalf("remote=%+v", remote)
+	}
+}
+
+func TestNormalizeRESTIssuePreservesAuthoritativeStateReason(t *testing.T) {
+	issue := normalizeRESTIssue(restIssue{Number: 93, State: "closed", StateReason: "not_planned"})
+	if issue.State != "CLOSED" || issue.StateReason != "NOT_PLANNED" {
+		t.Fatalf("issue=%+v", issue)
 	}
 }
 

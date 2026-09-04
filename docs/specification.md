@@ -304,6 +304,8 @@ agent-loop start --repo /path/to/repo [--json]
 
 `status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、固定値`limit: 1`、`available`、active Issueを返す。active Issueは`issue_number`、`run_id`、`generation`、`phase`、PID/PGIDを持つ。未回答requestは`pending_requests`へrequest ID順で返す。
 
+Issue snapshotは最後にauthoritative readしたGitHub `state_reason`を`github_state_reason`へ保存する。`canceled`ではさらに、source、旧status、GitHub state reason、execution release結果、時刻を`cancellation`へ保存する。これはworktree、branch、dirty changes、session、answers、attempt/continuation、Pull Request identityを変更する根拠にはしない。
+
 ### 6.4 watch
 
 ```text
@@ -317,6 +319,8 @@ agent-loop watch --repo /path/to/repo --until-attention [--json]
 - supervisorが `blocked`
 - 明示的な停止
 - `--until-idle` も指定された場合のキュー空
+
+`canceled`は解消済みterminal stateであり、`blocked` / `failed` attentionとして返さない。
 
 未回答質問が既に存在する場合、待機せず即時返却する。複数ある場合はすべてを`pending_requests`へrequest ID順で返し、回答側はそのIDに対応するrequestとIssueだけを原子的に変更する。watchはsnapshotとevent logを読み取るだけで、supervisorの親プロセスにはならない。
 
@@ -369,7 +373,7 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 
 `issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`またはIssue-local quarantine envelopeと、現在のprocess、managed worktree、content SHA-256、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。`resume`とpublicationの`retry-stage`は保存時と現在のworktree HEAD・content SHA-256・base ancestryが一致しなければ拒否し、checksの`retry-stage`はcleanかつfully pushedなlocal/remote/PR HEAD一致を要求する。quarantine envelopeだけが残るIssueは`cancel`だけを許可し、そのenvelopeのrevisionと内容が一致する場合に限り解消する。
 
-`issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`はrepositoryの実行枠が空であることを再検査し、generationを一度だけ進めて現在の実行として記録する。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずpending requestをcanceledへ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
+`issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`はrepositoryの実行枠が空であることを再検査し、generationを一度だけ進めて現在の実行として記録する。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずIssueを`canceled`へ、pending requestをrequest-level `canceled`へ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
 
 ambiguousなIssueはその`suspension`またはIssue-local envelopeだけをquarantineする。schedulerはquarantine中のIssueを再admitせず、後続候補の選択を続ける。terminal `blocked` / `failed`はPID/PGIDとrepositoryの実行枠を保持せず、他Issueの選択を妨げない。durable state、label、checkpointを手編集して判定を通してはならない。
 
@@ -464,8 +468,9 @@ starting ──► running ──► stopped
 - `completed`
 - `failed`
 - `blocked`
+- `canceled`
 
-`claimed`、`running`、worker実行中の`resolving_conflict`だけがrepositoryの実行枠を消費する。`needs_input`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、`completed`、`failed`、`blocked`は実行枠を消費せず、別Issueを選択できる。状態遷移の失敗は対象Issueへ閉じ込め、canonical state全体を解釈できる限りrepository状態を`blocked`へ遷移させない。
+`claimed`、`running`、worker実行中の`resolving_conflict`だけがrepositoryの実行枠を消費する。`needs_input`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、`completed`、`failed`、`blocked`、`canceled`は実行枠を消費せず、別Issueを選択できる。`canceled` worktreeは自動cleanup対象にせず、既存の明示purge安全契約へ引き渡す。状態遷移の失敗は対象Issueへ閉じ込め、canonical state全体を解釈できる限りrepository状態を`blocked`へ遷移させない。
 
 すべての遷移はsnapshotとeventを一つのtransactionとして記録し、再起動時にsnapshot、GitHub、process、worktreeを照合する。
 
@@ -774,7 +779,7 @@ transactionなしでsnapshotとevent logが食い違う場合、途中に壊れ�
 
 ### 12.4 永続schemaとIssue lifecycle APIのmigration
 
-config、registry、state、active event log、prepared transactionの現行storage schemaはv5、state semantic contractはv4とする。Issue lifecycle APIはstorage schemaと独立した`major.minor`を持つ。release artifactは`state_schema_current`、`state_schema_migration_from`、`semantic_contract_current`、`semantic_contract_minimum`、`issue_lifecycle_api_current`、`issue_lifecycle_api_minimum`を`version --json`とinstall manifestへ埋め込む。
+config、registry、state、active event log、prepared transactionの現行storage schemaはv5、state semantic contractはv4、Issue lifecycle APIはv2.1とする。v2.0 snapshotとprepared transactionは同一majorの互換入力として読み取り時にv2.1へ正規化する。Issue lifecycle APIはstorage schemaと独立した`major.minor`を持つ。release artifactは`state_schema_current`、`state_schema_migration_from`、`semantic_contract_current`、`semantic_contract_minimum`、`issue_lifecycle_api_current`、`issue_lifecycle_api_minimum`を`version --json`とinstall manifestへ埋め込む。
 
 storage schemaは保存形式、semantic contractはfieldの検証規則、Issue lifecycle APIは外部状態の意味と遷移契約を表す。保存形式を変更しても、決定的migrationによって同じ公開状態、terminal判定、実行枠消費、再開可否を維持できる場合はIssue lifecycle APIのmajor versionを変更しない。
 
@@ -896,7 +901,8 @@ supervisor起動時に次を行う。
 6. merge済みPRがあれば完了へ収束させ、旧versionでcompletedにされたopen PRはCI/merge監視へ戻す
 7. 実行途中でworkerが消えていればretryへ移す
 8. 未回答requestはneeds_inputのまま保持する
-9. reconciliationイベントを記録してpollingを開始する
+9. terminal `blocked` / `failed`のGitHub state reasonを取得し、安全条件を満たす`NOT_PLANNED` closeを`canceled`へ収束させる
+10. reconciliationイベントを記録してpollingを開始する
 
 reconciliationでは、永続状態を処理履歴の正本、GitHubとGit worktreeを外部事実の正本として扱う。次の不一致は、重複実行や人手変更の上書きを生じない範囲で自動収束させる。
 
@@ -910,6 +916,9 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 | PRがmerge済み | Issueをcompletedへ移し、未反映のdone label/commentを再同期する |
 | needs-input、done、failedのlabel/comment同期が途中 | marker付きcommentを照合し、不足しているGitHub更新だけを再実行する |
 | running labelだけが欠落し、worktreeが整合 | running labelを修復する |
+| terminal `blocked` / `failed`でGitHubが`NOT_PLANNED` close | PID/PGID、pending request、対象Issueのroot `active_execution` ownershipをtransaction内で再検証し、不在なら`not_present`、一致してprocess不在なら安全に`released`として`canceled`へ移す。別Issueの実行権は保持する |
+
+`NOT_PLANNED` cancellationはstartup、periodic、webhook、safety sweepで同じdomain decisionとstate mutationを使う。`issue_canceled` eventはIssue/run、GitHub state reason、旧status、対象Issueの`active_execution` release結果、保存済みPR identity、時刻を記録する。event・snapshot・pending terminal effectの解放は一つのtransactionであり、delivery再送、restart、prepared transaction replayで二重eventや二重releaseを行わない。対象Issueのactive processまたはownership不整合、PID/PGID、未回答request、未知または空のstate reason、複数/不一致PR、非terminal statusではfail closedとし、processをsignalせず成果物を削除しない。
 
 次の不一致は自動で上書きせず、Issueを `blocked` にして理由を保存する。
 
@@ -918,6 +927,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - exclusion labelが人手で付与された
 - PRがmergeされずcloseされた、または同じbranchに複数のopen PRがある
 - Issueがdoneを伴わずcloseされた
+- Issueのclose reasonが空、未知、または`COMPLETED`で、他の完了根拠がない
 - 保存済みworktree、local branch、open PRのremote branchが消失した
 - worktreeのbranchが保存値から変更された
 - claim中のready/running labelが両方とも除去された

@@ -11,7 +11,7 @@
 3. Issueが別のactive lifecycleを持たない。
 4. snapshot rootの`active_execution`が空である。
 
-実行開始はIssueのgeneration更新、active statusへの遷移、root `active_execution`の取得を1 transactionで行う。待機・terminal・quarantine状態は実行枠を保持できない。中断後の再開材料はIssue-localな`continuation`、`suspension`、`continuation_evidence`に保存する。
+実行開始はIssueのgeneration更新、active statusへの遷移、root `active_execution`の取得を1 transactionで行う。待機・terminal・quarantine状態は実行枠を保持できない。`canceled`も実行枠を持たず、旧lease/parkを復活させずに後続Issueをadmitする。中断後の再開材料はIssue-localな`continuation`、`suspension`、`continuation_evidence`に保存する。
 
 旧fieldと旧statusはcurrent v5 runtime入力ではfail closedで拒否する。v4 snapshotからのupgrade時だけmigration decoderが意味を失わない範囲で現行構造へ変換する。変換不能な入力を推測で復旧しない。
 

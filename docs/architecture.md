@@ -174,6 +174,8 @@ checkpointは同じ作業を継続するためのworkspace、branch、base、ses
 
 reconcilerは「workerが消えた」「PRが既に存在する」「merge済み」「label同期が不足」などの事実を正規化し、通常と同じ`Decide`へ渡す。事実ごとの専用status、専用command、専用state mutationを作らない。event logの文言や件数からauthorityを合成しない。
 
+GitHub Issueがauthoritativeに`NOT_PLANNED`でcloseされている場合、terminal `blocked` / `failed`かつPID/PGID、pending request、active processがなく、保存済みPR identityが一意に一致するときだけ共通reconcilerが`canceled`へ遷移する。対象Issueにroot `active_execution`が残っていればIssue/run/generation一致をtransaction内で再検証して解放し、不一致ならfail closedとする。別Issueの`active_execution`は所有権を照合して保持する。worktreeと成果物は変更せず、`issue_canceled`をsnapshotと同じtransactionへ記録する。
+
 ## 9. 障害境界
 
 | 範囲 | 例 | 設計上の処理 |
