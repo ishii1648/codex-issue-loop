@@ -165,7 +165,7 @@ func ConfirmWorkerStarted(from Status) (Transition, error) {
 }
 
 func RecoverUnstartedWorker(from, target Status) (Transition, error) {
-	if target != StatusLaunching && target != StatusRetryWait {
+	if target != StatusLaunching && target != StatusRetryWait && target != StatusBlocked {
 		return Transition{}, fmt.Errorf("recover unstarted worker does not allow target status %q", target)
 	}
 	return newAllowedTransition("recover_unstarted_worker", from, target, StatusRunning)
