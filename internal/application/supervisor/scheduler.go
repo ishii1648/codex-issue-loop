@@ -148,7 +148,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 			OutcomeCode: "started", ReasonCode: "scheduler_wake", Trigger: trigger,
 			ScheduledDeadline: scheduledDeadline, AttemptAllowed: !s.pollAt.After(cycleStarted), CoalescedWakeCount: coalescedWakeCount,
 		}); err != nil {
-			return failure.Wrap(failure.Supervisor, "record scheduler cycle signal", err)
+			l.Logger.Printf("record scheduler cycle signal: %v", err)
 		}
 		result, scheduleErr := s.schedule(ctx, pollCandidates)
 		elapsed := l.now().Sub(cycleStarted)
@@ -172,7 +172,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 			OutcomeCode: cycleOutcome, ReasonCode: cycleReason, OperationCode: "scheduler_cycle", ElapsedMS: elapsed.Milliseconds(), DeadlineRemainingMS: deadlineRemaining,
 			ProgressStalled: degraded, ThresholdExceeded: degraded,
 		}); err != nil {
-			return failure.Wrap(failure.Supervisor, "record scheduler duration signal", err)
+			l.Logger.Printf("record scheduler duration signal: %v", err)
 		}
 		if result.githubAttempted {
 			outcome, reason := "failed", "github_queue_poll_failed"
@@ -183,7 +183,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				RunID: s.runtimeRunID, CycleID: cycleID, Kind: "event", Name: "external_attempt_completed", Component: "github", Phase: "poll",
 				OutcomeCode: outcome, ReasonCode: reason, Provider: "github", OperationCode: "list_ready_issues",
 			}); err != nil {
-				return failure.Wrap(failure.Supervisor, "record GitHub attempt signal", err)
+				l.Logger.Printf("record GitHub attempt signal: %v", err)
 			}
 		}
 		if result.githubSucceeded {
@@ -191,7 +191,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				RunID: s.runtimeRunID, CycleID: cycleID, EpisodeID: s.retryEpisodeID(), Kind: "status", Name: "progress", Component: "scheduler", Phase: "poll",
 				OutcomeCode: "succeeded", ReasonCode: "github_queue_progress", ProgressKind: "github_poll",
 			}); err != nil {
-				return failure.Wrap(failure.Supervisor, "record scheduler progress signal", err)
+				l.Logger.Printf("record scheduler progress signal: %v", err)
 			}
 		}
 		pollCandidates = false
@@ -540,14 +540,14 @@ func (s *scheduler) handleCycleError(cause error) error {
 		s.cooldownUntil = cooldown.ResetAt
 		s.pollAt = cooldown.ResetAt
 		if err := s.recordRetrySignals(cause, "github_rate_limit", s.consecutiveFailures, cooldown.ResetAt, false); err != nil {
-			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "record rate-limit incident signal", err), failure.Supervisor, s.consecutiveFailures)
+			s.loop.Logger.Printf("record rate-limit incident signal: %v", err)
 		}
 		if err := s.loop.recordIncidentSignal(incidentloop.Signal{
 			RunID: s.runtimeRunID, EpisodeID: s.retryEpisodeID(), Kind: "event", Name: "external_attempt_completed", Component: "github", Phase: "poll",
 			OutcomeCode: "rate_limited", ReasonCode: "github_rate_limit", Provider: "github", OperationCode: "list_ready_issues",
 			RateLimitResource: cooldown.Resource, ResetAt: &cooldown.ResetAt,
 		}); err != nil {
-			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "record rate-limit attempt signal", err), failure.Supervisor, s.consecutiveFailures)
+			s.loop.Logger.Printf("record rate-limit attempt signal: %v", err)
 		}
 		s.loop.Logger.Printf("GitHub %s primary rate limit reached; suppressing requests until %s (source=%s)", cooldown.Resource, cooldown.ResetAt.Format(time.RFC3339), cooldown.Source)
 		if err := s.loop.recordSupervisorRateLimit(cause, s.consecutiveFailures, cooldown); err != nil {
@@ -556,9 +556,13 @@ func (s *scheduler) handleCycleError(cause error) error {
 		return nil
 	}
 	kind := failure.KindOf(cause)
+	if kind == failure.Issue {
+		s.loop.Logger.Printf("Issue-local scheduler cycle failure did not stop the queue: %v", cause)
+		return nil
+	}
 	if kind == failure.Supervisor {
 		if err := s.loop.recordFailureSignal("supervisor", "poll", 0, s.runtimeRunID, s.retryEpisodeID(), "supervisor_failure", cause, s.consecutiveFailures+1, nil, true); err != nil {
-			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "record supervisor failure signal", err), failure.Supervisor, s.consecutiveFailures+1)
+			s.loop.Logger.Printf("record supervisor failure signal: %v", err)
 		}
 		return s.loop.blockSupervisor(cause, kind, s.consecutiveFailures+1)
 	}
@@ -566,14 +570,14 @@ func (s *scheduler) handleCycleError(cause error) error {
 	s.loop.Logger.Printf("scheduler cycle failed (%d, %s): %v", s.consecutiveFailures, kind, cause)
 	if s.consecutiveFailures >= 5 {
 		if err := s.loop.recordFailureSignal("scheduler", "poll", 0, s.runtimeRunID, s.retryEpisodeID(), "scheduler_retry_exhausted", cause, s.consecutiveFailures, nil, true); err != nil {
-			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "record retry exhaustion signal", err), failure.Supervisor, s.consecutiveFailures)
+			s.loop.Logger.Printf("record retry exhaustion signal: %v", err)
 		}
 		return s.loop.blockSupervisor(cause, kind, s.consecutiveFailures)
 	}
 	delay := s.loop.retryDelay(s.consecutiveFailures)
 	retryAt := now.Add(delay)
 	if err := s.recordRetrySignals(cause, "scheduler_cycle_failed", s.consecutiveFailures, retryAt, false); err != nil {
-		return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "record scheduler retry signal", err), failure.Supervisor, s.consecutiveFailures)
+		s.loop.Logger.Printf("record scheduler retry signal: %v", err)
 	}
 	if err := s.loop.recordSupervisorRetry(cause, kind, s.consecutiveFailures, delay); err != nil {
 		return BlockedError{Err: failure.Wrap(failure.Supervisor, "persist supervisor retry", err)}
@@ -650,6 +654,11 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 			if delivery.Event == "issues" && delivery.Action == "collection_exited" {
 				converged, reconcileErr := s.loop.reconcileCollectionExit(ctx, *local, delivery)
 				if reconcileErr != nil {
+					if failure.KindOf(reconcileErr) == failure.Issue {
+						s.loop.Logger.Printf("Issue #%d webhook reconciliation failed without stopping the queue: %v", number, reconcileErr)
+						acknowledged = append(acknowledged, delivery)
+						continue
+					}
 					return nil, acknowledged, reconcileErr
 				}
 				if converged {
@@ -663,6 +672,11 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 			if local.Status.TerminalForWebhook() {
 				handled, reconcileErr := s.loop.reconcileTerminalWebhook(ctx, *local, delivery)
 				if reconcileErr != nil {
+					if failure.KindOf(reconcileErr) == failure.Issue {
+						s.loop.Logger.Printf("Issue #%d terminal webhook reconciliation failed without stopping the queue: %v", number, reconcileErr)
+						acknowledged = append(acknowledged, delivery)
+						continue
+					}
 					return nil, acknowledged, reconcileErr
 				}
 				if handled {
@@ -691,6 +705,11 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 				return nil
 			})
 			if updateErr != nil {
+				if failure.KindOf(updateErr) == failure.Issue {
+					s.loop.Logger.Printf("Issue #%d webhook wake failed without stopping the queue: %v", number, updateErr)
+					acknowledged = append(acknowledged, delivery)
+					continue
+				}
 				return nil, acknowledged, updateErr
 			}
 			acknowledged = append(acknowledged, delivery)
@@ -702,7 +721,7 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		}
 		candidate, getErr := s.loop.getIssue(ctx, number)
 		if getErr != nil {
-			return nil, acknowledged, getErr
+			return nil, acknowledged, failure.Wrap(failure.Transient, fmt.Sprintf("read webhook Issue #%d", number), getErr)
 		}
 		if gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
 			candidates = append(candidates, candidate)
@@ -909,7 +928,8 @@ func (s *scheduler) handleEvent(event schedulerEvent) error {
 	}
 	job, ok := s.active[event.IssueNumber]
 	if !ok || job.runID != event.RunID {
-		return failure.Wrap(failure.Supervisor, "handle scheduler event", fmt.Errorf("stale event for Issue #%d run %s", event.IssueNumber, event.RunID))
+		s.loop.Logger.Printf("ignored stale scheduler event for Issue #%d run %s", event.IssueNumber, event.RunID)
+		return nil
 	}
 	job.cancel()
 	delete(s.active, event.IssueNumber)

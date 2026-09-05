@@ -19,3 +19,17 @@ func TestUnclassifiedErrorDefaultsToIssueIsolation(t *testing.T) {
 		t.Fatalf("kind=%s", got)
 	}
 }
+
+type scopedIssueError struct{ err error }
+
+func (scopedIssueError) IssueScope() int { return 42 }
+func (e scopedIssueError) Error() string { return e.err.Error() }
+func (e scopedIssueError) Unwrap() error { return e.err }
+
+func TestSupervisorWrapCannotPromoteIssueScopedError(t *testing.T) {
+	base := errors.New("lifecycle changed")
+	err := Wrap(Supervisor, "persist lifecycle", scopedIssueError{err: base})
+	if got := KindOf(err); got != Issue || !errors.Is(err, base) {
+		t.Fatalf("classification=%s error=%v", got, err)
+	}
+}

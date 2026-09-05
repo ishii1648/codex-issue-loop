@@ -102,6 +102,16 @@ func TestStateAndEventsNeverPersistSecrets(t *testing.T) {
 	}
 }
 
+func TestUpdateIdentifiesIssueMutationFailure(t *testing.T) {
+	store := newStore(t)
+	base := errors.New("Issue lifecycle changed")
+	_, err := store.Update("issue_changed", 42, "run-42", nil, func(*Snapshot) error { return base })
+	var mutationErr IssueMutationError
+	if !errors.As(err, &mutationErr) || mutationErr.IssueNumber != 42 || !errors.Is(err, base) {
+		t.Fatalf("error=%T %v", err, err)
+	}
+}
+
 func TestLegacyGoalSnapshotIsIgnoredWithoutLosingContinuationState(t *testing.T) {
 	store := newStore(t)
 	snapshot := store.emptySnapshot()

@@ -36,6 +36,10 @@ func Wrap(kind Kind, operation string, err error) error {
 	if errors.As(err, &classified) {
 		return err
 	}
+	var scoped interface{ IssueScope() int }
+	if errors.As(err, &scoped) && scoped.IssueScope() > 0 {
+		kind = Issue
+	}
 	return &Error{Kind: kind, Operation: operation, Err: err}
 }
 

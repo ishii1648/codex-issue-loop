@@ -159,14 +159,14 @@ func (l *Loop) Run(ctx context.Context) error {
 		return err
 	}
 	if err := l.recordRuntimeIdentity(); err != nil {
-		return failure.Wrap(failure.Supervisor, "record runtime identity signal", err)
+		l.Logger.Printf("record runtime identity signal: %v", err)
 	}
 	if watchErr != nil {
 		if err := l.recordIncidentSignal(incidentloop.Signal{
 			Kind: "event", Name: "host_diagnostic", Component: "host", Phase: "startup",
 			OutcomeCode: "observed", ReasonCode: "fsnotify_unavailable", FailureKind: "supervisor", FailureCode: "fsnotify_unavailable", Resumable: true,
 		}); err != nil {
-			return failure.Wrap(failure.Supervisor, "record host diagnostic signal", err)
+			l.Logger.Printf("record host diagnostic signal: %v", err)
 		}
 	}
 
@@ -751,11 +751,11 @@ func deadlinePointer(value time.Time) *time.Time { return &value }
 func (l *Loop) issueState(number int) (state.Issue, error) {
 	snapshot, err := l.Store.Load()
 	if err != nil {
-		return state.Issue{}, err
+		return state.Issue{}, failure.Wrap(failure.Supervisor, "load durable state", err)
 	}
 	item := snapshot.Issues[strconv.Itoa(number)]
 	if item == nil {
-		return state.Issue{}, fmt.Errorf("Issue #%d is missing from state", number)
+		return state.Issue{}, failure.Wrap(failure.Issue, "load Issue state", fmt.Errorf("Issue #%d is missing from state", number))
 	}
 	return *item, nil
 }
