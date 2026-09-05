@@ -108,7 +108,7 @@ func TestSessionResumeNeverCrossesBackendNamespace(t *testing.T) {
 func TestFailIssueDoesNotSynthesizeMissingState(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	err := loop.failIssue(context.Background(), 999, failure.Wrap(failure.Issue, "fixture", errors.New("failed")), false)
-	if err == nil || failure.KindOf(err) != failure.Supervisor || !strings.Contains(err.Error(), "load Issue before failure transition") {
+	if err == nil || failure.KindOf(err) != failure.Issue || !strings.Contains(err.Error(), "load Issue state") {
 		t.Fatalf("error=%v kind=%s", err, failure.KindOf(err))
 	}
 	snapshot, loadErr := loop.Store.Load()

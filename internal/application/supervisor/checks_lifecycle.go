@@ -146,7 +146,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 		})
 		return failure.Wrap(failure.Supervisor, "persist Pull Request ready state", err)
 	default:
-		return failure.Wrap(failure.Supervisor, "inspect Pull Request checks", fmt.Errorf("unknown check status %q", selected.ChecksStatus))
+		return failure.Wrap(failure.Issue, "inspect Pull Request checks", fmt.Errorf("unknown check status %q", selected.ChecksStatus))
 	}
 }
 

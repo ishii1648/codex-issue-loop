@@ -50,7 +50,7 @@ func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) er
 	}
 	claimTransition, err := issuedomain.ConfirmClaim(issuedomain.StatusClaiming)
 	if err != nil {
-		return failure.Wrap(failure.Supervisor, "decide claimed Issue", err)
+		return failure.Wrap(failure.Issue, "decide claimed Issue", err)
 	}
 	_, err = l.Store.Update("issue_claimed", issue.Number, runID, map[string]any{"title": issue.Title}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
@@ -73,7 +73,7 @@ func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) er
 func (l *Loop) runClaimed(ctx context.Context, issue gh.Issue, runID string, wt worktree.Result, launch worktree.LaunchValidation, workspace state.WorkerWorkspace) error {
 	workerTransition, err := issuedomain.StartClaimedWorker(issuedomain.StatusClaimed)
 	if err != nil {
-		return failure.Wrap(failure.Supervisor, "decide initial worker start", err)
+		return failure.Wrap(failure.Issue, "decide initial worker start", err)
 	}
 	_, err = l.Store.Update("worker_started", issue.Number, runID, map[string]any{
 		"worktree": wt.Path, "branch": wt.Branch, "identity": l.WorkerIdentity,

@@ -444,6 +444,9 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		lastValid = cloneIssue(snapshot.Issues[strconv.Itoa(issueNumber)])
 	}
 	if err := mutate(&snapshot); err != nil {
+		if issueNumber > 0 {
+			return Snapshot{}, IssueMutationError{IssueNumber: issueNumber, Err: err}
+		}
 		return Snapshot{}, err
 	}
 	normalizeSnapshot(&snapshot)
@@ -491,6 +494,17 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+type IssueMutationError struct {
+	IssueNumber int
+	Err         error
+}
+
+func (e IssueMutationError) Error() string { return e.Err.Error() }
+func (e IssueMutationError) Unwrap() error { return e.Err }
+func (e IssueMutationError) IssueScope() int {
+	return e.IssueNumber
 }
 
 func isolateInvalidIssue(snapshot *Snapshot, issueNumber int, lastValid *Issue, cause error, now time.Time) bool {

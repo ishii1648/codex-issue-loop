@@ -2,7 +2,9 @@ package supervisor
 
 import (
 	"context"
-	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"errors"
+	"io"
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 )
 
@@ -88,6 +91,25 @@ func TestInvalidRetryDecisionIsIssueScoped(t *testing.T) {
 	}, "unexpected lifecycle state")
 	if got := failure.KindOf(err); got != failure.Issue {
 		t.Fatalf("kind=%s err=%v", got, err)
+	}
+}
+
+func TestIssueSchedulerFailureNeverEscalatesToSupervisor(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	s := &scheduler{loop: loop, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	cause := failure.Wrap(failure.Issue, "reconcile Issue", errors.New("invalid transition"))
+	for range 6 {
+		if err := s.handleCycleError(cause); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Supervisor.State == state.SupervisorStateBlocked || s.consecutiveFailures != 0 {
+		t.Fatalf("supervisor=%+v failures=%d", snapshot.Supervisor, s.consecutiveFailures)
 	}
 }
 

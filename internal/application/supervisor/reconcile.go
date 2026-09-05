@@ -17,6 +17,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 )
 
 var errReconciliationStateChanged = errors.New("durable Issue state changed during reconciliation")
@@ -87,11 +88,20 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			}
 			remote, err := l.inspectReconciliationIssue(ctx, *current)
 			if err != nil {
-				return fmt.Errorf("reconcile GitHub state for Issue #%d: %w", number, err)
+				if _, limited := cooldownFromError(err, l.now()); limited {
+					return fmt.Errorf("reconcile GitHub state for Issue #%d: %w", number, err)
+				}
+				l.Logger.Printf("Issue #%d startup GitHub reconciliation deferred without stopping the queue: %v", number, err)
+				break
 			}
 			considered, canceled, cancelErr := l.reconcileNotPlannedCancellation(latest, *current, remote, "startup_reconciliation", nil)
 			if cancelErr != nil {
-				return fmt.Errorf("cancel not planned Issue #%d during startup reconciliation: %w", number, cancelErr)
+				var mutationErr state.IssueMutationError
+				if !errors.As(cancelErr, &mutationErr) {
+					return cancelErr
+				}
+				l.Logger.Printf("Issue #%d startup cancellation failed without stopping the queue: %v", number, cancelErr)
+				break
 			}
 			if canceled {
 				break
@@ -119,7 +129,11 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 					continue
 				}
 				if err != nil {
-					return err
+					var mutationErr state.IssueMutationError
+					if !errors.As(err, &mutationErr) {
+						return err
+					}
+					l.Logger.Printf("Issue #%d terminal startup reconciliation failed without stopping the queue: %v", number, err)
 				}
 				break
 			}
@@ -127,7 +141,8 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			if current.Worktree != "" {
 				inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
 				if err != nil {
-					return fmt.Errorf("reconcile worktree for Issue #%d: %w", number, err)
+					l.Logger.Printf("Issue #%d startup worktree reconciliation failed without stopping the queue: %v", number, err)
+					break
 				}
 			}
 			decision := l.decideReconciliation(latest, *current, remote, inspection)
@@ -136,12 +151,14 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			}
 			lifecycleTransition, transitionErr := issuedomain.ReconcileObservation(current.Status, decision.status)
 			if transitionErr != nil {
-				return fmt.Errorf("decide startup lifecycle reconciliation for Issue #%d: %w", number, transitionErr)
+				l.Logger.Printf("Issue #%d startup lifecycle reconciliation failed without stopping the queue: %v", number, transitionErr)
+				break
 			}
 			predicateReport := startupReconciliationPredicateReport(number, decision)
 			if decision.markRunning {
 				if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
-					return fmt.Errorf("repair running label for Issue #%d: %w", number, err)
+					l.Logger.Printf("Issue #%d startup running-label repair deferred without stopping the queue: %v", number, err)
+					break
 				}
 			}
 			request := singlePendingRequest(latest, number)
@@ -214,7 +231,11 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				continue
 			}
 			if err != nil {
-				return err
+				var mutationErr state.IssueMutationError
+				if !errors.As(err, &mutationErr) {
+					return err
+				}
+				l.Logger.Printf("Issue #%d startup state reconciliation failed without stopping the queue: %v", number, err)
 			}
 			break
 		}
@@ -281,7 +302,7 @@ func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue
 	}
 	remote, err := l.inspectReconciliationIssue(ctx, current)
 	if err != nil {
-		return false, fmt.Errorf("inspect terminal Issue #%d for webhook %s: %w", current.Number, delivery.DeliveryID, err)
+		return false, failure.Wrap(failure.Transient, fmt.Sprintf("inspect terminal Issue #%d for webhook %s", current.Number, delivery.DeliveryID), err)
 	}
 	return l.applyWebhookReconciliation(ctx, current, delivery, remote, false)
 }
@@ -292,7 +313,7 @@ func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue
 func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
 	remote, err := l.inspectReconciliationIssue(ctx, current)
 	if err != nil {
-		return false, fmt.Errorf("inspect collection exit for Issue #%d from webhook %s: %w", current.Number, delivery.DeliveryID, err)
+		return false, failure.Wrap(failure.Transient, fmt.Sprintf("inspect collection exit for Issue #%d from webhook %s", current.Number, delivery.DeliveryID), err)
 	}
 	if !current.Status.TerminalForWebhook() && expectedActiveCollectionExit(current, remote.Issue, l.Config.GitHub) {
 		return false, nil
@@ -303,7 +324,7 @@ func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue,
 func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Issue, delivery webhook.Delivery, remote gh.RemoteState, forceTerminal bool) (bool, error) {
 	latest, err := l.Store.Load()
 	if err != nil {
-		return false, err
+		return false, failure.Wrap(failure.Supervisor, "load webhook reconciliation state", err)
 	}
 	latestItem := latest.Issues[strconv.Itoa(current.Number)]
 	if latestItem == nil || !reflect.DeepEqual(latestItem, &current) {
@@ -326,7 +347,7 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 	if current.Worktree != "" {
 		inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
 		if err != nil {
-			return false, fmt.Errorf("inspect terminal worktree for Issue #%d: %w", current.Number, err)
+			return false, failure.Wrap(failure.Issue, fmt.Sprintf("inspect terminal worktree for Issue #%d", current.Number), err)
 		}
 	}
 	decision := l.decideReconciliation(latest, current, remote, inspection)
@@ -344,7 +365,7 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 	}
 	lifecycleTransition, transitionErr := issuedomain.ReconcileObservation(current.Status, decision.status)
 	if transitionErr != nil {
-		return false, fmt.Errorf("decide webhook lifecycle reconciliation for Issue #%d: %w", current.Number, transitionErr)
+		return false, failure.Wrap(failure.Issue, fmt.Sprintf("decide webhook lifecycle reconciliation for Issue #%d", current.Number), transitionErr)
 	}
 	_, err = l.Store.Update("webhook_terminal_reconciled", current.Number, current.RunID, map[string]any{
 		"delivery_id": delivery.DeliveryID,

@@ -53,6 +53,13 @@ type recordingIncidentSignals struct {
 	signals []incidentloop.Signal
 }
 
+type failingIncidentSignals struct{ calls int }
+
+func (f *failingIncidentSignals) Record(incidentloop.Signal) error {
+	f.calls++
+	return errors.New("signal store unavailable")
+}
+
 func (r *recordingIncidentSignals) Record(signal incidentloop.Signal) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -684,6 +691,55 @@ func TestStartupReconciliationObservesRateLimitWithoutExiting(t *testing.T) {
 	}
 }
 
+func TestStartupIssueInspectionFailureDoesNotStopSupervisor(t *testing.T) {
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.GitHub = &startupRateLimitGitHub{fakeGitHub: fake, inspectErr: errors.New("Issue-specific inspection failed")}
+	_, err := loop.Store.Update("failed_fixture", 7, "run-7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusFailed, RunID: "run-7"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileStartup(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil || snapshot.Issues["7"] == nil || snapshot.Issues["7"].Status != issuedomain.StatusFailed || snapshot.Supervisor.State == state.SupervisorStateBlocked {
+		t.Fatalf("issue=%+v supervisor=%+v err=%v", snapshot.Issues["7"], snapshot.Supervisor, err)
+	}
+}
+
+func TestStaleSchedulerEventDoesNotStopSupervisor(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Logger = log.New(io.Discard, "", 0)
+	s := &scheduler{loop: loop, active: map[int]activeJob{}}
+	if err := s.handleEvent(schedulerEvent{Kind: schedulerJobFinished, IssueNumber: 7, RunID: "stale-run"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIncidentSignalFailureDoesNotStopScheduler(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.Logger = log.New(io.Discard, "", 0)
+	recorder := &failingIncidentSignals{}
+	loop.IncidentSignals = recorder
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := loop.runSchedulerEvents(ctx, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.calls == 0 {
+		t.Fatal("scheduler did not attempt to record an incident signal")
+	}
+}
+
 func TestStartupReconciliationUsesSharedCooldownBeforeGitHub(t *testing.T) {
 	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
 	resetAt := now.Add(20 * time.Minute)
@@ -967,6 +1023,55 @@ func TestWebhookMailboxCompactsSafeIntentsBeforeTargetReconciliationFailure(t *t
 	}
 	if github.restGets != 1 {
 		t.Fatalf("targeted reads=%d want=1", github.restGets)
+	}
+}
+
+func TestWebhookIssueReconciliationFailureIsAcknowledgedWithoutStoppingQueue(t *testing.T) {
+	loop, baseGitHub := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.Logger = log.New(io.Discard, "", 0)
+	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
+	github.issue = gh.Issue{Number: 1, State: "closed", StateReason: "NOT_PLANNED", Labels: loop.Config.GitHub.ReadyLabels}
+	loop.GitHub = github
+	_, err := loop.Store.Update("canceled_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Status: issuedomain.StatusCanceled, RunID: "run-1",
+			Cancellation: &state.Cancellation{
+				Source: "operator", PreviousStatus: issuedomain.StatusFailed,
+				ExecutionReleaseResult: "not_present", CanceledAt: loop.now(),
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := webhook.Delivery{
+		Version: webhook.InboxVersion, DeliveryID: "late-collection-exit", Event: "issues", Action: "collection_exited",
+		RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: loop.now(),
+	}
+	if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, acknowledged, err := s.processMailbox(context.Background(), snapshot)
+	if err != nil || len(acknowledged) != 1 || acknowledged[0].DeliveryID != delivery.DeliveryID {
+		t.Fatalf("acknowledged=%v err=%v", acknowledged, err)
+	}
+	if err := webhook.AckMailbox(loop.Store.Dir, acknowledged); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := webhook.ReadMailbox(loop.Store.Dir)
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("remaining=%v err=%v", remaining, err)
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil || snapshot.Issues["1"] == nil || snapshot.Issues["1"].Status != issuedomain.StatusCanceled || snapshot.Supervisor.State == state.SupervisorStateBlocked {
+		t.Fatalf("issue=%+v supervisor=%+v err=%v", snapshot.Issues["1"], snapshot.Supervisor, err)
 	}
 }
 

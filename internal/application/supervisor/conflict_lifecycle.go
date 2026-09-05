@@ -84,7 +84,7 @@ func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, p
 		}
 		persisted := updated.Issues[strconv.Itoa(current.Number)]
 		if persisted == nil {
-			return failure.Wrap(failure.Supervisor, "reload conflict recovery base budget", fmt.Errorf("Issue #%d is missing after commit", current.Number))
+			return failure.Wrap(failure.Issue, "reload conflict recovery base budget", fmt.Errorf("Issue #%d is missing after commit", current.Number))
 		}
 		current = *persisted
 		return l.failConflictRecovery(ctx, current, fmt.Sprintf("base update budget exceeded (%d > %d)", baseUpdates, l.Config.ConflictRecovery.MaxBaseUpdates))
@@ -397,7 +397,7 @@ func (l *Loop) scheduleConflictRetry(ctx context.Context, current state.Issue, r
 			}
 			persisted := updated.Issues[strconv.Itoa(current.Number)]
 			if persisted == nil {
-				return failure.Wrap(failure.Supervisor, "reload conflict recovery exhausted budget", fmt.Errorf("Issue #%d is missing after commit", current.Number))
+				return failure.Wrap(failure.Issue, "reload conflict recovery exhausted budget", fmt.Errorf("Issue #%d is missing after commit", current.Number))
 			}
 			current = *persisted
 		}
@@ -453,7 +453,7 @@ func (l *Loop) failConflictRecovery(ctx context.Context, current state.Issue, re
 		}
 		persisted := updated.Issues[strconv.Itoa(current.Number)]
 		if persisted == nil {
-			return failure.Wrap(failure.Supervisor, "reload conflict recovery failure", fmt.Errorf("Issue #%d is missing after commit", current.Number))
+			return failure.Wrap(failure.Issue, "reload conflict recovery failure", fmt.Errorf("Issue #%d is missing after commit", current.Number))
 		}
 		current = *persisted
 	}
