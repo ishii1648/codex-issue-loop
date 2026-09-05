@@ -1,5 +1,11 @@
 # Repository instructions
 
+## Durable Issue lifecycle
+
+- 状態語彙、遷移判定、不変条件は `internal/domain/issue` に置き、durable snapshotへのstatus commitは `internal/adapter/state/issue_transition.go` の境界を通す。`internal/application/app` と `internal/application/supervisor` に遷移の正当性判断や生のstatus代入を新設せず、domainからapplication、adapter、platformへの依存を導入しない。
+- 新しい遷移は、domainの語彙・decision・不変条件、永続commit境界、呼び出し側の順に実装する。この順序または境界に例外を設ける場合は、実装前にADRで理由と代替する不変条件を記録する。
+- 詳細な責務境界は [`docs/architecture.md` §3.1](docs/architecture.md#31-durable-issue-lifecycle境界)、公開状態の互換性は [`docs/architecture.md` §10](docs/architecture.md#10-issue-lifecycle-apiと互換性)を正本とし、このファイルへ詳細を重複させない。
+
 ## Comments
 
 - コメントには、コードだけでは十分に表現できない設計意図、制約、不変条件、または呼び出し側が依存するAPI契約だけを書く。
