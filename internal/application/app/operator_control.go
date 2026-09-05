@@ -423,6 +423,15 @@ func waitForOperatorDrain(ctx context.Context, store state.Store, deadline time.
 		if drain.Ready(snapshot) {
 			return nil
 		}
+		if drain.RecoverableUnstartedConflictLaunch(snapshot) {
+			snapshot, _, err = store.RecoverUnstartedConflictLaunch(time.Now().UTC())
+			if err != nil {
+				return fmt.Errorf("recover unstarted conflict launch while draining: %w", err)
+			}
+			if drain.Ready(snapshot) {
+				return nil
+			}
+		}
 		if !time.Now().UTC().Before(deadline) {
 			return errOperatorDrainTimeout
 		}

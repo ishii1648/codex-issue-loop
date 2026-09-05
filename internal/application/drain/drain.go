@@ -2,9 +2,11 @@ package drain
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 )
 
 // Requested fails closed for an unreadable fence: a malformed or inaccessible
@@ -42,4 +44,19 @@ func HasWorker(snapshot state.Snapshot) bool {
 		}
 	}
 	return false
+}
+
+// RecoverableUnstartedConflictLaunch only admits launch authority left by an
+// earlier supervisor generation after the current supervisor entered drain.
+func RecoverableUnstartedConflictLaunch(snapshot state.Snapshot) bool {
+	if snapshot.Supervisor.State != state.SupervisorStateDraining && snapshot.Supervisor.State != state.SupervisorStateMaintenance {
+		return false
+	}
+	active := snapshot.ActiveExecution
+	if active == nil || snapshot.Supervisor.StartedAt.IsZero() || !active.StartedAt.Before(snapshot.Supervisor.StartedAt) {
+		return false
+	}
+	issue := snapshot.Issues[fmt.Sprint(active.IssueNumber)]
+	return issue != nil && issue.Status == issuedomain.StatusLaunching && issue.LaunchSource == issuedomain.StatusResolvingConflict &&
+		issue.WorkerPID == 0 && issue.WorkerPGID == 0
 }

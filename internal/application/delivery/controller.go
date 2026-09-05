@@ -636,7 +636,11 @@ func (c Controller) waitForDrain(ctx context.Context, cfg Config, entries []regi
 	for {
 		progress := DrainProgress{Total: len(entries)}
 		for _, entry := range entries {
-			snapshot, err := (state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}).Load()
+			store := state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+			snapshot, err := store.Load()
+			if err == nil && drain.RecoverableUnstartedConflictLaunch(snapshot) {
+				snapshot, _, err = store.RecoverUnstartedConflictLaunch(c.now())
+			}
 			if err != nil {
 				progress.Waiting = append(progress.Waiting, entry.RepoID+":state_invalid")
 				continue

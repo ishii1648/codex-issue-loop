@@ -104,6 +104,17 @@ func TestConflictPublicationRejectsPathOutsideRecordedScope(t *testing.T) {
 	}
 }
 
+func TestConflictPublicationUsesExactVerificationOutcome(t *testing.T) {
+	recovery := state.ConflictRecovery{TargetBaseSHA: "base", OriginalHeadSHA: "head", ConflictFiles: []string{"shared.txt"}}
+	manager := Manager{}
+	for _, result := range []string{"failed", "pass", "ok", "success", "exit 0", "成功"} {
+		_, err := manager.Publish(context.Background(), config.Config{}, gh.Issue{}, t.TempDir(), "branch", recovery, []worker.Test{{Command: "go test ./...", Result: result}})
+		if err == nil || !strings.Contains(err.Error(), "not explicitly green") {
+			t.Fatalf("result %q: err=%v", result, err)
+		}
+	}
+}
+
 func conflictRepository(t *testing.T, initial, prChange, baseChange string) (string, string, string, config.Config) {
 	t.Helper()
 	root := t.TempDir()

@@ -2281,6 +2281,69 @@ func TestFaultDiskSafetyReserveBlocksSupervisor(t *testing.T) {
 	}
 }
 
+func TestConflictVerificationGreenUsesExactOutcomeVocabulary(t *testing.T) {
+	if !conflictVerificationGreen([]state.ConflictVerification{{Command: "go test ./...", Result: "passed"}}) {
+		t.Fatal("passed verification was not green")
+	}
+	for _, result := range []string{"failed", "pass", "ok", "success", "exit 0", "成功"} {
+		if conflictVerificationGreen([]state.ConflictVerification{{Command: "go test ./...", Result: result}}) {
+			t.Fatalf("result %q unexpectedly green", result)
+		}
+	}
+}
+
+func TestRestartRecoversPIDlessConflictLaunchBeforeMaintenanceDrain(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	now := time.Date(2026, 9, 5, 17, 20, 20, 136638000, time.UTC)
+	loop.Clock = fixedClock{value: now}
+	workspace := fixtureWorkspace(loop, loop.Config.RepoPath, "codex/issue-277")
+	prURL := "https://github.com/ishii1648/codex-issue-loop/pull/281"
+	runID := "conflict_174e861a0a076558"
+	if _, err := loop.Store.Update("fixture_unstarted_conflict_launch", 277, runID, nil, func(snapshot *state.Snapshot) error {
+		item := &state.Issue{
+			Number: 277, Title: "queue-level monitor", Status: issuedomain.StatusLaunching,
+			LaunchSource: issuedomain.StatusResolvingConflict, RunID: runID, Generation: 15,
+			Branch: workspace.Branch, Worktree: workspace.Path, Workspace: workspace,
+			PullRequestURL: prURL, PullRequestNumber: 281, HeadSHA: "684d57bf587e162ed396ed6928f4850ffe488d89", UpdatedAt: now,
+		}
+		item.Continuation = &state.ContinuationCheckpoint{
+			ID: "checkpoint_b5676a437bbfb3dc", CreatedAt: now.Add(-9 * time.Second), RunID: runID, Generation: 14,
+			BaseSHA: "35bcdbd67421986aa7a6a6ab87a81c1352c3e107", Workspace: workspace, HeadSHA: item.HeadSHA,
+			PullRequestURL: prURL, PullRequestNumber: 281, Stage: issuedomain.ContinuationStageChecks,
+		}
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: prURL, PreviousBaseSHA: item.Continuation.BaseSHA,
+			TargetBaseSHA: "812eb89c45087e4ef38105414c9f8a5329d51a70", OriginalHeadSHA: item.HeadSHA,
+			ConflictFiles: []string{"monitor/internal/model/replay.go"},
+		}
+		snapshot.Issues["277"] = item
+		snapshot.ActiveExecution = &state.ActiveExecution{
+			IssueNumber: 277, RunID: runID, Generation: 15, BaseSHA: item.Continuation.BaseSHA, StartedAt: now,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fence := filepath.Join(t.TempDir(), "maintenance")
+	if err := os.WriteFile(fence, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loop.MaintenanceFencePath = fence
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := loop.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["277"]
+	if snapshot.ActiveExecution != nil || item.Status != issuedomain.StatusResolvingConflict || item.LaunchSource != issuedomain.StatusUnset || item.Continuation == nil {
+		t.Fatalf("active=%+v issue=%+v", snapshot.ActiveExecution, item)
+	}
+}
+
 func TestPublicationCheckpointPublishesSavedCompletedResultWithoutWorker(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.issue.State = "OPEN"
@@ -2290,7 +2353,7 @@ func TestPublicationCheckpointPublishesSavedCompletedResultWithoutWorker(t *test
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	resultData := []byte(`{"version":1,"status":"completed","execution_profile":"extended","summary":"verified implementation","question":null,"tests":[{"command":"go test ./...","result":"pass"}],"git":null,"retry":null}`)
+	resultData := []byte(`{"version":1,"status":"completed","execution_profile":"extended","summary":"verified implementation","question":null,"tests":[{"command":"go test ./...","result":"passed"}],"git":null,"retry":null}`)
 	if err := os.WriteFile(filepath.Join(runDir, "result-1.json"), resultData, 0o600); err != nil {
 		t.Fatal(err)
 	}

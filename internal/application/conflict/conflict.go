@@ -171,13 +171,7 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 			return worker.GitResult{}, fmt.Errorf("conflict worker completed without reporting required verification")
 		}
 		for _, test := range tests {
-			if strings.TrimSpace(test.Command) == "" || strings.TrimSpace(test.Result) == "" {
-				return worker.GitResult{}, fmt.Errorf("conflict worker reported incomplete verification evidence")
-			}
-			result := strings.ToLower(strings.TrimSpace(test.Result))
-			green := result == "ok" || strings.HasPrefix(result, "ok ") || strings.HasPrefix(result, "pass") ||
-				strings.HasPrefix(result, "success") || strings.HasPrefix(result, "green") || strings.Contains(result, "exit 0")
-			if !green {
+			if !test.Passed() {
 				return worker.GitResult{}, fmt.Errorf("conflict worker verification is not explicitly green for %q: %s", test.Command, test.Result)
 			}
 		}

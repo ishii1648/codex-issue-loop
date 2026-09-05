@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -69,6 +70,13 @@ func TestRuntimeSchemaUsesStructuredOutputsSubset(t *testing.T) {
 		}
 	}
 	assertNoUnsupportedOneOf(t, runtimeSchema, "$")
+	tests := properties["tests"].(map[string]any)
+	items := tests["items"].(map[string]any)
+	testProperties := items["properties"].(map[string]any)
+	result := testProperties["result"].(map[string]any)
+	if !reflect.DeepEqual(result["enum"], []any{"passed", "failed"}) {
+		t.Fatalf("test result enum=%v", result["enum"])
+	}
 }
 
 func assertNoUnsupportedOneOf(t *testing.T, value any, path string) {

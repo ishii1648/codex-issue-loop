@@ -30,6 +30,32 @@ func TestResultValidation(t *testing.T) {
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("expected missing question error")
 	}
+	for _, result := range []string{"passed", "failed"} {
+		candidate := Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Tests: []Test{{Command: "go test ./...", Result: result}}}
+		if err := candidate.Validate(); err != nil {
+			t.Fatalf("result %q: %v", result, err)
+		}
+	}
+	for _, result := range []string{"pass", "ok", "success", "exit 0", "成功"} {
+		candidate := Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Tests: []Test{{Command: "go test ./...", Result: result}}}
+		if err := candidate.Validate(); err == nil {
+			t.Fatalf("result %q unexpectedly accepted", result)
+		}
+	}
+}
+
+func TestVerificationOutcomeIsExactAndLocaleIndependent(t *testing.T) {
+	if !(Test{Command: "go test ./...", Result: "passed"}).Passed() {
+		t.Fatal("passed command was not green")
+	}
+	for _, result := range []string{"failed", "passed ", "PASS", "成功"} {
+		if (Test{Command: "go test ./...", Result: result}).Passed() {
+			t.Fatalf("result %q unexpectedly green", result)
+		}
+	}
+	if (Test{Result: "passed"}).Passed() {
+		t.Fatal("empty command unexpectedly green")
+	}
 }
 
 func TestCodexLocalhostNetworkArgumentsAreFailClosed(t *testing.T) {
@@ -336,7 +362,7 @@ func TestPromptDoesNotAskForProfileAndIncludesCompletion(t *testing.T) {
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Completion.CreateDraftPR = true
 	prompt := BuildPrompt(cfg, gh.Issue{Number: 1, Title: "Test", Body: "Body"}, state.Issue{RunID: "run", Attempts: 1}, "")
-	for _, expected := range []string{"Do not ask the user to choose the execution profile", "supervisor will create or update a draft pull request", "Do not stage, commit, push", "continue directly into implementation"} {
+	for _, expected := range []string{"Do not ask the user to choose the execution profile", "supervisor will create or update a draft pull request", "Do not stage, commit, push", "continue directly into implementation", `use exactly "passed" or "failed"`} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("prompt missing %q", expected)
 		}

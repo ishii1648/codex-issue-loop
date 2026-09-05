@@ -22,6 +22,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
+	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	schema "github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/application/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/application/operatorcontrol"
@@ -877,6 +878,45 @@ func fixtureControlHealth(ctx context.Context, lm launchd.Manager, entry registr
 		return err
 	}
 	return waitForControlHealth(ctx, lm, entry, store, broker, timeout)
+}
+
+func TestOperatorDrainRecoversProvenUnstartedConflictLaunch(t *testing.T) {
+	store := state.Store{Dir: t.TempDir(), RepoID: "owner-repo", RepoPath: "/repo"}
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, _, err := store.StartExecution(state.ExecutionStart{IssueNumber: 277, Title: "queue", RunID: "conflict_277", BaseSHA: "base", StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &state.WorkerWorkspace{Path: "/worktree", Branch: "codex/issue-277", RepoID: store.RepoID, Repository: "owner/repo", GitCommonDir: "/repo/.git", MainCheckout: "/repo", CapturedAt: now}
+	if _, err := store.Update("fixture_unstarted_conflict_launch", 277, "conflict_277", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["277"]
+		item.Status, item.LaunchSource, item.Generation = issuedomain.StatusLaunching, issuedomain.StatusResolvingConflict, 15
+		item.Branch, item.Worktree, item.Workspace = workspace.Branch, workspace.Path, workspace
+		item.PullRequestURL, item.PullRequestNumber, item.HeadSHA = "https://example.test/pull/281", 281, "head"
+		item.Continuation = &state.ContinuationCheckpoint{ID: "checkpoint_277", CreatedAt: now, RunID: item.RunID, Generation: 14,
+			BaseSHA: "base", Workspace: workspace, HeadSHA: item.HeadSHA, PullRequestURL: item.PullRequestURL,
+			PullRequestNumber: item.PullRequestNumber, Stage: issuedomain.ContinuationStageChecks}
+		item.ConflictRecovery = &state.ConflictRecovery{PullRequestURL: item.PullRequestURL, PreviousBaseSHA: "base", TargetBaseSHA: "target", OriginalHeadSHA: item.HeadSHA, ConflictFiles: []string{"file.go"}}
+		snapshot.ActiveExecution.Generation = item.Generation
+		snapshot.Supervisor.State = state.SupervisorStateMaintenance
+		snapshot.Supervisor.StartedAt = now.Add(10 * time.Second)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Load()
+	if err != nil || !drain.RecoverableUnstartedConflictLaunch(before) {
+		t.Fatalf("fixture is not recoverable: supervisor=%+v active=%+v issue=%+v err=%v", before.Supervisor, before.ActiveExecution, before.Issues["277"], err)
+	}
+	if err := waitForOperatorDrain(context.Background(), store, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Load()
+	if err != nil || snapshot.ActiveExecution != nil || snapshot.Issues["277"].Status != issuedomain.StatusResolvingConflict {
+		t.Fatalf("active=%+v issue=%+v err=%v", snapshot.ActiveExecution, snapshot.Issues["277"], err)
+	}
 }
 
 func TestStartRecoversOnlyUnloadedSharedBrokerWhenSupervisorIsLoaded(t *testing.T) {
