@@ -1,0 +1,7 @@
+interface:
+  display_name: "Self Repair"
+  short_description: "Direct break-glass repair for codex-issue-loop"
+  default_prompt: "Use $self-repair to bypass agent-loop, create a goal, and directly repair this repository."
+
+policy:
+  allow_implicit_invocation: false
