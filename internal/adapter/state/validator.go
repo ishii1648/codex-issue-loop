@@ -133,6 +133,20 @@ func validateIssueAggregate(issue *Issue) error {
 	if issue.PullRequestMerged && (issue.PullRequestNumber == 0 || issue.PullRequestURL == "" || issue.HeadSHA == "") {
 		return fmt.Errorf("merged Pull Request identity is incomplete")
 	}
+	if issue.Status == issuedomain.StatusCanceled {
+		if issue.Cancellation == nil || issue.Cancellation.Source == "" || issue.Cancellation.PreviousStatus != issuedomain.StatusBlocked && issue.Cancellation.PreviousStatus != issuedomain.StatusFailed ||
+			(issue.Cancellation.ExecutionReleaseResult != "not_present" && issue.Cancellation.ExecutionReleaseResult != "released") || issue.Cancellation.CanceledAt.IsZero() {
+			return fmt.Errorf("canceled lifecycle has incomplete cancellation evidence")
+		}
+		if issue.Suspension != nil && (issue.Suspension.Status != issuedomain.SuspensionResolved || issue.Suspension.Resolution != issuedomain.ResolutionCancel) {
+			return fmt.Errorf("canceled lifecycle retains an unresolved suspension")
+		}
+		if issue.Cancellation.Source == "github_not_planned" && (!strings.EqualFold(issue.GitHubStateReason, "NOT_PLANNED") || !strings.EqualFold(issue.Cancellation.GitHubStateReason, "NOT_PLANNED")) {
+			return fmt.Errorf("GitHub cancellation is missing authoritative NOT_PLANNED state reason")
+		}
+	} else if issue.Cancellation != nil {
+		return fmt.Errorf("non-canceled lifecycle contains cancellation evidence")
+	}
 	switch issue.ReviewDecision {
 	case "", "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED":
 	default:

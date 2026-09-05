@@ -78,6 +78,14 @@ type WorkerIdentity struct {
 	Variant        string `json:"variant,omitempty"`
 }
 
+type Cancellation struct {
+	Source                 string             `json:"source"`
+	GitHubStateReason      string             `json:"github_state_reason,omitempty"`
+	PreviousStatus         issuedomain.Status `json:"previous_status"`
+	ExecutionReleaseResult string             `json:"execution_release_result"`
+	CanceledAt             time.Time          `json:"canceled_at"`
+}
+
 // ExecutionIdentity fences mutations to one Issue run and one monotonically
 // increasing generation. Run IDs alone are not sufficient after a restart.
 type ExecutionIdentity struct {
@@ -238,6 +246,8 @@ type Issue struct {
 	HeadSHA            string                          `json:"head_sha,omitempty"`
 	ReviewDecision     string                          `json:"review_decision,omitempty"`
 	PullRequestMerged  bool                            `json:"pull_request_merged,omitempty"`
+	GitHubStateReason  string                          `json:"github_state_reason,omitempty"`
+	Cancellation       *Cancellation                   `json:"cancellation,omitempty"`
 	FailureKind        string                          `json:"failure_kind,omitempty"`
 	LastError          string                          `json:"last_error,omitempty"`
 	RetryAfter         *time.Time                      `json:"retry_after,omitempty"`
@@ -344,6 +354,9 @@ func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*snapshot = Snapshot(decoded)
+	if snapshot.IssueLifecycleAPIVersion == issuedomain.LifecycleAPIPreviousMinor {
+		snapshot.IssueLifecycleAPIVersion = issuedomain.LifecycleAPICurrent
+	}
 	if snapshot.Issues == nil {
 		snapshot.Issues = map[string]*Issue{}
 	}

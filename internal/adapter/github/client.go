@@ -26,6 +26,7 @@ type Issue struct {
 	Milestone   string
 	Comments    []string
 	State       string
+	StateReason string `json:"StateReason,omitempty"`
 	AuthorLogin string `json:"author_login,omitempty"`
 	AuthorType  string `json:"author_type,omitempty"`
 }
@@ -87,13 +88,14 @@ const (
 )
 
 type rawIssue struct {
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	URL       string    `json:"url"`
-	CreatedAt time.Time `json:"createdAt"`
-	State     string    `json:"state"`
-	Labels    []struct {
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	URL         string    `json:"url"`
+	CreatedAt   time.Time `json:"createdAt"`
+	State       string    `json:"state"`
+	StateReason string    `json:"stateReason"`
+	Labels      []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 	Assignees []struct {
@@ -118,7 +120,7 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 	}
 	// gh paginates internally up to the requested limit. Keep this above the
 	// MVP's original 100 so large queues are not silently truncated.
-	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,createdAt,state,labels,assignees,milestone,author"}
+	args := []string{"issue", "list", "--repo", cfg.GitHub.Repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,url,createdAt,state,stateReason,labels,assignees,milestone,author"}
 	// A single configured ready label can be pushed into GitHub's query
 	// without changing the local has-any-label eligibility contract. This
 	// avoids paying GraphQL node cost for every unrelated open Issue on each
@@ -159,7 +161,7 @@ func (c CLI) ListReady(ctx context.Context, cfg config.Config) ([]Issue, error) 
 		}
 		issues = append(issues, NormalizeIssue(Issue{
 			Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt,
-			State: item.State, Labels: labels, Assignees: assignees, Milestone: milestone, AuthorLogin: item.Author.Login,
+			State: item.State, StateReason: item.StateReason, Labels: labels, Assignees: assignees, Milestone: milestone, AuthorLogin: item.Author.Login,
 			AuthorType: authorType(item.Author.IsBot),
 		}))
 	}
@@ -172,7 +174,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,labels,assignees,milestone,comments,author").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,stateReason,labels,assignees,milestone,comments,author").CombinedOutput()
 	if err != nil {
 		return Issue{}, c.commandError(ctx, path, fmt.Sprintf("get GitHub Issue #%d", number), err, out)
 	}
@@ -196,7 +198,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	for _, comment := range item.Comments {
 		comments = append(comments, comment.Body)
 	}
-	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State, AuthorLogin: item.Author.Login, AuthorType: authorType(item.Author.IsBot)}), nil
+	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State, StateReason: item.StateReason, AuthorLogin: item.Author.Login, AuthorType: authorType(item.Author.IsBot)}), nil
 }
 
 func authorType(bot bool) string {
@@ -583,6 +585,8 @@ func (c CLI) safe(data []byte) string {
 }
 
 func NormalizeIssue(issue Issue) Issue {
+	issue.State = strings.ToUpper(strings.TrimSpace(issue.State))
+	issue.StateReason = strings.ToUpper(strings.TrimSpace(issue.StateReason))
 	issue.Title = safeText(issue.Title, maxIssueTitleBytes)
 	issue.Body = safeText(issue.Body, maxIssueBodyBytes)
 	issue.URL = safeText(issue.URL, 2048)

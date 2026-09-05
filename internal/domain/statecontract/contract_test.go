@@ -14,6 +14,9 @@ func TestCurrentContractHasMigrationRulesForEveryExecutionRequirement(t *testing
 	if !ok || field.Class != ExecutionRequiredProvenance || !RequiredForStatus(field, issuedomain.StatusRetryWait) {
 		t.Fatalf("workspace contract=%+v ok=%v", field, ok)
 	}
+	if cancellation, ok := FieldByPath("issues[].cancellation"); !ok || cancellation.Class != Optional || cancellation.Migration.Kind != "compatible" {
+		t.Fatalf("cancellation contract=%+v ok=%v", cancellation, ok)
+	}
 }
 
 func TestContractRejectsRequiredFieldWithoutMigrationDecision(t *testing.T) {

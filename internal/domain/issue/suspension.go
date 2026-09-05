@@ -46,7 +46,7 @@ func ResolveSuspension(from Status, action ResolutionAction, checkpointStage Con
 	case ResolutionAdoptPR:
 		return NewTransition("resolve_suspension_adopt_pr", from, StatusCompleted)
 	case ResolutionCancel:
-		return NewTransition("resolve_suspension_cancel", from, from)
+		return NewTransition("resolve_suspension_cancel", from, StatusCanceled)
 	default:
 		return Transition{}, fmt.Errorf("unknown Issue resolution action %q", action)
 	}

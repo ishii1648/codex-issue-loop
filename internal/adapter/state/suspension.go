@@ -41,7 +41,7 @@ func finalizeLifecycleBoundaries(snapshot *Snapshot, now time.Time) {
 	if active := snapshot.ActiveExecution; active != nil {
 		issue := snapshot.Issues[strconv.Itoa(active.IssueNumber)]
 		if issue == nil || !issue.Status.RequiresActiveExecution() {
-			if issue != nil && issue.Status != issuedomain.StatusCompleted {
+			if issue != nil && issue.Status != issuedomain.StatusCompleted && issue.Status != issuedomain.StatusCanceled {
 				captureContinuation(issue, *active, now)
 			}
 			snapshot.ActiveExecution = nil
@@ -61,7 +61,7 @@ func finalizeLifecycleBoundaries(snapshot *Snapshot, now time.Time) {
 }
 
 func ensureTerminalSuspension(issue *Issue, now time.Time) {
-	if issue == nil || !issue.Status.Terminal() || issue.Status == issuedomain.StatusCompleted || issue.Suspension != nil {
+	if issue == nil || !issue.Status.Terminal() || issue.Status == issuedomain.StatusCompleted || issue.Status == issuedomain.StatusCanceled || issue.Suspension != nil {
 		return
 	}
 	reasonCode, recoverability := "terminal", issuedomain.RecoverabilityOperator

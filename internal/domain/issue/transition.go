@@ -244,6 +244,8 @@ func ReconcileObservation(from, to Status) (Transition, error) {
 			StatusClaiming, StatusClaimed, StatusRunning,
 			StatusResumePending, StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks,
 			StatusAwaitingMerge, StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted)
+	case StatusCanceled:
+		return newAllowedTransition("reconcile_observation", from, to, StatusBlocked, StatusFailed)
 	default:
 		return Transition{}, fmt.Errorf("reconciliation does not allow status %q to converge to %q", from, to)
 	}
