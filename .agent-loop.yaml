@@ -20,7 +20,7 @@ formatters:
     enabled: true
 
 completion:
-  auto_merge: false
+  auto_merge: true
 
 incident_automation:
   enabled: true
