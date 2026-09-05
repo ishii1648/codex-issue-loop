@@ -10,6 +10,7 @@
 GitHub Releaseには次を公開する。
 
 - `agent-loop_Darwin_arm64`
+- `agent-loop-monitor_Darwin_arm64`
 - `agent-loop_Darwin_arm64.spdx.json`（SPDX 2.3）
 - `checksums.txt`（SHA-256）
 - `release-manifest.json`（delivery protocol、tag/commit、target、artifact digest、schema互換範囲）

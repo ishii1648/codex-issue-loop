@@ -6,6 +6,8 @@
 
 ループの制御は決定論的なGoプログラムが担当し、実装上の判断とコード変更のみをCodexワーカーへ委譲する。
 
+同じreleaseには独立した`agent-loop-monitor`を含む。GitHub外形監視の4状態、区間、需要時稼働率とcoverageの契約は[`monitor/docs/specification.md`](../monitor/docs/specification.md)を正本とし、本書では重複定義しない。
+
 ## 2. 全体構成
 
 ![codex-issue-loopの全体構成](images/architecture-overview-v2.png)

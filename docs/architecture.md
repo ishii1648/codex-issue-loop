@@ -41,6 +41,8 @@ Issue producer
 
 Release deliveryは別bounded contextである。releaseの取得、検証、repository別assignment、drain、install、health check、rollbackはIssue lifecycleへ混在させない。
 
+GitHub外形監視も別bounded contextである。独立processがGitHubのIssue、label、event時刻だけからqueue可用性を判定し、supervisorのstate、metrics、logsを入力にしない。詳細は[`monitor/docs/architecture.md`](../monitor/docs/architecture.md)を正本とする。
+
 ## 3. 責務
 
 ### 3.1 Durable Issue lifecycle境界

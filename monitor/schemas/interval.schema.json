@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ishii1648/codex-issue-loop/monitor/schemas/interval.schema.json",
+  "type": "object",
+  "required": ["id", "repository", "status", "started_at"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "repository": {"type": "string"},
+    "status": {"enum": ["IDLE", "HEALTHY", "DOWN", "UNKNOWN"]},
+    "started_at": {"type": "string", "format": "date-time"},
+    "ended_at": {"type": "string", "format": "date-time"},
+    "reason": {"type": "string"}
+  },
+  "additionalProperties": false
+}
