@@ -2,6 +2,7 @@ package conflict
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -149,7 +150,9 @@ func (m Manager) describe(ctx context.Context, worktreePath, head, previousBase,
 			return Preparation{}, NonRecoverableError{fmt.Errorf("conflict path escapes worktree: %s", name)}
 		}
 		data, readErr := os.ReadFile(filepath.Join(worktreePath, clean))
-		if readErr != nil {
+		if errors.Is(readErr, os.ErrNotExist) {
+			data = []byte("[absent from worktree]")
+		} else if readErr != nil {
 			return Preparation{}, fmt.Errorf("read conflict file %s: %w", name, readErr)
 		}
 		fmt.Fprintf(&content, "\n--- %s ---\n%s", name, data)
