@@ -4,7 +4,8 @@ set -eu
 base=${BASE_SHA:?BASE_SHA is required}
 head=${HEAD_SHA:?HEAD_SHA is required}
 output=${REVIEW_OUTPUT:?REVIEW_OUTPUT is required}
-changed=$(git diff --name-only "$base" "$head")
+merge_base=$(git merge-base "$base" "$head")
+changed=$(git diff --name-only "$merge_base" "$head")
 high_risk=$(printf '%s\n' "$changed" | grep -E '^(internal/adapter/state/|internal/application/supervisor/|internal/domain/issue/|internal/domain/statecontract/|internal/application/migration/|internal/application/delivery/|\.github/workflows/|scripts/check-release\.sh$|\.agent-loop.*\.yaml$)' || true)
 findings=
 
@@ -21,7 +22,7 @@ if [ -n "$high_risk" ]; then
   invariant_tests=$(printf '%s\n' "$changed" | grep -E 'internal/adapter/state/.*_test\.go$' || true)
   [ -z "$state_changes" ] || [ -n "$invariant_tests" ] || add_finding missing_invariant_test
 
-  schema_changes=$(git diff "$base" "$head" -- internal/platform/schema internal/domain/statecontract | grep -E '^\+.*(Current|Version|version)' || true)
+  schema_changes=$(git diff "$merge_base" "$head" -- internal/platform/schema internal/domain/statecontract | grep -E '^\+.*(Current|Version|version)' || true)
   migration_changes=$(printf '%s\n' "$changed" | grep -E '^internal/application/migration/' || true)
   [ -z "$schema_changes" ] || [ -n "$migration_changes" ] || add_finding missing_migration_change
 
@@ -29,7 +30,7 @@ if [ -n "$high_risk" ]; then
   rollback_evidence=$(printf '%s\n' "$changed" | grep -E '^(docs/|README\.md$|scripts/check-release\.sh$)' || true)
   [ -z "$release_changes" ] || [ -n "$rollback_evidence" ] || add_finding missing_release_rollback_evidence
 
-  if git diff "$base" "$head" -- . ':!**/*_test.go' | grep -E '^\+.*(gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' >/dev/null; then
+  if git diff "$merge_base" "$head" -- . ':!**/*_test.go' | grep -E '^\+.*(gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' >/dev/null; then
     add_finding possible_secret_exposure
   fi
 fi

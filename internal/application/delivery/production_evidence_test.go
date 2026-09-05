@@ -658,6 +658,18 @@ func TestHighRiskReviewUsesMachineVerifiableEvidence(t *testing.T) {
 	if report := runReview(lowRisk, highRisk, "high-risk"); !report.HighRisk || report.FindingCount != 0 {
 		t.Fatalf("high-risk report=%+v", report)
 	}
+	runGit("checkout", "--detach", base)
+	write(".github/workflows/test.yml", "name: base-only workflow\n")
+	advancedBase := commit("advance base workflow")
+	runGit("checkout", "--detach", base)
+	write("monitor/queue.go", "package monitor\n")
+	monitorHead := commit("monitor change")
+	if report := runReview(advancedBase, monitorHead, "diverged-low-risk"); report.HighRisk || report.FindingCount != 0 {
+		t.Fatalf("base-only workflow change affected monitor review: %+v", report)
+	}
+	if report := runReview(advancedBase, highRisk, "diverged-high-risk"); !report.HighRisk || report.FindingCount != 0 {
+		t.Fatalf("head workflow change was not reviewed: %+v", report)
+	}
 
 	workflow, err := os.ReadFile(filepath.Join(repositoryRoot(t), ".github", "workflows", "high-risk-review.yml"))
 	if err != nil {
