@@ -119,11 +119,6 @@ func normalizeV5SemanticStateObject(object map[string]json.RawMessage, migratedA
 			status = "resume_pending"
 			item["status"] = mustRaw(status)
 		}
-		if status == "running" && rawInt(item["worker_pid"]) == 0 && rawInt(item["worker_pgid"]) == 0 {
-			status = "launching"
-			item["status"] = mustRaw(status)
-			item["launch_source"] = mustRaw("retry_wait")
-		}
 		if kind, ok := legacyEffectKind(rawString(item["github_sync"])); ok {
 			runID := rawString(item["run_id"])
 			if runID == "" {
@@ -225,6 +220,22 @@ func normalizeV5SemanticStateObject(object map[string]json.RawMessage, migratedA
 		delete(object, "active_execution")
 	} else {
 		object["active_execution"] = active
+	}
+	encodedSnapshot, err := json.Marshal(object)
+	if err != nil {
+		return err
+	}
+	var snapshot state.Snapshot
+	if err := json.Unmarshal(encodedSnapshot, &snapshot); err != nil {
+		return fmt.Errorf("decode semantic migration launch evidence: %w", err)
+	}
+	state.NormalizeLegacyWorkerLaunches(&snapshot)
+	object["issues"] = mustMarshal(snapshot.Issues)
+	object["pending_requests"] = mustMarshal(snapshot.PendingRequests)
+	if snapshot.ActiveExecution == nil {
+		delete(object, "active_execution")
+	} else {
+		object["active_execution"] = mustMarshal(snapshot.ActiveExecution)
 	}
 	return nil
 }

@@ -4,7 +4,80 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 )
+
+func legacyRunningLaunchFixture(answer string, needsInput bool) []byte {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	lease := func(generation int) map[string]any {
+		return map[string]any{
+			"owner": map[string]any{"run_id": "run_477", "generation": generation}, "slot": 0,
+			"declared_resources": []string{"repo:*"}, "resolved_resources": []string{"repo:*"},
+			"base_sha": "1111111111111111111111111111111111111111", "reserved_at": now,
+		}
+	}
+	item := map[string]any{
+		"number": 477, "status": "running", "run_id": "run_477", "lease_generation": 4, "lease": lease(4),
+		"branch": "codex/issue-477", "worktree": "/tmp/issue-477", "attempts": 2, "updated_at": now,
+		"workspace": map[string]any{"path": "/tmp/issue-477", "branch": "codex/issue-477", "repo_id": "repo_zeitreise", "repository": "owner/repo", "git_common_dir": "/tmp/repo/.git", "main_checkout": "/tmp/repo", "captured_at": now},
+	}
+	requests := map[string]any{}
+	if needsInput {
+		item["resource_park"] = map[string]any{
+			"id": "park_477", "kind": "needs_input", "request_id": "req_477", "status": "resuming",
+			"original_lease": lease(3), "parked_at": now, "resume_owner": map[string]any{"run_id": "run_477", "generation": 4},
+		}
+		item["answers"] = []map[string]any{{"request_id": "req_477", "question": "Continue?", "answer": answer, "answered_at": now}}
+		requests["req_477"] = map[string]any{
+			"id": "req_477", "issue_number": 477, "question": "Continue?", "run_id": "run_477", "resource_park_id": "park_477",
+			"released_owner": map[string]any{"run_id": "run_477", "generation": 3}, "status": "answered", "answer": "yes",
+			"created_at": now, "answered_at": now,
+		}
+	}
+	return mustMarshal(map[string]any{
+		"version": 4, "semantic_contract_version": 1, "repo_id": "repo_zeitreise", "repo_path": "/tmp/repo",
+		"state_revision": 1, "supervisor": map[string]any{"state": "stopped", "updated_at": now},
+		"issues": map[string]any{"477": item}, "pending_requests": requests,
+	})
+}
+
+func TestV5MigrationRestoresLegacyRunningLaunchSourceFromEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		data       []byte
+		wantStatus issuedomain.Status
+		wantSource issuedomain.Status
+	}{
+		{name: "answered resume", data: legacyRunningLaunchFixture("yes", true), wantStatus: issuedomain.StatusLaunching, wantSource: issuedomain.StatusResumePending},
+		{name: "answer mismatch fails closed", data: legacyRunningLaunchFixture("no", true), wantStatus: issuedomain.StatusBlocked},
+		{name: "released generation mismatch fails closed", data: func() []byte {
+			var fixture map[string]any
+			if err := json.Unmarshal(legacyRunningLaunchFixture("yes", true), &fixture); err != nil {
+				t.Fatal(err)
+			}
+			requests := fixture["pending_requests"].(map[string]any)
+			request := requests["req_477"].(map[string]any)
+			request["released_owner"].(map[string]any)["generation"] = 2
+			return mustMarshal(fixture)
+		}(), wantStatus: issuedomain.StatusBlocked},
+		{name: "ordinary retry", data: legacyRunningLaunchFixture("", false), wantStatus: issuedomain.StatusLaunching, wantSource: issuedomain.StatusRetryWait},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot, err := DecodePreviousSnapshot(test.data, time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC))
+			if err != nil {
+				t.Fatal(err)
+			}
+			issue := snapshot.Issues["477"]
+			if issue == nil || issue.Status != test.wantStatus || issue.LaunchSource != test.wantSource {
+				t.Fatalf("migrated issue=%+v", issue)
+			}
+			if test.wantStatus == issuedomain.StatusBlocked && (snapshot.ActiveExecution != nil || issue.Suspension == nil) {
+				t.Fatalf("ambiguous migration retained launch authority: %+v", snapshot)
+			}
+		})
+	}
+}
 
 func TestV5MigrationRemovesScenarioSpecificRuntimeAxes(t *testing.T) {
 	for _, fixture := range []struct {

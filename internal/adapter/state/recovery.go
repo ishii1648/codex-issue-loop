@@ -206,23 +206,8 @@ func normalizeSnapshot(snapshot *Snapshot) {
 		if issue.Session != nil && issue.SessionID == "" {
 			issue.SessionID = issue.Session.ID
 		}
-		if issue.Status == issuedomain.StatusRunning && issue.WorkerPID == 0 && issue.WorkerPGID == 0 {
-			activeMatches := snapshot.ActiveExecution != nil && snapshot.ActiveExecution.IssueNumber == issue.Number &&
-				snapshot.ActiveExecution.RunID == issue.RunID && snapshot.ActiveExecution.Generation == issue.Generation
-			target := issuedomain.StatusRetryWait
-			if activeMatches {
-				target = issuedomain.StatusLaunching
-				issue.LaunchSource = issuedomain.StatusRetryWait
-			}
-			transition, err := issuedomain.RecoverUnstartedWorker(issue.Status, target)
-			if err == nil {
-				_ = ApplyIssueTransition(issue, transition)
-				if target == issuedomain.StatusRetryWait {
-					issue.LastError = "running worker process identity was missing"
-				}
-			}
-		}
 	}
+	NormalizeLegacyWorkerLaunches(snapshot)
 }
 
 func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {

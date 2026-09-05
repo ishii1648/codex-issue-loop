@@ -1,0 +1,90 @@
+{
+  "version": 5,
+  "semantic_contract_version": 4,
+  "issue_lifecycle_api_version": "2.1",
+  "repo_id": "repo-deadbeef",
+  "repo_path": "/sanitized/zeitreise",
+  "state_revision": 0,
+  "supervisor": {
+    "state": "stopped",
+    "updated_at": "2026-09-04T12:00:03Z"
+  },
+  "active_execution": {
+    "issue_number": 477,
+    "run_id": "run_31bb113cd69020f4",
+    "generation": 4,
+    "base_sha": "1111111111111111111111111111111111111111",
+    "started_at": "2026-09-04T12:00:02Z"
+  },
+  "issues": {
+    "477": {
+      "number": 477,
+      "title": "Sanitized zeitreise Issue #477",
+      "status": "running",
+      "run_id": "run_31bb113cd69020f4",
+      "generation": 4,
+      "continuation": {
+        "id": "checkpoint_zeitreise_477",
+        "kind": "needs_input",
+        "request_id": "req_zeitreise_477",
+        "created_at": "2026-09-04T12:00:00Z",
+        "run_id": "run_31bb113cd69020f4",
+        "generation": 3,
+        "base_sha": "1111111111111111111111111111111111111111",
+        "stage": "resume"
+      },
+      "branch": "codex/issue-477-sanitized",
+      "worktree": "/sanitized/worktrees/zeitreise/issue-477",
+      "workspace": {
+        "path": "/sanitized/worktrees/zeitreise/issue-477",
+        "branch": "codex/issue-477-sanitized",
+        "repo_id": "repo-deadbeef",
+        "repository": "ishii1648/zeitreise",
+        "git_common_dir": "/sanitized/zeitreise/.git",
+        "main_checkout": "/sanitized/zeitreise",
+        "captured_at": "2026-09-04T11:55:00Z"
+      },
+      "attempts": 2,
+      "continuations": 1,
+      "execution_profile": "extended",
+      "session_id": "session_sanitized_zeitreise_477",
+      "session": {
+        "backend": "codex",
+        "id": "session_sanitized_zeitreise_477"
+      },
+      "pull_request_url": "https://github.com/ishii1648/zeitreise/pull/478",
+      "pull_request_number": 478,
+      "head_sha": "2222222222222222222222222222222222222222",
+      "answers": [
+        {
+          "request_id": "req_zeitreise_477",
+          "question": "Continue with the selected behavior?",
+          "answer": "continue",
+          "answered_at": "2026-09-04T12:00:01Z"
+        }
+      ],
+      "updated_at": "2026-09-04T12:00:03Z"
+    }
+  },
+  "pending_effects": {},
+  "quarantined_issues": {},
+  "intake_verifications": {},
+  "pending_requests": {
+    "req_zeitreise_477": {
+      "id": "req_zeitreise_477",
+      "issue_number": 477,
+      "question": "Continue with the selected behavior?",
+      "allow_free_text": true,
+      "run_id": "run_31bb113cd69020f4",
+      "checkpoint_id": "checkpoint_zeitreise_477",
+      "released_execution": {
+        "run_id": "run_31bb113cd69020f4",
+        "generation": 3
+      },
+      "status": "answered",
+      "answer": "continue",
+      "created_at": "2026-09-04T12:00:00Z",
+      "answered_at": "2026-09-04T12:00:01Z"
+    }
+  }
+}
