@@ -383,6 +383,15 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		return result, err
 	}
 	if s.loop.maintenanceRequested() {
+		if len(s.active) == 0 && snapshot.ActiveExecution != nil && !drain.HasWorker(snapshot) {
+			recoveredSnapshot, recovered, recoverErr := s.loop.Store.RecoverUnstartedConflictLaunch(s.loop.now())
+			if recoverErr != nil {
+				return result, failure.Wrap(failure.Supervisor, "recover unstarted conflict launch during drain", recoverErr)
+			}
+			if recovered {
+				snapshot = recoveredSnapshot
+			}
+		}
 		maintenanceState := state.SupervisorStateMaintenance
 		if len(s.active) > 0 || snapshot.ActiveExecution != nil || drain.HasWorker(snapshot) {
 			maintenanceState = state.SupervisorStateDraining

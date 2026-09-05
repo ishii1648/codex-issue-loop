@@ -157,11 +157,15 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 	if l.Conflicts == nil {
 		return l.failConflictRecovery(ctx, current, "conflict recovery manager is unavailable")
 	}
+	budget := issuedomain.AttemptBudget{Attempts: current.ConflictRecovery.Attempts, MaxAttempts: l.Config.ConflictRecovery.MaxAttemptsPerBase}
 	preparation, prepareErr := l.Conflicts.Prepare(ctx, l.Config, current.Worktree, current.Branch, current.ConflictRecovery)
 	if prepareErr != nil {
 		var fatal conflict.NonRecoverableError
 		if errors.As(prepareErr, &fatal) {
 			return l.failConflictRecovery(ctx, current, prepareErr.Error())
+		}
+		if budget.Exhausted() {
+			return l.failConflictRecovery(ctx, current, fmt.Sprintf("%s; recovery budget exhausted for base %s after %d attempts", prepareErr, current.ConflictRecovery.TargetBaseSHA, current.ConflictRecovery.Attempts))
 		}
 		return failure.Wrap(failure.Transient, "resume Pull Request conflict recovery", prepareErr)
 	}
@@ -175,7 +179,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		}
 		return l.publishConflictRecovery(ctx, issue, current, conflictTests(current.ConflictRecovery.Verification))
 	}
-	if (issuedomain.AttemptBudget{Attempts: current.ConflictRecovery.Attempts, MaxAttempts: l.Config.ConflictRecovery.MaxAttemptsPerBase}).Exhausted() {
+	if budget.Exhausted() {
 		return l.failConflictRecovery(ctx, current, fmt.Sprintf("recovery budget exhausted for base %s after %d attempts", current.ConflictRecovery.TargetBaseSHA, current.ConflictRecovery.Attempts))
 	}
 	issue, err := l.getIssue(ctx, current.Number)

@@ -1718,6 +1718,43 @@ func TestConflictRecoveryBlocksOnlyAfterPerBaseBudgetIsExhausted(t *testing.T) {
 	}
 }
 
+func TestConflictRecoveryPreparationFailureBlocksAfterBudgetIsExhausted(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.ConflictRecovery.MaxAttemptsPerBase = 2
+	github.issue = gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", HeadSHA: "head-pr"}}}
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "conflict_2", BaseSHA: "base-old", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loop.Store.Update("fixture", 1, "conflict_2", nil, func(s *state.Snapshot) error {
+		item := s.Issues["1"]
+		item.Status, item.Branch, item.Worktree = issuedomain.StatusResolvingConflict, "codex/issue-1-test", loop.Config.RepoPath
+		item.PullRequestURL, item.PullRequestNumber, item.HeadSHA = "https://example.test/pr/1", 1, "head-pr"
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: item.PullRequestURL, PreviousBaseSHA: "base-old", TargetBaseSHA: "base-new", OriginalHeadSHA: item.HeadSHA,
+			ConflictFiles: []string{"monitor/internal/model/model.go"}, Attempts: 2, BaseUpdates: 1,
+		}
+		setSupervisorTestWorkspace(s, item)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeConflictResolver{prepareErr: errors.New("read conflict file monitor/internal/model/model.go: file does not exist")}
+	loop.Conflicts = resolver
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if item.Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil || resolver.prepareCalls != 1 || !strings.Contains(item.LastError, "recovery budget exhausted") {
+		t.Fatalf("item=%+v active=%+v resolver=%+v", item, snapshot.ActiveExecution, resolver)
+	}
+}
+
 func TestConflictWorkerNeedsInputKeepsConflictResumeTarget(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
