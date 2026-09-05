@@ -15,7 +15,7 @@ git -C /absolute/path/to/codex-issue-loop status --short
 
 ## 2. 通常のtyped stop
 
-delivery controllerを停止し、`active_workers=0`を再確認してから対象repositoryだけを停止する。`agent-loop stop`はactive workerを終了させる契約を持つため、workerが残る状態では実行しない。
+delivery controllerを停止してから対象repositoryだけを停止する。通常の`agent-loop stop`はdeliveryと共通のdurable drain契約を使い、active workerへsignalを送らずcheckpointまで待つ。期限切れ時は通常運転へ戻るため、transactionやfenceを削除しない。
 
 ```sh
 launchctl bootout "gui/$(id -u)/com.codex-issue-loop.delivery"

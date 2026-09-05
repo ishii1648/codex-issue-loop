@@ -15,7 +15,9 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
+	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	"github.com/ishii1648/codex-issue-loop/internal/application/observe"
+	"github.com/ishii1648/codex-issue-loop/internal/application/operatorcontrol"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
@@ -54,6 +56,14 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 		return err
 	}
 	result := buildStatus(launchStatus, snapshot, cfg.Queue.Concurrency)
+	control, err := operatorcontrol.Load(l.OperatorControlPath(entry.RepoID))
+	if err != nil {
+		return err
+	}
+	if control.Generation != "" {
+		result.OperatorControl = &control
+	}
+	result.OperatorFence = drain.Requested(l.OperatorMaintenanceFencePath(entry.RepoID))
 	if cfg.Webhook.Enabled() {
 		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
 		brokerLaunchd, statusErr := manager.BrokerStatus(ctx)

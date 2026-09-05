@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
@@ -640,13 +641,7 @@ func (c Controller) waitForDrain(ctx context.Context, cfg Config, entries []regi
 				progress.Waiting = append(progress.Waiting, entry.RepoID+":state_invalid")
 				continue
 			}
-			ready := snapshot.Supervisor.State == state.SupervisorStateMaintenance
-			for _, issue := range snapshot.Issues {
-				if issue != nil && (issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
-					ready = false
-					break
-				}
-			}
+			ready := drain.Ready(snapshot)
 			if ready {
 				progress.Ready++
 			} else {

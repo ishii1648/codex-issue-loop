@@ -101,6 +101,22 @@ func (l Layout) DeliveryAssignmentTransactionPath(repoID string) string {
 	return filepath.Join(l.DeliveryAssignmentDir(repoID), "transaction.json")
 }
 
+func (l Layout) OperatorControlPath(repoID string) string {
+	return filepath.Join(l.RepoDir(repoID), "operator-control.json")
+}
+
+func (l Layout) OperatorMaintenanceFencePath(repoID string) string {
+	return filepath.Join(l.RepoDir(repoID), "operator-maintenance.json")
+}
+
+func (l Layout) OperatorControlLockPath(repoID string) string {
+	return filepath.Join(l.RepoDir(repoID), "operator-control.lock")
+}
+
+func (l Layout) MaintenanceWakePath(repoID string) string {
+	return filepath.Join(l.RepoDir(repoID), "delivery-maintenance.wake")
+}
+
 func (l Layout) DeliveryPlistPath() string {
 	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop.delivery.plist")
 }

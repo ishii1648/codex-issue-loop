@@ -192,7 +192,7 @@ func AcquireLock(path string) (*Lock, error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, errors.New("another delivery reconcile or apply is already running")
+			return nil, errors.New("another maintenance operation is already running")
 		}
 		return nil, err
 	}

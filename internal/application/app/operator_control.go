@@ -11,10 +11,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
+	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
+	"github.com/ishii1648/codex-issue-loop/internal/application/operatorcontrol"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
@@ -157,7 +160,7 @@ func (a App) unregister(ctx context.Context, l layout.Layout, args []string) err
 }
 
 func (a App) control(ctx context.Context, l layout.Layout, command string, args []string) error {
-	entry, jsonOut, err := a.resolve(l, command, args)
+	entry, options, err := a.resolveControl(l, command, args)
 	if err != nil {
 		return err
 	}
@@ -176,9 +179,15 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 			return exitError{4, fmt.Errorf("refuse %s before launchd mutation: %w; run agent-loop migrate --json", command, semanticErr)}
 		}
 	}
-	stopReport := supervisor.WorkerStopReport{Workers: []supervisor.WorkerStop{}}
 	switch command {
 	case "start":
+		tx, loadErr := operatorcontrol.Load(l.OperatorControlPath(entry.RepoID))
+		if loadErr != nil {
+			return loadErr
+		}
+		if tx.Active() || drain.Requested(l.OperatorMaintenanceFencePath(entry.RepoID)) {
+			return exitError{4, errors.New("an interrupted stop/restart drain is active; resume the recorded operation or use its explicit --force form")}
+		}
 		var launchStatus launchd.Status
 		launchStatus, err = lm.Status(ctx, entry)
 		if err == nil && !launchStatus.Loaded {
@@ -197,47 +206,399 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		if err == nil {
 			err = lm.Start(ctx, entry)
 		}
-	case "stop":
-		err = lm.Stop(ctx, entry)
-		if err == nil {
-			stopReport, err = supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, "worker canceled by explicit stop", a.ProcessController)
-		}
-	case "restart":
-		err = lm.Stop(ctx, entry)
-		if err == nil {
-			stopReport, err = supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, "worker canceled by supervisor restart", a.ProcessController)
-		}
-		if err == nil {
-			err = recordSupervisorControl(store, "starting", "restart requested")
-		}
-		if err == nil && cfg.Webhook.Enabled() {
-			err = lm.RestartBroker(ctx)
-		}
-		if err == nil {
-			err = lm.Start(ctx, entry)
-		}
+	case "stop", "restart":
+		return a.drainControl(ctx, l, entry, cfg, lm, store, command, options)
 	}
 	if err != nil {
-		if command == "start" || command == "restart" {
+		if command == "start" {
 			_ = recordSupervisorControl(store, "stopped", "start failed: "+err.Error())
 		}
 		return err
 	}
-	if command == "stop" {
-		_, err = store.Update("supervisor_stopped", 0, "", map[string]string{"reason": "explicit stop"}, func(s *state.Snapshot) error {
-			s.Supervisor.State, s.Supervisor.PID, s.Supervisor.Message = "stopped", 0, "explicit stop"
-			return nil
-		})
-		if err != nil {
+	status, _ := lm.Status(ctx, entry)
+	result := map[string]any{"repo_id": entry.RepoID, "command": command, "launchd": status}
+	return a.output(options.json, result)
+}
+
+type controlOptions struct {
+	json    bool
+	force   bool
+	timeout time.Duration
+}
+
+func (a App) resolveControl(l layout.Layout, command string, args []string) (registry.Entry, controlOptions, error) {
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	repo := fs.String("repo", "", "repository path")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	force := fs.Bool("force", false, "terminate active workers before stopping")
+	timeout := fs.Duration("timeout", 0, "graceful drain timeout")
+	if err := fs.Parse(args); err != nil {
+		return registry.Entry{}, controlOptions{}, exitError{2, err}
+	}
+	if command == "start" && (*force || *timeout != 0) {
+		return registry.Entry{}, controlOptions{}, exitError{2, errors.New("--force and --timeout are only valid for stop/restart")}
+	}
+	if *timeout < 0 {
+		return registry.Entry{}, controlOptions{}, exitError{2, errors.New("--timeout must be positive")}
+	}
+	entry, err := a.resolvePath(l, *repo)
+	return entry, controlOptions{json: *jsonOut, force: *force, timeout: *timeout}, err
+}
+
+func (a App) drainControl(ctx context.Context, l layout.Layout, entry registry.Entry, cfg config.Config, lm launchd.Manager, store state.Store, command string, options controlOptions) error {
+	hostLock, err := delivery.AcquireLock(delivery.RuntimePaths(l.Root).Lock)
+	if err != nil {
+		return err
+	}
+	defer hostLock.Close()
+	lock, err := delivery.AcquireLock(l.OperatorControlLockPath(entry.RepoID))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if drain.Requested(filepath.Join(l.DeliveryDir(), "maintenance.json"), l.DeliveryAssignmentFencePath(entry.RepoID)) {
+		return errors.New("cannot stop or restart while a delivery maintenance transaction is active")
+	}
+
+	operation := operatorcontrol.Operation(command)
+	txPath := l.OperatorControlPath(entry.RepoID)
+	fencePath := l.OperatorMaintenanceFencePath(entry.RepoID)
+	tx, err := operatorcontrol.Load(txPath)
+	if err != nil {
+		return err
+	}
+	if tx.Active() && tx.Operation != operation {
+		return fmt.Errorf("operator %s generation %s is active; finish it before requesting %s", tx.Operation, tx.Generation, command)
+	}
+	initialSnapshot, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if options.force {
+		return a.forceControl(ctx, l, entry, cfg, lm, store, operation, options, tx)
+	}
+	if !tx.Active() {
+		drainTimeout := options.timeout
+		if drainTimeout == 0 {
+			drainTimeout = cfg.Worker.Timeout.Duration + cfg.Worker.TimeoutGrace.Duration
+		}
+		now := time.Now().UTC()
+		tx = operatorcontrol.Transaction{
+			Version: 1, Generation: state.NewID("operator"), Operation: operation,
+			Phase: operatorcontrol.PhaseDraining, RequestedAt: now, DrainDeadline: now.Add(drainTimeout), UpdatedAt: now,
+			SupervisorPID: initialSnapshot.Supervisor.PID,
+			RestartBroker: operation == operatorcontrol.OperationRestart && cfg.Webhook.Enabled(),
+		}
+		if err := operatorcontrol.Save(txPath, tx); err != nil {
 			return err
 		}
 	}
-	status, _ := lm.Status(ctx, entry)
-	result := map[string]any{"repo_id": entry.RepoID, "command": command, "launchd": status}
-	if command == "stop" || command == "restart" {
-		result["worker_stop"] = stopReport
+
+	status, err := lm.Status(ctx, entry)
+	if err != nil {
+		return err
 	}
-	return a.output(jsonOut, result)
+	snapshot, err := store.Load()
+	if err != nil {
+		return err
+	}
+	needsDrain := status.Loaded || snapshot.ActiveExecution != nil || drain.HasWorker(snapshot)
+	if tx.Phase == operatorcontrol.PhaseDraining && needsDrain {
+		if err := ensureOperatorFence(fencePath, tx); err != nil {
+			return err
+		}
+		if err := wakeMaintenance(l, entry.RepoID, tx.Generation); err != nil {
+			return err
+		}
+		if err := waitForOperatorDrain(ctx, store, tx.DrainDeadline); err != nil {
+			if errors.Is(err, errOperatorDrainTimeout) {
+				timeoutSnapshot, loadErr := store.Load()
+				if loadErr != nil {
+					return loadErr
+				}
+				if tx.SupervisorPID > 0 && timeoutSnapshot.Supervisor.PID != tx.SupervisorPID && (timeoutSnapshot.ActiveExecution != nil || drain.HasWorker(timeoutSnapshot)) {
+					tx.Reason, tx.UpdatedAt = "supervisor identity changed during drain; retained work requires explicit force recovery", time.Now().UTC()
+					if saveErr := operatorcontrol.Save(txPath, tx); saveErr != nil {
+						return saveErr
+					}
+					return exitError{4, errors.New("graceful drain cannot resume an orphaned lifecycle after supervisor restart; maintenance remains active and explicit --force is required")}
+				}
+				if clearErr := operatorcontrol.ClearFence(fencePath); clearErr != nil {
+					return fmt.Errorf("restore scheduling after drain timeout: %w", clearErr)
+				}
+				if wakeErr := wakeMaintenance(l, entry.RepoID, "cleared-"+tx.Generation); wakeErr != nil {
+					return fmt.Errorf("wake scheduling after drain timeout: %w", wakeErr)
+				}
+				tx.Phase, tx.Reason, tx.CompletedAt, tx.UpdatedAt = operatorcontrol.PhaseTimedOut, err.Error(), time.Now().UTC(), time.Now().UTC()
+				if saveErr := operatorcontrol.Save(txPath, tx); saveErr != nil {
+					return saveErr
+				}
+				return exitError{4, fmt.Errorf("%w; normal scheduling was restored; retry later or use %s --force", err, command)}
+			}
+			tx.Reason, tx.UpdatedAt = err.Error(), time.Now().UTC()
+			_ = operatorcontrol.Save(txPath, tx)
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseDraining {
+		tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseStopping, time.Now().UTC()
+		if err := operatorcontrol.Save(txPath, tx); err != nil {
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseStopping {
+		if err := lm.Stop(ctx, entry); err != nil {
+			return err
+		}
+		if operation == operatorcontrol.OperationStop {
+			if err := recordStopped(store, "explicit graceful stop"); err != nil {
+				return err
+			}
+			return a.finishControl(l, entry, lm, txPath, fencePath, tx, options, supervisor.WorkerStopReport{Workers: []supervisor.WorkerStop{}})
+		}
+		tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseStarting, time.Now().UTC()
+		if err := operatorcontrol.Save(txPath, tx); err != nil {
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseStarting {
+		if err := recordSupervisorControl(store, state.SupervisorStateStarting, "graceful restart requested"); err != nil {
+			return err
+		}
+		if tx.RestartBroker {
+			tx.Phase = operatorcontrol.PhaseStoppingBroker
+		} else {
+			tx.Phase = operatorcontrol.PhaseStartingRepository
+		}
+		tx.UpdatedAt = time.Now().UTC()
+		if err := operatorcontrol.Save(txPath, tx); err != nil {
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseStoppingBroker {
+		if err := lm.StopBroker(ctx); err != nil {
+			return err
+		}
+		tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseStartingBroker, time.Now().UTC()
+		if err := operatorcontrol.Save(txPath, tx); err != nil {
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseStartingBroker {
+		if err := lm.StartBroker(ctx); err != nil {
+			return err
+		}
+		tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseStartingRepository, time.Now().UTC()
+		if err := operatorcontrol.Save(txPath, tx); err != nil {
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseStartingRepository {
+		if err := lm.Start(ctx, entry); err != nil {
+			return err
+		}
+		tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseHealthCheck, time.Now().UTC()
+		if err := operatorcontrol.Save(txPath, tx); err != nil {
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseHealthCheck {
+		if err := a.checkControlHealth(ctx, lm, entry, store, tx.RestartBroker, 10*time.Second); err != nil {
+			return err
+		}
+		return a.finishControl(l, entry, lm, txPath, fencePath, tx, options, supervisor.WorkerStopReport{Workers: []supervisor.WorkerStop{}})
+	}
+	return fmt.Errorf("operator control generation %s has unsupported active phase %s", tx.Generation, tx.Phase)
+}
+
+var errOperatorDrainTimeout = errors.New("graceful drain timeout reached without signaling or killing active workers")
+
+func waitForOperatorDrain(ctx context.Context, store state.Store, deadline time.Time) error {
+	for {
+		snapshot, err := store.Load()
+		if err != nil {
+			return err
+		}
+		if drain.Ready(snapshot) {
+			return nil
+		}
+		if !time.Now().UTC().Before(deadline) {
+			return errOperatorDrainTimeout
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func ensureOperatorFence(path string, tx operatorcontrol.Transaction) error {
+	fence, err := operatorcontrol.LoadFence(path)
+	if err == nil {
+		if fence.Generation != tx.Generation || fence.Operation != tx.Operation {
+			return errors.New("operator maintenance fence does not match the durable control transaction")
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return operatorcontrol.WriteFence(path, operatorcontrol.Fence{Generation: tx.Generation, Operation: tx.Operation, RequestedAt: tx.RequestedAt})
+}
+
+func wakeMaintenance(l layout.Layout, repoID, generation string) error {
+	return fsutil.WriteFile(l.MaintenanceWakePath(repoID), []byte(generation+"\n"), 0o600)
+}
+
+func recordStopped(store state.Store, reason string) error {
+	_, err := store.Update("supervisor_stopped", 0, "", map[string]string{"reason": reason}, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State, snapshot.Supervisor.PID, snapshot.Supervisor.Message = state.SupervisorStateStopped, 0, reason
+		return nil
+	})
+	return err
+}
+
+func (a App) checkControlHealth(ctx context.Context, lm launchd.Manager, entry registry.Entry, store state.Store, broker bool, timeout time.Duration) error {
+	if a.controlHealth != nil {
+		return a.controlHealth(ctx, lm, entry, store, broker, timeout)
+	}
+	return waitForControlHealth(ctx, lm, entry, store, broker, timeout)
+}
+
+func waitForControlHealth(ctx context.Context, lm launchd.Manager, entry registry.Entry, store state.Store, broker bool, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, err := lm.Status(ctx, entry)
+		if err != nil {
+			return err
+		}
+		healthy := status.Loaded && status.Running
+		if healthy && broker {
+			brokerStatus, brokerErr := lm.BrokerStatus(ctx)
+			if brokerErr != nil {
+				return brokerErr
+			}
+			healthy = brokerStatus.Loaded && brokerStatus.Running
+		}
+		if healthy {
+			snapshot, stateErr := store.Load()
+			if stateErr != nil {
+				return stateErr
+			}
+			healthy = snapshot.Supervisor.State == state.SupervisorStateMaintenance && snapshot.Supervisor.PID > 0
+		}
+		if healthy {
+			return nil
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return errors.New("restarted services did not become healthy; operator maintenance fence remains active")
+}
+
+func (a App) finishControl(l layout.Layout, entry registry.Entry, lm launchd.Manager, txPath, fencePath string, tx operatorcontrol.Transaction, options controlOptions, report supervisor.WorkerStopReport) error {
+	if err := operatorcontrol.ClearFence(fencePath); err != nil {
+		return err
+	}
+	if tx.Operation == operatorcontrol.OperationRestart {
+		if err := wakeMaintenance(l, entry.RepoID, "cleared-"+tx.Generation); err != nil {
+			return err
+		}
+	}
+	now := time.Now().UTC()
+	tx.Phase, tx.Reason, tx.CompletedAt, tx.UpdatedAt = operatorcontrol.PhaseSucceeded, "", now, now
+	if err := operatorcontrol.Save(txPath, tx); err != nil {
+		return err
+	}
+	status, _ := lm.Status(context.Background(), entry)
+	return a.output(options.json, map[string]any{"repo_id": entry.RepoID, "command": string(tx.Operation), "generation": tx.Generation, "phase": tx.Phase, "launchd": status, "worker_stop": report})
+}
+
+func (a App) forceControl(ctx context.Context, l layout.Layout, entry registry.Entry, cfg config.Config, lm launchd.Manager, store state.Store, operation operatorcontrol.Operation, options controlOptions, previous operatorcontrol.Transaction) error {
+	now := time.Now().UTC()
+	tx := operatorcontrol.Transaction{Version: 1, Generation: state.NewID("operator"), Operation: operation, Phase: operatorcontrol.PhaseStopping, RequestedAt: now, DrainDeadline: now, UpdatedAt: now, Reason: "explicit force requested", RestartBroker: operation == operatorcontrol.OperationRestart && cfg.Webhook.Enabled()}
+	if previous.Active() {
+		tx.Generation, tx.RequestedAt, tx.DrainDeadline, tx.RestartBroker = previous.Generation, previous.RequestedAt, previous.DrainDeadline, previous.RestartBroker
+	}
+	if err := operatorcontrol.Save(l.OperatorControlPath(entry.RepoID), tx); err != nil {
+		return err
+	}
+	if err := ensureOperatorFence(l.OperatorMaintenanceFencePath(entry.RepoID), tx); err != nil {
+		return err
+	}
+	if err := lm.Stop(ctx, entry); err != nil {
+		return err
+	}
+	reason := "worker canceled by explicit forced stop"
+	if operation == operatorcontrol.OperationRestart {
+		reason = "worker canceled by explicit forced restart"
+	}
+	report, err := supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, reason, a.ProcessController)
+	if err != nil {
+		return err
+	}
+	if operation == operatorcontrol.OperationStop {
+		if err := recordStopped(store, "explicit forced stop"); err != nil {
+			return err
+		}
+		return a.finishControl(l, entry, lm, l.OperatorControlPath(entry.RepoID), l.OperatorMaintenanceFencePath(entry.RepoID), tx, options, report)
+	}
+	tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseStarting, time.Now().UTC()
+	if err := operatorcontrol.Save(l.OperatorControlPath(entry.RepoID), tx); err != nil {
+		return err
+	}
+	if err := recordSupervisorControl(store, state.SupervisorStateStarting, "forced restart requested"); err != nil {
+		return err
+	}
+	if tx.RestartBroker {
+		tx.Phase = operatorcontrol.PhaseStoppingBroker
+	} else {
+		tx.Phase = operatorcontrol.PhaseStartingRepository
+	}
+	tx.UpdatedAt = time.Now().UTC()
+	if err := operatorcontrol.Save(l.OperatorControlPath(entry.RepoID), tx); err != nil {
+		return err
+	}
+	if tx.Phase == operatorcontrol.PhaseStoppingBroker {
+		if err := lm.StopBroker(ctx); err != nil {
+			return err
+		}
+		tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseStartingBroker, time.Now().UTC()
+		if err := operatorcontrol.Save(l.OperatorControlPath(entry.RepoID), tx); err != nil {
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseStartingBroker {
+		if err := lm.StartBroker(ctx); err != nil {
+			return err
+		}
+		tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseStartingRepository, time.Now().UTC()
+		if err := operatorcontrol.Save(l.OperatorControlPath(entry.RepoID), tx); err != nil {
+			return err
+		}
+	}
+	if tx.Phase == operatorcontrol.PhaseStartingRepository {
+		if err := lm.Start(ctx, entry); err != nil {
+			return err
+		}
+		tx.Phase, tx.UpdatedAt = operatorcontrol.PhaseHealthCheck, time.Now().UTC()
+		if err := operatorcontrol.Save(l.OperatorControlPath(entry.RepoID), tx); err != nil {
+			return err
+		}
+	}
+	if err := a.checkControlHealth(ctx, lm, entry, store, tx.RestartBroker, 10*time.Second); err != nil {
+		return err
+	}
+	return a.finishControl(l, entry, lm, l.OperatorControlPath(entry.RepoID), l.OperatorMaintenanceFencePath(entry.RepoID), tx, options, report)
 }
 
 func (a App) runBroker(ctx context.Context, l layout.Layout, args []string) error {

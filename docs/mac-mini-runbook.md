@@ -180,7 +180,9 @@ agent-loop stop --repo /absolute/path/to/repository --json
 agent-loop status --repo /absolute/path/to/repository --json
 ```
 
-停止はstate、event、Issue worktree、未commit変更を削除しない。
+通常停止はdurable fenceで新規dispatchを止め、active lifecycleがresult/session/publication/GitHub同期を完了するまでworkerへsignalを送らず待つ。`status --json`の`operator_control.phase`と`operator_maintenance_fence`で進捗を確認する。CLIやDesktopが中断した場合はtransaction/fenceを編集せず、同じ`stop`または`restart`を再実行して同じgenerationを再開する。host reboot後も同じ手順とする。
+
+`--timeout`では期限切れ時にworkerをkillせず通常運転へ戻る。drain中にsupervisor PIDが変わりorphan lifecycleが残った場合だけはfenceを保持してforce recoveryを要求する。再試行できない緊急時は対象と影響を再確認し、`agent-loop stop --force ...`または`restart --force ...`を使う。forceは保存process groupへ`SIGTERM`を送り、grace後の残存groupだけを`SIGKILL`する。通常停止もforce停止もstate、event、Issue worktree、未commit変更を削除しない。
 
 ## 5. 停止・障害からの復旧
 

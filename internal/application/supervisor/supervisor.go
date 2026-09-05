@@ -20,6 +20,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
+	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
@@ -69,12 +70,12 @@ type Loop struct {
 	IncidentAutomation incidentAutomationRunner
 	ReleaseVersion     string
 	ReleaseCommit      string
-	// Delivery fences stop new lifecycle dispatch while allowing active workers
-	// to reach their normal durable checkpoint without signals. The host fence
-	// coordinates legacy all-repository delivery; the repository fence isolates
-	// an exact per-repository assignment transaction.
+	// Maintenance fences stop new lifecycle dispatch while allowing active jobs
+	// to reach their normal durable checkpoint without signals. Delivery owns
+	// host/assignment fences and manual stop/restart owns the operator fence.
 	MaintenanceFencePath           string
 	RepositoryMaintenanceFencePath string
+	OperatorMaintenanceFencePath   string
 	publicationMu                  sync.Mutex
 }
 
@@ -167,16 +168,7 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 func (l *Loop) maintenanceRequested() bool {
-	for _, path := range []string{l.MaintenanceFencePath, l.RepositoryMaintenanceFencePath} {
-		if path == "" {
-			continue
-		}
-		_, err := os.Lstat(path)
-		if err == nil || !errors.Is(err, os.ErrNotExist) {
-			return true
-		}
-	}
-	return false
+	return drain.Requested(l.MaintenanceFencePath, l.RepositoryMaintenanceFencePath, l.OperatorMaintenanceFencePath)
 }
 
 func (l *Loop) waitForDelay(ctx context.Context, delay time.Duration) {

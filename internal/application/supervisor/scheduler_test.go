@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -145,6 +146,85 @@ func TestDeliveryMaintenanceFenceDrainsWithoutDispatchOrCancellation(t *testing.
 	snapshot, err = loop.Store.Load()
 	if err != nil || snapshot.Supervisor.State != "maintenance" {
 		t.Fatalf("supervisor=%+v err=%v", snapshot.Supervisor, err)
+	}
+}
+
+func TestFaultMaintenanceFenceAfterSupervisorCrashDoesNotReportStaleWorkerAsDrained(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	loop.GitHub = &countingGitHub{fakeGitHub: base}
+	fence := filepath.Join(t.TempDir(), "operator-maintenance.json")
+	if err := os.WriteFile(fence, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loop.OperatorMaintenanceFencePath = fence
+	_, err := loop.Store.Update("crashed_worker_fixture", 1, "run_crashed", nil, func(snapshot *state.Snapshot) error {
+		branch := "codex/crash-fixture"
+		snapshot.Issues["1"] = &state.Issue{Number: 1, Title: "crash fixture", RunID: "run_crashed", Status: issuedomain.StatusRunning, Generation: 1, Attempts: 1, WorkerPID: 4321, WorkerPGID: 4321, Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch)}
+		snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: 1, RunID: "run_crashed", Generation: 1, StartedAt: time.Now().UTC()}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := loop.Store.Load()
+	if err != nil || before.Issues["1"].WorkerPID != 4321 {
+		t.Fatalf("crash fixture was not persisted: snapshot=%+v err=%v", before, err)
+	}
+	s := &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	if result, err := s.schedule(context.Background(), true); err != nil || result.dispatched {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil || snapshot.Supervisor.State != state.SupervisorStateDraining {
+		t.Fatalf("stale worker crossed drain boundary: supervisor=%+v err=%v", snapshot.Supervisor, err)
+	}
+}
+
+func TestFaultHostRebootUnderOperatorFenceDoesNotSignalRetainedWorker(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	fence := filepath.Join(t.TempDir(), "operator-maintenance.json")
+	if err := os.WriteFile(fence, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loop.OperatorMaintenanceFencePath = fence
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, Title: "reboot fixture", RunID: "run_reboot", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loop.Store.Update("reboot_worker_fixture", 1, "run_reboot", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = issuedomain.StatusRunning
+		item.Branch = "codex/reboot-fixture"
+		item.Worktree = loop.Config.RepoPath
+		item.Workspace = fixtureWorkspace(loop, loop.Config.RepoPath, item.Branch)
+		item.WorkerPID, item.WorkerPGID = 5432, 5432
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := &fakeProcessGroups{alive: map[int]bool{5432: true}, owned: map[int]bool{5432: true}, signals: map[int][]syscall.Signal{}}
+	loop.Processes = groups
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.Run(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snapshot, loadErr := loop.Store.Load()
+		if loadErr == nil && snapshot.Supervisor.State == state.SupervisorStateDraining {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("rebooted supervisor did not enter draining: snapshot=%+v err=%v", snapshot.Supervisor, loadErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if len(groups.signals) != 0 || !groups.alive[5432] {
+		t.Fatalf("reboot recovery signaled retained worker: alive=%v signals=%v", groups.alive, groups.signals)
 	}
 }
 
