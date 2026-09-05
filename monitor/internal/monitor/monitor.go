@@ -28,26 +28,21 @@ func (r Runner) Poll(ctx context.Context, repo config.Repository) (model.Snapsho
 		return model.Snapshot{}, err
 	}
 	cursor := int64(0)
+	initialized := false
 	if previous != nil {
 		cursor = previous.EventCursor
-		if r.ObservationTimeout > 0 {
+		initialized = previous.EventCursorInitialized
+	}
+	observation, observeErr := r.Observer.Observe(ctx, repo, cursor, initialized, now)
+	if observeErr != nil {
+		errorAt := now
+		if previous != nil && r.ObservationTimeout > 0 {
 			gapAt := previous.LastObservationAt.Add(r.ObservationTimeout)
-			if now.After(gapAt) {
-				gap := model.Observation{Repository: repo.Name, ObservedAt: gapAt, Cursor: cursor, Error: "monitor observation history has a gap"}
-				unknown, closed, applyErr := model.Apply(previous, gap)
-				if applyErr != nil {
-					return model.Snapshot{}, applyErr
-				}
-				if commitErr := r.Store.Commit(unknown, closed); commitErr != nil {
-					return model.Snapshot{}, commitErr
-				}
-				previous = &unknown
+			if gapAt.Before(errorAt) {
+				errorAt = gapAt
 			}
 		}
-	}
-	observation, observeErr := r.Observer.Observe(ctx, repo, cursor, now)
-	if observeErr != nil {
-		observation = model.Observation{Repository: repo.Name, ObservedAt: now, Cursor: cursor, Error: observeErr.Error()}
+		observation = model.Observation{Repository: repo.Name, ObservedAt: errorAt, Cursor: cursor, Error: observeErr.Error()}
 	}
 	next, closed, err := model.Apply(previous, observation)
 	if err != nil {

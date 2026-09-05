@@ -163,8 +163,12 @@ func (a App) status(args []string) error {
 	if err != nil {
 		return err
 	}
+	repositories, err := selectRepos(cfg, *repository)
+	if err != nil {
+		return err
+	}
 	var snapshots []model.Snapshot
-	for _, repo := range selectRepos(cfg, *repository) {
+	for _, repo := range repositories {
 		snapshot, loadErr := (store.Store{Root: cfg.StateDir}).Load(repo.Name)
 		if loadErr != nil {
 			return loadErr
@@ -201,7 +205,11 @@ func (a App) history(args []string) error {
 		return err
 	}
 	result := map[string][]model.Interval{}
-	for _, repo := range selectRepos(cfg, *repository) {
+	repositories, err := selectRepos(cfg, *repository)
+	if err != nil {
+		return err
+	}
+	for _, repo := range repositories {
 		storage := store.Store{Root: cfg.StateDir}
 		intervals, loadErr := effectiveIntervals(storage, repo.Name, cfg.ObservationTimeout.Duration, to)
 		if loadErr != nil {
@@ -244,8 +252,12 @@ func (a App) report(args []string) error {
 	if err != nil {
 		return err
 	}
+	repositories, err := selectRepos(cfg, *repository)
+	if err != nil {
+		return err
+	}
 	var reports []model.Report
-	for _, repo := range selectRepos(cfg, *repository) {
+	for _, repo := range repositories {
 		storage := store.Store{Root: cfg.StateDir}
 		intervals, loadErr := effectiveIntervals(storage, repo.Name, cfg.ObservationTimeout.Duration, to)
 		if loadErr != nil {
@@ -327,16 +339,16 @@ func (a App) now() time.Time {
 	return time.Now().UTC()
 }
 
-func selectRepos(cfg config.Config, name string) []config.Repository {
+func selectRepos(cfg config.Config, name string) ([]config.Repository, error) {
 	if name == "" {
-		return cfg.Repositories
+		return cfg.Repositories, nil
 	}
 	for _, repo := range cfg.Repositories {
 		if strings.EqualFold(repo.Name, name) {
-			return []config.Repository{repo}
+			return []config.Repository{repo}, nil
 		}
 	}
-	return nil
+	return nil, fmt.Errorf("repository %q is not configured", name)
 }
 
 func parseRange(fromValue, toValue string, requireFrom bool, now time.Time) (time.Time, time.Time, error) {

@@ -2,10 +2,8 @@ package github
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +12,7 @@ import (
 )
 
 type Observer interface {
-	Observe(context.Context, config.Repository, int64, time.Time) (model.Observation, error)
+	Observe(context.Context, config.Repository, int64, bool, time.Time) (model.Observation, error)
 }
 
 type CLI struct{ Path string }
@@ -36,74 +34,9 @@ type rawEvent struct {
 		Name string `json:"name"`
 	} `json:"label"`
 	Issue struct {
-		Number int `json:"number"`
+		Number      int       `json:"number"`
+		PullRequest *struct{} `json:"pull_request"`
 	} `json:"issue"`
-}
-
-func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, observedAt time.Time) (model.Observation, error) {
-	issuesData, err := c.get(ctx, "repos/"+repo.Name+"/issues?state=open&per_page=100")
-	if err != nil {
-		return model.Observation{}, fmt.Errorf("list open issues for %s: %w", repo.Name, err)
-	}
-	eventsData, err := c.get(ctx, "repos/"+repo.Name+"/issues/events?per_page=100")
-	if err != nil {
-		return model.Observation{}, fmt.Errorf("list issue events for %s: %w", repo.Name, err)
-	}
-	var issuePages [][]rawIssue
-	if err := json.Unmarshal(issuesData, &issuePages); err != nil {
-		return model.Observation{}, fmt.Errorf("decode open issues for %s: %w", repo.Name, err)
-	}
-	var eventPages [][]rawEvent
-	if err := json.Unmarshal(eventsData, &eventPages); err != nil {
-		return model.Observation{}, fmt.Errorf("decode issue events for %s: %w", repo.Name, err)
-	}
-	eventsByIssue := map[int][]rawEvent{}
-	result := model.Observation{Repository: repo.Name, ObservedAt: observedAt.UTC(), Cursor: cursor}
-	for _, page := range eventPages {
-		for _, event := range page {
-			if event.ID > result.Cursor {
-				result.Cursor = event.ID
-			}
-			if relevantLabel(repo, event.Label.Name) && (event.Event == "labeled" || event.Event == "unlabeled") {
-				eventsByIssue[event.Issue.Number] = append(eventsByIssue[event.Issue.Number], event)
-				if event.ID > cursor {
-					result.EventIDs = append(result.EventIDs, event.ID)
-					if event.CreatedAt.After(result.ChangedAt) {
-						result.ChangedAt = event.CreatedAt.UTC()
-					}
-				}
-			}
-		}
-	}
-	for _, page := range issuePages {
-		for _, issue := range page {
-			if issue.PullRequest != nil || hasAny(issue.Labels, repo.TerminalLabels) || hasAny(issue.Labels, repo.ExcludeLabels) {
-				continue
-			}
-			ready := hasAny(issue.Labels, repo.ReadyLabels)
-			running := hasLabel(issue.Labels, repo.RunningLabel)
-			if !ready && !running {
-				continue
-			}
-			item := model.QueueItem{Number: issue.Number}
-			switch {
-			case ready && running:
-				item.Phase = model.Phase("conflicting-labels")
-			case running:
-				item.Phase = model.Running
-				item.PhaseSince = latestLabeled(eventsByIssue[issue.Number], []string{repo.RunningLabel})
-				item.Deadline = item.PhaseSince.Add(repo.ProcessingTimeout.Duration)
-			case ready:
-				item.Phase = model.Ready
-				item.PhaseSince = latestLabeled(eventsByIssue[issue.Number], repo.ReadyLabels)
-				item.Deadline = item.PhaseSince.Add(repo.AcceptanceTimeout.Duration)
-			}
-			result.Items = append(result.Items, item)
-		}
-	}
-	sort.Slice(result.Items, func(i, j int) bool { return result.Items[i].Number < result.Items[j].Number })
-	sort.Slice(result.EventIDs, func(i, j int) bool { return result.EventIDs[i] < result.EventIDs[j] })
-	return result, nil
 }
 
 func (c CLI) get(ctx context.Context, endpoint string) ([]byte, error) {
@@ -127,11 +60,6 @@ func latestLabeled(events []rawEvent, labels []string) time.Time {
 		}
 	}
 	return latest
-}
-
-func relevantLabel(repo config.Repository, label string) bool {
-	labels := append(append(append([]string{}, repo.ReadyLabels...), repo.TerminalLabels...), repo.RunningLabel)
-	return stringSet(labels)[strings.ToLower(label)]
 }
 
 func hasAny(labels []struct {
