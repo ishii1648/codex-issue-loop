@@ -43,6 +43,10 @@ Release deliveryは別bounded contextである。releaseの取得、検証、rep
 
 ## 3. 責務
 
+### 3.1 Durable Issue lifecycle境界
+
+現行実装では、状態語彙、遷移decision、不変条件を`internal/domain/issue`が所有し、`internal/adapter/state/issue_transition.go`がdurable snapshotへのstatus commit境界を担う。applicationはdomain decisionの呼び出しとeffectの調停に限定し、この規律のrepository作業ルールは[ルートの`AGENTS.md`](../AGENTS.md#durable-issue-lifecycle)、公開状態の互換性は[§10](#10-issue-lifecycle-apiと互換性)を参照する。
+
 | 責務 | 入力 | 出力 | 所有しないもの |
 | --- | --- | --- | --- |
 | GitHub observer | Issue、actor permission、PR、check | 正規化した外部事実 | lifecycle判断 |
