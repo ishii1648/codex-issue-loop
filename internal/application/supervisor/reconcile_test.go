@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -12,6 +13,7 @@ import (
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
@@ -22,6 +24,21 @@ import (
 type fakeProcesses map[int]bool
 
 func (f fakeProcesses) Alive(pid int) bool { return f[pid] }
+
+type cancellationWebhookGitHub struct {
+	*fakeGitHub
+	targetedRemote gh.RemoteState
+	targetedCalls  int
+}
+
+func (f *cancellationWebhookGitHub) GetREST(context.Context, config.Config, int) (gh.Issue, error) {
+	return f.targetedRemote.Issue, nil
+}
+
+func (f *cancellationWebhookGitHub) InspectPullRequestREST(context.Context, config.Config, int, int, string) (gh.RemoteState, error) {
+	f.targetedCalls++
+	return f.targetedRemote, nil
+}
 
 func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 	cfg := config.Defaults()
@@ -243,6 +260,209 @@ func TestPeriodicTerminalReconciliationCompletesAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestStartupNotPlannedCancellationPreservesArtifactsAndIsIdempotent(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	loop.Clock = fixedClock{value: now}
+	branch := "codex/issue-93-superseded"
+	prURL := "https://example.test/pull/98"
+	worktreePath := t.TempDir()
+	dirtyPath := filepath.Join(worktreePath, "uncommitted.txt")
+	if err := os.WriteFile(dirtyPath, []byte("preserve me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := &state.ContinuationCheckpoint{
+		ID: "checkpoint_issue_93", CreatedAt: now.Add(-time.Hour), RunID: "run_93", Generation: 4,
+		Stage: issuedomain.ContinuationStageChecks, PullRequestURL: prURL, PullRequestNumber: 98, HeadSHA: "head-98",
+	}
+	original := state.Issue{
+		Number: 93, Title: "Superseded", Status: issuedomain.StatusBlocked, RunID: "run_93", Generation: 4,
+		Branch: branch, Worktree: worktreePath, Attempts: 2, Continuations: 1,
+		SessionID: "session-93", Session: &state.WorkerSession{Backend: "codex", ID: "session-93"},
+		Answers:      []state.AnswerRecord{{RequestID: "req_old", Question: "Continue?", Answer: "yes", AnsweredAt: now.Add(-2 * time.Hour)}},
+		Continuation: checkpoint, PullRequestURL: prURL, PullRequestNumber: 98, HeadSHA: "head-98",
+		FailureKind: "issue", LastError: "startup reconciliation blocked: GitHub exclusion label was applied manually", UpdatedAt: now.Add(-time.Hour),
+	}
+	_, err := loop.Store.Update("blocked_fixture", 93, original.RunID, nil, func(snapshot *state.Snapshot) error {
+		value := original
+		snapshot.Issues["93"] = &value
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 93, State: "CLOSED", StateReason: "NOT_PLANNED"},
+		PullRequests: []gh.PullRequest{{Number: 98, URL: prURL, State: "CLOSED", HeadRefName: branch, HeadSHA: "head-98"}},
+	}
+	before, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileStartup(context.Background(), before); err != nil {
+		t.Fatal(err)
+	}
+	after, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := after.Issues["93"]
+	if item.Status != issuedomain.StatusCanceled || item.GitHubStateReason != "NOT_PLANNED" || item.Cancellation == nil ||
+		item.Cancellation.PreviousStatus != issuedomain.StatusBlocked || item.Cancellation.ExecutionReleaseResult != "not_present" {
+		t.Fatalf("cancellation=%+v issue=%+v", item.Cancellation, item)
+	}
+	if item.Worktree != original.Worktree || item.Branch != original.Branch || item.SessionID != original.SessionID ||
+		item.Attempts != original.Attempts || item.Continuations != original.Continuations || item.PullRequestURL != original.PullRequestURL ||
+		item.PullRequestNumber != original.PullRequestNumber || item.HeadSHA != original.HeadSHA || len(item.Answers) != 1 || item.Continuation == nil || item.Continuation.ID != checkpoint.ID {
+		t.Fatalf("retained artifacts changed: %+v", item)
+	}
+	if dirty, err := os.ReadFile(dirtyPath); err != nil || string(dirty) != "preserve me\n" {
+		t.Fatalf("dirty worktree content changed: content=%q err=%v", dirty, err)
+	}
+	if reason, attention := after.Attention(false); attention {
+		t.Fatalf("canceled Issue remained sticky attention: %s", reason)
+	}
+	events, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || strings.Count(string(events), `"type":"issue_canceled"`) != 1 ||
+		!strings.Contains(string(events), `"github_state_reason":"NOT_PLANNED"`) || !strings.Contains(string(events), `"run_id":"run_93"`) ||
+		!strings.Contains(string(events), `"previous_status":"blocked"`) || !strings.Contains(string(events), `"execution_release_result":"not_present"`) ||
+		!strings.Contains(string(events), `"url":"`+prURL+`"`) || !strings.Contains(string(events), `"canceled_at":"`+now.Format(time.RFC3339)+`"`) {
+		t.Fatalf("events=%s err=%v", events, err)
+	}
+	if err := loop.reconcileStartup(context.Background(), after); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || strings.Count(string(replayed), `"type":"issue_canceled"`) != 1 || github.inspectCalls != 1 {
+		t.Fatalf("replay events=%s inspections=%d err=%v", replayed, github.inspectCalls, err)
+	}
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 94, Title: "Next", RunID: "run_94", StartedAt: now.Add(time.Minute)}); err != nil {
+		t.Fatalf("next Issue was not admitted: %v", err)
+	}
+}
+
+func TestNotPlannedCancellationUsesPeriodicWebhookAndSafetySweepPaths(t *testing.T) {
+	routes := []struct {
+		name string
+		run  func(*Loop, state.Issue) error
+	}{
+		{name: "periodic", run: func(loop *Loop, current state.Issue) error {
+			return loop.reconcileTerminalPullRequest(context.Background(), current)
+		}},
+		{name: "webhook", run: func(loop *Loop, current state.Issue) error {
+			_, err := loop.reconcileTerminalWebhook(context.Background(), current, webhook.Delivery{DeliveryID: "delivery-1", Event: "issues", Action: "closed"})
+			return err
+		}},
+		{name: "safety sweep", run: func(loop *Loop, current state.Issue) error {
+			_, err := loop.reconcileCollectionExit(context.Background(), current, webhook.Delivery{DeliveryID: "sweep-1", Event: "issues", Action: "collection_exited"})
+			return err
+		}},
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			loop, github := testLoop(t, worker.Result{})
+			_, err := loop.Store.Update("failed_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+				snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusFailed, RunID: "run_7"}
+				return state.SetEffect(snapshot, 7, "run_7", issuedomain.EffectMarkFailed, loop.now())
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 7, State: "CLOSED", StateReason: "NOT_PLANNED"}}
+			current, err := loop.issueState(7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := route.run(loop, current); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := loop.Store.Load()
+			if err != nil || snapshot.Issues["7"].Status != issuedomain.StatusCanceled || state.PendingEffect(&snapshot, 7) != nil {
+				t.Fatalf("issue=%+v err=%v", snapshot.Issues["7"], err)
+			}
+		})
+	}
+}
+
+func TestNotPlannedCancellationPreservesUnrelatedActiveExecution(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	_, activeIdentity, err := loop.Store.StartExecution(state.ExecutionStart{
+		IssueNumber: 8, Title: "Running", RunID: "run_8", StartedAt: loop.now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loop.Store.Update("blocked_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{Number: 7, Status: issuedomain.StatusBlocked, RunID: "run_7"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{Issue: gh.Issue{Number: 7, State: "CLOSED", StateReason: "NOT_PLANNED"}}
+	current, err := loop.issueState(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.reconcileTerminalPullRequest(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Issues["7"].Status != issuedomain.StatusCanceled ||
+		snapshot.ActiveExecution == nil || snapshot.ActiveExecution.IssueNumber != 8 ||
+		snapshot.ActiveExecution.RunID != activeIdentity.RunID || snapshot.ActiveExecution.Generation != activeIdentity.Generation {
+		t.Fatalf("canceled=%+v active=%+v", snapshot.Issues["7"], snapshot.ActiveExecution)
+	}
+}
+
+func TestWebhookNotPlannedCancellationRejectsPRHiddenByTargetedInspection(t *testing.T) {
+	loop, baseGitHub := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	branch := "codex/issue-7-test"
+	prURL := "https://example.test/pull/7"
+	_, err := loop.Store.Update("blocked_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["7"] = &state.Issue{
+			Number: 7, Status: issuedomain.StatusBlocked, RunID: "run_7", Generation: 1,
+			Branch: branch, PullRequestURL: prURL, PullRequestNumber: 7, HeadSHA: "head-7",
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching := gh.PullRequest{Number: 7, URL: prURL, State: "CLOSED", HeadRefName: branch, HeadSHA: "head-7"}
+	issue := gh.Issue{Number: 7, State: "CLOSED", StateReason: "NOT_PLANNED"}
+	baseGitHub.remote = &gh.RemoteState{
+		Issue: issue,
+		PullRequests: []gh.PullRequest{
+			matching,
+			{Number: 8, URL: "https://example.test/pull/8", State: "CLOSED", HeadRefName: branch, HeadSHA: "head-8"},
+		},
+	}
+	github := &cancellationWebhookGitHub{
+		fakeGitHub: baseGitHub, targetedRemote: gh.RemoteState{Issue: issue, PullRequests: []gh.PullRequest{matching}},
+	}
+	loop.GitHub = github
+	current, err := loop.issueState(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.reconcileTerminalWebhook(context.Background(), current, webhook.Delivery{DeliveryID: "delivery-1", Event: "issues", Action: "closed"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Issues["7"].Status != issuedomain.StatusBlocked || snapshot.Issues["7"].Cancellation != nil ||
+		baseGitHub.inspectCalls != 1 || github.targetedCalls != 0 {
+		t.Fatalf("issue=%+v broad_calls=%d targeted_calls=%d", snapshot.Issues["7"], baseGitHub.inspectCalls, github.targetedCalls)
+	}
+}
+
 func TestStartupReconciliationSkipsMergeConfirmedHistory(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	_, err := loop.Store.Update("completed", 1, "run_1", nil, func(s *state.Snapshot) error {
@@ -430,7 +650,7 @@ func TestFaultStartupReconciliationConvergesOnDirtyPullRequestWithoutDuplicateCo
 	}
 }
 
-func TestTerminalTransitionRetainsGenericCheckpointWithoutRecoveryInspection(t *testing.T) {
+func TestTerminalTransitionRetainsGenericCheckpointAfterStateReasonInspection(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Processes = fakeProcesses{}
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
@@ -482,8 +702,8 @@ func TestTerminalTransitionRetainsGenericCheckpointWithoutRecoveryInspection(t *
 	if item.RunID != "run_typed" || item.Worktree != loop.Config.RepoPath || item.Branch != branch || item.SessionID != "session-typed" || item.Suspension == nil || item.Suspension.Reason != "worker blocked: network unavailable" {
 		t.Fatalf("startup park changed continuation state: %+v", item)
 	}
-	if github.inspectCalls != 0 {
-		t.Fatalf("terminal transition unexpectedly performed recovery inspection: %d", github.inspectCalls)
+	if github.inspectCalls != 1 {
+		t.Fatalf("terminal transition did not inspect authoritative state reason: %d", github.inspectCalls)
 	}
 }
 

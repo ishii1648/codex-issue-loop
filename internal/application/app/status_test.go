@@ -22,6 +22,10 @@ func TestStatusSummarizesSingleActiveExecutionAndRequests(t *testing.T) {
 				Number: 9, RunID: "run_9", Status: issuedomain.StatusRunning, WorkerPID: 109, WorkerPGID: 109,
 			},
 			"4": {Number: 4, RunID: "run_4", Status: issuedomain.StatusNeedsInput},
+			"3": {
+				Number: 3, RunID: "run_3", Status: issuedomain.StatusCanceled, GitHubStateReason: "NOT_PLANNED",
+				Cancellation: &state.Cancellation{Source: "github_not_planned", GitHubStateReason: "NOT_PLANNED", PreviousStatus: issuedomain.StatusBlocked, ExecutionReleaseResult: "not_present", CanceledAt: now},
+			},
 		},
 		PendingRequests: map[string]*state.Request{
 			"req_z": {ID: "req_z", IssueNumber: 9, Status: issuedomain.RequestStatusAnswered},
@@ -40,5 +44,8 @@ func TestStatusSummarizesSingleActiveExecutionAndRequests(t *testing.T) {
 	}
 	if result.State.Supervisor.RateLimit == nil || result.State.Supervisor.RateLimit.Resource != "graphql" || result.State.Supervisor.RateLimit.SuppressedRetryCount != 17 {
 		t.Fatalf("rate_limit=%+v", result.State.Supervisor.RateLimit)
+	}
+	if canceled := result.State.Issues["3"]; canceled.Status != issuedomain.StatusCanceled || canceled.GitHubStateReason != "NOT_PLANNED" || canceled.Cancellation == nil {
+		t.Fatalf("canceled status=%+v", canceled)
 	}
 }
