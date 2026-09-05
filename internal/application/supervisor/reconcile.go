@@ -311,6 +311,9 @@ func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue
 // with an authoritative targeted read. A normal claim also removes the ready
 // label, so an aligned running/needs-input label is not treated as exclusion.
 func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
+	if current.Status == issuedomain.StatusCanceled {
+		return true, nil
+	}
 	remote, err := l.inspectReconciliationIssue(ctx, current)
 	if err != nil {
 		return false, failure.Wrap(failure.Transient, fmt.Sprintf("inspect collection exit for Issue #%d from webhook %s", current.Number, delivery.DeliveryID), err)
