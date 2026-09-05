@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -1954,24 +1955,31 @@ func TestProcessStartFailureReleasesLaunchingExecution(t *testing.T) {
 	}
 }
 
-func TestAnsweredResumeWithSavedPullRequestSuspendsAndReleasesLaunch(t *testing.T) {
+func TestZeitreise477LegacyAnsweredResumeWithSavedPullRequestSuspendsWithoutWorkerLaunch(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
-	now := time.Now().UTC()
-	github.issue = gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.NeedsInputLabel}}
-	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{Number: 478, URL: "https://example.test/pull/478", State: "OPEN"}}}
-	_, err := loop.Store.Update("answered_resume_fixture", 1, "run_477", nil, func(snapshot *state.Snapshot) error {
-		branch := "codex/issue-477-test"
-		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, Title: "answered", Status: issuedomain.StatusResumePending, RunID: "run_477", Generation: 4,
-			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
-			PullRequestURL: "https://example.test/pull/478", PullRequestNumber: 478,
-			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_477", Kind: state.ContinuationKindNeedsInput, RequestID: "req_477", CreatedAt: now, RunID: "run_477", Generation: 4, Stage: issuedomain.ContinuationStageResume},
-			UpdatedAt:    now,
-		}
-		return nil
-	})
+	data, err := os.ReadFile(filepath.Join("testdata", "zeitreise-477-v0129-answered-running-state.json"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	data = bytes.ReplaceAll(data, []byte("/sanitized/zeitreise"), []byte(loop.Config.RepoPath))
+	data = bytes.ReplaceAll(data, []byte("/sanitized/worktrees/zeitreise/issue-477"), []byte(loop.Config.RepoPath))
+	if err := os.WriteFile(loop.Store.StatePath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(loop.Store.EventsPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	github.issue = gh.Issue{Number: 477, State: "OPEN", Labels: []string{loop.Config.GitHub.NeedsInputLabel}}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{Number: 478, URL: "https://github.com/ishii1648/zeitreise/pull/478", State: "OPEN"}}}
+	recorder := &recordingWorker{}
+	loop.Worker = recorder
+	loaded, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := loaded.Issues["477"]
+	if legacy == nil || legacy.Status != issuedomain.StatusLaunching || legacy.LaunchSource != issuedomain.StatusResumePending {
+		t.Fatalf("legacy launch authority was not restored: %+v", legacy)
 	}
 	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
 		t.Fatalf("worked=%v err=%v", worked, err)
@@ -1980,9 +1988,9 @@ func TestAnsweredResumeWithSavedPullRequestSuspendsAndReleasesLaunch(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := snapshot.Issues["1"]
-	if item == nil || item.Status != issuedomain.StatusBlocked || item.Suspension == nil || item.Suspension.CheckpointID != "checkpoint_477" ||
-		item.WorkerPID != 0 || item.WorkerPGID != 0 || snapshot.ActiveExecution != nil {
+	item := snapshot.Issues["477"]
+	if item == nil || item.Status != issuedomain.StatusBlocked || item.Suspension == nil || item.Suspension.CheckpointID != "checkpoint_zeitreise_477" ||
+		item.WorkerPID != 0 || item.WorkerPGID != 0 || snapshot.ActiveExecution != nil || len(recorder.runPrompts) != 0 || len(recorder.resumePrompts) != 0 {
 		t.Fatalf("answered resume launch did not suspend safely: %+v", item)
 	}
 }
@@ -1998,7 +2006,12 @@ func TestMarkRunningFailureReleasesAnsweredLaunchForRetry(t *testing.T) {
 			Number: 1, Title: "answered", Status: issuedomain.StatusResumePending, RunID: "run_resume", Generation: 1,
 			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
 			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_resume", Kind: state.ContinuationKindNeedsInput, RequestID: "req_resume", CreatedAt: now, RunID: "run_resume", Generation: 1, Stage: issuedomain.ContinuationStageResume},
-			UpdatedAt:    now,
+			Answers:      []state.AnswerRecord{{RequestID: "req_resume", Question: "Continue?", Answer: "yes", AnsweredAt: now}}, UpdatedAt: now,
+		}
+		snapshot.PendingRequests["req_resume"] = &state.Request{
+			ID: "req_resume", IssueNumber: 1, Question: "Continue?", RunID: "run_resume", CheckpointID: "checkpoint_resume",
+			ReleasedExecution: &state.ExecutionIdentity{RunID: "run_resume", Generation: 1}, Status: issuedomain.RequestStatusAnswered,
+			Answer: "yes", CreatedAt: now, AnsweredAt: &now,
 		}
 		return nil
 	})

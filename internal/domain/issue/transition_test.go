@@ -132,6 +132,7 @@ func TestExecutionTransitions(t *testing.T) {
 		{name: "start answered resume", make: func() (Transition, error) { return StartAnsweredResume(StatusResumePending) }, from: StatusResumePending, to: StatusLaunching},
 		{name: "start retry", make: func() (Transition, error) { return StartRetry(StatusRetryWait) }, from: StatusRetryWait, to: StatusLaunching},
 		{name: "confirm worker process", make: func() (Transition, error) { return ConfirmWorkerStarted(StatusLaunching) }, from: StatusLaunching, to: StatusRunning},
+		{name: "isolate ambiguous unstarted worker", make: func() (Transition, error) { return RecoverUnstartedWorker(StatusRunning, StatusBlocked) }, from: StatusRunning, to: StatusBlocked},
 		{name: "interrupt claim", make: func() (Transition, error) { return InterruptExecution(StatusClaiming) }, from: StatusClaiming, to: StatusRetryWait},
 		{name: "interrupt running", make: func() (Transition, error) { return InterruptExecution(StatusRunning) }, from: StatusRunning, to: StatusRetryWait},
 	}
@@ -157,6 +158,9 @@ func TestExecutionTransitionsRejectUnrelatedSources(t *testing.T) {
 	}
 	if _, err := InterruptExecution(StatusAwaitingChecks); err == nil {
 		t.Fatal("checks wait must not be interrupted as worker execution")
+	}
+	if _, err := RecoverUnstartedWorker(StatusRunning, StatusCompleted); err == nil {
+		t.Fatal("unstarted worker recovery must not synthesize completion")
 	}
 }
 
