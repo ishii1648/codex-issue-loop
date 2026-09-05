@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -977,6 +978,25 @@ func TestWebhookMailboxClaimsReadyIssueWithoutQueuePolling(t *testing.T) {
 	loop.Config.Webhook.SafetySweepInterval.Duration = 15 * time.Minute
 	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
 	loop.GitHub = github
+	if _, err := loop.Store.Update("canceled_fixture", 2, "run-2", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["2"] = &state.Issue{
+			Number: 2, Status: issuedomain.StatusCanceled, RunID: "run-2",
+			Cancellation: &state.Cancellation{
+				Source: "operator", PreviousStatus: issuedomain.StatusFailed,
+				ExecutionReleaseResult: "not_present", CanceledAt: loop.now(),
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := webhook.EnqueueMailbox(loop.Store.Dir, webhook.Delivery{
+		Version: webhook.InboxVersion, DeliveryID: "canceled-collection-exit", Event: "issues", Action: "collection_exited",
+		RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 2, AcceptedAt: loop.now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	delivery := webhook.Delivery{
 		Version: webhook.InboxVersion, DeliveryID: "delivery-labeled", Event: "issues", Action: "labeled",
 		RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: time.Now().UTC(),
@@ -1076,52 +1096,78 @@ func TestWebhookMailboxCompactsSafeIntentsBeforeTargetReconciliationFailure(t *t
 	}
 }
 
-func TestWebhookIssueReconciliationFailureIsAcknowledgedWithoutStoppingQueue(t *testing.T) {
-	loop, baseGitHub := testLoop(t, worker.Result{})
-	loop.Config.Webhook.Mode = "webhook"
-	loop.Logger = log.New(io.Discard, "", 0)
-	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
-	github.issue = gh.Issue{Number: 1, State: "closed", StateReason: "NOT_PLANNED", Labels: loop.Config.GitHub.ReadyLabels}
-	loop.GitHub = github
-	_, err := loop.Store.Update("canceled_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{
-			Number: 1, Status: issuedomain.StatusCanceled, RunID: "run-1",
-			Cancellation: &state.Cancellation{
-				Source: "operator", PreviousStatus: issuedomain.StatusFailed,
-				ExecutionReleaseResult: "not_present", CanceledAt: loop.now(),
-			},
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	delivery := webhook.Delivery{
-		Version: webhook.InboxVersion, DeliveryID: "late-collection-exit", Event: "issues", Action: "collection_exited",
-		RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: loop.now(),
-	}
-	if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
-		t.Fatal(err)
-	}
-	s := &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
-	snapshot, err := loop.Store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, acknowledged, err := s.processMailbox(context.Background(), snapshot)
-	if err != nil || len(acknowledged) != 1 || acknowledged[0].DeliveryID != delivery.DeliveryID {
-		t.Fatalf("acknowledged=%v err=%v", acknowledged, err)
-	}
-	if err := webhook.AckMailbox(loop.Store.Dir, acknowledged); err != nil {
-		t.Fatal(err)
-	}
-	remaining, err := webhook.ReadMailbox(loop.Store.Dir)
-	if err != nil || len(remaining) != 0 {
-		t.Fatalf("remaining=%v err=%v", remaining, err)
-	}
-	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"] == nil || snapshot.Issues["1"].Status != issuedomain.StatusCanceled || snapshot.Supervisor.State == state.SupervisorStateBlocked {
-		t.Fatalf("issue=%+v supervisor=%+v err=%v", snapshot.Issues["1"], snapshot.Supervisor, err)
+func TestCanceledWebhookMailboxIsIdempotent(t *testing.T) {
+	for _, action := range []string{"closed", "collection_exited"} {
+		t.Run(action, func(t *testing.T) {
+			loop, baseGitHub := testLoop(t, worker.Result{})
+			loop.Config.Webhook.Mode = "webhook"
+			github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
+			github.issue = gh.Issue{Number: 1, State: "closed", StateReason: "NOT_PLANNED"}
+			loop.GitHub = github
+			loop.Worktrees = nil
+			_, err := loop.Store.Update("canceled_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
+				snapshot.Issues["1"] = &state.Issue{
+					Number: 1, Status: issuedomain.StatusCanceled, RunID: "run-1",
+					Worktree: t.TempDir(), Branch: "codex/issue-1",
+					PullRequestNumber: 7, PullRequestURL: "https://example.test/owner/repo/pull/7", HeadSHA: "head-7",
+					Cancellation: &state.Cancellation{
+						Source: "operator", PreviousStatus: issuedomain.StatusFailed,
+						ExecutionReleaseResult: "not_present", CanceledAt: loop.now(),
+					},
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := loop.Store.StartExecution(state.ExecutionStart{
+				IssueNumber: 2, Title: "Next", RunID: "run-2", StartedAt: loop.now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			events, err := os.ReadFile(loop.Store.EventsPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s := &scheduler{loop: loop, active: map[int]activeJob{2: {runID: "run-2", cancel: cancel}}}
+			delivery := webhook.Delivery{
+				Version: webhook.InboxVersion, DeliveryID: "late-" + action, Event: "issues", Action: action,
+				RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: loop.now(),
+			}
+			for range 2 {
+				if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
+					t.Fatal(err)
+				}
+				candidates, acknowledged, err := s.processMailbox(context.Background(), before)
+				if err != nil || len(candidates) != 0 || len(acknowledged) != 1 || acknowledged[0].DeliveryID != delivery.DeliveryID {
+					t.Fatalf("candidates=%v acknowledged=%v err=%v", candidates, acknowledged, err)
+				}
+				if err := webhook.AckMailbox(loop.Store.Dir, acknowledged); err != nil {
+					t.Fatal(err)
+				}
+				remaining, err := webhook.ReadMailbox(loop.Store.Dir)
+				if err != nil || len(remaining) != 0 {
+					t.Fatalf("remaining=%v err=%v", remaining, err)
+				}
+				after, err := loop.Store.Load()
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("snapshot changed: before=%+v after=%+v err=%v", before, after, err)
+				}
+				afterEvents, err := os.ReadFile(loop.Store.EventsPath())
+				if err != nil || string(events) != string(afterEvents) {
+					t.Fatalf("events changed: %s err=%v", afterEvents, err)
+				}
+				if github.restGets != 0 || github.inspectCalls != 0 || ctx.Err() != nil {
+					t.Fatalf("reads=%d inspections=%d worker context=%v", github.restGets, github.inspectCalls, ctx.Err())
+				}
+			}
+		})
 	}
 }
 
