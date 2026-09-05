@@ -261,8 +261,8 @@ agent-loop <command> [options]
 | `register --repo PATH` | 対象リポジトリを検証し、registryとplistを生成する |
 | `unregister --repo PATH` | 停止確認後に登録を解除する |
 | `start` | LaunchAgentをbootstrap/kickstartする |
-| `stop` | LaunchAgentを停止する。Issue状態は保持する |
-| `restart` | 停止後に再起動する |
+| `stop [--timeout DURATION] [--force]` | durable drain後にLaunchAgentを停止する。Issue状態は保持する |
+| `restart [--timeout DURATION] [--force]` | durable drain後にbrokerを含むserviceを再起動しhealthを確認する |
 | `status` | snapshot、launchd状態、GitHub状態の要約を返す |
 | `watch` | イベントを追跡する |
 | `answer` | 未回答requestへ回答を登録する |
@@ -300,9 +300,13 @@ agent-loop start --repo /path/to/repo [--json]
 
 `start` 自身は常駐しない。
 
-`stop`と`restart`はLaunchAgentをunloadした後、snapshotに保存されたactive workerのPID/PGIDを照合する。所有権を確認できたprocess groupへ先に`SIGTERM`を送り、内部のgrace periodだけ待機する。残存groupだけを`SIGKILL`し、終了を確認してから`worker_process_stopped`を記録する。worktree、session、branch、run ID、generationは保持し、通常workerは`retry_wait`、conflict workerは`resolving_conflict`から次回起動時に再開する。PID再利用などで所有権を確認できないgroupはsignalせず停止処理を失敗させる。
+通常の`stop`と`restart`は、owner-onlyの`operator-control.json` transactionと`operator-maintenance.json` fenceをrepository state directoryへ原子的に記録する。supervisorはhost delivery、repository assignment delivery、operator controlのfenceを同じdrain predicateで評価し、fence中は新規claim、retry/resume、conflict worker、PR checks/merge/reconciliationを含む新しいlifecycle jobをdispatchしない。既に実行中のjobはcancelせず、worker result/sessionの保存、publication audit、Pull RequestとIssueのGitHub同期まで通常経路を完了する。schedulerのactive jobが0で、snapshot上のPID/PGIDも0になった`maintenance`状態だけをdurable drain完了とする。
 
-`status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、固定値`limit: 1`、`available`、active Issueを返す。active Issueは`issue_number`、`run_id`、`generation`、`phase`、PID/PGIDを持つ。未回答requestは`pending_requests`へrequest ID順で返す。
+drain完了後に旧repository LaunchAgentをunloadする。`restart`では共有brokerが必要なら再起動し、repository serviceとbrokerがloadedかつrunningであることを確認してからoperator fenceを解除してschedulerをwakeする。transaction phaseとgenerationを保持するため、CLI中断、重複command、supervisor crash、host reboot後は同じoperationを再実行して再開できる。fence下で再起動したsupervisorはorphan workerへsignalを送らず、保存PID/PGIDが残る限り`draining`を維持する。
+
+`--timeout`到達時はworkerをkillせずoperator fenceを解除し、transactionを`timed_out`として通常運転へ戻す。drain開始時からsupervisor PIDが変わり、orphan workerまたは`active_execution`が残る場合は安全な通常再開ができないためfenceを保持し、明示的な`--force`を要求する。operatorは後で通常commandを再試行するか、影響を確認して`--force`を明示する。`--force`だけがLaunchAgent unload後に保存PID/PGIDの所有権を照合し、全groupへ`SIGTERM`、grace後の残存groupへ`SIGKILL`を送り、`worker_process_stopped`を記録する。PID再利用などで所有権を確認できないgroupにはsignalを送らず失敗する。
+
+`status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、固定値`limit: 1`、`available`、active Issueを返す。active Issueは`issue_number`、`run_id`、`generation`、`phase`、PID/PGIDを持つ。未回答requestは`pending_requests`へrequest ID順で返す。stop/restart履歴と再開点は`operator_control`、現在のadmission fenceは`operator_maintenance_fence`で返す。
 
 ### 6.4 watch
 
