@@ -1,0 +1,739 @@
+package state
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
+	queuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/queue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
+	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
+)
+
+const CurrentVersion = schemaversion.Current
+
+type SchemaVersionError struct {
+	Kind    string
+	Version int
+}
+
+func (e SchemaVersionError) Error() string {
+	if e.Version == schemaversion.Previous {
+		return fmt.Sprintf("%s schema migration required from version %d to %d; stop loops and run agent-loop migrate --apply", e.Kind, schemaversion.Previous, CurrentVersion)
+	}
+	return fmt.Sprintf("unsupported %s version %d; this binary supports version %d", e.Kind, e.Version, CurrentVersion)
+}
+
+type Supervisor struct {
+	State               SupervisorState `json:"state"`
+	PID                 int             `json:"pid,omitempty"`
+	StartedAt           time.Time       `json:"started_at,omitempty"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	Message             string          `json:"message,omitempty"`
+	FailureKind         string          `json:"failure_kind,omitempty"`
+	ConsecutiveFailures int             `json:"consecutive_failures,omitempty"`
+	RetryAfter          *time.Time      `json:"retry_after,omitempty"`
+	RateLimit           *RateLimit      `json:"rate_limit,omitempty"`
+}
+
+type RateLimit struct {
+	Resource             string    `json:"resource"`
+	ObservedResetAt      time.Time `json:"observed_reset_at"`
+	CooldownSource       string    `json:"cooldown_source"`
+	SuppressedRetryCount uint64    `json:"suppressed_retry_count"`
+}
+
+type AnswerRecord struct {
+	RequestID  string    `json:"request_id"`
+	Question   string    `json:"question"`
+	Answer     string    `json:"answer"`
+	AnsweredAt time.Time `json:"answered_at"`
+}
+
+type WorkerSession struct {
+	Backend string `json:"backend"`
+	ID      string `json:"id"`
+}
+
+type WorkerIdentity struct {
+	Backend        string `json:"backend"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	RequestedModel string `json:"requested_model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
+	Variant        string `json:"variant,omitempty"`
+}
+
+// ExecutionIdentity fences mutations to one Issue run and one monotonically
+// increasing generation. Run IDs alone are not sufficient after a restart.
+type ExecutionIdentity struct {
+	RunID      string `json:"run_id"`
+	Generation uint64 `json:"generation"`
+}
+
+// ActiveExecution is the repository's only execution authority. Waiting,
+// suspended, and Pull Request lifecycle records never occupy it.
+type ActiveExecution struct {
+	IssueNumber int       `json:"issue_number"`
+	RunID       string    `json:"run_id"`
+	Generation  uint64    `json:"generation"`
+	BaseSHA     string    `json:"base_sha,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+}
+
+type EffectIntent struct {
+	ID          string                 `json:"id"`
+	IssueNumber int                    `json:"issue_number"`
+	RunID       string                 `json:"run_id"`
+	Kind        issuedomain.EffectKind `json:"kind"`
+	CreatedAt   time.Time              `json:"created_at"`
+}
+
+// ContinuationCheckpoint is the durable boundary between released execution
+// capacity and a later, explicitly validated continuation.
+type ContinuationCheckpoint struct {
+	ID                string                        `json:"id"`
+	Kind              string                        `json:"kind,omitempty"`
+	RequestID         string                        `json:"request_id,omitempty"`
+	CreatedAt         time.Time                     `json:"created_at"`
+	RunID             string                        `json:"run_id"`
+	Generation        uint64                        `json:"generation"`
+	BaseSHA           string                        `json:"base_sha,omitempty"`
+	Workspace         *WorkerWorkspace              `json:"workspace,omitempty"`
+	Session           *WorkerSession                `json:"session,omitempty"`
+	HeadSHA           string                        `json:"head_sha,omitempty"`
+	WorktreeSHA256    string                        `json:"worktree_sha256,omitempty"`
+	PullRequestURL    string                        `json:"pull_request_url,omitempty"`
+	PullRequestNumber int                           `json:"pull_request_number,omitempty"`
+	Stage             issuedomain.ContinuationStage `json:"stage,omitempty"`
+	ResultSHA256      string                        `json:"result_sha256,omitempty"`
+	Summary           string                        `json:"summary,omitempty"`
+	Evidence          *ContinuationEvidence         `json:"evidence,omitempty"`
+}
+
+// ContinuationEvidence records the immutable observation that caused a stage
+// to stop without introducing a scenario-specific recovery aggregate.
+type ContinuationEvidence struct {
+	Origin     string    `json:"origin"`
+	Phase      string    `json:"phase"`
+	Code       string    `json:"code"`
+	Status     string    `json:"status"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+type Suspension struct {
+	ID              string                         `json:"id"`
+	Origin          string                         `json:"origin,omitempty"`
+	Status          issuedomain.SuspensionStatus   `json:"status"`
+	ReasonCode      string                         `json:"reason_code"`
+	Recoverability  issuedomain.Recoverability     `json:"recoverability"`
+	Reason          string                         `json:"reason"`
+	MissingEvidence []string                       `json:"missing_evidence,omitempty"`
+	AllowedActions  []issuedomain.ResolutionAction `json:"allowed_actions"`
+	CheckpointID    string                         `json:"checkpoint_id,omitempty"`
+	SuspendedAt     time.Time                      `json:"suspended_at"`
+	ResolvedAt      time.Time                      `json:"resolved_at,omitempty"`
+	Resolution      issuedomain.ResolutionAction   `json:"resolution,omitempty"`
+}
+
+// ConflictAttempt is an append-only audit record for one autonomous conflict
+// recovery worker invocation. A new base SHA starts a new per-base budget while
+// preserving the earlier records.
+type ConflictAttempt struct {
+	Number        int                               `json:"number"`
+	BaseSHA       string                            `json:"base_sha"`
+	Status        issuedomain.ConflictAttemptStatus `json:"status"`
+	Reason        string                            `json:"reason,omitempty"`
+	ConflictFiles []string                          `json:"conflict_files,omitempty"`
+	StartedAt     time.Time                         `json:"started_at"`
+	FinishedAt    time.Time                         `json:"finished_at,omitempty"`
+}
+
+type ConflictVerification struct {
+	Command string `json:"command"`
+	Result  string `json:"result"`
+}
+
+// ConflictRecovery contains everything required to resume an in-place merge
+// after a supervisor restart. Prompt-only context is bounded by the preparer
+// before it is persisted.
+type ConflictRecovery struct {
+	PullRequestURL  string                 `json:"pull_request_url"`
+	RetryID         string                 `json:"retry_id,omitempty"`
+	PreviousBaseSHA string                 `json:"previous_base_sha,omitempty"`
+	TargetBaseSHA   string                 `json:"target_base_sha,omitempty"`
+	OriginalHeadSHA string                 `json:"original_head_sha,omitempty"`
+	ConflictFiles   []string               `json:"conflict_files,omitempty"`
+	AllowedPaths    []string               `json:"allowed_paths,omitempty"`
+	Attempts        int                    `json:"attempts"`
+	BaseUpdates     int                    `json:"base_updates"`
+	History         []ConflictAttempt      `json:"history,omitempty"`
+	OriginalDiff    string                 `json:"original_diff,omitempty"`
+	BaseCommits     string                 `json:"base_commits,omitempty"`
+	ConflictContent string                 `json:"conflict_content,omitempty"`
+	Verification    []ConflictVerification `json:"verification,omitempty"`
+	LastReason      string                 `json:"last_reason,omitempty"`
+	StartedAt       time.Time              `json:"started_at,omitempty"`
+	UpdatedAt       time.Time              `json:"updated_at,omitempty"`
+}
+
+// WorkerWorkspace is immutable provenance captured before the first worker
+// spawn. Continuations must reproduce every field before a backend is invoked.
+type WorkerWorkspace struct {
+	Path         string    `json:"path"`
+	Branch       string    `json:"branch"`
+	RepoID       string    `json:"repo_id"`
+	Repository   string    `json:"repository"`
+	RepositoryID int64     `json:"repository_id,omitempty"`
+	GitCommonDir string    `json:"git_common_dir"`
+	MainCheckout string    `json:"main_checkout"`
+	CapturedAt   time.Time `json:"captured_at"`
+}
+
+// CapturedAt is audit metadata and is deliberately not part of workspace
+// identity comparison.
+func (w WorkerWorkspace) Matches(path, branch, repoID, repository string, repositoryID int64, gitCommonDir, mainCheckout string) bool {
+	return w.Path == path && w.Branch == branch && w.RepoID == repoID &&
+		w.Repository == repository && w.RepositoryID == repositoryID &&
+		w.GitCommonDir == gitCommonDir && w.MainCheckout == mainCheckout
+}
+
+type Issue struct {
+	Number             int                             `json:"number"`
+	Title              string                          `json:"title"`
+	AuthorVerification *queuedomain.AuthorVerification `json:"author_verification,omitempty"`
+	Status             issuedomain.Status              `json:"status"`
+	RunID              string                          `json:"run_id,omitempty"`
+	Generation         uint64                          `json:"generation,omitempty"`
+	Continuation       *ContinuationCheckpoint         `json:"continuation,omitempty"`
+	Suspension         *Suspension                     `json:"suspension,omitempty"`
+	PublicationAudit   *publication.Audit              `json:"publication_audit,omitempty"`
+	Branch             string                          `json:"branch,omitempty"`
+	Worktree           string                          `json:"worktree,omitempty"`
+	Workspace          *WorkerWorkspace                `json:"workspace,omitempty"`
+	Attempts           int                             `json:"attempts"`
+	Continuations      int                             `json:"continuations"`
+	ExecutionProfile   string                          `json:"execution_profile,omitempty"`
+	SessionID          string                          `json:"session_id,omitempty"`
+	Session            *WorkerSession                  `json:"session,omitempty"`
+	WorkerIdentity     WorkerIdentity                  `json:"worker_identity,omitempty"`
+	WorkerPID          int                             `json:"worker_pid,omitempty"`
+	WorkerPGID         int                             `json:"worker_pgid,omitempty"`
+	PullRequestURL     string                          `json:"pull_request_url,omitempty"`
+	PullRequestNumber  int                             `json:"pull_request_number,omitempty"`
+	HeadSHA            string                          `json:"head_sha,omitempty"`
+	ReviewDecision     string                          `json:"review_decision,omitempty"`
+	PullRequestMerged  bool                            `json:"pull_request_merged,omitempty"`
+	FailureKind        string                          `json:"failure_kind,omitempty"`
+	LastError          string                          `json:"last_error,omitempty"`
+	RetryAfter         *time.Time                      `json:"retry_after,omitempty"`
+	Answers            []AnswerRecord                  `json:"answers,omitempty"`
+	ConflictRecovery   *ConflictRecovery               `json:"conflict_recovery,omitempty"`
+	UpdatedAt          time.Time                       `json:"updated_at"`
+}
+
+type QuarantineRecord struct {
+	IssueNumber    int                `json:"issue_number"`
+	RunID          string             `json:"run_id,omitempty"`
+	Generation     uint64             `json:"generation,omitempty"`
+	RejectedStatus issuedomain.Status `json:"rejected_status,omitempty"`
+	ReasonCode     string             `json:"reason_code"`
+	Reason         string             `json:"reason"`
+	QuarantinedAt  time.Time          `json:"quarantined_at"`
+	LastValid      *Issue             `json:"last_valid,omitempty"`
+	Requests       []*Request         `json:"requests,omitempty"`
+}
+
+type Option struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+type Request struct {
+	ID                string                    `json:"id"`
+	IssueNumber       int                       `json:"issue_number"`
+	Question          string                    `json:"question"`
+	Reason            string                    `json:"reason,omitempty"`
+	Recommended       string                    `json:"recommended_option,omitempty"`
+	Options           []Option                  `json:"options,omitempty"`
+	AllowFreeText     bool                      `json:"allow_free_text"`
+	ResumeStatus      issuedomain.Status        `json:"resume_status,omitempty"`
+	RunID             string                    `json:"run_id,omitempty"`
+	CheckpointID      string                    `json:"checkpoint_id,omitempty"`
+	ReleasedExecution *ExecutionIdentity        `json:"released_execution,omitempty"`
+	Status            issuedomain.RequestStatus `json:"status"`
+	Answer            string                    `json:"answer,omitempty"`
+	CreatedAt         time.Time                 `json:"created_at"`
+	AnsweredAt        *time.Time                `json:"answered_at,omitempty"`
+}
+
+type Recovery struct {
+	Status     RecoveryState `json:"status"`
+	Reason     string        `json:"reason"`
+	BackupDir  string        `json:"backup_dir"`
+	DetectedAt time.Time     `json:"detected_at"`
+}
+
+type Snapshot struct {
+	Version                  int                                        `json:"version"`
+	SemanticContractVersion  int                                        `json:"semantic_contract_version"`
+	IssueLifecycleAPIVersion string                                     `json:"issue_lifecycle_api_version"`
+	RepoID                   string                                     `json:"repo_id"`
+	RepoPath                 string                                     `json:"repo_path"`
+	StateRevision            uint64                                     `json:"state_revision"`
+	Supervisor               Supervisor                                 `json:"supervisor"`
+	ActiveExecution          *ActiveExecution                           `json:"active_execution,omitempty"`
+	Issues                   map[string]*Issue                          `json:"issues"`
+	PendingEffects           map[string]*EffectIntent                   `json:"pending_effects"`
+	QuarantinedIssues        map[string]*QuarantineRecord               `json:"quarantined_issues"`
+	IntakeVerifications      map[string]*queuedomain.AuthorVerification `json:"intake_verifications"`
+	PendingRequests          map[string]*Request                        `json:"pending_requests"`
+	Recovery                 *Recovery                                  `json:"recovery,omitempty"`
+}
+
+// UnmarshalJSON rejects scenario-specific recovery state when it is already
+// labeled as schema v5. Only the v4 migration decoder may interpret those
+// fields; silently discarding them here could resume without their evidence.
+func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
+	var envelope struct {
+		Version                 int                                   `json:"version"`
+		SemanticContractVersion int                                   `json:"semantic_contract_version"`
+		Issues                  map[string]map[string]json.RawMessage `json:"issues"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	if envelope.Version == CurrentVersion && envelope.SemanticContractVersion == statecontract.CurrentVersion {
+		for number, issue := range envelope.Issues {
+			for _, field := range []string{
+				"lease", "resource_park", "execution_lease", "lease_generation", "continuation_checkpoint", "blocked_cause", "environment_resume", "answered_workspace_recovery",
+				"workspace_provenance_recovery", "publication_failure", "publication_recovery",
+				"pull_request_checks_failure", "pull_request_checks_recovery", "merged_pull_request_adoption",
+			} {
+				if _, exists := issue[field]; exists {
+					return fmt.Errorf("Issue %s uses removed v5 field %q; migrate the original v4 input instead", number, field)
+				}
+			}
+			var status string
+			_ = json.Unmarshal(issue["status"], &status)
+			if status == "environment_resume_pending" || status == "publication_recovery_pending" || status == "pull_request_checks_recovery_pending" {
+				return fmt.Errorf("Issue %s uses removed v5 status %q", number, status)
+			}
+			if _, exists := issue["github_sync"]; exists {
+				return fmt.Errorf("Issue %s uses removed v5 field %q; effects belong to the repository aggregate", number, "github_sync")
+			}
+		}
+	}
+	type snapshotAlias Snapshot
+	var decoded snapshotAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*snapshot = Snapshot(decoded)
+	if snapshot.Issues == nil {
+		snapshot.Issues = map[string]*Issue{}
+	}
+	if snapshot.QuarantinedIssues == nil {
+		snapshot.QuarantinedIssues = map[string]*QuarantineRecord{}
+	}
+	if snapshot.IntakeVerifications == nil {
+		snapshot.IntakeVerifications = map[string]*queuedomain.AuthorVerification{}
+	}
+	if snapshot.PendingRequests == nil {
+		snapshot.PendingRequests = map[string]*Request{}
+	}
+	if snapshot.PendingEffects == nil {
+		snapshot.PendingEffects = map[string]*EffectIntent{}
+	}
+	return nil
+}
+
+type Event struct {
+	Version     int             `json:"version"`
+	EventID     string          `json:"event_id"`
+	Sequence    uint64          `json:"sequence"`
+	Timestamp   time.Time       `json:"timestamp"`
+	RepoID      string          `json:"repo_id"`
+	IssueNumber int             `json:"issue_number,omitempty"`
+	RunID       string          `json:"run_id,omitempty"`
+	Type        string          `json:"type"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+}
+
+type Store struct {
+	Dir            string
+	RepoID         string
+	RepoPath       string
+	Secrets        []string
+	EventRetention retention.Policy
+}
+
+func (s Store) StatePath() string  { return filepath.Join(s.Dir, "state.json") }
+func (s Store) EventsPath() string { return filepath.Join(s.Dir, "events.jsonl") }
+
+func (s Store) TransactionPath() string { return filepath.Join(s.Dir, "state.txn.json") }
+func (s Store) lockPath() string        { return filepath.Join(s.Dir, "state.lock") }
+
+func (s Store) Ensure() error {
+	if err := s.ensureDir(); err != nil {
+		return fmt.Errorf("create state directory: %w", err)
+	}
+	_, err := s.Load()
+	return err
+}
+
+func (s Store) Load() (Snapshot, error) {
+	if err := s.ensureDir(); err != nil {
+		return Snapshot{}, err
+	}
+	// Loading may complete a prepared transaction or repair a partial log tail.
+	lock, err := s.lock(true)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlock(lock)
+	return s.recoverUnlocked()
+}
+
+func (s Store) Update(eventType string, issueNumber int, runID string, payload any, mutate func(*Snapshot) error) (Snapshot, error) {
+	if err := s.ensureDir(); err != nil {
+		return Snapshot{}, err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlock(lock)
+	snapshot, err := s.recoverUnlocked()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if snapshot.Recovery != nil && snapshot.Recovery.Status == RecoveryStateBlocked {
+		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
+	}
+	var lastValid *Issue
+	if issueNumber > 0 {
+		lastValid = cloneIssue(snapshot.Issues[strconv.Itoa(issueNumber)])
+	}
+	if err := mutate(&snapshot); err != nil {
+		return Snapshot{}, err
+	}
+	normalizeSnapshot(&snapshot)
+	now := time.Now().UTC()
+	finalizeLifecycleBoundaries(&snapshot, now)
+	if validationErr := snapshot.Validate(); validationErr != nil {
+		if issueNumber < 1 || !isolateInvalidIssue(&snapshot, issueNumber, lastValid, validationErr, now) {
+			return Snapshot{}, fmt.Errorf("validate snapshot before event %q: %w", eventType, validationErr)
+		}
+		if err := snapshot.Validate(); err != nil {
+			return Snapshot{}, fmt.Errorf("validate repository after quarantining Issue #%d: %w", issueNumber, err)
+		}
+		payload = map[string]any{"rejected_event": eventType, "reason_code": "issue_invariant_violation", "reason": validationErr.Error()}
+		eventType = "issue_quarantined"
+	}
+	snapshot.StateRevision++
+	snapshot.Supervisor.UpdatedAt = now
+	snapshotJSON, err := redact.Marshal(snapshot, s.Secrets)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("sanitize state snapshot: %w", err)
+	}
+	if err := json.Unmarshal(snapshotJSON, &snapshot); err != nil {
+		return Snapshot{}, fmt.Errorf("decode sanitized state snapshot: %w", err)
+	}
+	payloadJSON, err := redact.Marshal(payload, s.Secrets)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("marshal event payload: %w", err)
+	}
+	event := Event{
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
+		Timestamp: now, RepoID: s.RepoID, IssueNumber: issueNumber,
+		RunID: runID, Type: eventType, Payload: payloadJSON,
+	}
+	txn := transaction{Version: CurrentVersion, Snapshot: snapshot, Event: event}
+	if err := fsutil.WriteJSON(s.TransactionPath(), txn, 0o600); err != nil {
+		return Snapshot{}, fmt.Errorf("prepare state transaction: %w", err)
+	}
+	if err := s.appendEventUnlocked(event); err != nil {
+		return Snapshot{}, err
+	}
+	if err := fsutil.WriteJSON(s.StatePath(), snapshot, 0o600); err != nil {
+		return Snapshot{}, err
+	}
+	if err := s.removeTransactionUnlocked(); err != nil {
+		return Snapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func isolateInvalidIssue(snapshot *Snapshot, issueNumber int, lastValid *Issue, cause error, now time.Time) bool {
+	if snapshot == nil || issueNumber < 1 || cause == nil {
+		return false
+	}
+	key := strconv.Itoa(issueNumber)
+	rejected := snapshot.Issues[key]
+	record := &QuarantineRecord{
+		IssueNumber: issueNumber, ReasonCode: "issue_invariant_violation", Reason: cause.Error(),
+		QuarantinedAt: now.UTC(), LastValid: cloneIssue(lastValid),
+	}
+	if rejected != nil {
+		record.RunID, record.Generation, record.RejectedStatus = rejected.RunID, rejected.Generation, rejected.Status
+	} else if lastValid != nil {
+		record.RunID, record.Generation, record.RejectedStatus = lastValid.RunID, lastValid.Generation, lastValid.Status
+	}
+	delete(snapshot.Issues, key)
+	for id, request := range snapshot.PendingRequests {
+		if request == nil || request.IssueNumber != issueNumber {
+			continue
+		}
+		copy := *request
+		copy.Options = append([]Option(nil), request.Options...)
+		record.Requests = append(record.Requests, &copy)
+		delete(snapshot.PendingRequests, id)
+	}
+	delete(snapshot.PendingEffects, key)
+	sort.Slice(record.Requests, func(i, j int) bool { return record.Requests[i].ID < record.Requests[j].ID })
+	if snapshot.ActiveExecution != nil && snapshot.ActiveExecution.IssueNumber == issueNumber {
+		snapshot.ActiveExecution = nil
+	}
+	snapshot.QuarantinedIssues[key] = record
+	return true
+}
+
+func cloneIssue(issue *Issue) *Issue {
+	if issue == nil {
+		return nil
+	}
+	data, err := json.Marshal(issue)
+	if err != nil {
+		return nil
+	}
+	var cloned Issue
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return nil
+	}
+	return &cloned
+}
+
+func (s Store) rotateEventsUnlocked(snapshot Snapshot) error {
+	policy := s.EventRetention
+	if policy.MaxBytes <= 0 || policy.MaxAge <= 0 || policy.Keep <= 0 || snapshot.StateRevision == 0 {
+		return nil
+	}
+	info, err := os.Stat(s.EventsPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Size() <= policy.MaxBytes && time.Since(info.ModTime()) <= policy.MaxAge {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]uint64{"archived_through": snapshot.StateRevision})
+	if err != nil {
+		return err
+	}
+	checkpoint := Event{
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: snapshot.StateRevision,
+		Timestamp: time.Now().UTC(), RepoID: s.RepoID, Type: "event_log_checkpoint", Payload: payload,
+	}
+	line, err := json.Marshal(checkpoint)
+	if err != nil {
+		return err
+	}
+	return retention.ArchiveAndReplace(s.EventsPath(), append(line, '\n'), policy)
+}
+
+func (s Store) Initialize() error {
+	if err := s.ensureDir(); err != nil {
+		return err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return err
+	}
+	defer unlock(lock)
+	snapshot, err := s.recoverUnlocked()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(s.StatePath()); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return fsutil.WriteJSON(s.StatePath(), snapshot, 0o600)
+}
+
+func (s Store) AcquireSupervisorLock() (*os.File, error) {
+	path := filepath.Join(s.Dir, "supervisor.lock")
+	if err := s.ensureDir(); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("another supervisor holds %s: %w", path, err)
+	}
+	return f, nil
+}
+
+// InspectExclusive runs inspect while holding the repository state mutation
+// lock. The callback must not call Store methods. It may perform only a bounded
+// external action whose safety depends on preventing a concurrent admission.
+func (s Store) InspectExclusive(inspect func(Snapshot) error) error {
+	if inspect == nil {
+		return errors.New("exclusive state inspection callback is required")
+	}
+	if err := s.ensureDir(); err != nil {
+		return err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return err
+	}
+	defer unlock(lock)
+	snapshot, err := s.recoverUnlocked()
+	if err != nil {
+		return err
+	}
+	return inspect(snapshot)
+}
+
+func (s Store) ensureDir() error {
+	const managedModeMask = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(s.Dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("managed state directory is not a directory: %s", s.Dir)
+	}
+	if info.Mode()&managedModeMask != 0o700 {
+		if err := os.Chmod(s.Dir, 0o700); err != nil {
+			return err
+		}
+	}
+	for _, path := range []string{s.StatePath(), s.EventsPath(), s.TransactionPath(), s.lockPath(), filepath.Join(s.Dir, "supervisor.lock")} {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("managed state path is not a regular file: %s", path)
+		}
+		if info.Mode()&managedModeMask == 0o600 {
+			continue
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ReleaseSupervisorLock(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+}
+
+func (s Store) lock(exclusive bool) (*os.File, error) {
+	f, err := os.OpenFile(s.lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open state lock: %w", err)
+	}
+	how := syscall.LOCK_SH
+	if exclusive {
+		how = syscall.LOCK_EX
+	}
+	if err := syscall.Flock(int(f.Fd()), how); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("lock state: %w", err)
+	}
+	return f, nil
+}
+
+func unlock(f *os.File) {
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+}
+
+func (s Snapshot) Attention(untilIdle bool) (string, bool) {
+	requests := make([]string, 0)
+	for id, request := range s.PendingRequests {
+		if request.Status == issuedomain.RequestStatusPending {
+			requests = append(requests, id)
+		}
+	}
+	if len(requests) > 0 {
+		sort.Strings(requests)
+		return "needs_input", true
+	}
+	for _, issue := range s.Issues {
+		if issue != nil && issue.Status == issuedomain.StatusBlocked {
+			return "blocked", true
+		}
+	}
+	if s.Supervisor.State == SupervisorStateBlocked || s.Supervisor.State == SupervisorStateStopped {
+		return string(s.Supervisor.State), true
+	}
+	if untilIdle && s.Supervisor.State == SupervisorStatePolling {
+		if len(s.PendingEffects) > 0 {
+			return "", false
+		}
+		for _, issue := range s.Issues {
+			if issue.Status.PreventsIdle() {
+				return "", false
+			}
+		}
+		return "idle", true
+	}
+	return "", false
+}
+
+func NewID(prefix string) string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	}
+	return prefix + "_" + hex.EncodeToString(buf)
+}
+
+func ValidID(value, prefix string) bool {
+	if !strings.HasPrefix(value, prefix) || len(value) <= len(prefix) || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}

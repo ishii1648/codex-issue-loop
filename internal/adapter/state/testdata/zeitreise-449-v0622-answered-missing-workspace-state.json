@@ -1,0 +1,119 @@
+{
+  "version": 4,
+  "semantic_contract_version": 0,
+  "repo_id": "repo_zeitreise",
+  "repo_path": "/sanitized/zeitreise",
+  "state_revision": 11,
+  "supervisor": {
+    "state": "running",
+    "updated_at": "2026-08-19T01:01:03Z"
+  },
+  "issues": {
+    "449": {
+      "number": 449,
+      "title": "Sanitized #449",
+      "status": "blocked",
+      "run_id": "run_0c0123ac8570c0a8",
+      "lease_generation": 2,
+      "lease": {
+        "owner": {
+          "run_id": "run_0c0123ac8570c0a8",
+          "generation": 2
+        },
+        "slot": 0,
+        "declared_resources": [
+          "repo:*"
+        ],
+        "resolved_resources": [
+          "repo:*"
+        ],
+        "base_sha": "0c1498c76f2e3b1f5f7d1871c5bbd0405ba9038e",
+        "reserved_at": "2026-08-19T01:01:00Z"
+      },
+      "resource_park": {
+        "id": "park_f5edeb293b3960b8",
+        "kind": "needs_input",
+        "request_id": "req_6058cb295f5cb9ff",
+        "status": "resumed",
+        "original_lease": {
+          "owner": {
+            "run_id": "run_0c0123ac8570c0a8",
+            "generation": 1
+          },
+          "slot": 0,
+          "declared_resources": [
+            "repo:*"
+          ],
+          "resolved_resources": [
+            "repo:*"
+          ],
+          "base_sha": "0c1498c76f2e3b1f5f7d1871c5bbd0405ba9038e",
+          "reserved_at": "2026-08-19T01:00:00Z"
+        },
+        "parked_at": "2026-08-19T01:00:05Z",
+        "resumed_at": "2026-08-19T01:01:00Z",
+        "resume_owner": {
+          "run_id": "run_0c0123ac8570c0a8",
+          "generation": 2
+        }
+      },
+      "declared_resources": [
+        "repo:*"
+      ],
+      "branch": "codex/issue-449-extent-121",
+      "worktree": "/sanitized/worktrees/zeitreise/issue-449",
+      "attempts": 1,
+      "continuations": 0,
+      "execution_profile": "extended",
+      "session_id": "01a012e1-b854-7e21-88b4-3cf814c7c5db",
+      "session": {
+        "backend": "codex",
+        "id": "01a012e1-b854-7e21-88b4-3cf814c7c5db"
+      },
+      "failure_kind": "issue",
+      "last_error": "worker workspace validation failed for /sanitized/worktrees/zeitreise/issue-449: saved workspace provenance is missing",
+      "answers": [
+        {
+          "request_id": "req_6058cb295f5cb9ff",
+          "question": "Which extent should be used?",
+          "answer": "121",
+          "answered_at": "2026-08-19T01:01:00Z"
+        }
+      ],
+      "blocked_cause": {
+        "origin": "supervisor",
+        "kind": "worker_workspace",
+        "resumable": false,
+        "reason": "worker workspace validation failed for /sanitized/worktrees/zeitreise/issue-449: saved workspace provenance is missing",
+        "blocked_at": "2026-08-19T01:01:02Z"
+      },
+      "updated_at": "2026-08-19T01:01:03Z"
+    }
+  },
+  "pending_requests": {
+    "req_6058cb295f5cb9ff": {
+      "id": "req_6058cb295f5cb9ff",
+      "issue_number": 449,
+      "question": "Which extent should be used?",
+      "reason": "product behavior",
+      "recommended_option": "121",
+      "options": [
+        {
+          "id": "121",
+          "label": "Extent 121"
+        }
+      ],
+      "allow_free_text": true,
+      "run_id": "run_0c0123ac8570c0a8",
+      "resource_park_id": "park_f5edeb293b3960b8",
+      "released_owner": {
+        "run_id": "run_0c0123ac8570c0a8",
+        "generation": 1
+      },
+      "status": "answered",
+      "answer": "121",
+      "created_at": "2026-08-19T01:00:05Z",
+      "answered_at": "2026-08-19T01:01:00Z"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ishii1648/codex-issue-loop/schemas/incident-observability.schema.json",
+  "title": "codex-issue-loop evidence-traced observability gaps",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "gaps"],
+  "properties": {
+    "version": {"const": 1},
+    "gaps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "incident_refs", "invariant_refs", "current_missing_evidence", "signal", "enables", "security", "cardinality", "retention"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "incident_refs": {"type": "array", "items": {"type": "string"}},
+          "invariant_refs": {"type": "array", "items": {"type": "string"}},
+          "current_missing_evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "signal": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "name", "fields"],
+            "properties": {
+              "kind": {"enum": ["event", "status", "log", "metric"]},
+              "name": {"type": "string", "minLength": 1},
+              "fields": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+            }
+          },
+          "enables": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "security": {"type": "string", "minLength": 1},
+          "cardinality": {"type": "string", "minLength": 1},
+          "retention": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

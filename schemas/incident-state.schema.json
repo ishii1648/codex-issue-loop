@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "codex-issue-loop durable incident state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "revision", "updated_at", "episodes"],
+  "properties": {
+    "version": {"const": 1},
+    "revision": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "last_signal": {"$ref": "#/$defs/id"},
+    "episodes": {"type": "object", "additionalProperties": {"$ref": "#/$defs/episode"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "evidence": {
+      "type": "object", "additionalProperties": false, "required": ["source", "ref"],
+      "properties": {"source": {"$ref": "#/$defs/id"}, "ref": {"type": "string", "minLength": 1, "maxLength": 1024}}
+    },
+    "features": {
+      "type": "object", "additionalProperties": false,
+      "required": ["corroborated_product_fix", "documented_invariant_violation", "repeated_independent_runs", "typed_transient", "retry_deadline_respected", "consecutive_failures", "successful_domain_event", "request_amplification", "progress_stalled", "human_action_required", "persistence_threshold_exceeded"],
+      "properties": {
+        "corroborated_product_fix": {"type": "boolean"}, "documented_invariant_violation": {"type": "boolean"},
+        "repeated_independent_runs": {"type": "boolean"}, "typed_transient": {"type": "boolean"},
+        "retry_deadline_respected": {"type": "boolean"}, "consecutive_failures": {"type": "integer", "minimum": 0},
+        "successful_domain_event": {"type": "boolean"}, "request_amplification": {"type": "boolean"},
+        "progress_stalled": {"type": "boolean"}, "human_action_required": {"type": "boolean"},
+        "persistence_threshold_exceeded": {"type": "boolean"}
+      }
+    },
+    "issue": {
+      "type": "object", "additionalProperties": false, "required": ["labels", "fingerprint", "status"],
+      "properties": {
+        "number": {"type": "integer", "minimum": 1}, "url": {"type": "string"},
+        "labels": {"type": "array", "uniqueItems": true, "items": {"type": "string", "maxLength": 128}},
+        "fingerprint": {"$ref": "#/$defs/fingerprint"}, "status": {"enum": ["dry_run", "created", "existing", "read_back"]},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "lifecycle": {
+      "type": "object", "additionalProperties": false, "required": ["stage", "outcome", "timestamp"],
+      "properties": {
+        "stage": {"enum": ["worker_started", "worker_failed", "pull_request_created", "checks_passed", "checks_failed", "review_passed", "review_failed", "merged", "issue_closed", "reopened", "recovery_completed"]},
+        "outcome": {"enum": ["started", "succeeded", "failed", "retrying", "blocked", "pending", "observed", "resolved", "reopened", "noop", "rejected", "rate_limited", "canceled"]},
+        "timestamp": {"type": "string", "format": "date-time"}, "ref": {"type": "string", "maxLength": 1024}
+      }
+    },
+    "episode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "id", "fingerprint", "repository", "correlation_id", "state", "started_at", "updated_at", "occurrence_count", "signal_ids", "last_signal_id", "evidence", "features", "primary_classification", "matched_rules", "confidence", "analysis_circuit_generation", "issue_circuit_generation", "lifecycle"],
+      "properties": {
+        "version": {"const": 1}, "id": {"type": "string", "pattern": "^inc-[a-f0-9]{20}$"},
+        "fingerprint": {"$ref": "#/$defs/fingerprint"}, "repository": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+$"},
+        "correlation_id": {"$ref": "#/$defs/id"}, "issue_number": {"type": "integer", "minimum": 1},
+        "run_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "invariant_codes": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "state": {"enum": ["open", "resolved", "reopened"]}, "started_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"}, "occurrence_count": {"type": "integer", "minimum": 1},
+        "signal_ids": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "last_signal_id": {"$ref": "#/$defs/id"}, "evidence": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/evidence"}},
+        "features": {"$ref": "#/$defs/features"},
+        "primary_classification": {"enum": ["expected_transient", "degraded", "operator_attention", "suspected_bug", "confirmed_bug", "unknown"]},
+        "matched_rules": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "confidence": {"enum": ["low", "medium", "high"]}, "missing_evidence": {"type": "array", "items": {"type": "string", "maxLength": 1024}},
+        "ai_analysis": {"$ref": "./incident-ai-analysis.schema.json"}, "issue": {"$ref": "#/$defs/issue"},
+        "analysis_attempts": {"type": "integer", "minimum": 0}, "next_attempt_at": {"type": "string", "format": "date-time"},
+        "circuit_open": {"type": "boolean"}, "analysis_circuit_generation": {"type": "integer", "minimum": 0},
+        "issue_attempts": {"type": "integer", "minimum": 0}, "issue_next_attempt_at": {"type": "string", "format": "date-time"},
+        "issue_circuit_open": {"type": "boolean"}, "issue_circuit_generation": {"type": "integer", "minimum": 0},
+        "lifecycle": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/lifecycle"}}
+      }
+    }
+  }
+}

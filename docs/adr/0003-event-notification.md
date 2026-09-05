@@ -20,7 +20,7 @@ watch algorithmは次の契約を守る。
 2. state directoryをfsnotifyへ登録する。
 3. subscription後にsnapshotをもう一度読み、read-subscribe間のraceを閉じる。
 4. `state.json`または`events.jsonl`のeventを受けたらpayloadを解釈せずsnapshotを読む。
-5. eventがなくてもjitter付きの`watch.reconcile_interval`でsnapshotを読む。
+5. eventがなくても内部のjitter付きreconciliation間隔でsnapshotを読む。
 6. watcher生成・directory登録が失敗した場合、またはevent/error channelが閉じた場合はwatchを終了せずpolling-onlyへ降格する。
 7. 各watch clientは独立したwatcherを持ち、client間でeventを消費し合わない。
 
@@ -65,7 +65,7 @@ fsnotify v1.7.0の[README](https://github.com/fsnotify/fsnotify/blob/v1.7.0/READ
 - 複数の実fsnotify watcherが同じstate revisionを受け取り、終了後に新しいwatcherで再接続できる。
 - event/error channelが閉じてもtimer pollingを継続する。
 
-2026-08-16にApple Silicon macOS上で`go test ./internal/observe -count=20`を実行し、実fsnotifyを使う複数watch・再接続を含むsuiteが20回、8.486秒で完了した。この反復には合計60回のwatcher subscription lifecycleが含まれ、hang、FD error、取りこぼしは発生しなかった。これは実装regressionの基準であり、event到達時間のSLOではない。resource modelはwatch clientごとに1 watcher・1 state directoryであり、repository配下を再帰監視しない。
+2026-08-16にApple Silicon macOS上で`go test ./internal/application/observe -count=20`を実行し、実fsnotifyを使う複数watch・再接続を含むsuiteが20回、8.486秒で完了した。この反復には合計60回のwatcher subscription lifecycleが含まれ、hang、FD error、取りこぼしは発生しなかった。これは実装regressionの基準であり、event到達時間のSLOではない。resource modelはwatch clientごとに1 watcher・1 state directoryであり、repository配下を再帰監視しない。
 
 macOS sleep/wakeは端末状態に依存するためmilestone blockerにせず、実際の発生時または計画保守時の運用確認とする。異常があった場合だけmacOS version、fsnotify version、`doctor`、state revision、時刻を記録してIssue化する。
 

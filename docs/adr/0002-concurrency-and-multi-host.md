@@ -1,8 +1,10 @@
 # ADR-0002: 単一ホスト並列化と複数ホスト冗長化を分離する
 
-- Status: Accepted
+- Status: Superseded by [ADR-0005](0005-single-execution-boundary.md)
 - Date: 2026-08-16
 - Decision owners: codex-issue-loop maintainers
+
+2026-09-04に、現行product boundaryをconcurrency 1へ固定し、resource admissionとmulti-hostを将来拡張として保持しない判断へ変更した。本書は旧判断の履歴として保持し、現行設計の根拠には使用しない。
 
 ## Context
 
@@ -30,9 +32,11 @@ v2の既定動作を`coordination.mode: local`相当として維持する。repo
 - 選択とclaimは決定論的な順番で直列化する。workerの完了順は保証しない。
 - publisherによるcommit、push、Pull Request、label、comment操作はrepository単位で直列化する。
 - GitHub API rate limitとbackoffはsupervisorがglobalに調停する。
-- 同じIssueへ複数slotを割り当てない。`needs_input`のIssueはslotを占有し続けず、worktreeだけを保持する。
+- 同じIssueへ複数slotを割り当てない。通常workerの`needs_input`はslotを占有し続けず、worktreeとpark済みresource claimを保持する。
 
 これはlocal state schemaをIssue map中心へ変更する将来機能であり、multi-host coordinatorを必要としない。
+
+worker slot間のresource claim、Issue本文の依存metadata、local resource leaseの取得・保持・解放は[Resource admission契約](../resource-admission.md)に従う。
 
 ### 3. 複数host冗長化
 

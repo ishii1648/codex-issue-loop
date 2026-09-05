@@ -1,0 +1,334 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
+)
+
+func (a App) delivery(ctx context.Context, l layout.Layout, args []string) error {
+	if len(args) == 0 {
+		return exitError{2, errors.New("delivery subcommand is required: configure, assignment, check, status, reconcile, apply, retry-rollback, pause, resume")}
+	}
+	switch args[0] {
+	case "configure":
+		return a.deliveryConfigure(ctx, l, args[1:])
+	case "assignment":
+		return a.deliveryAssignment(ctx, l, args[1:])
+	case "check", "status", "reconcile", "apply":
+		return a.deliveryOperation(ctx, l, args[0], args[1:])
+	case "retry-rollback":
+		return a.deliveryRetryRollback(ctx, l, args[1:])
+	case "pause", "resume":
+		return a.deliveryEnabled(l, args[0], args[1:])
+	default:
+		return exitError{2, fmt.Errorf("unknown delivery subcommand %q", args[0])}
+	}
+}
+
+func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []string) error {
+	if len(args) == 0 {
+		return exitError{2, errors.New("delivery assignment subcommand is required: migrate, status, preview, apply, retry, rollback, retry-rollback, verify")}
+	}
+	operation := args[0]
+	fs := flag.NewFlagSet("delivery assignment "+operation, flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	configFlag := fs.String("config", "", "absolute config path")
+	repoPath := fs.String("repo", "", "exact registered repository path")
+	version := fs.String("version", "", "exact stable version")
+	expectedGeneration := fs.Uint64("expected-generation", 0, "generation returned by preview or status")
+	applyMigration := fs.Bool("apply", false, "apply the reviewed v1 to v2 config migration")
+	confirmRetainedFence := fs.Bool("confirm-retained-fence", false, "confirm the retained rollback_failed transaction and retry its exact target")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args[1:]); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	path, err := delivery.ResolveConfigPath(*configFlag)
+	if err != nil {
+		return exitError{2, err}
+	}
+	ghPath := "gh"
+	if resolved, lookErr := exec.LookPath("gh"); lookErr == nil {
+		ghPath = resolved
+	}
+	controller := delivery.AssignmentController{Layout: l, ConfigPath: path, GH: ghPath}
+	switch operation {
+	case "migrate":
+		if *repoPath != "" || *version != "" || *expectedGeneration != 0 || *confirmRetainedFence {
+			return exitError{2, errors.New("assignment migrate does not accept --repo, --version, or --expected-generation")}
+		}
+		report, operationErr := controller.MigrateConfig(ctx, *applyMigration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "status":
+		if *version != "" || *expectedGeneration != 0 || *applyMigration || *confirmRetainedFence {
+			return exitError{2, errors.New("assignment status accepts only --repo")}
+		}
+		reports, operationErr := controller.Status(ctx, *repoPath)
+		if outputErr := a.output(*jsonOut, map[string]any{"version": 1, "assignments": reports}); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "preview":
+		if *repoPath == "" || *version == "" || *expectedGeneration != 0 || *applyMigration || *confirmRetainedFence {
+			return exitError{2, errors.New("assignment preview requires --repo and --version")}
+		}
+		plan, operationErr := controller.Preview(ctx, *repoPath, *version)
+		if outputErr := a.output(*jsonOut, plan); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "apply":
+		if *repoPath == "" || *version == "" || *expectedGeneration == 0 || *applyMigration || *confirmRetainedFence {
+			return exitError{2, errors.New("assignment apply requires --repo, --version, and --expected-generation")}
+		}
+		report, operationErr := controller.Apply(ctx, *repoPath, *version, *expectedGeneration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "retry":
+		if *repoPath == "" || *version != "" || *expectedGeneration == 0 || *applyMigration || !*confirmRetainedFence {
+			return exitError{2, errors.New("assignment retry requires --repo, --expected-generation, and --confirm-retained-fence")}
+		}
+		report, operationErr := controller.Retry(ctx, *repoPath, *expectedGeneration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "rollback":
+		if *repoPath == "" || *version != "" || *expectedGeneration == 0 || *applyMigration || *confirmRetainedFence {
+			return exitError{2, errors.New("assignment rollback requires --repo and --expected-generation")}
+		}
+		report, operationErr := controller.Rollback(ctx, *repoPath, *expectedGeneration)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "retry-rollback":
+		if *repoPath == "" || *version != "" || *expectedGeneration != 0 || *applyMigration || !*confirmRetainedFence {
+			return exitError{2, errors.New("assignment retry-rollback requires --repo and --confirm-retained-fence")}
+		}
+		report, operationErr := controller.RetryRollback(ctx, *repoPath)
+		if outputErr := a.output(*jsonOut, report); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	case "verify":
+		if *repoPath == "" || *version != "" || *expectedGeneration != 0 || *applyMigration || *confirmRetainedFence {
+			return exitError{2, errors.New("assignment verify requires --repo")}
+		}
+		report, operationErr := controller.Verify(ctx, *repoPath)
+		result := map[string]any{"version": 1, "verified": operationErr == nil, "assignment": report}
+		if outputErr := a.output(*jsonOut, result); outputErr != nil {
+			return outputErr
+		}
+		return operationErr
+	default:
+		return exitError{2, fmt.Errorf("unknown delivery assignment subcommand %q", operation)}
+	}
+}
+
+func (a App) deliveryRetryRollback(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("delivery retry-rollback", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	configFlag := fs.String("config", "", "absolute config path (tests and explicit operations only)")
+	backup := fs.String("backup", "", "exact retained delivery backup path")
+	confirm := fs.Bool("confirm-retained-fence", false, "confirm the retained rollback_failed transaction and retry")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	if !*confirm {
+		return exitError{2, errors.New("delivery retry-rollback requires --confirm-retained-fence")}
+	}
+	resolvedBackup, err := validateDeliveryBackupPath(l, *backup)
+	if err != nil {
+		return exitError{2, err}
+	}
+	if err := validateInstallationBackup(resolvedBackup); err != nil {
+		return exitError{2, fmt.Errorf("validate retained delivery backup: %w", err)}
+	}
+	path, err := delivery.ResolveConfigPath(*configFlag)
+	if err != nil {
+		return exitError{2, err}
+	}
+	report, retryErr := (delivery.Controller{Layout: l, ConfigPath: path}).RetryRollback(ctx, resolvedBackup)
+	if outputErr := a.output(*jsonOut, report); outputErr != nil {
+		return outputErr
+	}
+	return retryErr
+}
+
+func (a App) deliveryConfigure(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("delivery configure", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	configFlag := fs.String("config", "", "absolute config path (tests and explicit operations only)")
+	repository := fs.String("repository", "ishii1648/codex-issue-loop", "production Release repository")
+	apply := fs.Bool("apply", false, "write config and LaunchAgent")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	path, err := delivery.ResolveConfigPath(*configFlag)
+	if err != nil {
+		return exitError{2, err}
+	}
+	cfg := delivery.DefaultConfig(*repository)
+	if *repository == "ishii1648/codex-issue-loop" {
+		if existing, loadErr := delivery.LoadConfig(path); loadErr == nil {
+			cfg = existing
+		} else if !errors.Is(unwrapPathError(loadErr), os.ErrNotExist) {
+			if _, statErr := os.Lstat(path); statErr == nil {
+				return loadErr
+			}
+		}
+	}
+	result := map[string]any{"applied": false, "config_path": path, "runtime_root": l.DeliveryDir(), "plist": l.DeliveryPlistPath(), "label": l.DeliveryLabel(), "config": cfg}
+	if !*apply {
+		return a.output(*jsonOut, result)
+	}
+	defaultPath, defaultErr := delivery.DefaultConfigPath()
+	if defaultErr != nil {
+		return defaultErr
+	}
+	if filepath.Clean(path) != filepath.Clean(defaultPath) {
+		return exitError{2, errors.New("delivery configure --apply must use the default $HOME/.agent-loop-delivery.yaml path; --config is only for tests and explicit one-shot operations")}
+	}
+	binary := filepath.Join(l.BinDir, "agent-loop")
+	if info, err := os.Stat(binary); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("managed agent-loop installation is required before delivery configure --apply")
+	}
+	if err := delivery.WriteConfig(path, cfg); err != nil {
+		return err
+	}
+	manager := launchd.Manager{Layout: l}
+	if err := manager.WriteDeliveryPlist(binary, os.Getenv("PATH"), cfg.PollDuration()); err != nil {
+		return err
+	}
+	status, err := manager.DeliveryStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if status.Loaded {
+		if err := manager.StopDelivery(ctx); err != nil {
+			return err
+		}
+	}
+	if err := manager.StartDelivery(ctx); err != nil {
+		return err
+	}
+	result["applied"] = true
+	return a.output(*jsonOut, result)
+}
+
+func (a App) deliveryOperation(ctx context.Context, l layout.Layout, operation string, args []string) error {
+	fs := flag.NewFlagSet("delivery "+operation, flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	configFlag := fs.String("config", "", "absolute config path (tests and explicit operations only)")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	expectedVersion := fs.String("version", "", "exact production version to apply")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	path, err := delivery.ResolveConfigPath(*configFlag)
+	if err != nil {
+		return exitError{2, err}
+	}
+	ghPath := "gh"
+	if resolved, lookErr := exec.LookPath("gh"); lookErr == nil {
+		ghPath = resolved
+	}
+	if operation != "apply" && *expectedVersion != "" {
+		return exitError{2, errors.New("--version is only valid with delivery apply")}
+	}
+	if *expectedVersion != "" {
+		if _, parseErr := delivery.ParseSemVer(*expectedVersion); parseErr != nil {
+			return exitError{2, parseErr}
+		}
+	}
+	if operation == "apply" {
+		if cfg, loadErr := delivery.LoadConfig(path); loadErr == nil && cfg.Version == delivery.ConfigVersion {
+			return exitError{2, errors.New("host-wide delivery apply is disabled for per-repository config; use delivery assignment preview/apply")}
+		}
+	}
+	controller := delivery.Controller{Layout: l, ConfigPath: path, GH: ghPath, ExpectedVersion: *expectedVersion}
+	var report delivery.Report
+	switch operation {
+	case "check":
+		report, err = controller.Check(ctx)
+	case "status":
+		report, err = controller.Status()
+	case "reconcile":
+		report, err = controller.Reconcile(ctx, false)
+	case "apply":
+		report, err = controller.Reconcile(ctx, true)
+	}
+	if outputErr := a.output(*jsonOut, report); outputErr != nil {
+		return outputErr
+	}
+	return err
+}
+
+func (a App) deliveryEnabled(l layout.Layout, operation string, args []string) error {
+	fs := flag.NewFlagSet("delivery "+operation, flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	configFlag := fs.String("config", "", "absolute config path")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	path, err := delivery.ResolveConfigPath(*configFlag)
+	if err != nil {
+		return exitError{2, err}
+	}
+	cfg, err := delivery.LoadConfig(path)
+	if err != nil {
+		return err
+	}
+	paths := delivery.RuntimePaths(l.Root)
+	if _, statErr := os.Stat(paths.Maintenance); statErr == nil {
+		return errors.New("cannot pause or resume while a delivery maintenance transaction is active")
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	cfg.Enabled = operation == "resume"
+	if err := delivery.WriteConfig(path, cfg); err != nil {
+		return err
+	}
+	return a.output(*jsonOut, map[string]any{"enabled": cfg.Enabled, "config_path": path})
+}
+
+func unwrapPathError(err error) error {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err
+	}
+	return err
+}

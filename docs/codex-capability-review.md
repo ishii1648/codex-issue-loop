@@ -1,6 +1,6 @@
-# Codex Goal・task wake・token計測の公式仕様確認
+# Codex Goal・Desktop通知・task wake・token計測の公式仕様確認
 
-- 確認日: 2026-08-16
+- 確認日: 2026-08-17
 - 確認したlocal CLI: `codex-cli 0.136.0`
 - OpenAI公式Codex manual SHA-256: `40f7ed6c2b2b08b0e45ef4f60acbaf258348b0633db9b4757b6fff83a57f6849`
 - 判定語: **利用可能**、**利用不可**、**未保証**を区別する
@@ -10,17 +10,22 @@
 | 項目 | 判定 | `agent-loop`での扱い |
 | --- | --- | --- |
 | 対話surfaceのGoal | 利用可能 | 単一目的の監視・復旧taskで利用できる |
-| headless Goal | App Server経由で利用可能 | optional `extended` worker adapterをIssue #53で検証する。現行workerは変更しない |
+| headless Goal | App Server経由で利用可能 | 現行製品では利用しない。再導入条件を満たした場合だけ別Issueで評価する |
 | `codex exec --goal`相当 | 利用不可 | 公式non-interactive interfaceにGoal optionはないため推測で呼ばない |
 | App Server所有threadのprogrammatic resume/start | 利用可能 | `thread/resume`と`turn/start`を将来adapterで利用できる |
+| Desktopのquestion notifications | 利用可能 | 接続中の監視taskが質問した際の通常OS通知に使う |
+| Desktop Activityの回答待ち | 利用可能 | OS通知dismiss後に回答待ちchatを再発見する |
+| project/chatのpin | 利用可能 | repositoryごとの監視chatを見つけやすくする。権限やcontextは増えない |
 | 任意のDesktop taskを外部processからwake | 利用不可 | 公開契約がない。App Server所有threadの制御とDesktop taskへの注入を同一視しない |
 | 外部processからモバイルUIを`Needs input`へ遷移 | 利用不可 | App Serverのserver requestはclientが表示・回答する契約であり、ChatGPT mobile通知連携は保証されない |
 | chat内scheduled taskによる定期再開 | 利用可能 | 時刻ベースで同じchatへ戻れるが、event-driven wakeやtoken-free monitorの代替にしない |
 | CLI外部`notify` | 利用可能だがturn完了のみ | 現在のsupported eventは`agent-turn-complete`だけ。入力待ちpushには使わない |
-| turn/Goalのtoken counters | 利用可能 | App Server eventまたはGoal stateから観測できる |
+| turn/Goalのtoken counters | 利用可能 | 将来評価用の観測候補であり、現行runtimeでは収集しない |
 | 保留中tool call・long command待機中の厳密な無課金 | 未保証 | 製品全体のzero-token/zero-costを要件にしない。Go pollingがmodelを呼ばない範囲だけ保証する |
 
 ## Goal
+
+2026-08-22に、検証実装だったApp Server Goal adapterを現行製品から削除した。中核のworker lifecycleとdurable stateを優先し、Codex backendは`codex exec` / `codex exec resume`だけを使う。これは恒久的な不採用ではなく、[#189](https://github.com/ishii1648/codex-issue-loop/issues/189)に記録した再導入条件を満たした場合に別Issueで評価するdeferred decisionである。
 
 OpenAIの[Long-running work](https://learn.chatgpt.com/docs/long-running-work)では、Goal modeはCodex app、対話的CLI、IDE extensionで利用でき、同じchat/session内でpause、resume、edit、clearできる。Goalはsandboxとapproval policyを拡張せず、判断が必要なら停止する。2026-05-21の[公式changelog](https://learn.chatgpt.com/docs/changelog#codex-2026-05-21)ではexperimentalを卒業したと案内されている。
 
@@ -38,16 +43,22 @@ localのCodex CLI 0.136.0で`codex app-server generate-json-schema`を実行し�
 
 一方、[Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)が自動化用に説明する`codex exec`にはGoal optionが記載されていない。したがって現行の`codex exec` workerへ未文書化flagを追加しない。App Serverはrich client integration向けであり、自動jobにはSDKを推奨するという公式の位置づけも踏まえ、adapter化は既存方式とのfailure・security比較を行う。
 
-Goalを利用しても責務境界は変えない。
+将来headless Goalを再評価する場合も責務境界は変えない。
 
 - Goalは1件のIssue、特に`extended` profileの目的・budget・continuationだけを扱う。
 - Issue選択、claim、worktree、GitHub公開、次Issueへのloop、process再起動はGo supervisorが所有する。
 - Goal stateをqueueの正本やLaunchAgentの代替にしない。
-- App Server adapterが失敗しても、現行worktreeと永続stateを失わない。
+- adapter障害時も、現行worktreeと永続stateを失わない設計とreplay testを必須にする。
 
-実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)へ切り出した。
+最初の実装検証は[#53](https://github.com/ishii1648/codex-issue-loop/issues/53)、削除判断と再導入条件は[#189](https://github.com/ishii1648/codex-issue-loop/issues/189)およびGit履歴から追跡できる。
 
 ## External wakeとNeeds input
+
+[Notifications](https://learn.chatgpt.com/docs/notifications)は、Desktop Settingsでpermission notificationsとquestion notificationsを個別に設定でき、OSがChatGPT desktop appの通知権限を要求する場合があると記載する。ActivityはsidebarのbellまたはmacOSの`Cmd`+`Option`+`U`から開き、unread、running、回答待ちのchatを表示できる。利用可能なsurfaceのpetも`Running`、`Needs input`、`Ready`、`Blocked`を表示できる。
+
+[Projects and chats](https://learn.chatgpt.com/docs/projects)は、頻繁に戻るchatをpinでき、別の成果ごとにchatを分けることを推奨する。pinはsidebar内の位置だけを変え、contextやaccessを追加しない。これらを根拠に、接続中の通常経路は「repositoryごとのpin済み監視chatがblocking watchから戻る → Codexが質問する → question notificationとActivityの回答待ちへ残る」とする。
+
+ただし公式文書は、Desktop taskが切断中でも外部processからActivityへ新規項目を投入できるとは記載していない。ActivityとOS通知は発見経路であり正本ではない。切断中のrequestは永続snapshotへ保存し、再接続後のstatus-first手順で質問を再表示する。
 
 App Server clientは、自分が接続するApp Server上でpersisted threadを`thread/resume`し、`turn/start`で新しいturnを開始できる。これはdocumentedなprogrammatic continuationである。また、active turnには`turn/steer`で追加inputを送れる。
 
@@ -64,7 +75,7 @@ App Serverの`thread/status/changed`とserver requestは、そのApp Server clie
 
 [Scheduled tasks](https://learn.chatgpt.com/docs/automations)は同じchatへ時刻ベースで戻り、long-running operationをpollできる。ただし各runはChatGPT/Codex workを実行する。filesystem eventで即時wakeする仕組みでも、modelを呼ばないmonitorでもないため、`agent-loop watch`の代替にはしない。
 
-[CLI notifications](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications)の外部`notify`が現在扱うeventは`agent-turn-complete`だけである。よって、監視task未接続時の`needs_input`とsupervisor blockedには引き続き永続outbox + ntfy adapterを使う。
+[CLI notifications](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications)の外部`notify`が現在扱うeventは`agent-turn-complete`だけであり、`needs_input`の正本には使わない。監視task未接続時は永続snapshotにattentionを保持し、再接続時のstatus-first手順で回収する。
 
 ## Token usageと待機
 
@@ -81,7 +92,7 @@ App Serverの`thread/status/changed`とserver requestは、そのApp Server clie
 
 - `watch`のfsnotify待機とreconciliation pollingはGo内で完結し、model requestを開始しない。
 - Codex taskへ定期的に`status`を問い合わせさせない。
-- App Server Goal adapterを導入する場合も、token eventとGoal budgetを観測し、無制限continuationを許さない。
+- App Server Goal adapterを再導入する場合は、token eventとGoal budgetを観測し、無制限continuationを許さない。
 
 ## 再確認条件
 

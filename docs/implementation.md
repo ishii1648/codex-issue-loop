@@ -1,4 +1,17 @@
-# MVP実装状況
+# 実装状況と目標設計との差分
+
+この文書は現行コードの実装状況を記録する。契約の正本は[要件定義](requirements.md)と[仕様書](specification.md)、目標とする責務境界は[アーキテクチャ](architecture.md)と[ADR-0005](adr/0005-single-execution-boundary.md)である。
+
+2026-09-04の設計更新では文書だけを変更しており、以下の差分はまだ実装済みではない。
+
+- `queue.concurrency: 1`以外を拒否し、resource admissionをruntime判断から除去する
+- repositoryごとの単一`active execution = (Issue, run ID, generation)`へ置き換える
+- `needs_input`、retry、check、merge待ち、terminal、quarantineで実行枠を解放する
+- Issue aggregateの変更を一つのlifecycle decision境界へ集約する
+- 個別Issueを独立したenvelopeとして検証・quarantineし、root snapshot全体への障害波及を防ぐ
+- Issue作成者をGitHub permissionまたはexact allowlistでworker開始前に検証する
+- Issue lifecycle APIをversion付きで公開し、同一majorの旧minor fixture互換をgateする
+- Issue文脈の未分類errorをIssue-localへ閉じ込め、後続Issueを継続する
 
 ## 実装済み
 
@@ -21,6 +34,7 @@
 - Issue番号、作成日時、priority labelを使うconfigurableなqueue orderingと安定tie-break
 - Issue別branchとGit worktree
 - workerのworktree内実装と、supervisor publisherによるcommit・push・draft PR作成の分離
+- dirty PRのimmutable base merge準備、workerによる意味的競合解消、scope検証付き通常push、再起動時の冪等再開
 - draft PRのCI監視、成功後のReady化、manifestで選べるbase branch追随・squash merge、merge後のIssue完了
 - schema付き`codex exec`、session ID保存、`codex exec resume`
 - `standard` / `extended` preflight policy
@@ -38,9 +52,8 @@
 - tag由来version、再現build、SPDX SBOM、checksum、artifact attestationを含むGitHub Release workflow
 - binary/Skill manifest、稼働LaunchAgentを保ったupdate、自動rollback、明示backup rollback
 - config・registry・state・active event・transactionのv1→v2 migration、checksum backup、journal再開、paired rollback
+- config・registry・state・active event・transactionのv3→v4 migration、旧外部配送data除去、旧credential非破壊保持、paired rollback
 - status別保持期間、dirty・未push・open PR・未回答request検査、dry-run cleanup、確認token付きpurge、削除監査event
-- provider-neutral interface、永続outbox、重複抑止、上限付き再送を備えたopt-inのntfyスマートフォン直接push
-- mode `0600`のrepository別通知credential管理とdoctor診断
 
 ## 運用前に必要なもの
 
@@ -56,19 +69,21 @@
 - `codex login status`、登録済みcommandの絶対path、LaunchAgent plist
 - raw state/event/logの整合性とblocked/stopped状態。`schema_version: 1`と安定したdiagnostic codeで結果を返し、修復案は自動実行しない
 
-## MVPの制限
+## 現行実装の制限
 
 - 対象はmacOSのユーザーLaunchAgentのみである。
 - LaunchDaemonと自動ログインは採用せず、logout・再起動は運用時確認とする。[ADR-0001](adr/0001-macos-execution-model.md)を参照する。
-- 1 repositoryにつきconcurrencyは1である。
+- runtimeの実行authorityはsnapshot rootの単一`active_execution`だけに限定する。複数worker、resource definition、`repo:*` lease、slot、resource parkはmigration decoderの旧v4入力型を除いて保持しない。
+- current v5 stateの旧lease、park、scenario別status/sync/substateはvalidatorで拒否する。旧stateは手編集せず、停止中にv4 migration decoderで変換する。
 - 同じrepositoryを複数hostから処理しない。
-- local `flock`はhostをまたぐ排他ではない。複数hostを登録するだけでは安全にならず、[ADR-0002](adr/0002-concurrency-and-multi-host.md)のcoordinatorとpublication gatewayが実装されるまで禁止する。
+- local `flock`はhostをまたぐ排他ではない。multi-hostは[ADR-0005](adr/0005-single-execution-boundary.md)で現行設計の対象外としている。
 - GitHub labelは自動作成しない。
-- 起動時reconciliationはactive run、write-ahead claim、未反映GitHub状態、未記録のpush/PR、merge/close済みPRを復旧する。branch・worktree・labelの人手変更と二重workerの可能性は自動上書きせず、理由を残してblockedへ移す。
-- スマートフォン直接pushは初期adapterとしてntfyだけに対応する。外部account、private topic、credential、mobile appの準備と実機到達確認は運用者が行う。
+- 起動時reconciliationは全active/open-PR Issue、write-ahead claim、残存worker process group、未反映GitHub状態、未記録のpush/PR、merge/close済みPRをIssue単位で復旧する。所有確認済みのorphan groupは全group共通grace periodで終了し、PID再利用、branch・worktree・labelの人手変更は推測で上書きせずblockedへ移す。
+- 通常schedulerは保存済み未merge PRを持つterminal Issueを低頻度で1件ずつ再照合する。保存URL・head branch・単一PRが一致し、自動blocked markerを持つIssueのmergeだけをauthoritativeとしてcompletedへ収束させ、他workerを停止せず実行所有状態の解放とdone同期を行う。手動exclusion、未merge、mergeなしclose、複数PR、不一致はstickyのまま保持する。
+- PR conflictの検出自体はblocked理由にしない。`resolving_conflict`にbase SHA・競合file・試行履歴を保存し、budget超過またはworktree破損、scope違反等の非回復障害だけを最終blockedとして同期する。
 - 実GitHub repositoryと実Codex workerを使うMac mini E2Eの結果は[`docs/e2e/2026-08-15-mac-mini.md`](e2e/2026-08-15-mac-mini.md)に記録している。スマートフォンからのCodex Remote接続は確認済みである。display off、logout、OS再起動はM3の受け入れTODOとせず、発生時または計画保守時の運用確認としてrunbookで扱う。
 - Codex CLI 0.136.0以降とGitHub CLI 2.69.0以降を対応下限とし、起動時に必須capabilityを検査する。resume非対応時は既存worktreeと永続状態を使う新規sessionへfallbackする。詳細は`docs/compatibility.md`を正本とする。
-- worker timeout時は独立process groupへSIGTERMを送り、既定30秒のgrace period後も親子processが残る場合だけSIGKILLへ進む。終了段階をretry理由へ残し、worktreeと途中成果は削除しない。
+- worker timeout、stop、restart時はactive workerのprocess groupへSIGTERMを送り、既定30秒のgrace period後も親子processが残る場合だけSIGKILLへ進む。終了段階をIssue eventへ残し、worktreeと途中成果は削除しない。
 - `bootstrap-labels`は必須GitHubラベルのpreviewと冪等な不足分作成を提供する。既存metadataは保持し、部分成功後の再実行を安全にする。
 
 ## テスト

@@ -1,82 +1,63 @@
-version: 2
+version: 5
 
 github:
   repo: owner/repository
+  # Required only when webhook.mode is webhook.
+  # repository_id: 123456789
+  # Labels that people use to admit or exclude work are repository policy.
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
-  running_label: codex-loop:running
-  needs_input_label: codex-loop:needs-input
-  failed_label: codex-loop:failed
-  done_label: codex-loop:done
+  trusted_issue_authors:
+    minimum_permission: write
+    allow_logins: []
 
 queue:
-  poll_interval: 60s
   concurrency: 1
-  order: issue_number_asc
-  # Used from highest to lowest when order is priority_then_created_at.
-  priority_labels: []
-  max_attempts: 3
-  continue_after_needs_input: true
-
-worker:
-  command: codex
-  model: null
-  sandbox: workspace-write
-  session_mode: resumable
-  timeout: 2h
-  timeout_grace: 30s
-  ambiguous_profile: extended
-  profiles:
-    standard:
-      max_continuations: 0
-    extended:
-      max_continuations: 3
-
-watch:
-  reconcile_interval: 60s
-  reconcile_jitter: 10%
 
 git:
-  branch_prefix: codex/issue-
-  worktree_root: null
   base_branch: main
 
+# Opt in only when the repository uses Go. This is a fixed built-in adapter;
+# no shell command or extra arguments are accepted.
+formatters:
+  go:
+    enabled: false
+
 completion:
-  create_draft_pr: true
   # false: CI成功後にReady for reviewへ移し、人手のmergeを待つ。
   # true: CI成功後にsquash mergeまで実行する。
   auto_merge: false
-  close_issue: true
 
-# 0s means that worktrees in the status are retained indefinitely.
-worktrees:
-  completed_max_age: 168h
-  failed_max_age: 720h
-  blocked_max_age: 0s
-  needs_input_max_age: 0s
-
-# Direct smartphone push is opt-in. Store the token with the
-# `agent-loop notification-token` command, never in this file.
-notifications:
+# Disabled by default. Start with dry_run and inspect `agent-loop incident
+# status --repo . --json` before allowing GitHub Issue creation.
+incident_automation:
   enabled: false
-  provider: ntfy
-  endpoint: https://ntfy.sh
-  topic: replace-with-opaque-topic
-  include_details: false
-  timeout: 10s
-  min_interval: 5s
-  retry_initial: 10s
-  retry_max: 10m
-  max_attempts: 8
+  dry_run: true
+  interval: 15m
+  analyzer_timeout: 10m
+  max_analysis_attempts: 3
+  retry_backoff: 1m
+  max_episode_items: 128
+  degradation_threshold: 2m
 
-logs:
-  rotate_bytes: 16777216
-  rotate_interval: 24h
-  generations: 7
-  worker_run_max_age: 720h
-  worker_run_max_count: 100
-
-# Values are read from these environment variables at runtime. Never put the
-# secret values themselves in this file.
-security:
-  redact_env: []
+# Explicit fallback is polling. See docs/mac-mini-runbook.md before opting in.
+# Switch to webhook only after the reverse proxy and the GitHub webhook are both
+# ready. While deliveries cannot reach the broker, the only remaining detection
+# path is the 15 minute safety sweep, which is slower than 60 second polling.
+webhook:
+  mode: polling
+  # The connection fields below are required only when mode is webhook.
+  # listener_address must be a literal loopback address.
+  # mode: webhook
+  # listener_address: 127.0.0.1:8787
+  # Non-secret audit identifier for the public endpoint. Never write a URL that
+  # carries a query token.
+  # public_url_identifier: hooks.example.invalid/github/webhook
+  # Owner-only (0600) file outside the repository. Prefer a file source over env
+  # because LaunchAgent environments are hard to provision safely.
+  # secret_source:
+  #   file: /Users/example/Library/Application Support/codex-issue-loop/credentials/owner-repository.webhook
+  # Keep an installation allowlist for GitHub Apps. A classic repository webhook
+  # has no installation, so it requires an empty list plus the explicit opt-in.
+  # installation_ids: [987654]
+  # allow_repository_webhook: false

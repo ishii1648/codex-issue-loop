@@ -6,63 +6,49 @@
 make test
 make fault-test
 make test-race
+scripts/check-release.sh
 ```
 
-`make test`は通常suite、`make fault-test`は `TestFault` prefixを持つ障害注入・復旧suite、`make test-race`は全packageをrace detector付きで実行する。GitHub Actionsでは3つを独立stepとして実行する。
+通常suite、`TestFault`障害注入suite、race detector、release gateを独立して成功させる。外部GitHub APIやCodex inferenceを使うcontract testは置かず、local bare Git remote、fake GitHub/worker、fixture replay、隔離したHOMEで再現する。
 
-## 仕様17.2との対応
+## 中核ドメイン契約
 
-| 統合テスト要件 | 主なテストケース |
-|---|---|
-| fake GitHub adapter + fake Codex process | `TestFaultStandardWorkerCompletesWithoutAdditionalRun`、`TestFaultFakeCodexProcessProducesStructuredResult` |
-| worktree作成、再利用、異常終了 | `TestFaultWorktreeCreateReuseAndPartialCreation` |
-| supervisor二重起動防止 | `TestFaultSecondSupervisorCannotAcquireLock` |
-| snapshot途中書き込みからの復旧 | `TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint`、`TestFaultPartialEventTailIsTruncatedAndRecorded` |
-| worker kill後のreconciliation | `TestFaultWorkerKillReturnsRecoverableProcessError`、`TestFaultWorkerAndGitHubStateReconciliationDecisions` |
-| timeoutの段階的終了とprocess group回収 | `TestFaultWorkerTimeoutUsesGracefulProcessGroupTermination`、`TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace`、`TestWorkerTimeoutStageIsPersistedForRetry` |
-| watchの接続、切断、複数接続 | `TestFaultDisconnectedEventChannelsFallBackToTimer`、`TestFaultMultipleWatchConnectionsObserveSameRevision`、`TestFSNotifyMultipleWatchersWakeAndCanReconnect` |
-| event通知を破棄した場合のreconciliation | `TestFaultDroppedEventReconcilesAttention` |
-| watcher作成・購読失敗時のpolling-only fallback | `TestFaultWatcherSubscriptionFailureFallsBackToReconciliation` |
-| read-subscribe-read間に状態が変わるrace | `TestFaultReadSubscribeReadRace` |
-| attention状態と`state_revision`の永続化 | `TestFaultAttentionRevisionPersistsSnapshotAndEvent`、`TestFaultAttentionRemainsStickyUntilAnswered` |
-| standard workerが追加runなしで完了 | `TestFaultStandardWorkerCompletesWithoutAdditionalRun` |
-| extended workerだけが設定上限内でresume | `TestFaultExtendedWorkerResumesOnlyWithinConfiguredLimit` |
-| event rotation後のsequence復旧 | `TestFaultEventRotationKeepsCheckpointAndRecoverySequence` |
-| disk容量reserveでのblocked化 | `TestFaultDiskSafetyReserveBlocksSupervisor` |
+| 契約 | 主な検証 |
+| --- | --- |
+| Issue lifecycle APIの許可遷移とmajor互換性 | `internal/domain/issue`、`internal/application/conformance` |
+| root active executionが常に0/1件 | `TestConcurrentExecutionStartsHaveSingleWinner`、snapshot validator suite |
+| Issue番号・run ID・generationのfence | `internal/adapter/state/execution_test.go` |
+| waiting・terminal・quarantineで実行枠解放 | lifecycle boundary、supervisor reconciliation suite |
+| needs-input回答後の同一continuation再開 | `TestRunOncePersistsQuestion`、`TestAnswerDurablyWaitsWithoutStealingActiveExecution` |
+| 1 Issueの失敗・入力待ち・PR/check待ち・quarantine後もそのIssueを再admitせず後続を取得 | scheduler fault/conformance suite |
+| 作成者がtrusted ownerであるIssueだけを受理 | `internal/adapter/github/author_test.go`、`internal/domain/queue`、scheduler author verification suite |
+| root pending effectによるGitHub副作用の冪等性 | publication、GitHub sync、partial failure suite |
+| 先行PR merge後も後続PRを同一intentで継続し、base履歴分岐は拒否 | `TestPublishAllowsExistingPullRequestWhenBaseBranchFastForwards`、`TestPublishRefusesExistingPullRequestWhenBaseHistoryDiverges` |
+| Go formatterはoperator環境依存shimでなくself-containedなtoolchain実体を固定 | `TestRegistryPinsToolchainGofmtWhenDiscoveredCommandNeedsUserEnvironment`、`TestGofmtCapabilityProbeDoesNotInheritOperatorEnvironment` |
+| 再登録で`gh`等がoperator環境依存shimへ退行せず、検証済みmulticall symlinkを維持し、canonical実体と入口symlinkをdrift扱いしない | `TestRegistryPinsAquaManagedCommandToResolvedExecutable`、`TestRegistryKeepsSelfContainedCommandWhenDiscoveredPathNeedsOperatorEnvironment`、`TestRegistryPreservesRuntimeProbedMulticallSymlink`、`TestRegistryRejectsEnvironmentDependentCommandWithoutSafeFallback`、`TestSameExecutableAcceptsSymlinkToRegisteredCanonicalPath` |
+| stop/restartとorphan process回収 | process controller、scheduler cancellation、fault suite |
+| worktree provenance不一致をspawn前に拒否 | worktree validation、issue resolution suite |
 
-## 追加の部分障害と境界
+## Migration・互換性
 
-| 対象 | 主なテストケース |
-|---|---|
-| supervisor kill後の永続状態再利用 | `TestFaultSupervisorRestartResumesWithDurableAnswers` |
-| GitHub label/comment同期の途中停止 | `TestFaultPartialLabelCommentSyncCanBeRetried`、`TestFaultGitHubSyncPartialFailureIsRetried` |
-| push後に未記録のPR | `TestFaultStartupReconciliationPersistsDiscoveredPullRequest` |
-| registry add/resolve/remove | `TestFaultRegistryAddResolveRemoveAndAmbiguity` |
-| atomic fileとmarshal失敗 | `TestFaultAtomicWriteReplacesContentAndPreservesMode`、`TestFaultJSONMarshalFailureDoesNotCreateDestination` |
-| layout isolationとpermission | `TestFaultLayoutUsesIsolatedRootsAndPrivateDirectories` |
-| GitHub CLI response破損 | `TestFaultGitHubAdapterRejectsMalformedResponse` |
-| queue strategy・tie-break・pagination後sort | `TestOrderIssuesSupportsCreatedAtAndPriorityWithStableTieBreaks`、`TestListReadyOrdersAfterCollectingPaginatedFixture`、`TestSelectReadyAppliesChangedOrderOnlyToUnclaimedIssues` |
-| GitHubラベルのpreview・冪等作成・部分成功 | `TestBootstrapLabelsPreviewsCreatesAndPreservesExistingMetadata`、`TestBootstrapLabelsIsIdempotentWhenEveryLabelExists`、`TestFaultBootstrapLabelsReportsPartialSuccessAndCanBeRerun` |
-| doctorの安定code・認証・sleep・state・停止理由 | `TestDoctorOutputHasStableSchemaCodesAndSafeRemediations`、`TestFaultDoctorHostAuthAndSleepFixturesHaveUniqueCodes`、`TestFaultDoctorDetectsCorruptStateWithoutModifyingIt`、`TestDoctorCorrelatesBlockedAndStoppedStateWithEventAndLog` |
-| 回復不能なsnapshot/event不整合 | `TestFaultRevisionMismatchIsQuarantined`、`TestFaultCorruptSnapshotIsQuarantined` |
-| log世代上限とworker run保持 | `TestLongRunningWriterKeepsBoundedGenerations`、`TestWorkerRunLogPruningPreservesActiveAndAuditsDeletion` |
-| install manifest・update backup・rollback | `TestInstallArtifactsAreIdempotentAndVersioned`、`TestUpdateBackupCanRestoreBinarySkillAndManifest`、`TestDoctorDetectsInstalledBinaryAndSkillMismatch` |
-| SPDX SBOMの決定性 | `TestGenerateProducesDeterministicSPDXDocument` |
-| v1→v2 migration・backup restore・途中停止再開 | `TestApplyMigratesV1FixturesAndRestoreRecoversOriginalBytes`、`TestInterruptedApplyReusesJournalAndConvergesIdempotently`、`TestUnsupportedVersionIsRejectedWithoutBackup`、`TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback` |
-| worktree cleanup/purge・安全条件・監査 | `TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval`、`TestPurgeRequiresExactConfirmationAndCanRemoveDirtyWorktree` |
-| push通知のoutbox・重複抑止・再送・本体分離 | `TestDispatcherDeduplicatesRetriesAndRedactsFailures`、`TestDispatcherCancelsAnsweredRequestBeforeDelivery`、`TestNotificationFailureDoesNotStopSupervisor` |
+production由来のsanitized v4 fixtureはmigration decoderの入力としてだけ保持する。release gateは11 Issue・14旧substateをroot `active_execution`、Issue-local `continuation`、`continuation_evidence`、`suspension`へ変換し、Issue・answer・audit・generationの欠損/重複が0であることを検査する。
 
-障害注入suiteは外部GitHubやCodex認証を必要とせず、一時directory、fake executable、local Git repositoryだけを使用する。固定sleepで順序を作らず、hook、channel、context、永続状態の予定時刻を使って同期する。
+current v5入力に旧lease、resource park、scenario別status/sync/substateが残る場合は自動復旧せず拒否する。prepared transaction内のnested snapshotも同じdecoderとvalidatorを通す。event type/orderは監査の完全性確認に使うが、runtime authorityには使わない。
+
+## Release・delivery
+
+| 境界 | 主な検証 |
+| --- | --- |
+| 決定的build、manifest、checksum、SBOM | `scripts/check-release.sh` |
+| CLI surfaceとcredential不使用 | `scripts/cli-surface-contract.sh` |
+| lifecycle fixture replayと再起動 | `scripts/offline-release-contract.sh` |
+| production state非変更 | `scripts/production-state-isolation.sh` |
+| candidate/stable同一artifact | release workflow candidate integrity・promotion evidence |
+| repository別assignment、doctor、rollback drill | `scripts/production-assignment-health.sh` |
+| active executionとworker上限 | production state/release/assignment health tests |
+
+production確認では両repositoryに検証Issueを投入し、正常完了、needs-input中の後続進行、Issue-local failure中の後続進行、PR/check待ち中の後続進行を実測する。未trusted authorのskipと旧generation拒否は追加credentialを使わずfixture/fake serverで検証する。
 
 ## セキュリティ負テスト
 
-| 境界 | 主なテスト |
-|---|---|
-| Prompt injection・巨大入力・制御文字 | `TestPromptTreatsIssueInjectionAsBoundedData`、`TestIssueInputIsBoundedAndControlCharactersAreRemoved` |
-| 既知token・設定secret・private key | `TestConfiguredSecretIsRedactedFromTextAndJSON`、`TestLineWriterRedactsPrivateKeyBlock`、`TestWorkerArtifactsNeverPersistSecrets` |
-| state・event・file mode | `TestStateAndEventsNeverPersistSecrets`、`TestWritePlistUsesAbsoluteCommandsAndEscapesPaths` |
-| GitHubコメント・CLI error | `TestGitHubCommentsAndErrorsRedactSecrets` |
-| path traversal・symbolic link | `TestWorktreeRejectsTraversalAndSymbolicLink`、`TestLoadRejectsUnsafePathsRefsAndSecretNames` |
-| 通知credential・本文最小化・外部error | `TestNotificationTokenCommandStoresPrivateCredentialWithoutOutputLeak`、`TestLoadNotificationTokenRejectsUnsafePermissions`、`TestNtfySendsAuthenticatedMinimalNotification`、`TestDispatcherDeduplicatesRetriesAndRedactsFailures` |
-
-既知の到達可能な依存脆弱性は`make vuln-check`で検査し、Pull Requestと`main`のCIで必須にする。
+Issue本文による権限拡張、secret永続化、path traversal、symlink、別repository worktree、stale generation、未知lifecycle API major、旧v5 runtime fieldを拒否する。通常suiteはmodel呼び出し、外部network、新規tokenを必要としない。

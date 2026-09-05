@@ -1,74 +1,44 @@
-version: 2
+version: 5
 
 github:
   repo: ishii1648/codex-issue-loop
+  repository_id: 1334901081
   ready_labels: [codex-loop:ready]
   exclude_labels: [blocked, do-not-automate]
-  running_label: codex-loop:running
-  needs_input_label: codex-loop:needs-input
-  failed_label: codex-loop:failed
-  done_label: codex-loop:done
+  trusted_issue_authors:
+    minimum_permission: write
+    allow_logins: []
 
 queue:
-  poll_interval: 60s
   concurrency: 1
-  order: issue_number_asc
-  priority_labels: []
-  max_attempts: 3
-  continue_after_needs_input: true
-
-worker:
-  command: codex
-  model: null
-  sandbox: workspace-write
-  session_mode: resumable
-  timeout: 2h
-  timeout_grace: 30s
-  ambiguous_profile: extended
-  profiles:
-    standard:
-      max_continuations: 0
-    extended:
-      max_continuations: 3
-
-watch:
-  reconcile_interval: 60s
-  reconcile_jitter: 10%
 
 git:
-  branch_prefix: codex/issue-
-  worktree_root: null
   base_branch: main
 
+formatters:
+  go:
+    enabled: true
+
 completion:
-  create_draft_pr: true
   auto_merge: true
-  close_issue: true
 
-worktrees:
-  completed_max_age: 168h
-  failed_max_age: 720h
-  blocked_max_age: 0s
-  needs_input_max_age: 0s
+incident_automation:
+  enabled: true
+  dry_run: true
+  interval: 15m
+  analyzer_timeout: 10m
+  max_analysis_attempts: 3
+  retry_backoff: 1m
+  max_episode_items: 128
+  degradation_threshold: 2m
 
-notifications:
-  enabled: false
-  provider: ntfy
-  endpoint: https://ntfy.sh
-  topic: replace-with-opaque-topic
-  include_details: false
-  timeout: 10s
-  min_interval: 5s
-  retry_initial: 10s
-  retry_max: 10m
-  max_attempts: 8
-
-logs:
-  rotate_bytes: 16777216
-  rotate_interval: 24h
-  generations: 7
-  worker_run_max_age: 720h
-  worker_run_max_count: 100
-
-security:
-  redact_env: []
+# Cloudflare Tunnel構成はdocs/mac-mini-runbook.mdを参照する。
+# secret fileはrepository外の固定pathへowner-onlyで配置する。
+webhook:
+  mode: webhook
+  listener_address: 127.0.0.1:8787
+  public_url_identifier: hook.zeitreises.com/github/webhook
+  secret_source:
+    file: /usr/local/etc/codex-issue-loop/ishii1648-codex-issue-loop.webhook
+  # installationを持たないclassic repository webhookへの明示的なopt-in。
+  allow_repository_webhook: true

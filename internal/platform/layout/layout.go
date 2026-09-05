@@ -1,0 +1,108 @@
+package layout
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+type Layout struct {
+	Root         string
+	RegistryPath string
+	ReposRoot    string
+	BinDir       string
+	SkillsDir    string
+	LaunchAgents string
+}
+
+func New() (Layout, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Layout{}, fmt.Errorf("resolve user home: %w", err)
+	}
+	root := os.Getenv("AGENT_LOOP_HOME")
+	if root == "" {
+		root = filepath.Join(home, "Library", "Application Support", "codex-issue-loop")
+	}
+	skills := os.Getenv("AGENT_LOOP_SKILLS_DIR")
+	if skills == "" {
+		skills = filepath.Join(home, ".codex", "skills")
+	}
+	launchAgents := os.Getenv("AGENT_LOOP_LAUNCH_AGENTS_DIR")
+	if launchAgents == "" {
+		launchAgents = filepath.Join(home, "Library", "LaunchAgents")
+	}
+	return Layout{
+		Root:         root,
+		RegistryPath: filepath.Join(root, "registry.json"),
+		ReposRoot:    filepath.Join(root, "repos"),
+		BinDir:       filepath.Join(root, "bin"),
+		SkillsDir:    skills,
+		LaunchAgents: launchAgents,
+	}, nil
+}
+
+func (l Layout) Ensure() error {
+	for _, dir := range []string{l.Root, l.ReposRoot, l.BinDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("secure %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+func (l Layout) RepoDir(repoID string) string {
+	return filepath.Join(l.ReposRoot, repoID)
+}
+
+func (l Layout) RateLimitPath() string {
+	return filepath.Join(l.Root, "github-rate-limit.json")
+}
+
+func (l Layout) PlistPath(repoID string) string {
+	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop."+repoID+".plist")
+}
+
+func (l Layout) Label(repoID string) string {
+	return "com.codex-issue-loop." + repoID
+}
+
+func (l Layout) BrokerDir() string { return filepath.Join(l.Root, "broker") }
+
+func (l Layout) BrokerPlistPath() string {
+	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop.broker.plist")
+}
+
+func (l Layout) BrokerLabel() string { return "com.codex-issue-loop.broker" }
+
+// DeliveryDir contains host-level delivery runtime data.  The operator-owned
+// configuration deliberately lives outside this managed root at
+// $HOME/.agent-loop-delivery.yaml.
+func (l Layout) DeliveryDir() string { return filepath.Join(l.Root, "delivery") }
+
+func (l Layout) DeliverySlotsDir() string { return filepath.Join(l.DeliveryDir(), "slots") }
+
+func (l Layout) DeliveryAssignmentsDir() string {
+	return filepath.Join(l.DeliveryDir(), "assignments")
+}
+
+func (l Layout) DeliveryAssignmentDir(repoID string) string {
+	return filepath.Join(l.DeliveryAssignmentsDir(), repoID)
+}
+
+func (l Layout) DeliveryAssignmentFencePath(repoID string) string {
+	return filepath.Join(l.DeliveryAssignmentDir(repoID), "maintenance.json")
+}
+
+func (l Layout) DeliveryAssignmentTransactionPath(repoID string) string {
+	return filepath.Join(l.DeliveryAssignmentDir(repoID), "transaction.json")
+}
+
+func (l Layout) DeliveryPlistPath() string {
+	return filepath.Join(l.LaunchAgents, "com.codex-issue-loop.delivery.plist")
+}
+
+func (l Layout) DeliveryLabel() string { return "com.codex-issue-loop.delivery" }

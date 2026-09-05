@@ -1,4 +1,4 @@
-.PHONY: build test fault-test test-race vet vuln-check fmt-check schema-check tidy-check release-check ci clean
+.PHONY: build test fault-test conformance-test incident-e2e test-race vet vuln-check fmt-check schema-check tidy-check release-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -15,8 +15,18 @@ test:
 fault-test:
 	$(GO) test ./... -run '^TestFault' -count=1
 
+conformance-test:
+	$(GO) test ./internal/application/conformance -count=1
+
+incident-e2e:
+	CGO_ENABLED=0 $(GO) test ./internal/application/incidentloop -count=1
+
 test-race:
-	$(GO) test -race ./...
+	@if [ "$$($(GO) env GOHOSTOS)" = darwin ]; then \
+		CGO_ENABLED=1 $(GO) test -race -ldflags=-linkmode=external ./...; \
+	else \
+		$(GO) test -race ./...; \
+	fi
 
 vet:
 	$(GO) vet ./...
@@ -32,7 +42,7 @@ fmt-check:
 	fi
 
 schema-check:
-	$(GO) test ./internal/worker -run '^TestPublishedSchemaReferencesRuntimeSchema$$' -count=1
+	$(GO) test ./internal/adapter/worker -run '^TestPublishedSchemaReferencesRuntimeSchema$$' -count=1
 
 tidy-check:
 	$(GO) mod tidy
@@ -41,7 +51,7 @@ tidy-check:
 release-check:
 	scripts/check-release.sh
 
-ci: fmt-check schema-check tidy-check test fault-test test-race vet vuln-check build release-check
+ci: fmt-check schema-check tidy-check test fault-test conformance-test test-race vet vuln-check build release-check
 
 clean:
 	$(GO) clean

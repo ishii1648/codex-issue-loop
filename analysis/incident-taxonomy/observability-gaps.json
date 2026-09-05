@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "gaps": [
+    {
+      "id": "scheduler-cycle-trigger",
+      "incident_refs": ["cil-github-issue-102", "cil-20260816-issue90-retry-delay"],
+      "invariant_refs": ["retry_at must not be bypassed"],
+      "current_missing_evidence": ["which wake source started a cycle", "whether the cycle was allowed to call GitHub"],
+      "signal": {"kind": "event", "name": "scheduler_cycle", "fields": ["cycle_id", "trigger", "scheduled_deadline", "attempt_allowed", "coalesced_wake_count"]},
+      "enables": ["deterministic deadline-bypass detection", "fsnotify self-wake attribution", "coalescing ratio"],
+      "security": "Do not include filesystem paths; trigger is a bounded enum.",
+      "cardinality": "cycle_id is event-local and must not be a metric label; trigger is bounded.",
+      "retention": "Retain event records for at least two release windows and publish aggregate counts separately."
+    },
+    {
+      "id": "api-attempt-result",
+      "incident_refs": ["cil-github-issue-102", "cil-20260819-supervisor-blocked-44930"],
+      "invariant_refs": ["supervisor_recovered requires a successful external operation"],
+      "current_missing_evidence": ["stable operation code", "HTTP or GraphQL outcome", "rate-limit reset source"],
+      "signal": {"kind": "event", "name": "external_attempt_completed", "fields": ["cycle_id", "provider", "operation_code", "outcome_code", "rate_limit_resource", "reset_at"]},
+      "enables": ["distinguish no-op wake from real recovery", "attribute retry exhaustion", "rate-limit window analysis"],
+      "security": "Never store request URL query, response body, headers, token, repository path, or user identity.",
+      "cardinality": "provider, operation_code, outcome_code, and resource must use reviewed bounded vocabularies.",
+      "retention": "Keep sanitized event detail with the incident corpus horizon; aggregate outcome counters may be longer-lived."
+    },
+    {
+      "id": "progress-marker",
+      "incident_refs": ["cil-github-issue-124", "cil-20260816-issue90-retry-delay", "cil-github-issue-183"],
+      "invariant_refs": ["poll timer and ready queue must make progress"],
+      "current_missing_evidence": ["last successful queue poll", "last durable transition", "expected next progress deadline"],
+      "signal": {"kind": "status", "name": "progress", "fields": ["last_progress_kind", "last_progress_at", "next_expected_at", "active_scope_count"]},
+      "enables": ["progress-stalled entry and exit", "separate idle from busy loop", "measure blocked blast radius"],
+      "security": "Scope identifiers must be opaque hashes; do not expose branch, path, or Issue body.",
+      "cardinality": "Only bounded progress_kind is a metric label; scope details stay in events.",
+      "retention": "Snapshot current values and retain transitions, not every status read."
+    },
+    {
+      "id": "retry-episode-id",
+      "incident_refs": ["cil-github-issue-102", "cil-20260816-supervisor-transient-413", "cil-20260819-supervisor-blocked-44930"],
+      "invariant_refs": ["counter resets only after a successful cycle"],
+      "current_missing_evidence": ["retry/recovered events cannot always be joined to one operation episode"],
+      "signal": {"kind": "event", "name": "retry_episode", "fields": ["episode_id", "scope_kind", "attempt", "started_at", "retry_at", "terminal_outcome"]},
+      "enables": ["episode-level deduplication", "correct consecutive-failure counts", "expected-transient false-positive control"],
+      "security": "episode_id must be random or derived from non-secret stable IDs; no raw error in labels.",
+      "cardinality": "episode_id is never a metric label; scope_kind and terminal_outcome are bounded.",
+      "retention": "Retain full episodes until all constituent events expire atomically."
+    },
+    {
+      "id": "normalized-failure-code",
+      "incident_refs": ["cil-20260819-supervisor-blocked-44930", "cil-github-issue-183", "cil-github-pr-98"],
+      "invariant_refs": ["error strings alone do not drive state transitions"],
+      "current_missing_evidence": ["stable cause code independent of message text", "component and phase"],
+      "signal": {"kind": "event", "name": "failure_classified", "fields": ["failure_kind", "failure_code", "component", "phase", "resumable"]},
+      "enables": ["stable fingerprint", "operator runbook routing", "AI input without raw messages"],
+      "security": "Codes are allowlisted; raw error remains private and separately redacted.",
+      "cardinality": "failure_code, component, and phase require a versioned bounded registry.",
+      "retention": "Retain codes with durable state and event history across compatible migrations."
+    },
+    {
+      "id": "build-version",
+      "incident_refs": ["cil-github-issue-102", "cil-github-issue-124", "cil-github-issue-162", "cil-github-issue-164"],
+      "invariant_refs": ["classification may depend on known buggy version windows"],
+      "current_missing_evidence": ["some events lack runtime version and binary identity"],
+      "signal": {"kind": "event", "name": "runtime_identity", "fields": ["release_version", "commit_sha", "state_schema", "semantic_contract_version"]},
+      "enables": ["pre-fix/post-fix comparison", "known-bug suppression and recurrence detection", "migration compatibility analysis"],
+      "security": "Release metadata is public; do not add host identity or installation path.",
+      "cardinality": "Do not label high-frequency metrics by full commit SHA; expose it in status/events.",
+      "retention": "Retain identity at supervisor start and reference it by generation."
+    },
+    {
+      "id": "monotonic-duration",
+      "incident_refs": ["cil-20260816-issue90-retry-delay", "cil-github-issue-124"],
+      "invariant_refs": ["persistence thresholds must survive wall-clock adjustments"],
+      "current_missing_evidence": ["wall clock timestamps cannot prove elapsed duration across clock changes"],
+      "signal": {"kind": "event", "name": "operation_duration", "fields": ["operation_code", "elapsed_ms", "deadline_remaining_ms"]},
+      "enables": ["deterministic persistence threshold", "timer starvation detection"],
+      "security": "Durations contain no payload data.",
+      "cardinality": "operation_code is bounded; duration is a value, never a label.",
+      "retention": "Retain duration summaries with the episode and histogram aggregates by release."
+    },
+    {
+      "id": "timestamped-host-log",
+      "incident_refs": ["cil-github-issue-124", "cil-github-issue-183"],
+      "invariant_refs": ["host diagnostics must join to durable event windows"],
+      "current_missing_evidence": ["launchd stderr has no timestamp or structured reason code"],
+      "signal": {"kind": "log", "name": "host_diagnostic", "fields": ["timestamp", "component", "failure_code", "event_sequence"]},
+      "enables": ["join launchd failure to incident", "distinguish repeated rendering from repeated attempts"],
+      "security": "Apply existing redaction writer before persistence; prohibit environment, command line, and path output.",
+      "cardinality": "Log fields are not metric labels; component and failure_code are bounded.",
+      "retention": "Rotate with event history and record oldest/newest retained timestamp."
+    },
+    {
+      "id": "retention-manifest",
+      "incident_refs": ["cil-github-issue-168", "cil-github-issue-171", "cil-github-pr-98"],
+      "invariant_refs": ["absence of evidence must not be treated as evidence of absence"],
+      "current_missing_evidence": ["per-source retention coverage", "closure/supersede provenance", "expired CI detail"],
+      "signal": {"kind": "status", "name": "evidence_coverage", "fields": ["source_kind", "oldest_at", "newest_at", "record_count", "retention_policy", "last_compaction_at"]},
+      "enables": ["explicit unknown reason", "coverage-aware evaluation denominator", "identify incidents resolvable by longer retention"],
+      "security": "Expose only aggregate coverage and policy identifiers, never filenames or paths.",
+      "cardinality": "source_kind and retention_policy are bounded.",
+      "retention": "The manifest must outlive the data it describes by at least one analysis window."
+    }
+  ]
+}

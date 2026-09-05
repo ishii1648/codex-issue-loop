@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ishii1648/codex-issue-loop/schemas/incident-corpus.schema.json",
+  "title": "codex-issue-loop sanitized incident corpus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "generated_at", "selection_policy", "incidents"],
+  "properties": {
+    "version": {"const": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "selection_policy": {"type": "string", "minLength": 1},
+    "incidents": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/incident"}}
+  },
+  "$defs": {
+    "stringArray": {"type": "array", "items": {"type": "string"}},
+    "nonEmptyStringArray": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "ref"],
+      "properties": {"source": {"type": "string", "minLength": 1}, "ref": {"type": "string", "minLength": 1}}
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["corroborated_product_fix", "documented_invariant_violation", "repeated_independent_runs", "typed_transient", "retry_deadline_respected", "consecutive_failures", "successful_domain_event", "request_amplification", "progress_stalled", "human_action_required", "persistence_threshold_exceeded"],
+      "properties": {
+        "corroborated_product_fix": {"type": "boolean"},
+        "documented_invariant_violation": {"type": "boolean"},
+        "repeated_independent_runs": {"type": "boolean"},
+        "typed_transient": {"type": "boolean"},
+        "retry_deadline_respected": {"type": "boolean"},
+        "consecutive_failures": {"type": "integer", "minimum": 0},
+        "successful_domain_event": {"type": "boolean"},
+        "request_amplification": {"type": "boolean"},
+        "progress_stalled": {"type": "boolean"},
+        "human_action_required": {"type": "boolean"},
+        "persistence_threshold_exceeded": {"type": "boolean"}
+      }
+    },
+    "incident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "window", "first_signal", "event_types", "statuses", "links", "symptom", "root_cause", "recovery", "product_code_change", "confidence", "fingerprint", "evidence", "features", "ground_truth", "secondary_attributes", "missing_evidence", "would_resolve_with"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^cil-"},
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {"start": {"type": "string", "format": "date-time"}, "end": {"type": "string", "format": "date-time"}}
+        },
+        "first_signal": {"$ref": "#/$defs/evidence"},
+        "event_types": {"$ref": "#/$defs/nonEmptyStringArray"},
+        "statuses": {"$ref": "#/$defs/nonEmptyStringArray"},
+        "links": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["issues", "pull_requests", "commits"],
+          "properties": {"issues": {"$ref": "#/$defs/stringArray"}, "pull_requests": {"$ref": "#/$defs/stringArray"}, "commits": {"$ref": "#/$defs/stringArray"}}
+        },
+        "symptom": {"type": "string", "minLength": 1},
+        "root_cause": {"type": "string", "minLength": 1},
+        "recovery": {"type": "string", "minLength": 1},
+        "product_code_change": {"enum": ["merged", "none", "unknown"]},
+        "confidence": {"enum": ["high", "medium", "low"]},
+        "fingerprint": {"type": "string", "minLength": 1},
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}},
+        "features": {"$ref": "#/$defs/features"},
+        "ground_truth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["primary_classification", "basis"],
+          "properties": {
+            "primary_classification": {"enum": ["expected_transient", "degraded", "operator_attention", "suspected_bug", "confirmed_bug", "unknown"]},
+            "basis": {"type": "string", "minLength": 1}
+          }
+        },
+        "secondary_attributes": {"$ref": "#/$defs/stringArray"},
+        "missing_evidence": {"$ref": "#/$defs/stringArray"},
+        "would_resolve_with": {"$ref": "#/$defs/stringArray"}
+      }
+    }
+  }
+}

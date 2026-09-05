@@ -1,180 +1,244 @@
 # codex-issue-loop アーキテクチャ概要
 
-## 1. この仕組みが解決すること
+## 1. 目的と設計原則
 
-`codex-issue-loop` は、常時稼働する Mac mini 上で GitHub Issue を順番に取得し、Issue が存在する限り Codex CLI のワーカーを繰り返し実行する仕組みである。Mac miniは実行ホストであり、Issueの作成主体ではない。
+`codex-issue-loop`は、信頼できるGitHub Issueを決定的な順序で選び、1件ずつcoding workerへ渡し、個別Issueの結果にかかわらず次のIssueを処理し続けるsupervisorである。
 
-ユーザーはスマートフォンから監視taskを主な操作入口として利用できる。
+設計上の優先順位は次のとおりとする。
 
-- **監視task**: ループの起動・停止・状態確認・質問への回答
+1. repository全体の正本と実行authorityを壊さない
+2. 個別Issueの障害をそのIssueへ閉じ込め、queueの進行を維持する
+3. worker、回答、公開の重複と古い実行世代からの更新を防ぐ
+4. 作業成果、質問、公開identity、判断根拠を失わない
 
-仕事の投入元はCodexのIssue作成task、GitHub UI、`gh`やGitHub API、GitHub Actions等のautomationのいずれでもよい。作成元にかかわらず、着手可能条件を満たすGitHub Issueが共通のキュー境界になる。Codex taskは操作画面または任意のproducerであり、ループの実行主体ではない。監視taskが終了しても、`launchd` 配下のsupervisorは処理を継続する。
+安全側に停止する単位は、影響を受ける最小範囲とする。Issue固有の不整合や失敗はIssue単位で隔離し、canonical repository state全体を解釈できない場合だけsupervisor全体を停止する。
 
-## 2. 全体像
-
-![任意のIssue producer、GitHub、Mac mini上のsupervisorとCodex workerの関係](images/architecture-overview-v2.png)
-
-図中の `DURABLE STATE` がループ状態の正本である。fsnotify/kqueueによるstate directory eventは即時性のために使い、60秒間隔のreconciliationで通知の取りこぼしやbackend停止を修復する。[ADR-0003](adr/0003-event-notification.md)を正本とする。
-
-スマートフォンから監視taskへの紺色の矢印はCodex Remoteによる操作経路、`WATCH`から監視taskを経てスマートフォンへ戻るオレンジ色の破線はCodexの通知経路を表す。これに加えて、監視task未接続時はopt-inの外部push adapterが永続outboxからスマートフォンへ直接通知できる。いずれの通知も正本ではなく、永続snapshotへ戻るための補助経路である。
-
-## 3. コンポーネントと責務
-
-| コンポーネント | 実行主体 | 主な責務 |
-| --- | --- | --- |
-| 監視task | Codex app | CLI操作、状態の要約、ユーザーへの質問、回答登録 |
-| Issue producer | Codex app、GitHub UI、CLI/API、automation等 | 要望整理、Issue作成、着手可能ラベル付与 |
-| agent-loop Skill | Codexが読む手順 | 自然言語を安全なCLI操作へ対応づける |
-| agent-loop CLI | Goの短命プロセス | start、stop、status、watch、answer |
-| launchd | macOS | supervisorの起動と異常終了時の再起動 |
-| supervisor | Goの常駐プロセス | Issue選択、claim、worker起動、状態遷移、復旧 |
-| Codex worker | `codex exec` | 1件のIssueの調査、worktree内の実装・検証、構造化結果の返却 |
-| publisher | supervisor内の決定論的処理 | 差分検査、commit、push、draft PR作成・既存PR再利用 |
-| PR lifecycle controller | supervisor内の決定論的処理 | CI監視、Ready化、任意のbranch更新・squash merge、merge確認 |
-| GitHub | 外部共有状態 | Issueキュー、ラベル、コメント、Pull Request |
-| 永続状態 | ローカルファイル | snapshot、event log、未回答request、世代番号 |
-
-責務の中心は次のように分かれる。
+## 2. システム境界
 
 ```text
-Issue producer = 作成場所を問わない仕事の投入
-Codex app      = 人との対話、任意のproducer、監視
-agent-loop     = 決定論的な制御と継続実行
-Codex worker   = 1 Issue内の非決定的な開発作業
-GitHub         = producerとループが共有する仕事のキュー
+Issue producer
+      │ Issue
+      ▼
+   GitHub ── observed facts ──► queue policy ──► supervisor
+      ▲                              │                │
+      │                              │ trusted        │ one active execution
+      │                              ▼                ▼
+ publisher ◄── durable effect ── lifecycle ───────► worker
+      ▲                              ▲                │
+      │                              │ result/facts   │
+      └──────── reconciliation ──────┴────────────────┘
+                                     │
+                                     ▼
+                              durable state
 ```
 
-現行のownership境界は1 host・1 supervisor・1 workerである。将来の単一host並列化は同じsupervisor内のworker slotとして実装し、複数host冗長化は外部の線形化可能なcoordinatorとfenced publication gatewayを必須とする。GitHub labelを分散lockとして使わない。詳細は[ADR-0002](adr/0002-concurrency-and-multi-host.md)を正本とする。
+- GitHubはIssue、actor、label、Pull Request、check、mergeの外部事実を所有する。
+- durable stateは処理履歴、現在の実行、質問、continuation、publication intentの正本である。
+- workerは1件のIssueについて非決定的な開発作業を行うが、queue、永続状態、GitHub公開を所有しない。
+- supervisorは決定的な選択、遷移、外部effectの調停を行う。
+- eventとwebhookは起床のhintであり、実行authorityにはならない。
+- Codex監視taskは操作画面であり、supervisorや状態の正本ではない。
 
-## 4. 通常の実行フロー
+Release deliveryは別bounded contextである。releaseの取得、検証、repository別assignment、drain、install、health check、rollbackはIssue lifecycleへ混在させない。
 
-1. 任意のproducerが着手可能ラベル付きのGitHub Issueを作成する。
-2. supervisorがGitHubから着手可能なIssueを取得する。
-3. 決定論的な順序で1件を選び、ラベルとローカル状態でclaimする。
-4. Issue専用のbranchとworktreeを用意する。
-5. `codex exec`ワーカーがpreflightを行い、そのまま実装を開始する。
-6. ワーカーはworktree内で実装とテストを行い、構造化結果を返す。Git metadata、remote、GitHubは変更しない。
-7. supervisorのpublisherが差分を検査し、署名なしで非対話commit、push、draft PR作成を冪等に行う。
-8. supervisorがCIを監視し、成功したdraft PRをReady for reviewへ移す。失敗時は同じworktreeでworkerを再試行する。
-9. `auto_merge: false`では人手のmergeを監視しながら次のIssueへ進む。`auto_merge: true`では必要ならbase branchへ追随してCIを再確認し、squash mergeまで同じIssueを所有する。
-10. mergeを確認した後でIssueを完了扱いにし、設定に応じてcloseする。キューが空なら低負荷で待機する。
+## 3. 責務
 
-IssueごとのCodex workerは外側のループを所有しない。次のIssueを選ぶのは常にsupervisorである。
+| 責務 | 入力 | 出力 | 所有しないもの |
+| --- | --- | --- | --- |
+| GitHub observer | Issue、actor permission、PR、check | 正規化した外部事実 | lifecycle判断 |
+| author policy | actor identity、permission、allowlist | trusted / rejected / unverifiable | GitHub API呼び出し |
+| queue policy | trustedな候補集合、順序設定、snapshot | 次に開始するIssueまたは待機理由 | worker実行 |
+| lifecycle | 現在のIssue aggregate、intent、観測事実 | 次状態、effect intent、audit | 外部I/O |
+| supervisor | snapshot、deadline、外部事実 | use caseの実行順序 | lifecycle規則の再実装 |
+| worker | Issue文脈、worktree、回答 | 構造化された結果 | commit、push、PR、次Issue選択 |
+| publisher | durable publication intent、Git事実 | commit、push、PRの冪等な結果 | 実装判断 |
+| reconciler | snapshotと現在の外部事実 | lifecycleへ渡すreconcile intent | scenario固有のstate更新 |
+| state store | 検証済みdecision | atomic snapshot、event | domain判断 |
+| monitor | snapshot | status、attention | 状態遷移 |
 
-## 5. preflightと実行プロファイル
+外部adapterは事実を観測するだけで、その事実から直接statusを書き換えない。すべてのIssue状態変更はlifecycle decisionを経由する。
 
-preflightは別のユーザー確認工程ではなく、各Issueの最初に必ず行う論理フェーズである。初回のCodex workerは次を確認したうえで、そのまま作業を開始する。
+## 4. 永続aggregate
 
-- 受け入れ条件と変更範囲
-- 依存関係と検証方法
-- 破壊的操作、権限追加、外部公開、課金の有無
-- 複数段階の調査や反復が必要か
-- 1回のworker実行で完了できる見込み
+### 4.1 Repository aggregate
 
-preflightは実行方針を次のどちらかに分類する。
+repositoryの正本は概念上、次の要素だけを持つ。
 
-| profile | 用途 | supervisorの扱い |
+```text
+RepositoryState
+├── identity
+├── mode: running | stopped | blocked
+├── lifecycle_api_version
+├── active_execution: none | (issue, run_id, generation)
+├── issues: IssueEnvelope[]
+├── pending_effects
+└── state_revision
+```
+
+`active_execution`は並列resource leaseではない。process終了、再起動、遅延結果の前後で「どの実行だけが現在状態を変更できるか」を示す単一のfencing identityである。
+
+repository rootで検証する不変条件は、identity、version、revision、transaction整合性、active executionが0件または1件であることに限定する。個別Issueの内容を理由にroot全体を読めなくする設計を避ける。
+
+### 4.2 Issue envelope
+
+各Issueは次のどちらかとして保存する。
+
+```text
+IssueEnvelope = Managed(IssueAggregate) | Quarantined(QuarantineRecord)
+```
+
+`Managed`は通常のlifecycle対象である。`Quarantined`は、そのIssueだけを安全に解釈または継続できない場合の証拠保存形式であり、実行枠を消費しない。
+
+Issue aggregateは少なくとも次を一体として保持する。
+
+- Issue identityとauthor verification evidence
+- 公開lifecycle状態とそのAPI version
+- run IDとgeneration
+- workspace、branch、base commit
+- continuation checkpointとsuspension
+- pending requestとanswer
+- publication identityと結果
+- failure、reconciliation、監査evidence
+
+scenario別のresume status、sync flag、resource park、recovery substateを追加しない。中断理由の違いはgenericな`Suspension`のreasonとevidenceで表現する。
+
+## 5. 単一の状態遷移境界
+
+Issueの変更は概念上、次の一つの契約を通す。
+
+```text
+Decide(current aggregate, intent, observations)
+  -> next aggregate + durable effects + audit evidence
+```
+
+- `intent`は開始、worker結果、回答、取消、外部事実の照合など、利用者またはapplicationの意図を表す。
+- `observations`はGitHub、process、worktree、clockからadapterが取得した事実である。
+- lifecycleは副作用を実行せず、決定的なdecisionだけを返す。
+- state storeは現在のrevision、run ID、generationを再検証し、next aggregate、effect intent、eventをatomicにcommitする。
+- effect実行はcommit後に行い、同じeffect identityで再試行する。
+- effect結果も同じlifecycle境界からaggregateへ反映する。
+
+application、CLI、reconciler、publisherが独自にstatus、request、execution identityを組み合わせて更新することを禁止する。新しい障害シナリオは新しい復旧状態ではなく、新しいobservationまたはreasonとして扱う。
+
+decisionがIssue不変条件を満たさない場合、無効なnext aggregateは保存しない。最後の有効なIssue aggregateと拒否理由から`Quarantined` envelopeを作り、対象Issueがactiveなら同じtransactionで実行枠を解放する。root invariantまたはtransaction chain自体が成立しない場合だけrepositoryを`blocked`にする。
+
+## 6. Queueと単一実行
+
+queue処理は次の順序に固定する。
+
+1. GitHubから候補とactor事実を観測する
+2. author policyで信頼できる候補だけを残す
+3. snapshot上で処理可能な候補を決定的にsortする
+4. repositoryの実行枠が空であることを確認する
+5. 選択したIssueのactor事実を再取得して信頼性を再検証する
+6. 新しいrun IDとgenerationを含むactive executionをatomicに保存する
+7. workerを起動する
+8. 結果をlifecycleへ渡し、実行枠を解放または次のworker実行へ更新する
+9. queue評価へ戻る
+
+同時workerはrepositoryごとに最大1つとする。Issue間resource、path claim、dependency metadata、worker pool、slot assignmentは現行設計に含めない。
+
+`needs_input`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、terminal、quarantineはworkerを実行していないため実行枠を消費しない。これらのIssueはdurableに追跡しつつ、supervisorは別Issueを選択する。publisherとGitHub mutationはrepository単位で直列化するが、外部checkやmergeの待機によってworker枠を占有しない。
+
+同一repositoryを処理するsupervisorは1つ、hostも1つとする。worker並列化とmulti-hostは現行設計の拡張点ではなく対象外であり、必要になった時点で別要件とADRを作成する。[ADR-0005](adr/0005-single-execution-boundary.md)を正本とする。
+
+## 7. Issue作成者の信頼境界
+
+Issue本文はuntrusted inputである。ready labelだけではworker起動を許可しない。
+
+author policyはGitHub observerが取得した次の事実だけを入力にする。
+
+- actorのexact loginとaccount種別
+- repository ownerか
+- 現在のrepository permission
+- repository設定の明示allowlistに一致するか
+
+既定ではownerと`write`以上のcollaboratorを信頼し、botまたはGitHub Appはexact allowlistを必要とする。Issue本文、コメント、labelによる自己申告は信頼根拠にしない。
+
+候補取得時の検証結果はqueueの効率化に利用できるが、worker開始直前に必ず再検証する。検証不能または不一致は対象Issueを非着手として記録し、後続候補の選択を続ける。author検証APIの一時障害はその候補の一時的な不適格であり、既に検証できた別Issueを止めない。
+
+## 8. Continuationとreconciliation
+
+中断したIssueは共通の`Suspension`として扱う。
+
+```text
+Suspension
+├── reason
+├── checkpoint
+├── evidence
+├── allowed_resolutions
+└── pending_request (optional)
+```
+
+checkpointは同じ作業を継続するためのworkspace、branch、base、session、run、generation、publication identityを保持する。回答、retry、resume、cancelは保存済みcheckpointと現在の外部事実を再検証してからlifecycle intentとして適用する。
+
+reconcilerは「workerが消えた」「PRが既に存在する」「merge済み」「label同期が不足」などの事実を正規化し、通常と同じ`Decide`へ渡す。事実ごとの専用status、専用command、専用state mutationを作らない。event logの文言や件数からauthorityを合成しない。
+
+## 9. 障害境界
+
+| 範囲 | 例 | 設計上の処理 |
 | --- | --- | --- |
-| `standard` | 範囲が明確で、1回のworker実行で完了が見込める | 通常の上限とtimeoutで実行 |
-| `extended` | 調査、移行、広範な変更、複数回の検証が必要 | continuation budgetを確保し、必要なら`codex exec resume`で継続 |
+| Issue-local | worker失敗、provenance不足、PR不一致、個別aggregate違反、author不一致 | 対象Issueをretry、suspend、terminalまたはquarantineへ移し、再admissionを拒否して実行枠を解放し、後続候補からqueueを継続 |
+| Transient shared dependency | GitHub 5xx、rate limit、短時間のnetwork断 | durable deadlineまでbackoffし、repository stateを維持 |
+| Repository-wide | root snapshotを解釈不能、transaction chain破損、global config不正、全Issueに共通するauthority消失 | 新規effectを止めてrepositoryを`blocked`にする |
 
-分類が難しい場合にユーザーへ質問してはならない。可逆性と安全性を維持できる限り、より強い `extended` を選ぶ。
+Issue番号、run ID、generation、Issue lifecycle intentを持つerrorは、分類不能でもIssue-local境界で処理する。未分類errorを自動的にrepository-wideへ昇格させない。
 
-preflightは必ずしも2つのCodex workerを起動することを意味しない。初回workerの中でpreflightから実装へ連続して進み、追加実行が必要な場合だけsupervisorが継続workerを起動する。
+GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠解放を妨げない。同期はdurable effectとして再試行し、別Issueのworker起動を継続する。
 
-## 6. Codex Goalの位置づけ
+## 10. Issue lifecycle APIと互換性
 
-Codex Goalは、一つの具体的な目的と検証可能な完了条件を追う長時間作業に適している。一方、GitHub Issueを選び続ける無期限のキュー処理とは責務が異なる。
+公開lifecycle contractは、状態ごとの意味、許可遷移、terminal判定、実行枠消費、自動継続可否、人間操作要否を一つのversioned sourceとして定義する。CLI JSON、event、GitHub表示、migration、validatorはこのcontractから同じ意味へprojectする。
 
-このため、次の境界を設ける。
+内部storage schemaとIssue lifecycle APIを分離する。
 
-- Goalを外側のIssueループ、プロセス監視、永続状態の正本にはしない。
-- 現行のheadless workerは `standard` / `extended` profileと`codex exec`で制御する。
-- `extended` の継続はsupervisorが `codex exec resume` を管理する。
-- 監視taskで「この障害を復旧する」など単一目的を追う場合は、ユーザーがGoalを利用してよい。
-- App ServerのGoal APIは公式提供済みである。`extended` profileのoptional adapterとしてIssue #53で検証し、導入までは現行workerを維持する。
+- storage変更を決定的に移行でき、公開上の意味が変わらない場合はAPI majorを維持する。
+- 同一majorの旧minor fixtureは新minorで読み、同じ意味で継続できなければならない。
+- 公開状態の削除・改名・意味変更、terminal判定、実行枠消費、許可遷移の非互換変更ではAPI majorを更新する。
+- major更新でも、根拠が十分なIssueは決定的に移行する。
+- 移行不能なIssueは`Quarantined`へ変換し、他Issueを継続する。
 
-したがってGoalは排除せず、適用範囲を単一目的の内側に限定する。
+migration decoderは旧形式を読む境界に限定する。旧scenario別runtime経路を互換性のために残さず、変換後は現行aggregateと共通lifecycleだけを使用する。
 
-## 7. 質問で止まる場合
+## 11. Package境界
 
-ワーカーは次の場合に限って `needs_input` を返す。
+```text
+internal/
+├── domain/
+│   ├── issue/       # aggregate、lifecycle contract、decision、invariant
+│   └── queue/       # author policy、eligibility、deterministic ordering
+├── application/
+│   ├── supervisor/  # queue loop、単一実行、Issue-local failure boundary
+│   ├── reconcile/   # 外部事実の収集とreconcile intent
+│   └── publication/ # durable effectの直列実行
+├── adapter/
+│   ├── state/
+│   ├── github/
+│   ├── worker/
+│   └── publish/
+└── platform/        # config、filesystem、process、launchd
+```
 
-- 外部仕様やUI動作を変えるプロダクト判断
-- データ削除、公開、課金、credential、権限拡大
-- リポジトリ内の情報だけでは安全に決められない事項
-- 相反する受け入れ条件
+依存方向は`domain`を内側とし、domainはfilesystem、network、process、clock、永続storeを直接参照しない。applicationはdomain decisionを呼び出してeffectを調停し、adapterは外部事実とeffect結果を変換する。
 
-命名、局所的な実装、既存規約から推測できる事項、容易に戻せる内部構造については質問せず進める。また、`standard` / `extended` の分類をユーザーへ質問しない。
+`domain/admission`を現行runtimeの判断経路に置かない。既存resource admission実装を将来再利用する前提も設けない。並列化要件が新たに承認された場合にだけ、現在の単一実行モデルとの置換または独立bounded contextとして再設計する。
 
-`needs_input` は一過性の通知ではない。request IDと質問内容を永続状態へ保存し、ユーザーが回答するまでattention状態を保持する。監視taskが切断されても質問は失われない。
+## 12. 設計上の不変条件
 
-## 8. 監視を取りこぼさない仕組み
+- repositoryのactive executionは常に0件または1件である。
+- active execution以外のrunまたはgenerationは状態と外部公開を変更できない。
+- Issue状態は共通lifecycle decision以外から変更しない。
+- Issue-local障害はrepository modeを`blocked`にしない。
+- workerを実行していないIssueは実行枠を消費しない。
+- authorを検証できないIssueをworkerへ渡さない。
+- untrusted Issueが後続のtrusted Issueを妨げない。
+- 未回答request、workspace、publication identity、quarantine evidenceを暗黙に削除しない。
+- eventを正本または実行authorityにしない。
+- workerにqueue選択、commit、push、PR作成を許可しない。
+- 同一publication intentの再試行で別branchまたは別PRを作らない。
+- PR待機中にbase branchが進んでもfast-forwardなら同一publication intentを継続し、履歴分岐だけを拒否する。
+- 同一API majorのminor updateでIssue状態の意味を変えない。
 
-### 8.1 基本方針
+## 13. 実装との関係
 
-監視では次の優先順位を守る。
-
-1. **永続状態が正本**
-2. **event通知は低遅延化のヒント**
-3. **低頻度pollingは取りこぼし修復**
-
-fsnotify/kqueueでstate directoryを監視するが、そのeventだけに依存しない。eventを受信した場合も、そのpayloadを正本とはせず永続状態を読み直す。watcherを作成・登録できない場合はpolling-onlyへ降格する。
-
-### 8.2 watchアルゴリズム
-
-`agent-loop watch --until-attention` は次の順序で動作する。
-
-1. snapshotを読み、既にattention状態なら直ちに返す。
-2. event通知を購読する。
-3. 購読開始とのraceを防ぐためsnapshotをもう一度読む。
-4. eventまたはreconciliation期限までOSレベルで待機する。
-5. 起床後にsnapshotを読み直す。
-6. `needs_input`、`blocked`、`stopped`等なら構造化結果を返す。
-7. 通常状態なら再び待機する。
-
-snapshotには単調増加する `state_revision` を持たせる。watchは最後に確認したrevisionを記録し、再接続後も状態変化を比較できる。
-
-reconciliation間隔の既定値は60秒とし、複数watchがある場合はjitterを加える。これはIssueキューを取得する `queue.poll_interval` とは別の設定である。
-
-### 8.3 トークン消費の境界
-
-reconciliation pollingはGoプロセス内で行い、待機中のheartbeatや途中結果をCodexへ返さない。この待機処理はモデルを呼び出さないため、polling自体はLLMトークンを消費しない。
-
-Codexに「一定時間ごとにstatusを確認する」と推論させる設計は禁止する。Codexはwatchがattention結果を返した後の要約、ユーザーへの質問、回答登録にだけ使う。
-
-ただし、Codex task内で保留中のtool callについて、OpenAIが課金を含む厳密なゼロトークン保証を公開しているとは限らない。そのため「Go側の待機ではモデル呼び出しを行わない」という実装上の保証と、Codex製品全体の課金仕様を区別する。
-
-## 9. 障害時の振る舞い
-
-| 障害 | 継続するもの | 復旧方法 |
-| --- | --- | --- |
-| 監視taskが終了 | supervisor、Issue処理、永続質問 | 同じまたは新しい監視taskからstatus/watch |
-| event通知を取りこぼす | 永続状態、attention状態 | 60秒以内のreconciliation |
-| watchプロセスが終了 | supervisor、永続状態 | 監視taskからwatchへ再接続 |
-| Codex workerが異常終了 | worktree、run状態 | backoff後に再試行またはextended continuation |
-| supervisorが異常終了 | snapshot、event log、GitHub状態 | launchd再起動後にreconciliation |
-| Macがスリープ | 実行は停止し得る | macOSの「ディスプレイoff時もスリープさせない」を有効化 |
-
-App Server所有threadは`thread/resume`と`turn/start`でprogrammaticに継続できるが、外部supervisorから任意のDesktop taskを直接wakeし、モバイルUIを`Needs input`へ変える公開契約には依存しない。監視taskが接続されていない期間は、opt-inのntfy adapterが`needs_input`とsupervisor blockedを永続outboxから通知する。詳細は[公式仕様確認](codex-capability-review.md)と[スマートフォン直接push通知](notifications.md)を参照する。
-
-## 10. 設計上の不変条件
-
-- ループの正本状態をCodex taskの会話履歴だけに置かない。
-- 未回答requestは回答または明示取消まで消さない。
-- eventを状態そのものとして扱わない。
-- Codexによる定期pollingを行わない。
-- 1 Issueにつき同時に1つのwriterだけを許可する。
-- GitHubへ公開できるpublisherをrepository単位で1つの論理writerに限定する。
-- workerに次Issueの選択や無限ループを任せない。
-- preflightの実行経路選択でユーザーを止めない。
-- Goalを永続supervisorの代替にしない。
-
-## 11. 日常運用のイメージ
-
-通常、ユーザーが直接操作する必要があるのは監視taskだけである。
-
-1. GitHub UI、CLI/API、automation、または任意の `[INTAKE] <repo> — new issue` taskから新しい仕事を登録する。
-2. `[LOOP] <repo> — monitor` で状態確認と必要な回答を行う。
-
-ループに着手可能なIssueがあればsupervisorが自動的に処理する。質問が必要になれば監視taskのwatchが戻り、Codexがユーザーへ質問する。回答後は同じworktreeと保存済みコンテキストを使って処理を再開する。
+本書は目標設計を表し、現行コードがすべて適合済みであることを意味しない。適合状況と既知の差分は[実装状況](implementation.md)に記録する。要件は[要件定義](requirements.md)、外部観測可能な振る舞いは[仕様書](specification.md)を正本とする。

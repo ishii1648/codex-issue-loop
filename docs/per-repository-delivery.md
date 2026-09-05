@@ -1,0 +1,92 @@
+# Repository別stable delivery
+
+## 不変条件
+
+- 配布対象はstable Releaseだけであり、alpha、beta、LKG channelはない。
+- stableはGAと同義の唯一の正式releaseであり、GAを別の昇格状態として持たない。
+- stable Releaseの公開だけではassignmentを変更しない。
+- assignmentのhealthはrepository rolloutの結果であり、stable Releaseの状態を変更しない。
+- assignmentの正本はowner-onlyのdelivery configであり、repository ID、version、commit、artifact SHA-256、immutable slot、generation、previousを保持する。
+- applyとrollbackは対象repository以外のplist、PID、assignment、durable stateを変更しない。
+- active workerは停止しない。drain期限では変更をdeferしてfenceを解除する。
+- rollback失敗時は対象repositoryのfenceとtransactionを保持する。
+- global operatorのupdate/rollbackはrepository plistを各assignmentのimmutable slotへ維持し、global binaryへ差し替えない。
+
+## v1からv2への明示migration
+
+検証済みv0.9以降のbinaryでpreviewし、全repositoryが現在installのexact tupleになることを確認してから適用する。
+
+```sh
+operator_binary=/absolute/path/to/verified/agent-loop_Darwin_arm64
+"$operator_binary" delivery assignment migrate --json
+"$operator_binary" delivery assignment migrate --apply --json
+"$operator_binary" delivery assignment status --json
+```
+
+previewはfileを変更しない。applyは現在binaryをimmutable slotへcopyしconfigをv2へ更新するが、repository plist、LaunchAgent、PID、snapshotは変更しない。migrationから全repositoryの切替完了までは、global install pathが旧runtimeの起動元として残るため上書きしない。assignment操作には検証済みrelease artifactを`operator_binary`として直接使う。migration前にdelivery LaunchAgentを停止しておけば、旧controllerがv2 configを読む一時的なerrorを避けられる。
+
+## Repository単位の適用
+
+`--version`は既存のexact stable tagを指定する。previewが返したgenerationをapplyへ渡す。
+
+```sh
+"$operator_binary" delivery assignment preview \
+  --repo /absolute/path/to/repository --version v0.9.0 --json
+
+"$operator_binary" delivery assignment apply \
+  --repo /absolute/path/to/repository --version v0.9.0 \
+  --expected-generation 1 --json
+
+"$operator_binary" delivery assignment verify \
+  --repo /absolute/path/to/repository --json
+```
+
+artifactはchecksum、annotated tagのpeeled commit、release manifest、binary metadata、GitHub attestationを照合してからslotへstageする。tagが検証中に移動した場合、またはpreview後にgenerationが変わった場合は適用しない。
+
+validation中は対象repositoryのtyped maintenance fenceがadmissionを停止するため、doctorはqueue livenessだけを`WEBHOOK_QUEUE_DEFERRED_MAINTENANCE`としてdeferする。artifact、schema、LaunchAgent、GitHub、brokerなど他の診断は通常どおり必須である。assignment確定後はfenceを解除してschedulerをwakeし、通常doctorとrollout healthでqueue livenessを再び必須にする。
+
+## Rollback
+
+rollback先はconfigに記録されたpreviousだけである。
+
+```sh
+"$operator_binary" delivery assignment rollback \
+  --repo /absolute/path/to/repository \
+  --expected-generation 2 --json
+```
+
+rollbackもgenerationを1増やす。成功後のpreviousはrollback前versionになるため、同じartifactの再適用を新しいpreviewから行える。
+
+rollback自体が失敗してrepository fenceを保持した場合、transaction、current assignment、generation、fence identity、LaunchAgent loaded状態がすべて一致するときだけtyped retryを使う。
+
+```sh
+"$operator_binary" delivery assignment retry-rollback \
+  --repo /absolute/path/to/repository \
+  --confirm-retained-fence --json
+```
+
+停止中repositoryは旧assigned binaryのdoctorを起動しない。operator binaryがexact slot、plist、unloaded状態、schema対応済みcanonical snapshotとworker不在を検査する。成功時だけtransactionを`rolled_back`へ進めてfenceを解除し、不一致なら変更せずfail closedとする。
+
+## rollback_failedからの限定再試行
+
+`rollback_failed`ではfenceやtransactionを削除・編集しない。対象repositoryにactive workerがなく、retained fence、transaction、current assignment、expected generation、保存済みのexact targetが一致することを確認してから、同じtargetだけを再試行する。
+
+```sh
+"$operator_binary" delivery assignment retry \
+  --repo /absolute/path/to/repository \
+  --expected-generation 1 \
+  --confirm-retained-fence --json
+```
+
+CLIは保存済みtarget slotのdigest、fence generation、repository stateを再検証する。targetの差し替え、active workerの停止、別repositoryの変更は拒否し、成功時だけtransactionを完了してfenceを解除する。
+
+## Evidence
+
+段階展開では対象外repositoryについて、切替前後の次を保存する。
+
+- assignment tupleとgeneration
+- LaunchAgent PIDとprogram binary SHA-256
+- state revision
+- Issue、active execution、pending request、managed worktreeの要約
+
+対象repositoryは`assignment verify`、`doctor --repo ... --assignment-health --json`、`status --repo ... --json`を保存する。最終状態は全repositoryでworker limit 1、pending assignment transactionなし、repository fenceなしを必須とする。

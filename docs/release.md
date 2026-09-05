@@ -12,17 +12,26 @@ GitHub Releaseには次を公開する。
 - `agent-loop_Darwin_arm64`
 - `agent-loop_Darwin_arm64.spdx.json`（SPDX 2.3）
 - `checksums.txt`（SHA-256）
+- `release-manifest.json`（delivery protocol、tag/commit、target、artifact digest、schema互換範囲）
 - GitHub Actions artifact provenance attestation
+
+suffixなしのstable Releaseが唯一の正式releaseであり、GAは別の段階・channel・状態として定義しない。candidateは公開前検証の一時artifactで、repository assignmentの対象ではない。stable公開後のrepository別適用成否はrollout状態であり、releaseの成熟度を変更しない。
 
 release jobは同じtag、commit、`SOURCE_DATE_EPOCH`から2回buildし、binary、SBOM、checksumのbyte一致を確認してから公開する。repository固有の長期secretは使わず、GitHub Actionsの短命OIDC tokenと`GITHUB_TOKEN`だけを使う。
 
+GitHub Actionsのartifact downloadとGitHub Release downloadでは実行modeが保持されないため、isolated canaryとstable readbackはdownload後にbinaryを`0755`へ戻してから実行する。これはfile bytesを変更しない。mode復元後もmanifestのSHA-256とattestationを正本とし、不一致時はcandidate公開またはstable公開を停止する。
+
+candidate integrityは待機を挟まず、candidate prereleaseから取得したbinaryとcanonical artifactのbyte一致およびGitHub attestationを即時検証する。production hostのraw snapshotはowner-onlyのprivate evidenceに限定し、公開Releaseにはcandidate digest、非変更結果、安全条件、private evidence digestだけのredacted summaryを添付する。Release workflowはstable公開後のartifact readbackで完了する。repository rolloutは独立workflowで検証し、5分間のhealth soakとして開始時・1分後・5分後に対象repositoryのassignment、doctor、statusを採取する。
+
 Pull Requestとmainの通常CIでも`scripts/check-release.sh`を実行し、固定test versionから2回作成したartifactのbyte一致と埋め込みversion/commitを確認する。
+
+release artifactの`version --json`とinstall manifestはstorage schemaのcurrent/migration-from、およびsemantic contractのcurrent/minimumを明示する。release checkはこの範囲とversioned state contractを検査し、execution-required provenance追加にmigration/compatibility ruleがないbuildを拒否する。release前にはsupported旧versionのactive、blocked、needs-input、retry、publication recovery fixtureへcurrent validatorを適用する。
 
 ## Release作成
 
 1. `main`のCIとIssue/milestoneを確認する。
 2. releaseするcommitへannotated tagを作る。
-3. tagをpushし、Release workflowの成功を確認する。
+3. tagをpushし、`verify-stable-release`までのRelease workflow成功を確認する。
 
 ```sh
 git tag -a v1.2.3 -m 'v1.2.3'
@@ -44,6 +53,51 @@ chmod 0755 agent-loop_Darwin_arm64
 ```
 
 checksum、attestation、version/commitのいずれかが一致しなければ実行・installしない。
+
+stable公開後のassignment、rollback drill、health reportはRelease workflowの完了条件ではない。rollout成功後に`production-health-report.json`をstable Releaseへ追加し、独立した`Repository rollout health` workflowを起動する。rollout失敗時は対象repositoryだけをpreviousへ戻し、artifact自体の修正が必要と確認できた場合に限って新しいpatch releaseを作る。
+
+## Mac側pull型delivery
+
+v0.9.0以降の通常経路はrepository別assignmentである。stable公開は全repositoryを更新せず、operatorがexact versionとpreview generationを指定して1 repositoryずつ適用する。設定、CLI、初回v1→v2 migration、rollback、隔離evidenceは[Repository別stable delivery](per-repository-delivery.md)を正本とする。設計判断は[ADR-0004](adr/0004-per-repository-stable-assignment.md)に記録する。
+
+```sh
+agent-loop delivery assignment migrate --json
+agent-loop delivery assignment migrate --apply --json
+agent-loop delivery assignment preview --repo /absolute/path/to/repository --version v1.2.3 --json
+agent-loop delivery assignment apply --repo /absolute/path/to/repository --version v1.2.3 --expected-generation 1 --json
+agent-loop delivery assignment verify --repo /absolute/path/to/repository --json
+```
+
+v2 configでは`auto_apply: never`とstable channelだけを許可し、host-wide `delivery apply`を拒否する。以下のhost-wide transaction説明はv0.8.5以前のbinaryによるv1 configのrollback/recovery互換境界に限る。v0.9.0以降のbinaryへv1 configを直接渡してhost-wide操作してはならない。
+
+### v1 host-wide controller（legacy recoveryのみ）
+
+初回installとdoctor完了後、Macごとに1つのcontrollerをpreviewしてから有効化する。
+
+```sh
+agent-loop delivery configure --json
+agent-loop delivery configure --apply --json
+agent-loop delivery check --json
+agent-loop delivery status --json
+```
+
+設定は`$HOME/.agent-loop-delivery.yaml`だけに置き、regular file、現在userのowner、mode `0600`を必須とする。`--config`はtestまたは明示運用用のabsolute pathだけを受理する。credentialは保存せず既存の`gh`認証を使う。transaction、download cache、log、maintenance fenceは`$HOME/Library/Application Support/codex-issue-loop/delivery/`配下であり、設定fileや各repositoryへ展開しない。
+
+`check`/`reconcile`はdraft/prereleaseを除く最新production Releaseのannotated SemVer tagをcommitへpeelし、`release-manifest.json`、`checksums.txt`、binaryとmanifest双方のGitHub attestation、`darwin/arm64` target、binary埋め込みmetadataを照合する。checksumとtrusted release workflow attestationの完了前にcandidate binaryを実行しない。download中にRelease/tagが変化した場合はfresh candidateでやり直す。major、schema migration、downgrade、同一version異commit、未知manifest/protocolは自動適用しない。
+
+`com.codex-issue-loop.delivery`は`RunAtLoad`と`StartInterval`で短命な`delivery reconcile`を実行する。host lockで手動`apply`との多重実行を拒否し、永続phaseと固定backup pathから再開する。drain timeoutではworkerをkillせずfenceを解除してdeferする。apply後はfenceを維持したまま全repositoryを含む`doctor --json`を二度実行してsoakし、失敗時は通常Issue処理の再開前にrollbackする。rollbackも失敗した場合はfenceとbackupを保持してfail closedする。
+
+```sh
+agent-loop delivery pause --json
+agent-loop delivery resume --json
+agent-loop delivery apply --version v1.2.3 --json
+```
+
+pause/resumeはactive maintenance transaction中には変更できない。schema migrationとmajor updateは従来どおり全loop停止、migration preview、paired rollbackを明示承認する手動runbookへ移す。
+
+`rollback_failed`の再試行は通常reconcileから行わない。原因解消、exact managed backup、retained maintenance fenceをoperatorが確認した場合だけ、検証済みcandidateの`delivery retry-rollback --backup <exact-path> --confirm-retained-fence --json`を使用する。previous installへ既に戻っている場合はrestoreを重ねずhealthだけを再検証し、成功時だけfenceを解除する。
+
+retry時のaggregate validationがlegacy completed merged identityだけを理由にmaintenance snapshotを隔離した場合は、検証済みcandidateの`recover-quarantined-snapshot`をdry-runし、exact backupと全GitHub PR identityを確認した後だけ専用confirmで復元する。これは一般の破損stateや追加invariant違反を許容するcompatibility bypassではない。
 
 ## 新規install
 
@@ -73,6 +127,8 @@ agent-loop doctor --json
 6. 途中で失敗した場合は旧install一式を自動復元し、元のLaunchAgentを再開する。
 
 state、event、worker log、worktree、registryは通常updateの対象ではなく保持される。schema migrationを伴うversionでは全loopを先に停止する。新artifactの`update`はbinary/Skillだけを配置して自動再開せず、`schema_migration_required: true`を返す。その後、installed binaryで`migrate --apply`を実行してからdoctorとstartへ進む。詳細は[永続schema migration runbook](migration.md)を正本とする。
+
+storage versionが同じでもsemantic contract migrationが必要なら自動再開しない。`migrate --json`の`non_migratable`が空であることを確認し、apply、doctor、repositoryごとのstartの順を守る。rollback時はmigration backupを先にrestoreし、安全な旧artifactへ戻す。
 
 ## rollback
 

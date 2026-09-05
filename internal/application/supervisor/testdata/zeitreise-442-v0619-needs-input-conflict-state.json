@@ -1,0 +1,104 @@
+{
+  "version": 4,
+  "semantic_contract_version": 1,
+  "repo_id": "repo_zeitreise",
+  "repo_path": "/sanitized/zeitreise",
+  "state_revision": 6,
+  "supervisor": {
+    "state": "running",
+    "updated_at": "2026-08-18T09:05:00Z"
+  },
+  "issues": {
+    "442": {
+      "number": 442,
+      "title": "Sanitized zeitreise Issue #442",
+      "status": "resolving_conflict",
+      "run_id": "run_adaf3142bd207b24",
+      "lease_generation": 4,
+      "lease": {
+        "owner": {"run_id": "run_adaf3142bd207b24", "generation": 4},
+        "slot": 0,
+        "declared_resources": ["repo:*"],
+        "resolved_resources": ["repo:*"],
+        "base_sha": "1111111111111111111111111111111111111111",
+        "reserved_at": "2026-08-18T09:01:00Z"
+      },
+      "resource_park": {
+        "id": "park_sanitized_zeitreise_442",
+        "kind": "needs_input",
+        "request_id": "req_b24ba2cd328c461f",
+        "status": "resumed",
+        "original_lease": {
+          "owner": {"run_id": "run_adaf3142bd207b24", "generation": 3},
+          "slot": 0,
+          "declared_resources": ["repo:*"],
+          "resolved_resources": ["repo:*"],
+          "base_sha": "1111111111111111111111111111111111111111",
+          "reserved_at": "2026-08-18T08:55:00Z"
+        },
+        "parked_at": "2026-08-18T09:00:00Z",
+        "resumed_at": "2026-08-18T09:01:00Z",
+        "resume_owner": {"run_id": "run_adaf3142bd207b24", "generation": 4}
+      },
+      "declared_resources": ["repo:*"],
+      "branch": "codex/issue-442-sanitized",
+      "worktree": "/sanitized/worktrees/zeitreise/issue-442",
+      "workspace": {
+        "path": "/sanitized/worktrees/zeitreise/issue-442",
+        "branch": "codex/issue-442-sanitized",
+        "repo_id": "repo_zeitreise",
+        "repository": "ishii1648/zeitreise",
+        "git_common_dir": "/sanitized/zeitreise/.git",
+        "main_checkout": "/sanitized/zeitreise",
+        "captured_at": "2026-08-18T08:55:00Z"
+      },
+      "attempts": 2,
+      "continuations": 1,
+      "execution_profile": "extended",
+      "session_id": "session_sanitized_zeitreise_442",
+      "session": {"backend": "codex", "id": "session_sanitized_zeitreise_442"},
+      "pull_request_url": "https://github.com/ishii1648/zeitreise/pull/454",
+      "pull_request_number": 454,
+      "head_sha": "2222222222222222222222222222222222222222",
+      "answers": [
+        {
+          "request_id": "req_b24ba2cd328c461f",
+          "question": "Sanitized continuation question",
+          "answer": "continue",
+          "answered_at": "2026-08-18T09:01:00Z"
+        }
+      ],
+      "conflict_recovery": {
+        "pull_request_url": "https://github.com/ishii1648/zeitreise/pull/454",
+        "previous_base_sha": "3333333333333333333333333333333333333333",
+        "target_base_sha": "4444444444444444444444444444444444444444",
+        "original_head_sha": "2222222222222222222222222222222222222222",
+        "conflict_files": ["sanitized/conflict-file.ts"],
+        "allowed_paths": ["sanitized/conflict-file.ts"],
+        "attempts": 0,
+        "base_updates": 1,
+        "original_diff": "+sanitized PR intent",
+        "base_commits": "sanitized base change",
+        "conflict_content": "<<<<<<< sanitized conflict",
+        "started_at": "2026-08-18T09:05:00Z",
+        "updated_at": "2026-08-18T09:05:00Z"
+      },
+      "updated_at": "2026-08-18T09:05:00Z"
+    }
+  },
+  "pending_requests": {
+    "req_b24ba2cd328c461f": {
+      "id": "req_b24ba2cd328c461f",
+      "issue_number": 442,
+      "question": "Sanitized continuation question",
+      "allow_free_text": true,
+      "run_id": "run_adaf3142bd207b24",
+      "resource_park_id": "park_sanitized_zeitreise_442",
+      "released_owner": {"run_id": "run_adaf3142bd207b24", "generation": 3},
+      "status": "answered",
+      "answer": "continue",
+      "created_at": "2026-08-18T09:00:00Z",
+      "answered_at": "2026-08-18T09:01:00Z"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ishii1648/codex-issue-loop/schemas/incident-source-inventory.schema.json",
+  "title": "codex-issue-loop incident source inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "retrieved_at", "sources"],
+  "properties": {
+    "version": {"const": 1},
+    "retrieved_at": {"type": "string", "format": "date-time"},
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "period_start", "period_end", "count", "unit", "query", "gaps", "constraints"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "minLength": 1},
+          "period_start": {"type": ["string", "null"], "format": "date-time"},
+          "period_end": {"type": ["string", "null"], "format": "date-time"},
+          "count": {"type": "integer", "minimum": 0},
+          "unit": {"type": "string", "minLength": 1},
+          "query": {"type": "string", "minLength": 1},
+          "gaps": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "constraints": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    }
+  }
+}

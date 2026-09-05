@@ -2,6 +2,8 @@
 
 `agent-loop`は`.agent-loop.yaml`で指定されたready、running、needs-input、failed、done、`blocked`除外ラベル、およびqueueのpriority labelを使用する。`bootstrap-labels`は対象リポジトリの不足ラベルだけを安全に作成する。priorityの順位と運用は[Queue ordering](queue-ordering.md)を参照する。
 
+schema v3の複数worker段階では、同一repository内並列実行のresource claimとして`area:<resource>` labelを使用し、configのresource definitionから不足labelをbootstrap対象へ加える。prefix、正規化、不正・未知labelの縮退規則は[Resource admission契約](resource-admission.md)を正本とする。definition未導入のconcurrency 1 configではbootstrap対象に含めない。
+
 ## 標準手順
 
 最初に変更計画をpreviewする。この操作はGitHubを変更しない。
