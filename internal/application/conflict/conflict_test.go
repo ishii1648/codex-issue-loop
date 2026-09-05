@@ -83,6 +83,61 @@ func TestConflictRecoveryPreservesBothChangeIntentsAndPublishesWithoutForce(t *t
 	}
 }
 
+func TestConflictRecoveryDescribesDeletedConflictResolutionOnRetry(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	repo := filepath.Join(root, "pr")
+	actor := filepath.Join(root, "base")
+	runGit(t, root, "init", "--bare", remote)
+	runGit(t, root, "init", "-b", "main", repo)
+	configureGit(t, repo)
+	file := "shared.txt"
+	if err := os.WriteFile(filepath.Join(repo, file), []byte("initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", file)
+	runGit(t, repo, "commit", "-m", "initial")
+	runGit(t, repo, "remote", "add", "origin", remote)
+	runGit(t, repo, "push", "-u", "origin", "main")
+	branch := "codex/issue-1-delete"
+	runGit(t, repo, "checkout", "-b", branch)
+	runGit(t, repo, "rm", file)
+	runGit(t, repo, "commit", "-m", "delete file")
+	runGit(t, repo, "push", "-u", "origin", branch)
+	runGit(t, root, "clone", "-b", "main", remote, actor)
+	configureGit(t, actor)
+	if err := os.WriteFile(filepath.Join(actor, file), []byte("base change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, actor, "add", file)
+	runGit(t, actor, "commit", "-m", "modify file")
+	runGit(t, actor, "push", "origin", "main")
+	cfg := config.Defaults()
+	cfg.Git.BaseBranch = "main"
+	cfg.RepoPath = repo
+
+	manager := Manager{}
+	prepared, err := manager.Prepare(context.Background(), cfg, repo, branch, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(repo, file)); err != nil {
+		t.Fatal(err)
+	}
+	recovery := state.ConflictRecovery{
+		PreviousBaseSHA: prepared.PreviousBaseSHA, TargetBaseSHA: prepared.TargetBaseSHA,
+		OriginalHeadSHA: prepared.OriginalHeadSHA, ConflictFiles: prepared.ConflictFiles,
+		AllowedPaths: prepared.AllowedPaths,
+	}
+	retried, err := manager.Prepare(context.Background(), cfg, repo, branch, &recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retried.ConflictFiles) != 1 || retried.ConflictFiles[0] != file || !strings.Contains(retried.ConflictContent, "[absent from worktree]") {
+		t.Fatalf("preparation=%+v", retried)
+	}
+}
+
 func TestConflictPublicationRejectsPathOutsideRecordedScope(t *testing.T) {
 	repo, branch, file, cfg := conflictRepository(t, "one\n", "one\npr\n", "one\nbase\n")
 	manager := Manager{}
