@@ -1021,6 +1021,26 @@ func TestDurableStateRejectsUnknownIssueStatus(t *testing.T) {
 	}
 }
 
+func TestLifecycleAPIPreviousMinorNormalizesCompatibly(t *testing.T) {
+	store := newStore(t)
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(string(encoded), `"issue_lifecycle_api_version":"`+issuedomain.LifecycleAPICurrent+`"`, `"issue_lifecycle_api_version":"`+issuedomain.LifecycleAPIPreviousMinor+`"`, 1)
+	var decoded Snapshot
+	if err := json.Unmarshal([]byte(legacy), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.IssueLifecycleAPIVersion != issuedomain.LifecycleAPICurrent || decoded.Validate() != nil {
+		t.Fatalf("version=%q validation=%v", decoded.IssueLifecycleAPIVersion, decoded.Validate())
+	}
+}
+
 func TestAttentionReportsOneBlockedIssueWhileAnotherWorkerIsActive(t *testing.T) {
 	snapshot := Snapshot{
 		Supervisor: Supervisor{State: "running"},
@@ -1034,6 +1054,81 @@ func TestAttentionReportsOneBlockedIssueWhileAnotherWorkerIsActive(t *testing.T)
 	}
 	if reason, ok := snapshot.Attention(true); !ok || reason != "blocked" {
 		t.Fatalf("until-idle reason=%q ok=%v", reason, ok)
+	}
+}
+
+func TestCanceledIssueIsTerminalWithoutStickyAttention(t *testing.T) {
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	snapshot := Snapshot{
+		Supervisor: Supervisor{State: SupervisorStatePolling},
+		Issues: map[string]*Issue{"93": {
+			Number: 93, Status: issuedomain.StatusCanceled,
+			Cancellation:      &Cancellation{Source: "github_not_planned", GitHubStateReason: "NOT_PLANNED", PreviousStatus: issuedomain.StatusBlocked, ExecutionReleaseResult: "not_present", CanceledAt: now},
+			GitHubStateReason: "NOT_PLANNED",
+		}},
+		PendingEffects: map[string]*EffectIntent{}, PendingRequests: map[string]*Request{},
+	}
+	if reason, ok := snapshot.Attention(false); ok {
+		t.Fatalf("reason=%q ok=%v", reason, ok)
+	}
+	if reason, ok := snapshot.Attention(true); !ok || reason != "idle" {
+		t.Fatalf("until-idle reason=%q ok=%v", reason, ok)
+	}
+}
+
+func TestNotPlannedCancellationReleasesMatchingRetainedExecution(t *testing.T) {
+	store := newStore(t)
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	_, identity, err := store.StartExecution(ExecutionStart{
+		IssueNumber: 93, Title: "Superseded", RunID: "run_93", StartedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.Update("issue_canceled", 93, identity.RunID, nil, func(snapshot *Snapshot) error {
+		item := snapshot.Issues["93"]
+		item.Status = issuedomain.StatusBlocked
+		item.GitHubStateReason = "NOT_PLANNED"
+		expected := *item
+		releaseResult, applyErr := ApplyNotPlannedCancellation(snapshot, 93, &expected, now.Add(time.Minute))
+		if applyErr != nil {
+			return applyErr
+		}
+		if releaseResult != "released" {
+			return fmt.Errorf("execution release result=%q", releaseResult)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ActiveExecution != nil || result.Issues["93"].Status != issuedomain.StatusCanceled ||
+		result.Issues["93"].Cancellation.ExecutionReleaseResult != "released" {
+		t.Fatalf("issue=%+v active=%+v", result.Issues["93"], result.ActiveExecution)
+	}
+	if _, _, err := store.StartExecution(ExecutionStart{
+		IssueNumber: 94, Title: "Next", RunID: "run_94", StartedAt: now.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("next Issue was not admitted after ownership release: %v", err)
+	}
+}
+
+func TestNotPlannedCancellationRejectsRetainedExecutionOwnerMismatch(t *testing.T) {
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	snapshot := Snapshot{
+		ActiveExecution: &ActiveExecution{IssueNumber: 93, RunID: "other", Generation: 4, StartedAt: now},
+		Issues: map[string]*Issue{"93": {
+			Number: 93, Status: issuedomain.StatusBlocked, RunID: "run_93", Generation: 4,
+			GitHubStateReason: "NOT_PLANNED",
+		}},
+		PendingEffects: map[string]*EffectIntent{}, PendingRequests: map[string]*Request{},
+	}
+	expected := *snapshot.Issues["93"]
+	if _, err := ApplyNotPlannedCancellation(&snapshot, 93, &expected, now); err == nil || !strings.Contains(err.Error(), "ownership is inconsistent") {
+		t.Fatalf("owner mismatch error=%v", err)
+	}
+	if snapshot.ActiveExecution == nil || snapshot.Issues["93"].Status != issuedomain.StatusBlocked {
+		t.Fatalf("mismatched ownership was changed: issue=%+v active=%+v", snapshot.Issues["93"], snapshot.ActiveExecution)
 	}
 }
 
@@ -1082,6 +1177,113 @@ func TestFaultSnapshotWriteCrashRecoversEveryTransactionPoint(t *testing.T) {
 			}
 			events, _, partial, err := store.readEventsUnlocked()
 			if err != nil || partial || len(events) != 2 || events[1].Type != "second" {
+				t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
+			}
+		})
+	}
+}
+
+func TestFaultNotPlannedCancellationRecoversOnceAtEveryTransactionPoint(t *testing.T) {
+	for _, crashPoint := range []string{"prepared", "event_appended", "snapshot_written"} {
+		t.Run(crashPoint, func(t *testing.T) {
+			store := newStore(t)
+			base, err := store.Update("blocked", 93, "run_93", nil, func(snapshot *Snapshot) error {
+				snapshot.Issues["93"] = &Issue{Number: 93, Status: issuedomain.StatusBlocked, RunID: "run_93", LastError: "superseded"}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := base
+			expected := *next.Issues["93"]
+			next.Issues["93"].GitHubStateReason = "NOT_PLANNED"
+			canceledAt := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+			if _, err := ApplyNotPlannedCancellation(&next, 93, &expected, canceledAt); err != nil {
+				t.Fatal(err)
+			}
+			next.StateRevision++
+			next.Supervisor.UpdatedAt = canceledAt
+			if err := next.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			event := Event{
+				Version: CurrentVersion, EventID: "evt_issue_canceled", Sequence: next.StateRevision, Timestamp: canceledAt,
+				RepoID: store.RepoID, IssueNumber: 93, RunID: "run_93", Type: "issue_canceled",
+			}
+			if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: next, Event: event}, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if crashPoint == "event_appended" || crashPoint == "snapshot_written" {
+				if err := store.appendEventUnlocked(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if crashPoint == "snapshot_written" {
+				if err := fsutil.WriteJSON(store.StatePath(), next, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			loaded, err := store.Load()
+			if err != nil || loaded.Issues["93"].Status != issuedomain.StatusCanceled {
+				t.Fatalf("loaded=%+v err=%v", loaded.Issues["93"], err)
+			}
+			if _, err := store.Load(); err != nil {
+				t.Fatal(err)
+			}
+			events, _, partial, err := store.readEventsUnlocked()
+			if err != nil || partial || len(events) != 2 || events[1].Type != "issue_canceled" {
+				t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
+			}
+		})
+	}
+}
+
+func TestFaultRetainedExecutionCancellationRecoversOnceAtEveryTransactionPoint(t *testing.T) {
+	for _, crashPoint := range []string{"prepared", "event_appended", "snapshot_written"} {
+		t.Run(crashPoint, func(t *testing.T) {
+			store := newStore(t)
+			canceledAt := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+			base, _, err := store.StartExecution(ExecutionStart{
+				IssueNumber: 93, Title: "Superseded", RunID: "run_93", StartedAt: canceledAt.Add(-time.Hour),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := base
+			item := next.Issues["93"]
+			item.Status = issuedomain.StatusBlocked
+			item.GitHubStateReason = "NOT_PLANNED"
+			expected := *item
+			releaseResult, err := ApplyNotPlannedCancellation(&next, 93, &expected, canceledAt)
+			if err != nil || releaseResult != "released" {
+				t.Fatalf("release result=%q err=%v", releaseResult, err)
+			}
+			next.StateRevision++
+			next.Supervisor.UpdatedAt = canceledAt
+			event := Event{
+				Version: CurrentVersion, EventID: "evt_issue_canceled_released", Sequence: next.StateRevision, Timestamp: canceledAt,
+				RepoID: store.RepoID, IssueNumber: 93, RunID: "run_93", Type: "issue_canceled",
+			}
+			if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: next, Event: event}, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if crashPoint == "event_appended" || crashPoint == "snapshot_written" {
+				if err := store.appendEventUnlocked(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if crashPoint == "snapshot_written" {
+				if err := fsutil.WriteJSON(store.StatePath(), next, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			loaded, err := store.Load()
+			if err != nil || loaded.ActiveExecution != nil || loaded.Issues["93"].Status != issuedomain.StatusCanceled ||
+				loaded.Issues["93"].Cancellation.ExecutionReleaseResult != "released" {
+				t.Fatalf("loaded=%+v active=%+v err=%v", loaded.Issues["93"], loaded.ActiveExecution, err)
+			}
+			events, _, partial, err := store.readEventsUnlocked()
+			if err != nil || partial || len(events) != 2 || events[1].Type != "issue_canceled" {
 				t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
 			}
 		})

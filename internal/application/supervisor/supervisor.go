@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -426,6 +427,16 @@ func (l *Loop) inspectIssue(ctx context.Context, current state.Issue) (gh.Remote
 	return l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
 }
 
+func (l *Loop) inspectReconciliationIssue(ctx context.Context, current state.Issue) (gh.RemoteState, error) {
+	if terminalReconciliationCandidate(current) && current.Branch != "" {
+		// Cancellation must observe the complete zero/one/multiple PR set for
+		// the saved branch. The webhook-optimized targeted read proves only one
+		// PR identity and therefore cannot authorize this terminal transition.
+		return l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+	}
+	return l.inspectIssue(ctx, current)
+}
+
 func pullRequestNumber(value string) int {
 	parts := strings.Split(strings.TrimRight(value, "/"), "/")
 	if len(parts) < 2 || parts[len(parts)-2] != "pull" {
@@ -650,16 +661,54 @@ func (l *Loop) ensurePendingExecution(current state.Issue) (state.Issue, error) 
 }
 
 func (l *Loop) reconcileTerminalPullRequest(ctx context.Context, scheduled state.Issue) error {
-	current, err := l.issueState(scheduled.Number)
+	snapshot, err := l.Store.Load()
 	if err != nil {
 		return failure.Wrap(failure.Supervisor, "refresh terminal Issue state", err)
 	}
-	if !terminalPullRequestCandidate(current) || current.RunID != scheduled.RunID {
+	item := snapshot.Issues[strconv.Itoa(scheduled.Number)]
+	if item == nil || !terminalReconciliationCandidate(*item) || item.RunID != scheduled.RunID {
 		return nil
 	}
+	current := *item
 	remote, err := l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "reconcile terminal Pull Request", err)
+	}
+	considered, canceled, err := l.reconcileNotPlannedCancellation(snapshot, current, remote, "periodic_reconciliation", nil)
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "persist not planned cancellation", err)
+	}
+	if canceled {
+		return nil
+	}
+	if considered {
+		currentState, observation := l.reconciliationInputs(snapshot, current, remote, worktree.Inspection{})
+		decision, _ := issuedomain.DecideNotPlannedCancellation(currentState, observation)
+		_, err = l.Store.Update("terminal_issue_reconciled", current.Number, current.RunID, map[string]any{
+			"status": current.Status, "reason": decision.Reason, "github_state_reason": remote.Issue.StateReason,
+		}, func(latest *state.Snapshot) error {
+			latestItem := latest.Issues[strconv.Itoa(current.Number)]
+			if latestItem == nil || !reflect.DeepEqual(latestItem, &current) {
+				return nil
+			}
+			latestItem.GitHubStateReason = remote.Issue.StateReason
+			latestItem.UpdatedAt = l.now()
+			return nil
+		})
+		return failure.Wrap(failure.Supervisor, "persist refused not planned cancellation", err)
+	}
+	if !terminalPullRequestCandidate(current) {
+		_, err = l.Store.Update("terminal_issue_reconciled", current.Number, current.RunID, map[string]any{
+			"status": current.Status, "reason": "terminal Issue remains sticky", "github_state_reason": remote.Issue.StateReason,
+		}, func(latest *state.Snapshot) error {
+			latestItem := latest.Issues[strconv.Itoa(current.Number)]
+			if latestItem != nil && reflect.DeepEqual(latestItem, &current) {
+				latestItem.GitHubStateReason = remote.Issue.StateReason
+				latestItem.UpdatedAt = l.now()
+			}
+			return nil
+		})
+		return failure.Wrap(failure.Supervisor, "persist terminal Issue reconciliation", err)
 	}
 	decision, ok := l.decideTerminalPullRequestReconciliation(current, remote)
 	if !ok {

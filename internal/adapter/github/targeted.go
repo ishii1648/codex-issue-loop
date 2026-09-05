@@ -16,13 +16,14 @@ type TargetedRESTClient interface {
 }
 
 type restIssue struct {
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	HTMLURL   string    `json:"html_url"`
-	CreatedAt time.Time `json:"created_at"`
-	State     string    `json:"state"`
-	Labels    []struct {
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	HTMLURL     string    `json:"html_url"`
+	CreatedAt   time.Time `json:"created_at"`
+	State       string    `json:"state"`
+	StateReason string    `json:"state_reason"`
+	Labels      []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 	Assignees []struct {
@@ -60,7 +61,7 @@ func normalizeRESTIssue(item restIssue) Issue {
 	}
 	return NormalizeIssue(Issue{
 		Number: item.Number, Title: item.Title, Body: item.Body, URL: item.HTMLURL,
-		CreatedAt: item.CreatedAt, State: item.State, Labels: labels,
+		CreatedAt: item.CreatedAt, State: item.State, StateReason: item.StateReason, Labels: labels,
 		Assignees: assignees, Milestone: milestone, AuthorLogin: item.User.Login, AuthorType: item.User.Type,
 	})
 }

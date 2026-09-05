@@ -238,11 +238,13 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 - `resume`は保存session/workspaceからworker境界を継続する。
 - `retry-stage`は保存済みpublish/checks/conflict stageへ戻る。completed resultがある場合はSHA-256を照合し、workerを再実行しない。
 - `adopt-pr`は保存branch/head/baseと一致するsame-repositoryの一意なmerged PRだけを採用する。commit、push、PR、mergeは作成しない。
-- `cancel`はworkerを起動せずsuspensionをterminalに解決する。
+- `cancel`はworkerを起動せずIssueを`canceled`へ収束させる。
 
 terminal Issueはroot `active_execution`を持たず、base SHA、workspace、session、result digestはIssue-local `continuation`へ保持する。成功したresolveだけがgenerationを進めて単一実行枠を取得する。ambiguousなIssueはそのIssueだけをquarantineし、`cancel`以外を許可しないため、後続queueのcapacityを消費しない。
 
 GitHub同期またはtransaction途中で停止した場合も同じ`issue plan`から再確認し、同じactionを再実行して冪等に収束させる。state/event/label/worktreeを手編集せず、別Issueのexecutionを変更せず、欠けたauthorityをevent件数・error文言・現在のbaseから合成しない。旧scenario別recordは全loop停止中のtyped migrationだけがv4 raw入力からgeneric continuationへ変換し、v5に残る旧状態はfail closedとする。
+
+GitHub上でIssueを`not planned`としてcloseした場合は、startup/periodic/webhook/safety sweepが`status --json`の対象Issueを`canceled`へ収束させる。`github_state_reason: NOT_PLANNED`、`cancellation.previous_status`、`execution_release_result`、PR identityと`issue_canceled` eventを確認する。対象Issueのactive PID/PGIDまたはactive process、未回答request、root `active_execution`のIssue/run/generation不一致、複数/不一致PR、空または未知のstate reasonがある場合は自動cancelされない。一致するretained `active_execution`だけはprocess不在の再検証後に同じtransactionで解放され、別Issueの`active_execution`は保持される。workerへのsignal、worktree削除、state/label手編集で通過させてはならない。
 
 ### Git transportまたはcommit署名で停止する
 

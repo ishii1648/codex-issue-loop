@@ -196,8 +196,9 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 		Observations: map[string]any{
 			"worker_live": workerLive, "workspace_valid": launchErr == nil && launch.Valid,
 			"workspace_error": errorText(launchErr), "github_observed": remoteErr == nil,
-			"git_valid": inspectErr == nil && inspection.Valid,
-			"git_error": errorText(inspectErr), "git_head": inspection.Head, "git_remote_head": inspection.RemoteHead,
+			"github_state_reason": remote.Issue.StateReason,
+			"git_valid":           inspectErr == nil && inspection.Valid,
+			"git_error":           errorText(inspectErr), "git_head": inspection.Head, "git_remote_head": inspection.RemoteHead,
 			"git_dirty": inspection.Dirty, "git_unpushed": inspection.UnpushedCommits,
 			"worktree_sha256": worktreeSHA256, "worktree_digest_error": errorText(worktreeDigestErr),
 			"checkpoint_worktree_sha256": checkpointWorktreeSHA256(item),
@@ -319,6 +320,46 @@ func checkpointWorktreeSHA256(item *state.Issue) string {
 	return item.Continuation.WorktreeSHA256
 }
 
+func issueResolutionAudit(planned issuePlanningContext, action issuedomain.ResolutionAction, issueNumber int, now time.Time,
+	mergedPR gh.PullRequest, hasMergedPR bool,
+) (string, map[string]any) {
+	payload := map[string]any{
+		"action": action, "checkpoint_id": planned.issue.Suspension.CheckpointID,
+		"planned_state_revision": planned.snapshot.StateRevision,
+		"worker_live":            planned.workerLive,
+		"workspace_valid":        planned.launchErr == nil && planned.launch.Valid,
+		"git_valid":              planned.inspectErr == nil && planned.inspection.Valid,
+		"git_head":               planned.inspection.Head, "git_remote_head": planned.inspection.RemoteHead,
+		"git_dirty": planned.inspection.Dirty, "git_unpushed": planned.inspection.UnpushedCommits,
+		"worktree_sha256":          planned.worktreeSHA256,
+		"checkpoint_base_ancestor": planned.baseOK,
+		"github_observed":          planned.remoteErr == nil, "github_issue_state": planned.remote.Issue.State,
+		"github_state_reason": planned.remote.Issue.StateReason,
+		"open_pull_requests":  countOpenPullRequests(planned.remote.PullRequests),
+		"pending_request_ids": append([]string(nil), planned.pending...),
+	}
+	if action == issuedomain.ResolutionRetryStage && planned.issue.Continuation != nil && planned.issue.Continuation.Stage == issuedomain.ContinuationStagePublish {
+		payload["publication_result_sha256"] = planned.resultSHA256
+	}
+	if action == issuedomain.ResolutionAdoptPR && hasMergedPR {
+		payload["adopted_pull_request"] = map[string]any{
+			"number": mergedPR.Number, "url": mergedPR.URL, "head_sha": mergedPR.HeadSHA,
+			"head_ref": mergedPR.HeadRefName, "base_ref": mergedPR.BaseRefName,
+			"head_repository": mergedPR.HeadRepository, "merged_at": mergedPR.MergedAt,
+		}
+	}
+	if action != issuedomain.ResolutionCancel {
+		return "issue_suspension_resolved", payload
+	}
+	payload["issue_number"] = issueNumber
+	payload["run_id"] = planned.issue.RunID
+	payload["previous_status"] = planned.issue.Status
+	payload["execution_release_result"] = "not_present"
+	payload["canceled_at"] = now
+	payload["source"] = "operator_resolution"
+	return "issue_canceled", payload
+}
+
 func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("issue resolve", flag.ContinueOnError)
 	repo := fs.String("repo", "", "repository path")
@@ -392,31 +433,8 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	}
 	now := time.Now().UTC()
 	mergedPR, hasMergedPR := mergedPullRequestForIssue(planned.issue, planned.remote.PullRequests)
-	payload := map[string]any{
-		"action": action, "checkpoint_id": planned.issue.Suspension.CheckpointID,
-		"planned_state_revision": planned.snapshot.StateRevision,
-		"worker_live":            planned.workerLive,
-		"workspace_valid":        planned.launchErr == nil && planned.launch.Valid,
-		"git_valid":              planned.inspectErr == nil && planned.inspection.Valid,
-		"git_head":               planned.inspection.Head, "git_remote_head": planned.inspection.RemoteHead,
-		"git_dirty": planned.inspection.Dirty, "git_unpushed": planned.inspection.UnpushedCommits,
-		"worktree_sha256":          planned.worktreeSHA256,
-		"checkpoint_base_ancestor": planned.baseOK,
-		"github_observed":          planned.remoteErr == nil, "github_issue_state": planned.remote.Issue.State,
-		"open_pull_requests":  countOpenPullRequests(planned.remote.PullRequests),
-		"pending_request_ids": append([]string(nil), planned.pending...),
-	}
-	if action == issuedomain.ResolutionRetryStage && planned.issue.Continuation != nil && planned.issue.Continuation.Stage == issuedomain.ContinuationStagePublish {
-		payload["publication_result_sha256"] = planned.resultSHA256
-	}
-	if action == issuedomain.ResolutionAdoptPR && hasMergedPR {
-		payload["adopted_pull_request"] = map[string]any{
-			"number": mergedPR.Number, "url": mergedPR.URL, "head_sha": mergedPR.HeadSHA,
-			"head_ref": mergedPR.HeadRefName, "base_ref": mergedPR.BaseRefName,
-			"head_repository": mergedPR.HeadRepository, "merged_at": mergedPR.MergedAt,
-		}
-	}
-	result, err := planned.store.Update("issue_suspension_resolved", *number, planned.issue.RunID,
+	eventType, payload := issueResolutionAudit(planned, action, *number, now, mergedPR, hasMergedPR)
+	result, err := planned.store.Update(eventType, *number, planned.issue.RunID,
 		payload, func(snapshot *state.Snapshot) error {
 			if snapshot.StateRevision != planned.snapshot.StateRevision {
 				return fmt.Errorf("Issue #%d canonical state changed after planning", *number)
@@ -479,6 +497,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 					return err
 				}
 			} else {
+				previous := item.Status
 				transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.ContinuationStageNone)
 				if transitionErr != nil {
 					return transitionErr
@@ -487,6 +506,11 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 					return err
 				}
 				state.CancelPendingRequests(snapshot, item.Number)
+				item.Cancellation = &state.Cancellation{
+					Source: "operator_resolution", GitHubStateReason: planned.remote.Issue.StateReason,
+					PreviousStatus: previous, ExecutionReleaseResult: "not_present", CanceledAt: now,
+				}
+				item.GitHubStateReason = planned.remote.Issue.StateReason
 			}
 			if item.Suspension != nil {
 				item.Suspension.Status = issuedomain.SuspensionResolved

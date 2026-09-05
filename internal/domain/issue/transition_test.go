@@ -107,7 +107,7 @@ func TestResolveSuspensionUsesGenericActionsAndSavedStage(t *testing.T) {
 		{action: ResolutionRetryStage, stage: ContinuationStageResume, want: StatusResumePending},
 		{action: ResolutionRetryStage, stage: ContinuationStageConflict, want: StatusResolvingConflict},
 		{action: ResolutionAdoptPR, want: StatusCompleted},
-		{action: ResolutionCancel, want: StatusBlocked},
+		{action: ResolutionCancel, want: StatusCanceled},
 	}
 	for _, test := range tests {
 		transition, err := ResolveSuspension(StatusBlocked, test.action, test.stage)
@@ -208,6 +208,7 @@ func TestReconcileObservationTransitions(t *testing.T) {
 		{from: StatusCompleted, to: StatusAwaitingChecks},
 		{from: StatusFailed, to: StatusCompleted},
 		{from: StatusNeedsInput, to: StatusBlocked},
+		{from: StatusBlocked, to: StatusCanceled},
 		{from: StatusRetryWait, to: StatusRetryWait},
 	}
 	for _, test := range tests {
@@ -233,6 +234,7 @@ func TestStatusOperationalPredicates(t *testing.T) {
 		{status: StatusRetryWait, webhookRoutable: true},
 		{status: StatusNeedsInput, webhookTerminal: true, webhookRoutable: true},
 		{status: StatusCompleted, webhookTerminal: true},
+		{status: StatusCanceled, webhookTerminal: true},
 	}
 	for _, test := range tests {
 		if got := test.status.RequiresActiveExecution(); got != test.activeExecution {
@@ -264,6 +266,7 @@ func TestStatusSchedulingPredicates(t *testing.T) {
 		{status: StatusAwaitingChecks, pending: true, retainsLogs: true, preventsIdle: true},
 		{status: StatusAwaitingMerge, pending: true, retainsLogs: true, preventsIdle: true},
 		{status: StatusCompleted, ineligible: true},
+		{status: StatusCanceled, ineligible: true},
 	}
 	for _, test := range tests {
 		if got := test.status.PendingDispatch(); got != test.pending {

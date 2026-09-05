@@ -7,23 +7,33 @@ import (
 )
 
 type ReconciliationState struct {
-	Number            int
-	Status            Status
-	LastError         string
-	Branch            string
-	PullRequest       string
-	Effect            EffectKind
-	RetryAt           *time.Time
-	WorkerPID         int
-	WorkerPGID        int
-	PullRequestMerged bool
-	WorktreeSaved     bool
+	Number                     int
+	RunID                      string
+	Generation                 uint64
+	Status                     Status
+	LastError                  string
+	Branch                     string
+	PullRequest                string
+	PullRequestNumber          int
+	HeadSHA                    string
+	Effect                     EffectKind
+	RetryAt                    *time.Time
+	WorkerPID                  int
+	WorkerPGID                 int
+	PullRequestMerged          bool
+	WorktreeSaved              bool
+	PendingRequest             bool
+	ActiveExecutionIssueNumber int
+	ActiveExecutionRunID       string
+	ActiveExecutionGeneration  uint64
 }
 
 type ReconciliationPullRequest struct {
+	Number      int
 	URL         string
 	State       string
 	HeadRefName string
+	HeadSHA     string
 	Draft       bool
 	Merged      bool
 }
@@ -39,6 +49,7 @@ type ReconciliationWorkspace struct {
 type ReconciliationObservation struct {
 	Now                  time.Time
 	IssueOpen            bool
+	IssueClosed          bool
 	Ready                bool
 	Running              bool
 	NeedsInput           bool
@@ -53,6 +64,7 @@ type ReconciliationObservation struct {
 	PullRequests         []ReconciliationPullRequest
 	Workspace            ReconciliationWorkspace
 	WorkerAlive          bool
+	IssueStateReason     string
 }
 
 type ReconciliationDecision struct {
@@ -92,6 +104,69 @@ func BlockReconciliation(decision ReconciliationDecision, reason string) Reconci
 func TerminalPullRequestCandidate(current ReconciliationState) bool {
 	return (current.Status == StatusBlocked || current.Status == StatusFailed) && current.PullRequest != "" &&
 		!current.PullRequestMerged && current.Effect == EffectNone
+}
+
+func TerminalReconciliationCandidate(current ReconciliationState) bool {
+	return current.Status == StatusBlocked || current.Status == StatusFailed
+}
+
+func cancellationPullRequestAligned(current ReconciliationState, observed ReconciliationObservation) bool {
+	if current.PullRequest == "" {
+		return current.PullRequestNumber == 0 && len(observed.PullRequests) == 0
+	}
+	if current.Branch == "" || len(observed.PullRequests) != 1 {
+		return false
+	}
+	pr := observed.PullRequests[0]
+	if pr.URL != current.PullRequest || pr.HeadRefName != current.Branch {
+		return false
+	}
+	if current.PullRequestNumber != 0 && pr.Number != current.PullRequestNumber {
+		return false
+	}
+	if current.PullRequestMerged != pr.Merged {
+		return false
+	}
+	return current.HeadSHA == "" || pr.HeadSHA == current.HeadSHA
+}
+
+// DecideNotPlannedCancellation accepts only an authoritative GitHub
+// NOT_PLANNED close at an inactive, unambiguous terminal boundary.
+func DecideNotPlannedCancellation(current ReconciliationState, observed ReconciliationObservation) (ReconciliationDecision, bool) {
+	decision := initialReconciliationDecision(current)
+	if !TerminalReconciliationCandidate(current) || !observed.IssueClosed || !strings.EqualFold(observed.IssueStateReason, "NOT_PLANNED") {
+		return decision, false
+	}
+	decision.Reason = "GitHub Issue was closed as not planned"
+	if current.WorkerPID != 0 || current.WorkerPGID != 0 || observed.WorkerAlive {
+		decision.Reason = "not planned cancellation refused because worker process identity is present"
+		return decision, true
+	}
+	if current.PendingRequest {
+		decision.Reason = "not planned cancellation refused because an operator request is pending"
+		return decision, true
+	}
+	if current.ActiveExecutionIssueNumber > 0 && current.ActiveExecutionIssueNumber == current.Number {
+		if current.ActiveExecutionRunID != current.RunID || current.ActiveExecutionGeneration != current.Generation {
+			decision.Reason = "not planned cancellation refused because execution authority ownership is inconsistent"
+			return decision, true
+		}
+	}
+	if current.Effect != EffectNone && current.Effect != EffectMarkBlocked && current.Effect != EffectMarkFailed {
+		decision.Reason = "not planned cancellation refused because an incompatible GitHub effect is pending"
+		return decision, true
+	}
+	if !cancellationPullRequestAligned(current, observed) {
+		decision.Reason = "not planned cancellation refused because Pull Request identity is ambiguous"
+		return decision, true
+	}
+	decision.Status = StatusCanceled
+	decision.LastError = ""
+	decision.Effect = EffectNone
+	decision.RetryAt = nil
+	decision.WorkerPID = 0
+	decision.WorkerPGID = 0
+	return decision, true
 }
 
 func DecideTerminalPullRequestReconciliation(current ReconciliationState, observed ReconciliationObservation) (ReconciliationDecision, bool) {
@@ -140,6 +215,9 @@ func DecideTerminalPullRequestReconciliation(current ReconciliationState, observ
 // worktree, and process observations into this DTO and commit the result.
 func DecideReconciliation(current ReconciliationState, observed ReconciliationObservation) ReconciliationDecision {
 	decision := initialReconciliationDecision(current)
+	if canceled, considered := DecideNotPlannedCancellation(current, observed); considered {
+		return canceled
+	}
 
 	// Terminal authority is intentionally checked before labels. An exact
 	// observed merge may complete a sticky failed/blocked record.

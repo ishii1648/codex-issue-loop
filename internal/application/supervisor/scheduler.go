@@ -752,7 +752,7 @@ func (s *scheduler) dispatchTerminalPullRequestReconciliation(ctx context.Contex
 	now := s.loop.now()
 	candidates := make([]state.Issue, 0)
 	for _, issue := range snapshot.Issues {
-		if issue == nil || !terminalPullRequestCandidate(*issue) {
+		if issue == nil || !terminalReconciliationCandidate(*issue) {
 			continue
 		}
 		if _, active := s.active[issue.Number]; active {
