@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -200,6 +201,88 @@ func ValidateNeedsInputContinuation(issue *Issue, request *Request) error {
 		request.ReleasedExecution == nil || request.ReleasedExecution.RunID != checkpoint.RunID ||
 		request.ReleasedExecution.Generation != checkpoint.Generation {
 		return fmt.Errorf("Issue #%d needs-input continuation identity is inconsistent", issue.Number)
+	}
+	return nil
+}
+
+// RecoverUnstartedConflictLaunch releases only a conflict launch whose complete
+// persisted identity chain proves that no worker process identity was recorded.
+func (s Store) RecoverUnstartedConflictLaunch(now time.Time) (Snapshot, bool, error) {
+	if now.IsZero() {
+		return Snapshot{}, false, fmt.Errorf("unstarted conflict launch recovery requires an observation time")
+	}
+	snapshot, err := s.Load()
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	active := snapshot.ActiveExecution
+	if active == nil {
+		return snapshot, false, nil
+	}
+	issue := snapshot.Issues[strconv.Itoa(active.IssueNumber)]
+	if issue == nil || issue.Status != issuedomain.StatusLaunching || issue.LaunchSource != issuedomain.StatusResolvingConflict || issue.WorkerPID != 0 || issue.WorkerPGID != 0 {
+		return snapshot, false, nil
+	}
+	expected := *active
+	if err := validateUnstartedConflictLaunch(&snapshot, issue); err != nil {
+		return snapshot, false, err
+	}
+	payload := map[string]any{
+		"launch_source": issue.LaunchSource, "run_id": issue.RunID, "generation": issue.Generation,
+		"checkpoint_id": issue.Continuation.ID, "observed_at": now.UTC(),
+	}
+	updated, err := s.Update("unstarted_conflict_launch_recovered", issue.Number, issue.RunID, payload, func(latest *Snapshot) error {
+		current := latest.Issues[strconv.Itoa(issue.Number)]
+		if latest.ActiveExecution == nil || *latest.ActiveExecution != expected || current == nil {
+			return fmt.Errorf("Issue #%d conflict launch changed before recovery", issue.Number)
+		}
+		if err := validateUnstartedConflictLaunch(latest, current); err != nil {
+			return err
+		}
+		transition, err := issuedomain.AbortWorkerLaunch(current.Status, current.LaunchSource)
+		if err != nil {
+			return err
+		}
+		identity := ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
+		if err := ReleaseExecution(latest, current.Number, identity); err != nil {
+			return err
+		}
+		if err := ApplyIssueTransition(current, transition); err != nil {
+			return err
+		}
+		current.UpdatedAt = now.UTC()
+		return nil
+	})
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	return updated, true, nil
+}
+
+func validateUnstartedConflictLaunch(snapshot *Snapshot, issue *Issue) error {
+	if snapshot == nil || issue == nil || snapshot.ActiveExecution == nil {
+		return fmt.Errorf("unstarted conflict launch evidence is incomplete")
+	}
+	active := snapshot.ActiveExecution
+	if issue.Status != issuedomain.StatusLaunching || issue.LaunchSource != issuedomain.StatusResolvingConflict ||
+		issue.WorkerPID != 0 || issue.WorkerPGID != 0 || active.IssueNumber != issue.Number ||
+		active.RunID != issue.RunID || active.Generation != issue.Generation || active.Generation == 0 || active.StartedAt.IsZero() {
+		return fmt.Errorf("Issue #%d unstarted conflict launch execution identity is inconsistent", issue.Number)
+	}
+	checkpoint := issue.Continuation
+	if checkpoint == nil || checkpoint.ID == "" || checkpoint.RunID != issue.RunID || checkpoint.Generation == 0 || checkpoint.Generation+1 != issue.Generation ||
+		active.StartedAt.Before(checkpoint.CreatedAt) ||
+		checkpoint.BaseSHA != active.BaseSHA || checkpoint.HeadSHA != issue.HeadSHA || checkpoint.PullRequestURL != issue.PullRequestURL ||
+		checkpoint.PullRequestNumber != issue.PullRequestNumber || !reflect.DeepEqual(checkpoint.Workspace, issue.Workspace) {
+		return fmt.Errorf("Issue #%d unstarted conflict launch continuation identity is inconsistent", issue.Number)
+	}
+	if checkpoint.Stage != issuedomain.ContinuationStageChecks && checkpoint.Stage != issuedomain.ContinuationStageConflict {
+		return fmt.Errorf("Issue #%d unstarted conflict launch continuation stage is inconsistent", issue.Number)
+	}
+	recovery := issue.ConflictRecovery
+	if recovery == nil || recovery.PullRequestURL == "" || recovery.PullRequestURL != issue.PullRequestURL ||
+		recovery.PreviousBaseSHA != active.BaseSHA || recovery.TargetBaseSHA == "" || recovery.OriginalHeadSHA != issue.HeadSHA || len(recovery.ConflictFiles) == 0 {
+		return fmt.Errorf("Issue #%d unstarted conflict launch recovery context is inconsistent", issue.Number)
 	}
 	return nil
 }

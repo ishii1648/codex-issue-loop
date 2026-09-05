@@ -510,11 +510,7 @@ func conflictVerificationGreen(values []state.ConflictVerification) bool {
 		return false
 	}
 	for _, value := range values {
-		result := strings.ToLower(strings.TrimSpace(value.Result))
-		green := strings.TrimSpace(value.Command) != "" && (result == "ok" || strings.HasPrefix(result, "ok ") ||
-			strings.HasPrefix(result, "pass") || strings.HasPrefix(result, "success") ||
-			strings.HasPrefix(result, "green") || strings.Contains(result, "exit 0"))
-		if !green {
+		if !(worker.Test{Command: value.Command, Result: value.Result}).Passed() {
 			return false
 		}
 	}

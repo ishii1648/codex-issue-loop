@@ -931,6 +931,82 @@ esac
 	}
 }
 
+func TestAssignmentDrainRecoversProvenUnstartedConflictLaunch(t *testing.T) {
+	l, _, entries, _ := assignmentFixture(t)
+	entry := entries[0]
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	if err := store.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 5, 17, 20, 20, 136638000, time.UTC)
+	if _, _, err := store.StartExecution(state.ExecutionStart{
+		IssueNumber: 277, Title: "queue-level monitor", RunID: "conflict_174e861a0a076558", BaseSHA: "base", StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &state.WorkerWorkspace{
+		Path: "/state/worktrees/issue-277", Branch: "codex/issue-277", RepoID: entry.RepoID,
+		Repository: "owner/a", GitCommonDir: entry.RepoPath + "/.git", MainCheckout: entry.RepoPath, CapturedAt: now,
+	}
+	if _, err := store.Update("fixture_unstarted_conflict_launch", 277, "conflict_174e861a0a076558", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["277"]
+		item.Status, item.LaunchSource, item.Generation = issuedomain.StatusLaunching, issuedomain.StatusResolvingConflict, 15
+		item.Branch, item.Worktree, item.Workspace = workspace.Branch, workspace.Path, workspace
+		item.PullRequestURL, item.PullRequestNumber, item.HeadSHA = "https://example.test/pull/281", 281, "head"
+		item.Continuation = &state.ContinuationCheckpoint{
+			ID: "checkpoint_b5676a437bbfb3dc", CreatedAt: now, RunID: item.RunID, Generation: 14,
+			BaseSHA: "base", Workspace: workspace, HeadSHA: item.HeadSHA, PullRequestURL: item.PullRequestURL,
+			PullRequestNumber: item.PullRequestNumber, Stage: issuedomain.ContinuationStageChecks,
+		}
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: item.PullRequestURL, PreviousBaseSHA: "base", TargetBaseSHA: "target",
+			OriginalHeadSHA: item.HeadSHA, ConflictFiles: []string{"monitor/internal/model/replay.go"},
+		}
+		snapshot.ActiveExecution.Generation = item.Generation
+		snapshot.Supervisor.State = state.SupervisorStatePolling
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sleepCalls := 0
+	controller := AssignmentController{
+		Layout: l, Now: func() time.Time { return now.Add(time.Minute) },
+		Sleep: func(context.Context, time.Duration) error {
+			sleepCalls++
+			before, err := store.Load()
+			if err != nil {
+				return err
+			}
+			_, err = store.Update("fixture_drain_progress", 0, "", nil, func(snapshot *state.Snapshot) error {
+				if sleepCalls == 1 {
+					if before.ActiveExecution == nil || before.Issues["277"].Status != issuedomain.StatusLaunching {
+						t.Fatal("assignment drain recovered before the supervisor entered drain")
+					}
+					snapshot.Supervisor.State = state.SupervisorStateDraining
+					snapshot.Supervisor.StartedAt = now.Add(10 * time.Second)
+				} else {
+					if before.ActiveExecution != nil || before.Issues["277"].Status != issuedomain.StatusResolvingConflict {
+						t.Fatal("assignment drain did not recover the prior-supervisor launch")
+					}
+					snapshot.Supervisor.State = state.SupervisorStateMaintenance
+				}
+				return nil
+			})
+			return err
+		},
+	}
+	if err := controller.waitForDrain(context.Background(), DefaultConfig("owner/release"), entry); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sleepCalls != 2 || snapshot.ActiveExecution != nil || snapshot.Issues["277"].Status != issuedomain.StatusResolvingConflict {
+		t.Fatalf("active=%+v issue=%+v", snapshot.ActiveExecution, snapshot.Issues["277"])
+	}
+}
+
 func TestLegacyRuntimeSwitchUsesTargetStateLockWithoutGlobalFence(t *testing.T) {
 	l, configPath, entries, legacyBinary := assignmentFixture(t)
 	runner := &legacyAssignmentRunner{legacyPath: legacyBinary}

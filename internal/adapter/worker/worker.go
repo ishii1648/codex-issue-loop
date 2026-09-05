@@ -39,6 +39,10 @@ type Test struct {
 	Result  string `json:"result"`
 }
 
+func (t Test) Passed() bool {
+	return strings.TrimSpace(t.Command) != "" && t.Result == "passed"
+}
+
 type GitResult struct {
 	Branch         string `json:"branch"`
 	Commit         string `json:"commit"`
@@ -437,6 +441,14 @@ func (r Result) Validate() error {
 	if r.Tests == nil {
 		return fmt.Errorf("worker result tests must be an array")
 	}
+	for _, test := range r.Tests {
+		if strings.TrimSpace(test.Command) == "" {
+			return fmt.Errorf("worker result test command must not be empty")
+		}
+		if test.Result != "passed" && test.Result != "failed" {
+			return fmt.Errorf("worker result test outcome must be passed or failed")
+		}
+	}
 	switch r.Status {
 	case "completed":
 	case "needs_input":
@@ -601,6 +613,7 @@ Follow AGENTS.md and repository conventions. Work only inside the provided workt
 Ask for user input only for product behavior that materially changes external behavior, destructive or public operations, billing, credentials, permission expansion, irreconcilable acceptance criteria, or facts that cannot be established safely from the repository. Make reasonable assumptions for naming, local implementation details, reversible internals, formatting, and tests.
 
 Completion policy: %s
+For every entry in tests, use exactly "passed" or "failed" as result. Do not translate or elaborate these result values.
 Return only the schema-conforming final result. Never print credentials or secrets in the result, logs, commits, comments, or pull request.
 
 Additional continuation context:
@@ -666,7 +679,7 @@ func BuildConflictPrompt(current state.Issue) string {
 	}
 	return `Resolve the already-prepared merge conflicts in the existing Pull Request worktree.
 
-The supervisor has fetched and merged an immutable base SHA. Preserve the current base-side design and tests while satisfying the Issue acceptance criteria and the Pull Request's original intent. Inspect AGENTS.md and repository guidance, resolve every unmerged entry and conflict marker, and run all required format, lint, test, and build commands. Report each verification command and result. Do not return completed unless the required verification is green.
+The supervisor has fetched and merged an immutable base SHA. Preserve the current base-side design and tests while satisfying the Issue acceptance criteria and the Pull Request's original intent. Inspect AGENTS.md and repository guidance, resolve every unmerged entry and conflict marker, and run all required format, lint, test, and build commands. Report each verification command with result exactly "passed" or "failed". Do not translate or elaborate result values. Do not return completed unless every required verification result is "passed".
 
 Do not run git add, git commit, git push, force push, branch creation, Pull Request creation, or agent-loop. Leave the resolved files unstaged for the supervisor. Do not modify paths outside allowed_paths. If a material requirements choice is unavoidable, return needs_input. Use blocked only for a genuinely non-recoverable condition.
 

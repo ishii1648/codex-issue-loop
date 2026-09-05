@@ -117,6 +117,10 @@ func (l *Loop) Run(ctx context.Context) error {
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == state.RecoveryStateBlocked {
 		return BlockedError{Err: fmt.Errorf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)}
 	}
+	snapshot, _, err = l.Store.RecoverUnstartedConflictLaunch(l.now())
+	if err != nil {
+		return BlockedError{Err: fmt.Errorf("recover unstarted conflict launch: %w", err)}
+	}
 	if !l.maintenanceRequested() {
 		if err := l.reconcileStartupWithRateLimit(ctx, snapshot); err != nil {
 			return err

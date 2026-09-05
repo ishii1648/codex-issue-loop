@@ -757,6 +757,9 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 }
 
 func reconcileStoppedAssignmentState(store state.Store, now time.Time) error {
+	if _, _, err := store.RecoverUnstartedConflictLaunch(now); err != nil {
+		return err
+	}
 	_, err := store.Update("assignment_stopped_state_reconciled", 0, "", map[string]string{"reason": "retained stopped assignment retry"}, func(snapshot *state.Snapshot) error {
 		if snapshotHasWorker(*snapshot) {
 			return errors.New("stopped assignment state retains a worker process identity")
@@ -764,7 +767,7 @@ func reconcileStoppedAssignmentState(store state.Store, now time.Time) error {
 		if active := snapshot.ActiveExecution; active != nil {
 			item := snapshot.Issues[fmt.Sprint(active.IssueNumber)]
 			if item == nil || item.Status != issuedomain.StatusLaunching || item.WorkerPID != 0 || item.WorkerPGID != 0 ||
-				item.RunID != active.RunID || item.Generation != active.Generation {
+				item.RunID != active.RunID || item.Generation != active.Generation || item.LaunchSource == issuedomain.StatusResolvingConflict {
 				return errors.New("stopped assignment active execution is not an unstarted worker launch")
 			}
 			transition, transitionErr := issuedomain.AbortWorkerLaunch(item.Status, item.LaunchSource)
@@ -825,13 +828,20 @@ func (c AssignmentController) rollbackSwitch(ctx context.Context, cfg Config, en
 
 func (c AssignmentController) waitForDrain(ctx context.Context, cfg Config, entry registry.Entry) error {
 	deadline := c.now().Add(cfg.DrainDuration())
+	store := state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
 	for {
-		snapshot, err := (state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}).Load()
-		if err == nil {
-			ready := drain.Ready(snapshot)
-			if ready {
-				return nil
+		snapshot, err := store.Load()
+		if err != nil {
+			return err
+		}
+		if drain.RecoverableUnstartedConflictLaunch(snapshot) {
+			snapshot, _, err = store.RecoverUnstartedConflictLaunch(c.now())
+			if err != nil {
+				return fmt.Errorf("recover unstarted conflict launch while draining: %w", err)
 			}
+		}
+		if drain.Ready(snapshot) {
+			return nil
 		}
 		if !c.now().Before(deadline) {
 			return errors.New("repository drain deadline reached without signaling or killing workers")
