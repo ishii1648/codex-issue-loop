@@ -79,7 +79,6 @@ func TestRecoverUnstartedConflictLaunchRejectsIncompleteEvidence(t *testing.T) {
 	}{
 		{name: "continuation run mismatch", mutate: func(snapshot *Snapshot) { snapshot.Issues["277"].Continuation.RunID = "conflict_stale" }},
 		{name: "continuation generation mismatch", mutate: func(snapshot *Snapshot) { snapshot.Issues["277"].Continuation.Generation = 15 }},
-		{name: "continuation generation gap", mutate: func(snapshot *Snapshot) { snapshot.Issues["277"].Continuation.Generation = 13 }},
 		{name: "missing checkpoint", mutate: func(snapshot *Snapshot) { snapshot.Issues["277"].Continuation = nil }},
 		{name: "workspace mismatch", mutate: func(snapshot *Snapshot) { snapshot.Issues["277"].Continuation.Workspace.Branch = "codex/stale" }},
 		{name: "conflict base mismatch", mutate: func(snapshot *Snapshot) { snapshot.Issues["277"].ConflictRecovery.PreviousBaseSHA = "stale" }},
@@ -101,6 +100,22 @@ func TestRecoverUnstartedConflictLaunchRejectsIncompleteEvidence(t *testing.T) {
 				t.Fatalf("mismatched evidence changed ownership: active=%+v issue=%+v err=%v", unchanged.ActiveExecution, unchanged.Issues["277"], loadErr)
 			}
 		})
+	}
+}
+
+func TestRecoverUnstartedConflictLaunchAcceptsRepeatedReservationGeneration(t *testing.T) {
+	store, now := productionUnstartedConflictLaunchFixture(t)
+	if _, err := store.Update("fixture_repeated_reservation", 277, "conflict_174e861a0a076558", nil, func(snapshot *Snapshot) error {
+		snapshot.Issues["277"].Generation = 16
+		snapshot.ActiveExecution.Generation = 16
+		snapshot.ActiveExecution.StartedAt = now.Add(time.Minute)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, recovered, err := store.RecoverUnstartedConflictLaunch(now.Add(2 * time.Minute))
+	if err != nil || !recovered || snapshot.ActiveExecution != nil || snapshot.Issues["277"].Status != issuedomain.StatusResolvingConflict {
+		t.Fatalf("recovered=%v active=%+v issue=%+v err=%v", recovered, snapshot.ActiveExecution, snapshot.Issues["277"], err)
 	}
 }
 
