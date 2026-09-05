@@ -14,6 +14,15 @@ type SemanticContractVersionError struct {
 	Current int
 }
 
+type LifecycleAPIVersionError struct {
+	Version string
+	Current string
+}
+
+func (e LifecycleAPIVersionError) Error() string {
+	return fmt.Sprintf("snapshot Issue lifecycle API version %q does not match %q", e.Version, e.Current)
+}
+
 func (e SemanticContractVersionError) Error() string {
 	return fmt.Sprintf("snapshot semantic contract version %d does not match %d", e.Version, e.Current)
 }
@@ -29,7 +38,7 @@ func (snapshot Snapshot) Validate() error {
 		return SemanticContractVersionError{Version: snapshot.SemanticContractVersion, Current: statecontract.CurrentVersion}
 	}
 	if snapshot.IssueLifecycleAPIVersion != issuedomain.LifecycleAPICurrent {
-		return fmt.Errorf("snapshot Issue lifecycle API version %q does not match %q", snapshot.IssueLifecycleAPIVersion, issuedomain.LifecycleAPICurrent)
+		return LifecycleAPIVersionError{Version: snapshot.IssueLifecycleAPIVersion, Current: issuedomain.LifecycleAPICurrent}
 	}
 	if strings.TrimSpace(snapshot.RepoID) == "" || strings.TrimSpace(snapshot.RepoPath) == "" {
 		return fmt.Errorf("snapshot repository identity is incomplete")

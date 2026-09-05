@@ -164,6 +164,15 @@ func ConfirmWorkerStarted(from Status) (Transition, error) {
 	return newAllowedTransition("confirm_worker_started", from, StatusRunning, StatusLaunching)
 }
 
+func AbortWorkerLaunch(from, target Status) (Transition, error) {
+	switch target {
+	case StatusClaimed, StatusResumePending, StatusRetryWait, StatusResolvingConflict:
+	default:
+		return Transition{}, fmt.Errorf("abort worker launch does not allow target status %q", target)
+	}
+	return newAllowedTransition("abort_worker_launch", from, target, StatusLaunching)
+}
+
 func RecoverUnstartedWorker(from, target Status) (Transition, error) {
 	if target != StatusLaunching && target != StatusRetryWait && target != StatusBlocked {
 		return Transition{}, fmt.Errorf("recover unstarted worker does not allow target status %q", target)
