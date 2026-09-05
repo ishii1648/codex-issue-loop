@@ -217,6 +217,10 @@ printf '%s\n' '回答内容' | "$agent_loop_bin" answer \
 "$agent_loop_bin" status --repo "$PWD" --json
 ```
 
+通常の`stop`と`restart`はrepository単位のdurable maintenance fenceを先に記録し、新規claim、retry/resume、conflict recovery、PR maintenanceを停止します。実行中workerへsignalを送らず、result、session、publication、GitHub同期を含むlifecycle jobがdurable checkpointへ到達してからLaunchAgentを停止します。`restart`は必要な共有brokerとrepository serviceを再起動し、healthを確認した後だけfenceを解除します。
+
+drain期限は`--timeout`で指定できます。期限切れではworkerを終了せずfenceを解除して通常運転へ戻ります。ただしdrain中にsupervisor identityが変わりorphan lifecycleが残った場合はfenceを保持し、明示的なforce recoveryを要求します。緊急時に既存workerを`SIGTERM`、grace、`SIGKILL`の順で回収する操作は、影響を確認したうえで`stop --force`または`restart --force`を明示してください。CLI中断後は`status --json`の`operator_control`を確認し、同じcommandを再実行すると同じgenerationを再開します。transactionやfenceを手編集・削除しないでください。
+
 `stop`は永続状態やIssue worktreeを削除しません。restart、cleanup、復旧は[Mac mini常駐運用runbook](docs/mac-mini-runbook.md)と[doctor・復旧runbook](docs/doctor.md)を参照してください。
 
 ### 5. 更新する

@@ -14,6 +14,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
+	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
@@ -383,13 +384,13 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	}
 	if s.loop.maintenanceRequested() {
 		maintenanceState := state.SupervisorStateMaintenance
-		if len(s.active) > 0 {
+		if len(s.active) > 0 || snapshot.ActiveExecution != nil || drain.HasWorker(snapshot) {
 			maintenanceState = state.SupervisorStateDraining
 		}
-		if snapshot.Supervisor.State != maintenanceState || snapshot.Supervisor.Message != "host delivery maintenance fence is active" {
-			_, err = s.loop.Store.Update("delivery_maintenance_observed", 0, "", map[string]string{"state": string(maintenanceState)}, func(current *state.Snapshot) error {
+		if snapshot.Supervisor.State != maintenanceState || snapshot.Supervisor.Message != "maintenance drain fence is active" {
+			_, err = s.loop.Store.Update("maintenance_drain_observed", 0, "", map[string]string{"state": string(maintenanceState)}, func(current *state.Snapshot) error {
 				current.Supervisor.State = maintenanceState
-				current.Supervisor.Message = "host delivery maintenance fence is active"
+				current.Supervisor.Message = "maintenance drain fence is active"
 				return nil
 			})
 		}

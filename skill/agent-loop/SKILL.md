@@ -18,6 +18,10 @@ Use the `agent-loop` CLI as the only control interface. The Skill does not own t
    - Never delete, reset, overwrite state, or change macOS/GitHub/Codex settings as an automatic repair. For `GITHUB_LABELS_MISSING`, preview `bootstrap-labels` first and apply only within the user's authorized repository scope.
 2. Run `agent-loop status --repo <path> --json` before mutating loop state.
 3. Use `start`, `stop`, or `restart` only for the repository the user named.
+   - Ordinary `stop` and `restart` create a durable operator transaction and maintenance fence. They do not signal an active worker; wait for the worker result, session, publication, and GitHub synchronization checkpoint.
+   - If the CLI is interrupted or the host restarts, inspect `status --json` and resume the same recorded operation. Never delete or edit `operator_control` or the operator fence.
+   - A drain timeout restores normal scheduling without killing the worker. Offer a later graceful retry first. Use `--force` only after the user explicitly authorizes terminating the named repository's active worker; only this path may use `SIGTERM` and subsequent `SIGKILL`.
+   - For `restart`, require repository service and configured broker health before treating the operation as complete. A retained fence or non-`succeeded` transaction is not a successful restart.
 4. If status contains a pending request, present that request before starting a new watch. Preserve its request ID, Issue number, question, reason, recommended option, every option ID and label, and whether free text is allowed. In Codex Desktop, ask it as a question that waits for the user's response so question notifications and Activity can surface it; do not finish with a progress-only summary.
 5. Otherwise call `agent-loop watch --repo <path> --until-attention --json` once.
 6. Do not implement a Codex-side polling loop. The Go watch process combines OS events with reconciliation polling internally.

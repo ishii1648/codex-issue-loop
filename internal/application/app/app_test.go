@@ -25,6 +25,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	schema "github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/application/observe"
+	"github.com/ishii1648/codex-issue-loop/internal/application/operatorcontrol"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
@@ -573,7 +574,7 @@ func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
 	assertRequest(outcome.result, secondRequest)
 }
 
-func TestStopCancelsSavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
+func TestForcedStopCancelsSavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -608,7 +609,7 @@ func TestStopCancelsSavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
 	groups := &appProcessGroups{alive: map[int]bool{101: true, 102: true}, signals: map[int][]syscall.Signal{}}
 	var out, stderr bytes.Buffer
 	a := App{Out: &out, Err: &stderr, ProcessController: groups}
-	if code := a.Run(context.Background(), []string{"stop", "--repo", repo, "--json"}); code != 0 {
+	if code := a.Run(context.Background(), []string{"stop", "--repo", repo, "--force", "--json"}); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 	snapshot, err := store.Load()
@@ -623,6 +624,257 @@ func TestStopCancelsSavedWorkerBeforeRecordingSupervisorStopped(t *testing.T) {
 			t.Fatalf("Issue %s=%+v", key, issue)
 		}
 	}
+}
+
+func TestFaultGracefulStopTimeoutRestoresAdmissionWithoutSignaling(t *testing.T) {
+	repo, l, entry, store, launchctl := operatorControlFixture(t)
+	if err := recordSupervisorControl(store, state.SupervisorStatePolling, "fixture running"); err != nil {
+		t.Fatal(err)
+	}
+	groups := &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}
+	var output bytes.Buffer
+	err := (App{Out: &output, Err: &output, ProcessController: groups}).control(context.Background(), l, "stop", []string{"--repo", repo, "--timeout", "1ms", "--json"})
+	if err == nil || !strings.Contains(err.Error(), "normal scheduling was restored") {
+		t.Fatalf("err=%v output=%s", err, output.String())
+	}
+	if len(groups.signals) != 0 {
+		t.Fatalf("graceful timeout signaled workers: %v", groups.signals)
+	}
+	if _, err := os.Stat(l.OperatorMaintenanceFencePath(entry.RepoID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("operator fence was not cleared: %v", err)
+	}
+	tx, err := operatorcontrol.Load(l.OperatorControlPath(entry.RepoID))
+	if err != nil || tx.Phase != operatorcontrol.PhaseTimedOut {
+		t.Fatalf("transaction=%+v err=%v", tx, err)
+	}
+	status, err := (launchd.Manager{Layout: l, Launchctl: launchctl}).Status(context.Background(), entry)
+	if err != nil || !status.Loaded {
+		t.Fatalf("timeout stopped the service: status=%+v err=%v", status, err)
+	}
+}
+
+func TestFaultInterruptedAndDuplicateRestartResumesSameDurableGeneration(t *testing.T) {
+	repo, l, entry, store, _ := operatorControlFixture(t)
+	if err := recordSupervisorControl(store, state.SupervisorStatePolling, "fixture running"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fenceObserved := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := os.Stat(l.OperatorMaintenanceFencePath(entry.RepoID)); err == nil {
+				close(fenceObserved)
+				cancel()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	var output bytes.Buffer
+	app := App{Out: &output, Err: &output, ProcessController: &appProcessGroups{alive: map[int]bool{}, signals: map[int][]syscall.Signal{}}, controlHealth: fixtureControlHealth}
+	if err := app.control(ctx, l, "restart", []string{"--repo", repo, "--json"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted restart err=%v output=%s", err, output.String())
+	}
+	<-fenceObserved
+	interrupted, err := operatorcontrol.Load(l.OperatorControlPath(entry.RepoID))
+	if err != nil || !interrupted.Active() {
+		t.Fatalf("interrupted transaction=%+v err=%v", interrupted, err)
+	}
+	if _, err := os.Stat(l.OperatorMaintenanceFencePath(entry.RepoID)); err != nil {
+		t.Fatalf("interrupted restart did not retain fence: %v", err)
+	}
+	if err := recordSupervisorControl(store, state.SupervisorStateMaintenance, "drain complete"); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := app.control(context.Background(), l, "restart", []string{"--repo", repo, "--json"}); err != nil {
+		t.Fatalf("resume restart: %v output=%s", err, output.String())
+	}
+	completed, err := operatorcontrol.Load(l.OperatorControlPath(entry.RepoID))
+	if err != nil || completed.Phase != operatorcontrol.PhaseSucceeded || completed.Generation != interrupted.Generation {
+		t.Fatalf("completed transaction=%+v interrupted=%+v err=%v", completed, interrupted, err)
+	}
+	if _, err := os.Stat(l.OperatorMaintenanceFencePath(entry.RepoID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful restart retained fence: %v", err)
+	}
+}
+
+func TestFaultSupervisorCrashDuringDrainRequiresExplicitForce(t *testing.T) {
+	repo, l, entry, store, _ := operatorControlFixture(t)
+	if _, _, err := store.StartExecution(state.ExecutionStart{IssueNumber: 1, Title: "crash fixture", RunID: "run_crash", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.Update("crash_worker_running", 1, "run_crash", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["1"]
+		item.Status = issuedomain.StatusRunning
+		item.Worktree, item.Branch = snapshot.RepoPath, "codex/crash-fixture"
+		item.Workspace = testWorkerWorkspace(snapshot, item.Worktree, item.Branch)
+		item.WorkerPID, item.WorkerPGID = 6161, 6161
+		snapshot.Supervisor.PID = 111
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := &appProcessGroups{alive: map[int]bool{6161: true}, signals: map[int][]syscall.Signal{}}
+	app := App{Out: io.Discard, Err: io.Discard, ProcessController: groups}
+	ctx, cancel := context.WithCancel(context.Background())
+	fenceObserved := make(chan struct{})
+	go func() {
+		for {
+			if _, statErr := os.Stat(l.OperatorMaintenanceFencePath(entry.RepoID)); statErr == nil {
+				close(fenceObserved)
+				cancel()
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	if err := app.control(ctx, l, "restart", []string{"--repo", repo, "--json"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted restart err=%v", err)
+	}
+	<-fenceObserved
+	tx, err := operatorcontrol.Load(l.OperatorControlPath(entry.RepoID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.DrainDeadline = time.Now().Add(-time.Second)
+	if err := operatorcontrol.Save(l.OperatorControlPath(entry.RepoID), tx); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update("supervisor_restarted_during_drain", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = state.SupervisorStateDraining
+		snapshot.Supervisor.PID = 222
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = app.control(context.Background(), l, "restart", []string{"--repo", repo, "--json"})
+	if err == nil || !strings.Contains(err.Error(), "explicit --force is required") {
+		t.Fatalf("crash recovery err=%v", err)
+	}
+	if len(groups.signals) != 0 {
+		t.Fatalf("non-force crash recovery sent signals: %v", groups.signals)
+	}
+	if _, err := os.Stat(l.OperatorMaintenanceFencePath(entry.RepoID)); err != nil {
+		t.Fatalf("crash recovery did not retain fence: %v", err)
+	}
+}
+
+func TestGracefulRestartRestartsBrokerAndRepositoryBeforeClearingFence(t *testing.T) {
+	repo, l, entry, store, launchctl := operatorControlFixture(t)
+	repoLoaded := filepath.Join(t.TempDir(), "repo-loaded")
+	brokerLoaded := filepath.Join(t.TempDir(), "broker-loaded")
+	logPath := filepath.Join(t.TempDir(), "launchctl.log")
+	for _, path := range []string{repoLoaded, brokerLoaded} {
+		if err := os.WriteFile(path, []byte("loaded"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := `#!/bin/sh
+case "$1" in
+  print)
+    case "$2" in
+      *broker*) test -f "$OPERATOR_BROKER_LOADED" && printf 'state = running\npid = 5252\n' ;;
+      *) test -f "$OPERATOR_REPO_LOADED" && printf 'state = running\npid = 4242\n' ;;
+    esac
+    ;;
+  bootout)
+    case "$2" in *broker*) rm -f "$OPERATOR_BROKER_LOADED" ;; *) rm -f "$OPERATOR_REPO_LOADED" ;; esac
+    printf 'bootout %s\n' "$2" >> "$OPERATOR_CONTROL_LOG"
+    ;;
+  bootstrap)
+    case "$3" in *broker*) : > "$OPERATOR_BROKER_LOADED" ;; *) : > "$OPERATOR_REPO_LOADED" ;; esac
+    printf 'bootstrap %s\n' "$3" >> "$OPERATOR_CONTROL_LOG"
+    ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPERATOR_REPO_LOADED", repoLoaded)
+	t.Setenv("OPERATOR_BROKER_LOADED", brokerLoaded)
+	t.Setenv("OPERATOR_CONTROL_LOG", logPath)
+	secret := filepath.Join(t.TempDir(), "webhook-secret")
+	if err := os.WriteFile(secret, []byte("fixture-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := fmt.Sprintf("version: 5\ngithub:\n  repo: owner/repo\n  repository_id: 1234\nwebhook:\n  mode: webhook\n  listener_address: 127.0.0.1:8787\n  public_url_identifier: fixture.example/webhook\n  secret_source:\n    file: %q\n  installation_ids: [99]\n", secret)
+	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordSupervisorControl(store, state.SupervisorStateMaintenance, "drain complete"); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := (App{Out: &output, Err: &output, controlHealth: fixtureControlHealth}).control(context.Background(), l, "restart", []string{"--repo", repo, "--json"}); err != nil {
+		t.Fatalf("restart: %v output=%s", err, output.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []string{l.Label(entry.RepoID), l.BrokerLabel(), "bootstrap " + l.BrokerPlistPath(), "bootstrap " + l.PlistPath(entry.RepoID)} {
+		if !strings.Contains(string(logData), operation) {
+			t.Fatalf("missing %q in launchctl log:\n%s", operation, logData)
+		}
+	}
+	if _, err := os.Stat(l.OperatorMaintenanceFencePath(entry.RepoID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("health-checked restart retained fence: %v", err)
+	}
+	tx, err := operatorcontrol.Load(l.OperatorControlPath(entry.RepoID))
+	if err != nil || tx.Phase != operatorcontrol.PhaseSucceeded {
+		t.Fatalf("transaction=%+v err=%v", tx, err)
+	}
+}
+
+func operatorControlFixture(t *testing.T) (string, layout.Layout, registry.Entry, state.Store, string) {
+	t.Helper()
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	loaded := filepath.Join(t.TempDir(), "repo-loaded")
+	if err := os.WriteFile(loaded, []byte("loaded"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launchctl := filepath.Join(t.TempDir(), "launchctl")
+	script := "#!/bin/sh\ncase \"$1\" in\n print) test -f \"$OPERATOR_CONTROL_LOADED\" && printf 'state = running\\npid = 4242\\n' ;;\n bootout) rm -f \"$OPERATOR_CONTROL_LOADED\" ;;\n bootstrap) : > \"$OPERATOR_CONTROL_LOADED\" ;;\nesac\n"
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPERATOR_CONTROL_LOADED", loaded)
+	canonicalRepo, err := config.CanonicalRepoPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := registry.Entry{RepoID: "owner-repo-operator", RepoPath: canonicalRepo, GitHubRepo: "owner/repo", RegisteredAt: time.Now().UTC(), Commands: map[string]string{"launchctl": launchctl}}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: canonicalRepo}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	return repo, l, entry, store, launchctl
+}
+
+func fixtureControlHealth(ctx context.Context, lm launchd.Manager, entry registry.Entry, store state.Store, broker bool, timeout time.Duration) error {
+	_, err := store.Update("fixture_supervisor_healthy", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = state.SupervisorStateMaintenance
+		snapshot.Supervisor.PID = 4242
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return waitForControlHealth(ctx, lm, entry, store, broker, timeout)
 }
 
 func TestStartRecoversOnlyUnloadedSharedBrokerWhenSupervisorIsLoaded(t *testing.T) {

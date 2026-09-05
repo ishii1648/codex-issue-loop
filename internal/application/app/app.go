@@ -29,6 +29,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/compat"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
@@ -74,6 +75,7 @@ type App struct {
 	Err                     io.Writer
 	ProcessController       supervisor.ProcessGroupController
 	validateResumeWorkspace func(context.Context, worktree.Manager, config.Config, string, string) (worktree.LaunchValidation, error)
+	controlHealth           func(context.Context, launchd.Manager, registry.Entry, state.Store, bool, time.Duration) error
 }
 
 type exitError struct {
@@ -425,6 +427,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		Logger:                         log.New(safeLog, "agent-loop: ", log.LstdFlags|log.LUTC),
 		MaintenanceFencePath:           filepath.Join(l.DeliveryDir(), "maintenance.json"),
 		RepositoryMaintenanceFencePath: l.DeliveryAssignmentFencePath(entry.RepoID),
+		OperatorMaintenanceFencePath:   l.OperatorMaintenanceFencePath(entry.RepoID),
 		ReleaseVersion:                 Version,
 		ReleaseCommit:                  Commit,
 	}
