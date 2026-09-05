@@ -30,4 +30,8 @@ agent-loop-monitor report --config ~/.agent-loop-monitor.yaml --from 2026-09-01T
 
 GitHub失敗はrepositoryごとの`last_error`と`UNKNOWN`に記録されます。他repositoryのpollは継続します。認証、rate limit、repository名を修復後に`run --once --json`を実行し、`status`で復旧を確認します。破損したstateを推測で編集せず、該当directoryを保全して原因を調査します。
 
+`last_error`がsnapshot不一致なら、cursorを操作せず次の通常pollで収束を確認します。`queue exit history is insufficient`、再入履歴不足、cursor探索上限の場合は、現在snapshotだけを根拠に正常扱いへ戻しません。cursor探索は最大1,000 eventで停止し、古いcursorの全履歴探索は行いません。継続するUNKNOWNは履歴不足として調査し、cursorの早送りやinterval削除で隠さないでください。観測不能期間内のdeadlineはDOWNと断定せずUNKNOWNに含め、復旧状態は検証したpoll時刻から始まります。
+
+rollbackは旧releaseのmonitor binaryで`install`、`service register`、`service restart`を実行します。事前にmonitorを停止して専用state directoryを保全し、schema version 1のcurrent stateとinterval logは維持します。旧版はcursor/snapshotの検証が弱いため、rollback後の観測結果でUNKNOWN期間を補完しないでください。supervisorのassignmentとstateを変更する必要はありません。
+
 logはmonitor state rootの`launchd.stdout.log`と`launchd.stderr.log`です。supervisor logとは別です。
