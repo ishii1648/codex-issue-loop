@@ -163,6 +163,56 @@ func TestDeliveryMaintenanceFenceDrainsWithoutDispatchOrCancellation(t *testing.
 	}
 }
 
+func TestDeliveryMaintenanceFenceRecoversCurrentSupervisorUnstartedConflictLaunch(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	loop.GitHub = &countingGitHub{fakeGitHub: base}
+	now := time.Date(2026, 9, 5, 20, 0, 0, 0, time.UTC)
+	fence := filepath.Join(t.TempDir(), "maintenance.json")
+	if err := os.WriteFile(fence, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loop.MaintenanceFencePath = fence
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 277, Title: "queue-level monitor", RunID: "conflict_277", BaseSHA: "base", StartedAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loop.Store.Update("current_supervisor_unstarted_conflict", 277, "conflict_277", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["277"]
+		branch := "codex/issue-277"
+		workspace := fixtureWorkspace(loop, loop.Config.RepoPath, branch)
+		workspace.CapturedAt = now
+		item.Status, item.LaunchSource, item.Generation = issuedomain.StatusLaunching, issuedomain.StatusResolvingConflict, 2
+		item.Branch, item.Worktree, item.Workspace = branch, loop.Config.RepoPath, workspace
+		item.PullRequestURL, item.PullRequestNumber, item.HeadSHA = "https://example.test/pr/281", 281, "head"
+		item.Continuation = &state.ContinuationCheckpoint{
+			ID: "checkpoint_277", CreatedAt: now, RunID: item.RunID, Generation: 1, BaseSHA: "base",
+			Workspace: workspace, HeadSHA: item.HeadSHA, PullRequestURL: item.PullRequestURL,
+			PullRequestNumber: item.PullRequestNumber, Stage: issuedomain.ContinuationStageChecks,
+		}
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: item.PullRequestURL, PreviousBaseSHA: "base", TargetBaseSHA: "target",
+			OriginalHeadSHA: item.HeadSHA, ConflictFiles: []string{"monitor/internal/model/model.go"},
+		}
+		snapshot.ActiveExecution.Generation = item.Generation
+		snapshot.Supervisor.State = state.SupervisorStatePolling
+		snapshot.Supervisor.StartedAt = now
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+	if result, err := s.schedule(context.Background(), true); err != nil || result.dispatched {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Supervisor.State != state.SupervisorStateMaintenance || snapshot.ActiveExecution != nil || snapshot.Issues["277"].Status != issuedomain.StatusResolvingConflict {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+}
+
 func TestFaultMaintenanceFenceAfterSupervisorCrashDoesNotReportStaleWorkerAsDrained(t *testing.T) {
 	loop, base := testLoop(t, worker.Result{})
 	loop.GitHub = &countingGitHub{fakeGitHub: base}
