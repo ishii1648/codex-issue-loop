@@ -3,84 +3,82 @@ name: self-repair
 description: Directly repair this codex-issue-loop repository from a normal Codex session when its own agent-loop runtime cannot safely process the repair. Use only when the user explicitly invokes $self-repair and directs Codex not to delegate the change to agent-loop. Never invoke this skill implicitly from a suspected or observed failure.
 ---
 
-# Self Repair
+# 自己修復
 
-Use this repository-scoped break-glass workflow only after the user explicitly invokes
-`$self-repair` and requests direct implementation without agent-loop. Treat that invocation as
-an explicit request to create the Codex goal required by this workflow. Do not create an
-implementation Issue for the same request.
+ユーザーが`$self-repair`を明示的に呼び出し、agent-loopへ委譲せず直接実装するよう
+依頼した場合だけ、このrepository scopeのbreak-glass workflowを使用する。この呼び出しを、
+workflowに必要なCodex goalを作成する明示的な依頼として扱う。同じ依頼の実装Issueを
+作成しない。
 
-Establish the repair goal immediately after reading this skill. Do not inspect the repository,
-run a command, or take any other workflow step first.
+このskillを読んだ直後に修復goalを確立する。先にrepositoryを調査したり、commandを実行したり、
+他のworkflow stepへ進んだりしない。
 
-## Establish the goal
+## Goalを確立する
 
-1. Call `get_goal` as the first action.
-2. If no unfinished goal exists, call `create_goal` with an objective that names the defect, the
-   authorized delivery scope, the required verification, and the intended restored state. Omit
-   `token_budget` unless the user explicitly supplied one.
-3. If the active goal describes this repair, continue it instead of creating another goal. If an
-   unrelated unfinished goal exists, do not replace it; stop and ask the user how to proceed.
-4. Do not mutate repository or external state when goal tooling is unavailable or the repair goal
-   cannot be established.
+1. 最初のactionとして`get_goal`を呼び出す。
+2. 未完了のgoalがなければ、障害、許可されたdelivery scope、必要な検証、復旧後の状態を
+   objectiveに含めて`create_goal`を呼び出す。ユーザーが明示的に指定しない限り
+   `token_budget`を設定しない。
+3. active goalがこの修復を表していれば、新しいgoalを作成せず継続する。無関係な未完了goalが
+   ある場合は置き換えず、停止してユーザーに進め方を確認する。
+4. goal toolを利用できない場合、または修復goalを確立できない場合は、repositoryや外部状態を
+   変更しない。
 
-Do not continue to break-glass eligibility checks until this gate succeeds.
+このgateが成功するまでbreak-glass eligibilityの確認へ進まない。
 
-On every resumed or automatically continued turn, call `get_goal` and re-read live Git, process,
-queue, and delivery state before acting. The goal is a continuation anchor, not operational
-evidence.
+再開または自動継続された各turnでは`get_goal`を呼び出し、処理を始める前にGit、process、queue、
+deliveryの実状態を再取得する。goalは継続のanchorであり、運用状態のevidenceではない。
 
-## Confirm break-glass eligibility
+## Break-glass eligibilityを確認する
 
-1. Resolve the repository root with Git and keep every path and command scoped to that root.
-2. Read the repository instructions, `.agent-loop.yaml`, and `docs/break-glass-repair.md` before
-   acting.
-3. Collect the runbook's read-only evidence when the installed CLI remains usable. Preserve exact
-   diagnostic codes and command failures.
-4. Continue only when the defect affects codex-issue-loop's ability to accept, schedule, execute,
-   publish, update, or safely recover the same repair. If the evidence shows that the ordinary
-   Issue loop can safely perform the work, stop and report that break-glass is not eligible.
+1. Gitでrepository rootを解決し、すべてのpathとcommandをそのrootに限定する。
+2. 処理を始める前にrepository instructions、`.agent-loop.yaml`、
+   `docs/break-glass-repair.md`を読む。
+3. installed CLIを利用できる場合は、runbookで指定されたread-only evidenceを収集する。
+   diagnostic codeとcommand failureを正確に保持する。
+4. 障害によってcodex-issue-loopが同じ修復を受け付ける、scheduleする、実行する、publishする、
+   updateする、または安全にrecoverする能力が損なわれている場合だけ続行する。通常のIssue loopが
+   安全に処理できるとevidenceが示す場合は停止し、break-glassの対象外であることを報告する。
 
-Do not infer direct-implementation authority from a failure alone. Explicit invocation and a
-qualifying self-hosting failure are both required.
+failureだけから直接実装の権限を推測しない。明示的な呼び出しと、条件を満たすself-hosting failureの
+両方を必須とする。
 
-## Quiesce the affected runtime
+## 対象runtimeをquiesceする
 
-Follow `docs/break-glass-repair.md` as the repository authority.
+`docs/break-glass-repair.md`をrepository authorityとして従う。
 
-- Record the initial delivery, supervisor, worker, and worktree state.
-- Wait for `active_workers=0`; never terminate an active implementation worker to begin repair.
-- Confirm the exact impact with the user before stopping a controller or supervisor unless that
-  stop was already explicitly requested.
-- Prefer the typed CLI stop. Use `scripts/break-glass-stop.sh` only when the installed CLI is
-  unusable and its exact repository-ID and LaunchAgent checks succeed.
-- Never hand-edit or delete durable state, registry entries, active execution, continuations,
-  sessions, managed worktrees, delivery configuration, or backups.
+- delivery、supervisor、worker、worktreeの初期状態を記録する。
+- `active_workers=0`になるまで待つ。修復を始めるためにactive implementation workerを終了しない。
+- controllerまたはsupervisorの停止が明示的に依頼済みでない限り、停止前に正確な影響を示して
+  ユーザーへ確認する。
+- typed CLIによる停止を優先する。installed CLIを利用できず、exact repository IDとLaunchAgentの
+  検証に成功した場合だけ`scripts/break-glass-stop.sh`を使用する。
+- durable state、registry entry、active execution、continuation、session、managed worktree、
+  delivery configuration、backupを手作業で編集または削除しない。
 
-## Implement the repair
+## 修復を実装する
 
-1. Inspect the worktree before editing. Preserve unrelated user changes and do not proceed from a
-   dirty or ambiguous checkout that cannot be isolated safely.
-2. Work on a clean `codex/*` branch or clean dedicated worktree.
-3. Reproduce the failure and add or identify a test that fails for the demonstrated cause.
-4. Make the smallest coherent change that fixes that cause. Do not add speculative recovery,
-   compatibility, retry, fallback, persistence, configuration, or unrelated refactoring.
-5. Run the focused test first, then the repository checks required by the runbook for the
-   authorized delivery scope.
-6. Review the final diff once and remove changes that are not required by the repair.
+1. 編集前にworktreeを確認する。無関係なユーザー変更を保持し、安全に分離できないdirtyまたは
+   ambiguousなcheckoutでは続行しない。
+2. cleanな`codex/*` branchまたは専用worktreeで作業する。
+3. failureを再現し、確認した原因によって失敗するtestを追加または特定する。
+4. 原因を修正する最小の一貫した変更を行う。推測に基づくrecovery、compatibility、retry、fallback、
+   persistence、configuration、無関係なrefactoringを追加しない。
+5. focused testを先に実行し、その後、許可されたdelivery scopeについてrunbookが要求する
+   repository checkを実行する。
+6. 最終diffを一度確認し、修復に不要な変更を削除する。
 
-Do not commit, push, create or merge a Pull Request, tag a release, apply an assignment, or restart
-services unless the user requested that scope or separately authorized it.
+ユーザーがそのscopeを依頼済み、または別途許可していない限り、commit、push、Pull Requestの
+作成・merge、release tagの作成、assignmentのapply、serviceのrestartを行わない。
 
-## Complete or block the goal
+## Goalを完了またはblockする
 
-- If the goal covers only a tested patch or Pull Request, complete it when that deliverable and
-  its required verification are finished.
-- If the goal covers operational restoration, complete it only after the requested release and
-  assignment steps succeed, scoped doctor/status/assignment verification passes, and controllers
-  are returned to the intended state.
-- Call `update_goal` with `complete` only when every stated completion condition is satisfied.
-- Call `update_goal` with `blocked` only after the same blocking condition has repeated for at
-  least three consecutive goal turns and no safe in-scope progress remains.
-- When blocked or awaiting authorization, preserve the current state and report the exact
-  evidence, completed work, remaining action, and safe resumption point.
+- goalが検証済みpatchまたはPull Requestだけを対象とする場合は、そのdeliverableと必要な検証が
+  完了した時点でgoalを完了する。
+- goalが運用復旧までを対象とする場合は、要求されたreleaseとassignment stepが成功し、scoped
+  doctor/status/assignment verificationを通過し、controllerを意図した状態へ戻した後だけ完了する。
+- すべての完了条件を満たした場合だけ`update_goal`を`complete`で呼び出す。
+- 同じblocking conditionが3回以上連続するgoal turnで発生し、安全なscope内の進行が残っていない
+  場合だけ`update_goal`を`blocked`で呼び出す。
+- blockedまたは許可待ちの場合は現状を保持し、正確なevidence、完了済みの作業、残りのaction、
+  安全な再開地点を報告する。
