@@ -50,3 +50,46 @@ esac
 		}
 	}
 }
+
+func TestCLITerminalEventsEndQueueAtGitHubTime(t *testing.T) {
+	for _, event := range []string{
+		`"event":"closed"`,
+		`"event":"labeled","label":{"name":"done"}`,
+	} {
+		t.Run(event, func(t *testing.T) {
+			dir := t.TempDir()
+			script := filepath.Join(dir, "gh")
+			body := `#!/bin/sh
+case "$*" in
+  *issues/events*) printf '%s\n' '[{"id":11,` + event + `,"created_at":"2026-09-05T10:10:00Z","issue":{"number":1}},{"id":10}]' ;;
+  *issues\?*) printf '%s\n' '[[]]' ;;
+  *) exit 9 ;;
+esac
+`
+			if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+			repo := config.Repository{Name: "owner/repo", RunningLabel: "running", TerminalLabels: []string{"done"}}
+			initial, _, err := model.Apply(nil, model.Observation{
+				Repository: repo.Name, ObservedAt: base, Cursor: 10, CursorInitialized: true,
+				Items: []model.QueueItem{{Number: 1, Phase: model.Running, PhaseSince: base, Deadline: base.Add(time.Hour)}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := (CLI{Path: script}).Observe(context.Background(), repo, 10, true, base.Add(20*time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, closed, err := model.Apply(&initial, observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminalAt := base.Add(10 * time.Minute)
+			if next.Current.Status != model.Idle || !next.Current.StartedAt.Equal(terminalAt) || len(closed) != 1 || !closed[0].EndedAt.Equal(terminalAt) {
+				t.Fatalf("terminal replay: next=%+v closed=%+v", next, closed)
+			}
+		})
+	}
+}

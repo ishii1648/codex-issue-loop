@@ -14,6 +14,8 @@ import (
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 )
 
+const maxEventPages = 10
+
 func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, initialized bool, observedAt time.Time) (model.Observation, error) {
 	result := model.Observation{
 		Repository:        repo.Name,
@@ -51,7 +53,7 @@ func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, 
 func (c CLI) eventsSince(ctx context.Context, repo config.Repository, cursor int64) ([]model.QueueEvent, int64, error) {
 	var result []model.QueueEvent
 	head := cursor
-	for page := 1; ; page++ {
+	for page := 1; page <= maxEventPages; page++ {
 		events, err := c.eventPage(ctx, repo, page)
 		if err != nil {
 			return nil, cursor, err
@@ -85,6 +87,7 @@ func (c CLI) eventsSince(ctx context.Context, repo config.Repository, cursor int
 			return nil, cursor, fmt.Errorf("event cursor %d was not found for %s", cursor, repo.Name)
 		}
 	}
+	return nil, cursor, fmt.Errorf("event cursor %d was not found within %d pages for %s", cursor, maxEventPages, repo.Name)
 }
 
 func (c CLI) eventHead(ctx context.Context, repo config.Repository) (int64, error) {
