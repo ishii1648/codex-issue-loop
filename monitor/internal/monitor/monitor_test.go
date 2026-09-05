@@ -16,13 +16,14 @@ type fakeObserver struct {
 	errors       map[string]error
 }
 
-func (f fakeObserver) Observe(_ context.Context, repo config.Repository, _ int64, at time.Time) (model.Observation, error) {
+func (f fakeObserver) Observe(_ context.Context, repo config.Repository, _ int64, _ bool, at time.Time) (model.Observation, error) {
 	if err := f.errors[repo.Name]; err != nil {
 		return model.Observation{}, err
 	}
 	observation := f.observations[repo.Name]
 	observation.Repository = repo.Name
 	observation.ObservedAt = at
+	observation.CursorInitialized = true
 	return observation, nil
 }
 
@@ -48,7 +49,7 @@ func TestRepositoryObservationFailuresArePersistedIndependently(t *testing.T) {
 	}
 }
 
-func TestRestartRecordsUnknownObservationGapBeforeRecovery(t *testing.T) {
+func TestRestartReplaysCompleteHistoryWithoutUnknownGap(t *testing.T) {
 	root := t.TempDir()
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	repo := config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done"}, AcceptanceTimeout: config.Duration{Duration: time.Hour}, ProcessingTimeout: config.Duration{Duration: time.Hour}}
@@ -62,14 +63,14 @@ func TestRestartRecordsUnknownObservationGapBeforeRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Current.Status != model.Idle || !current.Current.StartedAt.Equal(base.Add(10*time.Minute)) {
+	if current.Current.Status != model.Idle || !current.Current.StartedAt.Equal(base) {
 		t.Fatalf("recovered current = %+v", current.Current)
 	}
 	history, err := runner.Store.History(repo.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 2 || history[0].Status != model.Idle || !history[0].EndedAt.Equal(base.Add(3*time.Minute)) || history[1].Status != model.Unknown || !history[1].EndedAt.Equal(base.Add(10*time.Minute)) {
+	if len(history) != 0 {
 		t.Fatalf("restart history = %+v", history)
 	}
 }

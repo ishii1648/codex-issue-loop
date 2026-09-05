@@ -26,7 +26,7 @@ agent-loop-monitor report --config ~/.agent-loop-monitor.yaml --from 2026-09-01T
 
 ## 停止・再起動・復旧
 
-`service stop`はLaunchAgentだけを停止し、config、current state、interval logを保持します。再開は`service start`、設定・binary更新後は`service restart`を使います。停止が`observation_timeout`を超えるとreportと次回pollはその区間を`UNKNOWN`として扱います。
+`service stop`はLaunchAgentだけを停止し、config、current state、interval log、event cursorを保持します。再開は`service start`、設定・binary更新後は`service restart`を使います。停止中は`observation_timeout`以降を一時的に`UNKNOWN`として表示しますが、再開pollでrepository eventのcursorまでの完全な履歴を取得できればdeadlineとevent時刻から区間をreplayします。cursorを発見できない場合はgapを推測せず`UNKNOWN`のまま扱います。
 
 GitHub失敗はrepositoryごとの`last_error`と`UNKNOWN`に記録されます。他repositoryのpollは継続します。認証、rate limit、repository名を修復後に`run --once --json`を実行し、`status`で復旧を確認します。破損したstateを推測で編集せず、該当directoryを保全して原因を調査します。
 
