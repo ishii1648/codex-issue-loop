@@ -4,7 +4,7 @@
 
 依存方向は`cmd -> app/monitor -> github + model + store + config`です。`internal/application/supervisor`、`internal/domain/issue`、`internal/adapter/state`への依存はarchitecture testで拒否します。
 
-GitHub adapterが実行できる外部操作は`gh api --method GET --paginate --slurp`だけです。Issue、label、commentなどのmutation methodをinterfaceへ含めません。
+GitHub adapterが実行できる外部操作は`gh api --method GET`だけです。open Issue snapshotには`--paginate --slurp`、repository issue eventsには最大10ページの明示的なpage指定を使います。modelでbatch全体のsnapshot整合性を検証してからrunnerが区間をcommitします。Issue、label、commentなどのmutation methodをinterfaceへ含めません。
 
 永続rootは既定で`~/Library/Application Support/codex-issue-loop-monitor`です。repositoryごとに`repositories/<owner--repo>/current.json`と`intervals.jsonl`を持ちます。確定intervalをatomicに更新してからcurrent stateをatomic renameし、同じinterval IDの再commitを除外します。process再起動直後にpollすることで中断したcommitも同じ決定へ収束します。
 

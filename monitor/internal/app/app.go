@@ -380,6 +380,12 @@ func errorText(err error) string {
 func effectiveSnapshot(snapshot model.Snapshot, timeout time.Duration, now time.Time) model.Snapshot {
 	expiredAt := snapshot.LastObservationAt.Add(timeout)
 	if timeout > 0 && now.After(expiredAt) && snapshot.Current.Status != model.Unknown {
+		for _, item := range snapshot.Queue {
+			if item.Deadline.After(snapshot.LastObservationAt) && item.Deadline.Before(expiredAt) {
+				expiredAt = item.Deadline
+			}
+		}
+
 		snapshot.Current = model.Interval{ID: fmt.Sprintf("%s:%s:%d", snapshot.Repository, model.Unknown, expiredAt.UnixNano()), Repository: snapshot.Repository, Status: model.Unknown, StartedAt: expiredAt, Reason: "monitor observation history has a gap"}
 		snapshot.LastError = "monitor observation history has a gap"
 	}
@@ -398,6 +404,12 @@ func effectiveIntervals(storage store.Store, repository string, timeout time.Dur
 	expiredAt := snapshot.LastObservationAt.Add(timeout)
 	if !to.After(expiredAt) || snapshot.Current.Status == model.Unknown || len(intervals) == 0 {
 		return intervals, nil
+	}
+
+	for _, item := range snapshot.Queue {
+		if item.Deadline.After(snapshot.LastObservationAt) && item.Deadline.Before(expiredAt) {
+			expiredAt = item.Deadline
+		}
 	}
 	last := &intervals[len(intervals)-1]
 	if last.EndedAt.IsZero() && expiredAt.After(last.StartedAt) {

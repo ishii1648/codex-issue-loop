@@ -31,7 +31,17 @@ type QueueItem struct {
 	Deadline   time.Time `json:"deadline"`
 }
 
+type QueueEvent struct {
+	ID     int64
+	At     time.Time
+	Number int
+	Kind   string
+	Item   QueueItem
+}
+
 type Observation struct {
+	Events []QueueEvent `json:"-"`
+
 	Repository string      `json:"repository"`
 	ObservedAt time.Time   `json:"observed_at"`
 	Items      []QueueItem `json:"queue"`
@@ -89,6 +99,9 @@ func Evaluate(observation Observation) (Status, time.Time, string) {
 	if !deadline.IsZero() {
 		return Down, deadline, "progress deadline exceeded"
 	}
+	if observation.ChangedAt.After(latestProgress) {
+		latestProgress = observation.ChangedAt.UTC()
+	}
 	return Healthy, latestProgress, "queue progress is within deadline"
 }
 
@@ -98,8 +111,13 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, *Interval, er
 	}
 	status, start, reason := Evaluate(observation)
 	next := Snapshot{SchemaVersion: SchemaVersion, Repository: observation.Repository, Queue: append([]QueueItem(nil), observation.Items...), LastObservationAt: observation.ObservedAt.UTC(), EventCursor: observation.Cursor, SeenEventIDs: uniqueIDs(observation.EventIDs), LastError: observation.Error}
-	if observation.Error == "" {
+	if status != Unknown {
 		next.LastSuccessAt = observation.ObservedAt.UTC()
+	}
+	if status == Unknown {
+		next.EventCursor = 0
+		next.SeenEventIDs = nil
+		next.Queue = nil
 	}
 	if previous == nil || previous.Current.Status == "" {
 		next.Current = newInterval(observation.Repository, status, start, reason)
@@ -112,17 +130,30 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, *Interval, er
 		return Snapshot{}, nil, fmt.Errorf("observation time moved backwards")
 	}
 	next.LastSuccessAt = previous.LastSuccessAt
-	if observation.Error == "" {
+	if status != Unknown {
 		next.LastSuccessAt = observation.ObservedAt.UTC()
 	}
-	next.EventCursor = max(previous.EventCursor, observation.Cursor)
-	next.SeenEventIDs = mergeIDs(previous.SeenEventIDs, observation.EventIDs)
+	if status == Unknown {
+		next.Queue = append([]QueueItem(nil), previous.Queue...)
+		next.EventCursor = previous.EventCursor
+		next.SeenEventIDs = append([]int64(nil), previous.SeenEventIDs...)
+	} else {
+		next.EventCursor = max(previous.EventCursor, observation.Cursor)
+		next.SeenEventIDs = mergeIDs(previous.SeenEventIDs, observation.EventIDs)
+	}
 	if status == previous.Current.Status {
 		next.Current = previous.Current
 		next.Current.Reason = reason
 		return next, nil, nil
 	}
-	if previous.Current.Status == Unknown && !start.After(previous.Current.StartedAt) {
+	if status == Unknown {
+		for _, item := range previous.Queue {
+			if item.Deadline.After(previous.LastObservationAt) && item.Deadline.Before(start) {
+				start = item.Deadline
+			}
+		}
+	}
+	if previous.Current.Status == Unknown {
 		start = observation.ObservedAt.UTC()
 	}
 	if start.Before(previous.Current.StartedAt) {
