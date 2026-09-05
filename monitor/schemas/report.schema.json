@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ishii1648/codex-issue-loop/monitor/schemas/report.schema.json",
+  "type": "object",
+  "required": ["schema_version", "repository", "from", "to", "durations_seconds", "demand_availability", "observation_coverage"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "repository": {"type": "string"},
+    "from": {"type": "string", "format": "date-time"},
+    "to": {"type": "string", "format": "date-time"},
+    "durations_seconds": {"type": "object", "required": ["IDLE", "HEALTHY", "DOWN", "UNKNOWN"], "additionalProperties": {"type": "number", "minimum": 0}},
+    "demand_availability": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "observation_coverage": {"type": "number", "minimum": 0, "maximum": 1}
+  },
+  "additionalProperties": false
+}

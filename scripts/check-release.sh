@@ -19,9 +19,15 @@ run_host_go_test() {
 scripts/build-release.sh "$version" "$commit" "$source_epoch" "$temporary_root/first"
 scripts/build-release.sh "$version" "$commit" "$source_epoch" "$temporary_root/second"
 
-for name in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
+for name in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
   cmp "$temporary_root/first/$name" "$temporary_root/second/$name"
 done
+
+monitor_version_json=$($temporary_root/first/agent-loop-monitor_Darwin_arm64 version --json)
+printf '%s\n' "$monitor_version_json" | grep -Fq '"version":"v0.0.0-test"'
+printf '%s\n' "$monitor_version_json" | grep -Fq "\"commit\":\"$commit\""
+printf '%s\n' "$monitor_version_json" | grep -Fq '"target":"darwin/arm64"'
+printf '%s\n' "$monitor_version_json" | grep -Fq '"monitor_schema_version":1'
 
 version_json=$($temporary_root/first/agent-loop_Darwin_arm64 version --json)
 printf '%s\n' "$version_json" | grep -Fq '"version":"v0.0.0-test"'

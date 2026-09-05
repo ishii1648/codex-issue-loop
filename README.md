@@ -2,6 +2,8 @@
 
 GitHub Issueをキューとして、着手可能なIssueが存在する限りCodex CLI、Claude Code、またはOpenCode workerを繰り返し実行する、Apple Silicon macOS向けの常駐ループです。
 
+GitHub上の実装queue可用性は、supervisorから独立したread-only外形監視binary `agent-loop-monitor`で記録できます。状態契約、設定、導入手順は[`monitor/`](monitor/README.md)を参照してください。
+
 ## セットアップ
 
 Macへのinstallと、対象リポジトリごとの設定・登録・起動を行います。

@@ -1,0 +1,19 @@
+version: 1
+poll_interval: 1m
+observation_timeout: 3m
+state_dir: /Users/example/Library/Application Support/codex-issue-loop-monitor
+repositories:
+  - name: ishii1648/codex-issue-loop
+    ready_labels: [codex-loop:ready]
+    exclude_labels: [blocked, do-not-automate]
+    running_label: codex-loop:running
+    terminal_labels: [codex-loop:done, codex-loop:needs-input, codex-loop:failed, blocked]
+    acceptance_timeout: 10m
+    processing_timeout: 2h
+  - name: ishii1648/zeitreise
+    ready_labels: [codex-loop:ready]
+    exclude_labels: [blocked, do-not-automate]
+    running_label: codex-loop:running
+    terminal_labels: [codex-loop:done, codex-loop:needs-input, codex-loop:failed, blocked]
+    acceptance_timeout: 10m
+    processing_timeout: 2h

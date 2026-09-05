@@ -78,6 +78,7 @@ jobs:
         with:
           subject-path: |
             dist/candidate/agent-loop_Darwin_arm64
+            dist/candidate/agent-loop-monitor_Darwin_arm64
             dist/candidate/agent-loop_Darwin_arm64.spdx.json
             dist/candidate/release-manifest.json
             dist/candidate/checksums.txt
@@ -111,7 +112,7 @@ jobs:
         run: |
           source_epoch=$(git show -s --format=%ct "${RELEASE_COMMIT}")
           scripts/build-release.sh "${RELEASE_TAG}" "${RELEASE_COMMIT}" "$source_epoch" dist/comparison
-          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
+          for asset in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
             cmp "dist/candidate/$asset" "dist/comparison/$asset"
           done
 
@@ -137,6 +138,7 @@ jobs:
           jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
             '.version == $version and .commit == $commit and .assignment_protocol == 1 and .semantic_contract_current == 4 and .semantic_contract_minimum == 1 and .state_schema_current == 5 and .state_schema_migration_from == 4 and .issue_lifecycle_api_current == "2.0" and .issue_lifecycle_api_minimum == "1.0"' release-manifest.json
           gh attestation verify agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
+          gh attestation verify agent-loop-monitor_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
 
   replay-production-fixtures:
     name: replay-production-fixtures
@@ -477,19 +479,21 @@ jobs:
         run: |
           candidate_tag="candidate-${RELEASE_TAG}-${GITHUB_RUN_ID}"
           gh release view "$RELEASE_TAG" --json tagName,isDraft,isPrerelease,assets \
-            --jq 'select(.tagName == "'"$RELEASE_TAG"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 7)' >/dev/null
+            --jq 'select(.tagName == "'"$RELEASE_TAG"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 8)' >/dev/null
           mkdir -p dist/stable dist/prerelease
           gh release download "$RELEASE_TAG" --dir dist/stable
           gh release download "$candidate_tag" --dir dist/prerelease
-          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json; do
+          for asset in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json; do
             cmp "dist/prerelease/$asset" "dist/stable/$asset"
           done
-          for asset in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
+          for asset in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
             cmp "dist/candidate/$asset" "dist/stable/$asset"
           done
           gh attestation verify dist/stable/agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
+          gh attestation verify dist/stable/agent-loop-monitor_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/cli-surface-report.json --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/offline-contract-report.json --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/production-state-report.json --repo "$GITHUB_REPOSITORY"
           chmod 0755 dist/stable/agent-loop_Darwin_arm64
+          chmod 0755 dist/stable/agent-loop-monitor_Darwin_arm64
           dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" '.version == $version and .commit == $commit and .assignment_protocol == 1'
