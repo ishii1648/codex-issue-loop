@@ -128,9 +128,10 @@ func TestExecutionTransitions(t *testing.T) {
 		to   Status
 	}{
 		{name: "confirm claim", make: func() (Transition, error) { return ConfirmClaim(StatusClaiming) }, from: StatusClaiming, to: StatusClaimed},
-		{name: "start claimed worker", make: func() (Transition, error) { return StartClaimedWorker(StatusClaimed) }, from: StatusClaimed, to: StatusRunning},
-		{name: "start answered resume", make: func() (Transition, error) { return StartAnsweredResume(StatusResumePending) }, from: StatusResumePending, to: StatusRunning},
-		{name: "start retry", make: func() (Transition, error) { return StartRetry(StatusRetryWait) }, from: StatusRetryWait, to: StatusRunning},
+		{name: "start claimed worker", make: func() (Transition, error) { return StartClaimedWorker(StatusClaimed) }, from: StatusClaimed, to: StatusLaunching},
+		{name: "start answered resume", make: func() (Transition, error) { return StartAnsweredResume(StatusResumePending) }, from: StatusResumePending, to: StatusLaunching},
+		{name: "start retry", make: func() (Transition, error) { return StartRetry(StatusRetryWait) }, from: StatusRetryWait, to: StatusLaunching},
+		{name: "confirm worker process", make: func() (Transition, error) { return ConfirmWorkerStarted(StatusLaunching) }, from: StatusLaunching, to: StatusRunning},
 		{name: "interrupt claim", make: func() (Transition, error) { return InterruptExecution(StatusClaiming) }, from: StatusClaiming, to: StatusRetryWait},
 		{name: "interrupt running", make: func() (Transition, error) { return InterruptExecution(StatusRunning) }, from: StatusRunning, to: StatusRetryWait},
 	}
@@ -227,6 +228,7 @@ func TestStatusOperationalPredicates(t *testing.T) {
 		webhookRoutable bool
 	}{
 		{status: StatusClaiming, activeExecution: true, webhookRoutable: true},
+		{status: StatusLaunching, activeExecution: true, webhookRoutable: true},
 		{status: StatusRunning, activeExecution: true, webhookRoutable: true},
 		{status: StatusRetryWait, webhookRoutable: true},
 		{status: StatusNeedsInput, webhookTerminal: true, webhookRoutable: true},
@@ -256,6 +258,7 @@ func TestStatusSchedulingPredicates(t *testing.T) {
 	}{
 		{status: StatusUnset},
 		{status: StatusClaiming, pending: true, retainsLogs: true, preventsIdle: true, dispatches: true},
+		{status: StatusLaunching, pending: true, retainsLogs: true, preventsIdle: true, ineligible: true, dispatches: true},
 		{status: StatusRunning, retainsLogs: true, preventsIdle: true, ineligible: true},
 		{status: StatusNeedsInput, retainsLogs: true, ineligible: true},
 		{status: StatusAwaitingChecks, pending: true, retainsLogs: true, preventsIdle: true},

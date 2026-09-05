@@ -119,6 +119,11 @@ func normalizeV5SemanticStateObject(object map[string]json.RawMessage, migratedA
 			status = "resume_pending"
 			item["status"] = mustRaw(status)
 		}
+		if status == "running" && rawInt(item["worker_pid"]) == 0 && rawInt(item["worker_pgid"]) == 0 {
+			status = "launching"
+			item["status"] = mustRaw(status)
+			item["launch_source"] = mustRaw("retry_wait")
+		}
 		if kind, ok := legacyEffectKind(rawString(item["github_sync"])); ok {
 			runID := rawString(item["run_id"])
 			if runID == "" {
@@ -294,7 +299,7 @@ func legacyExecutionIdentity(raw json.RawMessage) (string, uint64, string, time.
 
 func legacyActiveExecutionStatus(status string) bool {
 	switch status {
-	case "claiming", "claimed", "running", "resolving_conflict":
+	case "claiming", "claimed", "launching", "running", "resolving_conflict":
 		return true
 	default:
 		return false
@@ -598,7 +603,7 @@ func legacySuspension(issue map[string]json.RawMessage, forceQuarantine bool) (s
 
 func legacyExecutionStatus(status string) bool {
 	switch status {
-	case "claiming", "claimed", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
+	case "claiming", "claimed", "launching", "running", "resume_pending", "environment_resume_pending", "resolving_conflict":
 		return true
 	default:
 		return false
@@ -616,7 +621,7 @@ func legacyScenarioRecoveryStatus(status string) bool {
 
 func legacyWorkspaceStatus(status string) bool {
 	switch status {
-	case "claimed", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending",
+	case "claimed", "launching", "running", "answer_claim_waiting", "resume_pending", "environment_resume_pending",
 		"publication_recovery_pending", "pull_request_checks_recovery_pending", "retry_wait", "needs_input",
 		"awaiting_checks", "awaiting_merge", "resolving_conflict":
 		return true

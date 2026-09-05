@@ -222,7 +222,7 @@ func startupRemoteInspectionRequired(snapshot state.Snapshot, item *state.Issue,
 		return true
 	}
 	switch item.Status {
-	case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusRunning, issuedomain.StatusResumePending, issuedomain.StatusAwaitingChecks, issuedomain.StatusAwaitingMerge, issuedomain.StatusResolvingConflict:
+	case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusLaunching, issuedomain.StatusRunning, issuedomain.StatusResumePending, issuedomain.StatusAwaitingChecks, issuedomain.StatusAwaitingMerge, issuedomain.StatusResolvingConflict:
 		return true
 	case issuedomain.StatusRetryWait:
 		return item.RetryAfter == nil || !item.RetryAfter.After(now)
@@ -350,7 +350,7 @@ func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg confi
 	}
 	if labels[cfg.RunningLabel] {
 		switch current.Status {
-		case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusRunning, issuedomain.StatusRetryWait, issuedomain.StatusResumePending, issuedomain.StatusAwaitingChecks, issuedomain.StatusAwaitingMerge, issuedomain.StatusResolvingConflict:
+		case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusLaunching, issuedomain.StatusRunning, issuedomain.StatusRetryWait, issuedomain.StatusResumePending, issuedomain.StatusAwaitingChecks, issuedomain.StatusAwaitingMerge, issuedomain.StatusResolvingConflict:
 			return true
 		}
 	}

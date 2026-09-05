@@ -33,6 +33,13 @@ func (f numberedFakeGitHub) Get(_ context.Context, cfg config.Config, number int
 	return gh.Issue{Number: number, Title: "Test", State: "OPEN", Labels: append([]string(nil), cfg.GitHub.ReadyLabels...)}, nil
 }
 
+func (f numberedFakeGitHub) Inspect(_ context.Context, cfg config.Config, number int, _ string) (gh.RemoteState, error) {
+	if f.remote != nil {
+		return *f.remote, nil
+	}
+	return gh.RemoteState{Issue: gh.Issue{Number: number, Title: "Test", State: "OPEN", Labels: []string{cfg.GitHub.RunningLabel}}}, nil
+}
+
 type countingGitHub struct {
 	*fakeGitHub
 	mu        sync.Mutex
@@ -1142,6 +1149,7 @@ func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *tes
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].Status = issuedomain.StatusRunning
+		snapshot.Issues["1"].WorkerPID, snapshot.Issues["1"].WorkerPGID = 123, 123
 		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
 		return nil
 	})
@@ -1165,7 +1173,8 @@ func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *tes
 		t.Fatalf("candidates=%v acknowledged=%v rest_gets=%d err=%v", candidates, acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil {
+	item := snapshot.Issues["1"]
+	if err != nil || item == nil || item.Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil {
 		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -1184,6 +1193,7 @@ func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testin
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].Status = issuedomain.StatusRunning
+		snapshot.Issues["1"].WorkerPID, snapshot.Issues["1"].WorkerPGID = 123, 123
 		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
 		return nil
 	})
@@ -1219,6 +1229,7 @@ func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 	}
 	_, err = loop.Store.Update("running_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"].Status = issuedomain.StatusRunning
+		snapshot.Issues["1"].WorkerPID, snapshot.Issues["1"].WorkerPGID = 123, 123
 		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
 		return nil
 	})
@@ -1249,7 +1260,8 @@ func TestAuthoritativeCollectionExitFencesLateWorkerCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err = loop.Store.Load()
-	if err != nil || snapshot.Issues["1"].Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil {
+	item := snapshot.Issues["1"]
+	if err != nil || item == nil || item.Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil {
 		t.Fatalf("late worker result changed authoritative state: issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -1280,15 +1292,24 @@ func (w *barrierPoolWorker) run(ctx context.Context, current state.Issue) (worke
 	}
 }
 
-func (w *barrierPoolWorker) Run(ctx context.Context, _ config.Config, _ gh.Issue, current state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+func (w *barrierPoolWorker) Run(ctx context.Context, cfg config.Config, _ gh.Issue, current state.Issue, _ string, started worker.Started) (worker.Result, error) {
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return w.run(ctx, current)
 }
 
-func (w *barrierPoolWorker) Resume(ctx context.Context, _ config.Config, _ gh.Issue, current state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+func (w *barrierPoolWorker) Resume(ctx context.Context, cfg config.Config, _ gh.Issue, current state.Issue, _ string, started worker.Started) (worker.Result, error) {
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return w.run(ctx, current)
 }
 
-func (w *blockingPoolWorker) Run(ctx context.Context, _ config.Config, _ gh.Issue, current state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+func (w *blockingPoolWorker) Run(ctx context.Context, cfg config.Config, _ gh.Issue, current state.Issue, _ string, started worker.Started) (worker.Result, error) {
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	w.mu.Lock()
 	w.active++
 	if w.active > w.maximum {
@@ -1678,7 +1699,19 @@ func TestWorkerProcessCallbackFencesRunAndPersistsProcessGroup(t *testing.T) {
 		item.Worktree = loop.Config.RepoPath
 		item.Branch = "codex/issue-1-test"
 		item.Workspace = fixtureWorkspace(loop, item.Worktree, item.Branch)
-		return nil
+		claimed, transitionErr := issuedomain.ConfirmClaim(item.Status)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if err := state.ApplyIssueTransition(item, claimed); err != nil {
+			return err
+		}
+		launching, transitionErr := issuedomain.StartClaimedWorker(item.Status)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		item.LaunchSource = item.Status
+		return state.ApplyIssueTransition(item, launching)
 	})
 	if err != nil {
 		t.Fatal(err)

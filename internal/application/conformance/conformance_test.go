@@ -248,13 +248,22 @@ func TestFaultDurableTransactionFiveCrashBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = store.Update("worker_started", 1, owner.RunID, nil, func(snapshot *state.Snapshot) error {
-				return state.ApplyIssueTransition(snapshot.Issues["1"], start)
+				item := snapshot.Issues["1"]
+				item.LaunchSource = item.Status
+				return state.ApplyIssueTransition(item, start)
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			base, err := store.Update("worker_process_started", 1, owner.RunID, map[string]int{"pid": 4242, "pgid": 4242}, func(snapshot *state.Snapshot) error {
 				item := snapshot.Issues["1"]
+				started, transitionErr := issuedomain.ConfirmWorkerStarted(item.Status)
+				if transitionErr != nil {
+					return transitionErr
+				}
+				if err := state.ApplyIssueTransition(item, started); err != nil {
+					return err
+				}
 				item.WorkerPID, item.WorkerPGID = 4242, 4242
 				return nil
 			})

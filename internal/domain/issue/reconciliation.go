@@ -302,6 +302,13 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		} else if !observed.Ready && !observed.Running {
 			return BlockReconciliation(decision, "claim labels were removed manually")
 		}
+	case StatusLaunching:
+		now := observed.Now
+		decision.Status, decision.RetryAt = StatusRetryWait, &now
+		decision.LastError, decision.Reason = "worker launch interrupted before process identity was saved", "dead worker launch scheduled for retry"
+		if !observed.Running && observed.Workspace.Valid {
+			decision.MarkRunning = true
+		}
 	case StatusRunning, StatusClaimed:
 		now := observed.Now
 		decision.Status, decision.RetryAt = StatusRetryWait, &now
@@ -331,7 +338,7 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 			decision.MarkRunning = true
 		}
 	}
-	if len(open) == 1 && (current.Status == StatusRunning || current.Status == StatusClaimed) {
+	if len(open) == 1 && (current.Status == StatusLaunching || current.Status == StatusRunning || current.Status == StatusClaimed) {
 		decision.Reason = "open Pull Request discovered and dead worker scheduled for retry"
 	}
 	return decision

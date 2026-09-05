@@ -25,6 +25,7 @@ const (
 	StatusUnset             Status = ""
 	StatusClaiming          Status = "claiming"
 	StatusClaimed           Status = "claimed"
+	StatusLaunching         Status = "launching"
 	StatusRunning           Status = "running"
 	StatusResumePending     Status = "resume_pending"
 	StatusRetryWait         Status = "retry_wait"
@@ -38,7 +39,7 @@ const (
 )
 
 var allStatuses = [...]Status{
-	StatusUnset, StatusClaiming, StatusClaimed, StatusRunning,
+	StatusUnset, StatusClaiming, StatusClaimed, StatusLaunching, StatusRunning,
 	StatusResumePending, StatusRetryWait,
 	StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 	StatusResolvingConflict, StatusBlocked, StatusFailed, StatusCompleted,
@@ -88,7 +89,7 @@ func (s Status) WorktreeRetentionClass() WorktreeRetentionClass {
 
 func (s Status) RequiresWorkspaceProvenance() bool {
 	switch s {
-	case StatusClaimed, StatusRunning, StatusResumePending,
+	case StatusClaimed, StatusLaunching, StatusRunning, StatusResumePending,
 		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 		StatusResolvingConflict:
 		return true
@@ -99,7 +100,7 @@ func (s Status) RequiresWorkspaceProvenance() bool {
 
 func (s Status) RequiresActiveExecution() bool {
 	switch s {
-	case StatusClaiming, StatusClaimed, StatusRunning, StatusResolvingConflict:
+	case StatusClaiming, StatusClaimed, StatusLaunching, StatusRunning:
 		return true
 	default:
 		return false
@@ -112,7 +113,7 @@ func (s Status) TerminalForWebhook() bool {
 
 func (s Status) WebhookRoutable() bool {
 	switch s {
-	case StatusClaiming, StatusClaimed, StatusRunning, StatusResumePending,
+	case StatusClaiming, StatusClaimed, StatusLaunching, StatusRunning, StatusResumePending,
 		StatusRetryWait, StatusNeedsInput, StatusAwaitingChecks, StatusAwaitingMerge,
 		StatusResolvingConflict:
 		return true
@@ -125,7 +126,7 @@ func (s Status) WebhookRoutable() bool {
 // repository's single active-execution scheduler gate.
 func (s Status) PendingDispatch() bool {
 	switch s {
-	case StatusClaiming, StatusResumePending,
+	case StatusClaiming, StatusLaunching, StatusResumePending,
 		StatusRetryWait, StatusAwaitingChecks, StatusAwaitingMerge, StatusResolvingConflict:
 		return true
 	default:
@@ -152,7 +153,7 @@ func (s Status) IneligibleForAdmission() bool {
 		return true
 	}
 	switch s {
-	case StatusRunning, StatusClaimed, StatusNeedsInput,
+	case StatusRunning, StatusLaunching, StatusClaimed, StatusNeedsInput,
 		StatusResumePending, StatusResolvingConflict:
 		return true
 	default:
@@ -162,7 +163,7 @@ func (s Status) IneligibleForAdmission() bool {
 
 func (s Status) DispatchesWorker() bool {
 	switch s {
-	case StatusClaiming, StatusResumePending, StatusRetryWait, StatusResolvingConflict:
+	case StatusClaiming, StatusLaunching, StatusResumePending, StatusRetryWait, StatusResolvingConflict:
 		return true
 	default:
 		return false

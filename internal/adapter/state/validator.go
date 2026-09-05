@@ -117,6 +117,18 @@ func validateIssueAggregate(issue *Issue) error {
 	if issue.WorkerPID > 0 && (issue.RunID == "" || !issue.Status.RequiresActiveExecution()) {
 		return fmt.Errorf("worker process is not owned by an executing lifecycle")
 	}
+	if issue.Status == issuedomain.StatusRunning && issue.WorkerPID == 0 {
+		return fmt.Errorf("running worker process identity is missing")
+	}
+	if issue.Status == issuedomain.StatusLaunching {
+		switch issue.LaunchSource {
+		case issuedomain.StatusClaimed, issuedomain.StatusResumePending, issuedomain.StatusRetryWait, issuedomain.StatusResolvingConflict:
+		default:
+			return fmt.Errorf("launch source %q is invalid", issue.LaunchSource)
+		}
+	} else if issue.LaunchSource != issuedomain.StatusUnset {
+		return fmt.Errorf("launch source is retained outside launching state")
+	}
 	if issue.Session != nil {
 		if strings.TrimSpace(issue.Session.Backend) == "" || strings.TrimSpace(issue.Session.ID) == "" || issue.SessionID != issue.Session.ID {
 			return fmt.Errorf("worker session identity is incomplete or inconsistent")

@@ -79,7 +79,7 @@ RepositoryState
 └── state_revision
 ```
 
-`active_execution`は並列resource leaseではない。process終了、再起動、遅延結果の前後で「どの実行だけが現在状態を変更できるか」を示す単一のfencing identityである。
+`active_execution`は並列resource leaseではない。process終了、再起動、遅延結果の前後で「どの実行だけが現在状態を変更できるか」を示す単一のfencing identityである。worker起動時はgeneration付きの`launching`がこれを所有し、started callbackが同じgenerationとPID/PGIDを一つのtransactionで保存したときだけ`running`へ遷移する。
 
 repository rootで検証する不変条件は、identity、version、revision、transaction整合性、active executionが0件または1件であることに限定する。個別Issueの内容を理由にroot全体を読めなくする設計を避ける。
 
@@ -233,7 +233,8 @@ internal/
 - active execution以外のrunまたはgenerationは状態と外部公開を変更できない。
 - Issue状態は共通lifecycle decision以外から変更しない。
 - Issue-local障害はrepository modeを`blocked`にしない。
-- workerを実行していないIssueは実行枠を消費しない。
+- `launching`はworker processを持たない予約状態として一時的に実行枠を所有できるが、失敗またはreconciliationで実行枠を解放する。
+- `running`は同じactive execution generationに属するPID/PGIDを必ず持つ。
 - authorを検証できないIssueをworkerへ渡さない。
 - untrusted Issueが後続のtrusted Issueを妨げない。
 - 未回答request、workspace、publication identity、quarantine evidenceを暗黙に削除しない。

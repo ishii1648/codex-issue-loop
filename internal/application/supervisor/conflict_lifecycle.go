@@ -144,6 +144,13 @@ func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, p
 }
 
 func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue) error {
+	if current.Status == issuedomain.StatusResolvingConflict {
+		resumed, err := l.ensurePendingExecution(current)
+		if err != nil {
+			return err
+		}
+		current = resumed
+	}
 	if current.ConflictRecovery == nil {
 		return l.failConflictRecovery(ctx, current, "durable conflict recovery context is missing")
 	}
@@ -193,6 +200,9 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 			return transferErr
 		}
 		payload["execution_identity"] = identity
+		if item.Status != issuedomain.StatusLaunching {
+			item.LaunchSource = item.Status
+		}
 		if err := state.ApplyIssueTransition(item, attemptTransition); err != nil {
 			return err
 		}
@@ -223,9 +233,20 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 }
 
 func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current state.Issue, result worker.Result, runErr error) error {
+	fresh, freshErr := l.issueState(current.Number)
+	if freshErr == nil && fresh.RunID == current.RunID && fresh.Generation == current.Generation {
+		current = fresh
+	}
 	var workspaceErr *workerWorkspaceError
 	if errors.As(runErr, &workspaceErr) {
+		if current.Status == issuedomain.StatusLaunching && !workspaceErr.terminal {
+			return l.scheduleConflictRetry(ctx, current, workspaceErr.Error())
+		}
 		return l.blockWorkerWorkspace(ctx, current, workspaceErr)
+	}
+	var launchErr *launchValidationError
+	if errors.As(runErr, &launchErr) {
+		return l.handleLaunchValidationFailure(ctx, current, launchErr)
 	}
 	profile := result.ExecutionProfile
 	if profile == "" {
@@ -235,8 +256,6 @@ func (l *Loop) handleConflictResult(ctx context.Context, issue gh.Issue, current
 		"status": result.Status, "summary": result.Summary, "execution_profile": profile, "tests": result.Tests,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		item.WorkerPID = 0
-		item.WorkerPGID = 0
 		item.ExecutionProfile = profile
 		if result.Status == "completed" && item.ConflictRecovery != nil {
 			item.ConflictRecovery.Verification = make([]state.ConflictVerification, 0, len(result.Tests))
