@@ -113,8 +113,13 @@ func TestQueueHealthDefersOnlyForValidRepositoryAssignmentMaintenance(t *testing
 	l := layout.Layout{Root: root}
 	entry := registry.Entry{RepoID: "repo"}
 	health := queueHealth{OK: false, Code: "mailbox_unbounded"}
-	if item := diagnoseQueueProgress(l, entry, health, "mailbox=100"); item.OK || item.Code != "WEBHOOK_QUEUE_STALLED" {
+	item := diagnoseQueueProgress(l, entry, health, "mailbox=100")
+	if item.OK || item.Code != "WEBHOOK_QUEUE_STALLED" {
 		t.Fatalf("queue failure was hidden without maintenance: %+v", item)
+	}
+	if len(item.Remediations) != 1 || !strings.Contains(item.Remediations[0].Summary, "state.active_execution") ||
+		!strings.Contains(item.Remediations[0].Summary, "Issue-local suspension") || strings.Contains(item.Remediations[0].Summary, "active lease") {
+		t.Fatalf("queue remediation does not use current execution and suspension terms: %+v", item.Remediations)
 	}
 	fencePath := l.DeliveryAssignmentFencePath(entry.RepoID)
 	if err := os.MkdirAll(filepath.Dir(fencePath), 0o700); err != nil {

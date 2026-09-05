@@ -523,7 +523,7 @@ func diagnoseQueueProgress(l layout.Layout, entry registry.Entry, health queueHe
 	}
 	return failedDiagnostic("WEBHOOK_QUEUE_STALLED", "repository", entry.RepoID,
 		"ready Issueが2 local reconciliation interval以内にclaimされていません", detail,
-		instruction("status --jsonのbroker.queue_healthと阻害中のactive leaseを確認してください"))
+		instruction("status --jsonのbroker.queue_health、state.active_execution、Issue-local suspensionを確認してください"))
 }
 
 func diagnoseFormatters(ctx context.Context, entry registry.Entry, cfg config.Config) []diagnostic {
@@ -578,9 +578,8 @@ func diagnoseWorkerBackend(ctx context.Context, entry registry.Entry, cfg config
 	}
 	diagnostics := []diagnostic{}
 	if current, err := exec.LookPath(cfg.Worker.EffectiveCommand()); err == nil {
-		absolute, _ := filepath.Abs(current)
-		if len(entry.Commands) > 0 && absolute != path {
-			diagnostics = append(diagnostics, failedDiagnostic("WORKER_COMMAND_PATH_DRIFT", "repository", entry.RepoID, "登録後にworker command pathが変化しました", fmt.Sprintf("registered=%s current=%s", path, absolute),
+		if len(entry.Commands) > 0 && !registry.SameExecutable(current, path) {
+			diagnostics = append(diagnostics, failedDiagnostic("WORKER_COMMAND_PATH_DRIFT", "repository", entry.RepoID, "登録後にworker command pathが変化しました", fmt.Sprintf("registered=%s current=%s", path, current),
 				command("確認後にcommand pathを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath))))
 		}
 	}

@@ -100,19 +100,23 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		if resolveErr != nil {
 			return Entry{}, fmt.Errorf("resolve %s command %q: %w", name, command, resolveErr)
 		}
-		absolute, resolveErr := filepath.Abs(path)
-		if resolveErr != nil {
-			return Entry{}, resolveErr
+		var absolute string
+		if name == "gofmt" {
+			formatterCtx, cancelFormatter := context.WithTimeout(context.Background(), 5*time.Second)
+			absolute, resolveErr = resolveGofmt(formatterCtx, path)
+			cancelFormatter()
+			if resolveErr != nil {
+				return Entry{}, fmt.Errorf("verify gofmt capability: %w", resolveErr)
+			}
+		} else {
+			commandCtx, cancelCommand := context.WithTimeout(context.Background(), 5*time.Second)
+			absolute, resolveErr = resolveServiceCommand(commandCtx, name, path, entry.EnvironmentPath, r)
+			cancelCommand()
+			if resolveErr != nil {
+				return Entry{}, fmt.Errorf("verify %s command: %w", name, resolveErr)
+			}
 		}
 		entry.Commands[name] = absolute
-	}
-	if cfg.Formatters.Go.Enabled {
-		formatterCtx, cancelFormatter := context.WithTimeout(context.Background(), 5*time.Second)
-		formatterErr := compat.ProbeGofmt(formatterCtx, entry.Commands["gofmt"])
-		cancelFormatter()
-		if formatterErr != nil {
-			return Entry{}, fmt.Errorf("verify gofmt capability: %w", formatterErr)
-		}
 	}
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
 	entry.WorkerVersion = compat.ProbeBackend(probeCtx, entry.WorkerBackend, entry.Commands[entry.WorkerBackend]).Version
@@ -130,6 +134,150 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 		return Entry{}, err
 	}
 	return entry, nil
+}
+
+func resolveServiceCommand(ctx context.Context, name, discovered, environmentPath string, existing Registry) (string, error) {
+	candidate, candidateErr := canonicalExecutable(discovered)
+	if candidateErr == nil {
+		candidateErr = probeServiceCommand(ctx, name, candidate, environmentPath)
+		if candidateErr == nil {
+			return candidate, nil
+		}
+	}
+	absolute, absoluteErr := absoluteExecutable(discovered)
+	if absoluteErr == nil && absolute != candidate {
+		if err := probeServiceCommand(ctx, name, absolute, environmentPath); err == nil {
+			return absolute, nil
+		}
+	}
+	if managed, err := resolveAquaCommand(ctx, name, environmentPath); err == nil {
+		return managed, nil
+	}
+
+	ids := make([]string, 0, len(existing.Repos))
+	for id := range existing.Repos {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		previous := existing.Repos[id].Commands[name]
+		if previous == "" {
+			continue
+		}
+		fallback, err := canonicalExecutable(previous)
+		if err != nil {
+			continue
+		}
+		if err := probeServiceCommand(ctx, name, fallback, environmentPath); err == nil {
+			return fallback, nil
+		}
+	}
+	return "", fmt.Errorf("discovered path is not self-contained in the LaunchAgent environment (%v); put a direct executable ahead of environment-dependent shims in PATH", candidateErr)
+}
+
+func resolveAquaCommand(ctx context.Context, name, environmentPath string) (string, error) {
+	aquaPath, err := exec.LookPath("aqua")
+	if err != nil {
+		return "", err
+	}
+	output, err := exec.CommandContext(ctx, aquaPath, "which", name).CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(output))
+	if value == "" || strings.ContainsAny(value, "\r\n") || !filepath.IsAbs(value) {
+		return "", fmt.Errorf("aqua which returned an invalid path")
+	}
+	candidate, err := canonicalExecutable(value)
+	if err != nil {
+		return "", err
+	}
+	if err := probeServiceCommand(ctx, name, candidate, environmentPath); err != nil {
+		return "", err
+	}
+	return candidate, nil
+}
+
+func probeServiceCommand(ctx context.Context, name, path, environmentPath string) error {
+	if name == "launchctl" {
+		return nil
+	}
+	command := exec.CommandContext(ctx, path, "--version")
+	command.Env = []string{"PATH=" + environmentPath}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		command.Env = append(command.Env, "HOME="+home)
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("runtime-equivalent version probe: %s", strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func resolveGofmt(ctx context.Context, discovered string) (string, error) {
+	candidate, candidateErr := canonicalExecutable(discovered)
+	if candidateErr == nil {
+		if probeErr := compat.ProbeGofmt(ctx, candidate); probeErr == nil {
+			return candidate, nil
+		} else {
+			candidateErr = probeErr
+		}
+	}
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and Go toolchain discovery failed: %w", candidateErr, err)
+	}
+	output, err := exec.CommandContext(ctx, goPath, "env", "GOROOT").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and resolve GOROOT: %w: %s", candidateErr, err, strings.TrimSpace(string(output)))
+	}
+	root := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and GOROOT is not absolute", candidateErr)
+	}
+	toolchainFormatter, err := canonicalExecutable(filepath.Join(root, "bin", "gofmt"))
+	if err != nil {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and resolve toolchain gofmt: %w", candidateErr, err)
+	}
+	if err := compat.ProbeGofmt(ctx, toolchainFormatter); err != nil {
+		return "", fmt.Errorf("registered path is not self-contained (%v) and toolchain gofmt probe failed: %w", candidateErr, err)
+	}
+	return toolchainFormatter, nil
+}
+
+func canonicalExecutable(path string) (string, error) {
+	absolute, err := absoluteExecutable(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return absoluteExecutable(resolved)
+}
+
+func absoluteExecutable(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return "", fmt.Errorf("command is not an executable regular file: %s", absolute)
+	}
+	return absolute, nil
+}
+
+// SameExecutable reports identity after resolving both paths to executable
+// regular files; invalid or missing paths never compare equal.
+func SameExecutable(first, second string) bool {
+	firstResolved, firstErr := canonicalExecutable(first)
+	secondResolved, secondErr := canonicalExecutable(second)
+	return firstErr == nil && secondErr == nil && firstResolved == secondResolved
 }
 
 func (s Store) Remove(repoID string) error {

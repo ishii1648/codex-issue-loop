@@ -121,8 +121,8 @@ func (s Status) WebhookRoutable() bool {
 	}
 }
 
-// PendingDispatch is only one scheduler gate; retry deadlines and resource
-// admission still apply.
+// PendingDispatch is only the lifecycle-status gate; dispatch also requires the
+// repository's single active-execution scheduler gate.
 func (s Status) PendingDispatch() bool {
 	switch s {
 	case StatusClaiming, StatusResumePending,

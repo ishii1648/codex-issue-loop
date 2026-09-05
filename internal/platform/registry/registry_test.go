@@ -35,8 +35,12 @@ func TestFaultRegistryAddResolveRemoveAndAmbiguity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	canonicalBinDir, err := filepath.EvalSymlinks(binDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, command := range entry.Commands {
-		if !filepath.IsAbs(command) || !strings.HasPrefix(command, binDir+string(filepath.Separator)) {
+		if !filepath.IsAbs(command) || !strings.HasPrefix(command, canonicalBinDir+string(filepath.Separator)) {
 			t.Fatalf("command %s=%q", name, command)
 		}
 	}
@@ -104,7 +108,11 @@ func TestRegistryResolvesSelectedBackendCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entry.WorkerBackend != "opencode" || entry.Commands["opencode"] != filepath.Join(binDir, "opencode") || entry.Commands["codex"] != "" {
+	expectedOpenCode, err := filepath.EvalSymlinks(filepath.Join(binDir, "opencode"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.WorkerBackend != "opencode" || entry.Commands["opencode"] != expectedOpenCode || entry.Commands["codex"] != "" {
 		t.Fatalf("entry=%+v", entry)
 	}
 }
@@ -137,7 +145,8 @@ func TestRegistryRegistersGofmtOnlyWhenEnabled(t *testing.T) {
 	}
 	cfg.Formatters.Go.Enabled = true
 	enabled, err := store.Add(cfg)
-	if err != nil || enabled.Commands["gofmt"] != filepath.Join(binDir, "gofmt") {
+	expectedFormatter, resolveErr := filepath.EvalSymlinks(filepath.Join(binDir, "gofmt"))
+	if err != nil || resolveErr != nil || enabled.Commands["gofmt"] != expectedFormatter {
 		t.Fatalf("enabled formatter registration=%+v err=%v", enabled.Commands, err)
 	}
 	if err := os.WriteFile(filepath.Join(binDir, "gofmt"), []byte("#!/bin/sh\nprintf 'wrong\\n'\n"), 0o700); err != nil {
@@ -145,6 +154,216 @@ func TestRegistryRegistersGofmtOnlyWhenEnabled(t *testing.T) {
 	}
 	if _, err := store.Add(cfg); err == nil || !strings.Contains(err.Error(), "gofmt capability") {
 		t.Fatalf("invalid gofmt capability registered: %v", err)
+	}
+}
+
+func TestRegistryPinsToolchainGofmtWhenDiscoveredCommandNeedsUserEnvironment(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	toolchainBin := filepath.Join(root, "toolchain", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(toolchainBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "gh", "codex", "launchctl"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "gofmt"), []byte("#!/bin/sh\ntest \"$AQUA_GLOBAL_CONFIG\" != \"\" || exit 1\nprintf 'package probe\\n\\nfunc f() {}\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	goCommand := "#!/bin/sh\ntest \"$1 $2\" = \"env GOROOT\" || exit 1\nprintf '%s\\n' '" + filepath.Join(root, "toolchain") + "'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(goCommand), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	toolchainGofmt := filepath.Join(toolchainBin, "gofmt")
+	if err := os.WriteFile(toolchainGofmt, []byte("#!/bin/sh\nprintf 'package probe\\n\\nfunc f() {}\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("AQUA_GLOBAL_CONFIG", filepath.Join(root, "aqua.yaml"))
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testRegistryConfig(t, repo, "owner/repo")
+	cfg.Formatters.Go.Enabled = true
+	entry, err := (Store{Path: filepath.Join(root, "registry.json")}).Add(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFormatter, err := filepath.EvalSymlinks(toolchainGofmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Commands["gofmt"] != expectedFormatter {
+		t.Fatalf("registered gofmt=%q, want self-contained toolchain path %q", entry.Commands["gofmt"], expectedFormatter)
+	}
+}
+
+func TestRegistryKeepsSelfContainedCommandWhenDiscoveredPathNeedsOperatorEnvironment(t *testing.T) {
+	root := t.TempDir()
+	directBin := filepath.Join(root, "direct")
+	shimBin := filepath.Join(root, "shims")
+	for _, dir := range []string{directBin, shimBin} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"git", "gh", "codex", "launchctl"} {
+		if err := os.WriteFile(filepath.Join(directBin, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		shim := "#!/bin/sh\ntest \"$OPERATOR_ONLY\" = enabled || exit 1\nexit 0\n"
+		if err := os.WriteFile(filepath.Join(shimBin, name), []byte(shim), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := Store{Path: filepath.Join(root, "registry.json")}
+	firstRepo := filepath.Join(root, "first")
+	secondRepo := filepath.Join(root, "second")
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if err := os.Mkdir(repo, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", directBin)
+	first, err := store.Add(testRegistryConfig(t, firstRepo, "owner/first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimBin)
+	t.Setenv("OPERATOR_ONLY", "enabled")
+	second, err := store.Add(testRegistryConfig(t, secondRepo, "owner/second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "gh", "codex"} {
+		if second.Commands[name] != first.Commands[name] {
+			t.Fatalf("command %s=%q, want retained self-contained path %q", name, second.Commands[name], first.Commands[name])
+		}
+	}
+}
+
+func TestRegistryPinsAquaManagedCommandToResolvedExecutable(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	managedBin := filepath.Join(root, "managed")
+	for _, dir := range []string{binDir, managedBin} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"git", "codex", "launchctl"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte("#!/bin/sh\ntest \"$OPERATOR_ONLY\" = enabled || exit 1\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	managedGH := filepath.Join(managedBin, "gh")
+	if err := os.WriteFile(managedGH, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	aqua := "#!/bin/sh\ntest \"$1 $2\" = \"which gh\" || exit 1\nprintf '%s\\n' '" + managedGH + "'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "aqua"), []byte(aqua), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("OPERATOR_ONLY", "enabled")
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (Store{Path: filepath.Join(root, "registry.json")}).Add(testRegistryConfig(t, repo, "owner/repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := filepath.EvalSymlinks(managedGH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Commands["gh"] != expected {
+		t.Fatalf("registered gh=%q, want Aqua-managed executable %q", entry.Commands["gh"], expected)
+	}
+}
+
+func TestRegistryPreservesRuntimeProbedMulticallSymlink(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "codex", "launchctl"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	multicall := filepath.Join(root, "offline-contract-stub")
+	if err := os.WriteFile(multicall, []byte("#!/bin/sh\ntest \"${0##*/} $1\" = \"gh --version\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ghLink := filepath.Join(binDir, "gh")
+	if err := os.Symlink(multicall, ghLink); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (Store{Path: filepath.Join(root, "registry.json")}).Add(testRegistryConfig(t, repo, "owner/repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Commands["gh"] != ghLink {
+		t.Fatalf("registered gh=%q, want runtime-probed multicall link %q", entry.Commands["gh"], ghLink)
+	}
+}
+
+func TestRegistryRejectsEnvironmentDependentCommandWithoutSafeFallback(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "gh", "codex", "launchctl"} {
+		body := "#!/bin/sh\nexit 0\n"
+		if name == "gh" {
+			body = "#!/bin/sh\ntest \"$OPERATOR_ONLY\" = enabled || exit 1\nexit 0\n"
+		}
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("OPERATOR_ONLY", "enabled")
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (Store{Path: filepath.Join(root, "registry.json")}).Add(testRegistryConfig(t, repo, "owner/repo"))
+	if err == nil || !strings.Contains(err.Error(), "direct executable") {
+		t.Fatalf("environment-dependent command was accepted: %v", err)
+	}
+}
+
+func TestSameExecutableAcceptsSymlinkToRegisteredCanonicalPath(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "codex-real")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "codex")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if !SameExecutable(link, target) {
+		t.Fatal("symlink and canonical target were reported as different executables")
 	}
 }
 

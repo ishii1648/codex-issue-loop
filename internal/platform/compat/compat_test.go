@@ -126,6 +126,15 @@ func TestGofmtCapabilityProbe(t *testing.T) {
 	}
 }
 
+func TestGofmtCapabilityProbeDoesNotInheritOperatorEnvironment(t *testing.T) {
+	formatter := filepath.Join(t.TempDir(), "gofmt")
+	writeExecutable(t, formatter, "#!/bin/sh\ntest \"$FORMATTER_OPERATOR_ONLY\" = enabled || exit 1\nprintf 'package probe\\n\\nfunc f() {}\\n'\n")
+	t.Setenv("FORMATTER_OPERATOR_ONLY", "enabled")
+	if err := ProbeGofmt(context.Background(), formatter); err == nil {
+		t.Fatal("environment-dependent formatter passed the runtime-equivalent probe")
+	}
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {

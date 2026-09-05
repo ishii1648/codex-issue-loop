@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -377,6 +378,142 @@ func TestIssueResolveCancelClearsPendingAttentionWithoutExecution(t *testing.T) 
 	}
 }
 
+func TestIssueResolveCancelPreservesCompetingActiveExecution(t *testing.T) {
+	fixture := newIssueResolutionFixture(t, 185, "OPEN", nil)
+	fixture.block(t, issuedomain.StatusRunning, "environment unavailable", true, "")
+	if _, _, err := fixture.store.StartExecution(state.ExecutionStart{
+		IssueNumber: 252, Title: "competing fixture", RunID: "run_252", BaseSHA: fixture.base,
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	planArgs := []string{"issue", "plan", "--repo", fixture.repo, "--issue", "185", "--json"}
+	if code := a.Run(context.Background(), planArgs); code != 0 {
+		t.Fatalf("plan code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	var report issuePlanReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	cancelPlan := findActionPlan(t, report.Actions, issuedomain.ResolutionCancel)
+	resumePlan := findActionPlan(t, report.Actions, issuedomain.ResolutionResume)
+	if !report.ReadOnly || !cancelPlan.Eligible || resumePlan.Eligible ||
+		!containsReason(resumePlan.Reasons, "repository active execution is occupied by Issue #252") {
+		t.Fatalf("plan=%+v", report)
+	}
+
+	out.Reset()
+	stderr.Reset()
+	resumeArgs := []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "185", "--action", "resume", "--json"}
+	if code := a.Run(context.Background(), resumeArgs); code == 0 ||
+		!strings.Contains(stderr.String(), "repository active execution is occupied by Issue #252") {
+		t.Fatalf("occupied resume resolved: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	afterResume, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterResume.StateRevision != before.StateRevision || !reflect.DeepEqual(afterResume.ActiveExecution, before.ActiveExecution) ||
+		!reflect.DeepEqual(afterResume.Issues["252"], before.Issues["252"]) ||
+		!reflect.DeepEqual(afterResume.Issues["185"].Suspension, before.Issues["185"].Suspension) {
+		t.Fatalf("rejected resume changed state: before=%+v after=%+v", before, afterResume)
+	}
+
+	out.Reset()
+	stderr.Reset()
+	resolveArgs := []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "185", "--action", "cancel", "--json"}
+	if code := a.Run(context.Background(), resolveArgs); code != 0 {
+		t.Fatalf("resolve code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	after, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after.ActiveExecution, before.ActiveExecution) ||
+		!reflect.DeepEqual(after.Issues["252"], before.Issues["252"]) {
+		t.Fatalf("competing execution changed: before=%+v/%+v after=%+v/%+v",
+			before.ActiveExecution, before.Issues["252"], after.ActiveExecution, after.Issues["252"])
+	}
+	item := after.Issues["185"]
+	if item.Status != issuedomain.StatusBlocked || item.Suspension == nil ||
+		item.Suspension.Status != issuedomain.SuspensionResolved || item.Suspension.Resolution != issuedomain.ResolutionCancel {
+		t.Fatalf("canceled Issue=%+v", item)
+	}
+}
+
+func TestIssuePlanAndResolveRetryStageFailClosedWithCompetingActiveExecution(t *testing.T) {
+	fixture := newIssueResolutionFixture(t, 186, "OPEN", nil)
+	fixture.block(t, issuedomain.StatusAwaitingChecks, "checks unavailable", false, "https://example.test/pull/186")
+	fixture.rewritePullRequests(t, []map[string]any{{
+		"number": 186, "url": "https://example.test/pull/186", "state": "OPEN", "isDraft": false,
+		"mergedAt": nil, "headRefName": fixture.branch, "baseRefName": "main", "headRefOid": fixture.head,
+		"mergeCommit": nil, "headRepository": map[string]any{"name": "repo"},
+		"headRepositoryOwner": map[string]any{"login": "owner"}, "mergeStateStatus": "CLEAN", "statusCheckRollup": []any{},
+	}})
+
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	planArgs := []string{"issue", "plan", "--repo", fixture.repo, "--issue", "186", "--json"}
+	if code := a.Run(context.Background(), planArgs); code != 0 {
+		t.Fatalf("initial plan code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	var initialReport issuePlanReport
+	if err := json.Unmarshal(out.Bytes(), &initialReport); err != nil {
+		t.Fatal(err)
+	}
+	if plan := findActionPlan(t, initialReport.Actions, issuedomain.ResolutionRetryStage); !plan.Eligible {
+		t.Fatalf("retry-stage fixture is not initially eligible: %+v", plan)
+	}
+
+	if _, _, err := fixture.store.StartExecution(state.ExecutionStart{
+		IssueNumber: 253, Title: "competing fixture", RunID: "run_253", BaseSHA: fixture.base,
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), planArgs); code != 0 {
+		t.Fatalf("occupied plan code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	var occupiedReport issuePlanReport
+	if err := json.Unmarshal(out.Bytes(), &occupiedReport); err != nil {
+		t.Fatal(err)
+	}
+	plan := findActionPlan(t, occupiedReport.Actions, issuedomain.ResolutionRetryStage)
+	if plan.Eligible || !containsReason(plan.Reasons, "repository active execution is occupied by Issue #253") {
+		t.Fatalf("occupied retry-stage plan=%+v", plan)
+	}
+
+	out.Reset()
+	stderr.Reset()
+	resolveArgs := []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "186", "--action", "retry-stage", "--json"}
+	if code := a.Run(context.Background(), resolveArgs); code == 0 ||
+		!strings.Contains(stderr.String(), "repository active execution is occupied by Issue #253") {
+		t.Fatalf("occupied retry-stage resolved: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	after, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.StateRevision != before.StateRevision || !reflect.DeepEqual(after.ActiveExecution, before.ActiveExecution) ||
+		!reflect.DeepEqual(after.Issues["253"], before.Issues["253"]) ||
+		!reflect.DeepEqual(after.Issues["186"].Suspension, before.Issues["186"].Suspension) {
+		t.Fatalf("rejected retry-stage changed state: before=%+v after=%+v", before, after)
+	}
+}
+
 type issueResolutionFixture struct {
 	repo, branch, worktree, runID, base, head string
 	l                                         layout.Layout
@@ -495,6 +632,10 @@ func (f *issueResolutionFixture) writeGH(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'gh version 2.69.0\n'
+  exit 0
+fi
 case "$1 $2" in
   "issue view")
     case "$*" in *--jq*) exit 0 ;; *) printf '%%s\n' '%s' ;; esac ;;
@@ -536,6 +677,26 @@ func actionEligibility(actions []issueActionPlan, target issuedomain.ResolutionA
 	for _, action := range actions {
 		if action.Action == target {
 			return action.Eligible
+		}
+	}
+	return false
+}
+
+func findActionPlan(t *testing.T, actions []issueActionPlan, target issuedomain.ResolutionAction) issueActionPlan {
+	t.Helper()
+	for _, action := range actions {
+		if action.Action == target {
+			return action
+		}
+	}
+	t.Fatalf("action %s is missing from plan", target)
+	return issueActionPlan{}
+}
+
+func containsReason(reasons []string, target string) bool {
+	for _, reason := range reasons {
+		if reason == target {
+			return true
 		}
 	}
 	return false

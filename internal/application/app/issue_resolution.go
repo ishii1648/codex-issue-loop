@@ -187,7 +187,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 			resultSHA256 = fmt.Sprintf("%x", sha256.Sum256(encoded))
 		}
 	}
-	actions := plannedIssueActions(cfg, item, workerLive, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, pending, remote, remoteErr, resultErr)
+	actions := plannedIssueActions(cfg, item, snapshot.ActiveExecution, workerLive, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, pending, remote, remoteErr, resultErr)
 	after, readErr := os.ReadFile(store.StatePath())
 	readOnly := readErr == nil && bytes.Equal(before, after)
 	report := issuePlanReport{
@@ -216,7 +216,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 		workerLive: workerLive, pending: pending, resultSummary: resultSummary, resultSHA256: resultSHA256, resultErr: resultErr, report: report}, nil
 }
 
-func plannedIssueActions(cfg config.Config, item *state.Issue, workerLive bool, launch worktree.LaunchValidation, launchErr error,
+func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *state.ActiveExecution, workerLive bool, launch worktree.LaunchValidation, launchErr error,
 	inspection worktree.Inspection, inspectErr error, worktreeSHA256 string, worktreeDigestErr error,
 	baseOK bool, baseErr error, pending []string, remote gh.RemoteState, remoteErr error,
 	resultErr error,
@@ -233,6 +233,9 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, workerLive bool, 
 		}
 		if workerLive {
 			reasons = append(reasons, "worker process is alive")
+		}
+		if resolutionRequiresExecutionSlot(action) && activeExecution != nil {
+			reasons = append(reasons, fmt.Sprintf("repository active execution is occupied by Issue #%d", activeExecution.IssueNumber))
 		}
 		if len(pending) > 0 && action != issuedomain.ResolutionCancel {
 			reasons = append(reasons, "Issue has a pending operator request")
@@ -303,6 +306,10 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, workerLive bool, 
 		result = append(result, issueActionPlan{Action: action, Eligible: len(reasons) == 0, Reasons: reasons})
 	}
 	return result
+}
+
+func resolutionRequiresExecutionSlot(action issuedomain.ResolutionAction) bool {
+	return action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage
 }
 
 func checkpointWorktreeSHA256(item *state.Issue) string {
@@ -415,8 +422,11 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 				return fmt.Errorf("Issue #%d canonical state changed after planning", *number)
 			}
 			item := snapshot.Issues[strconv.Itoa(*number)]
-			if item == nil || !reflect.DeepEqual(item.Suspension, planned.issue.Suspension) || snapshot.ActiveExecution != nil {
+			if item == nil || !reflect.DeepEqual(item.Suspension, planned.issue.Suspension) {
 				return fmt.Errorf("Issue #%d suspension changed after planning", *number)
+			}
+			if resolutionRequiresExecutionSlot(action) && snapshot.ActiveExecution != nil {
+				return fmt.Errorf("Issue #%d execution slot changed after planning", *number)
 			}
 			if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
 				if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStagePublish {

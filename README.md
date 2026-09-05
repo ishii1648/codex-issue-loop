@@ -119,7 +119,7 @@ sleep 3
 
 多数のrepositoryを常駐させる場合は、明示的な`webhook.mode: webhook`で共有localhost brokerを利用できます。公開HTTPS endpointはagent-loopが用意せず、既存のreverse proxyから`127.0.0.1`または`::1`へ配送します。署名検証、secret管理、GitHub event、rotation、15分の条件付きREST safety sweep、pollingへのrollbackは[Mac mini常駐運用runbook](docs/mac-mini-runbook.md#12-webhook-brokerとreverse-proxy)を参照してください。
 
-`completion.auto_merge: true`でPR conflictが発生した場合は、同じworktree・branch・PRを使う`resolving_conflict`へ自動遷移します。通常の自動lifecycleで処理できない`blocked` / `failed` Issueは、scenario別commandではなく共通のread-only planと型付きresolutionで扱います。
+`completion.auto_merge: true`でPR conflictが発生した場合は、同じworktree・branch・PRを使う`resolving_conflict`へ自動遷移します。自動mergeを停止するrollbackでは`completion.auto_merge: false`へ戻し、`doctor`成功後に対象repositoryを`restart`します。通常の自動lifecycleで処理できない`blocked` / `failed` Issueは、scenario別commandではなく共通のread-only planと型付きresolutionで扱います。
 
 ```sh
 "$agent_loop_bin" issue plan --repo "$PWD" --issue 123 --json
