@@ -227,6 +227,7 @@ type Issue struct {
 	Status             issuedomain.Status              `json:"status"`
 	RunID              string                          `json:"run_id,omitempty"`
 	Generation         uint64                          `json:"generation,omitempty"`
+	LaunchSource       issuedomain.Status              `json:"launch_source,omitempty"`
 	Continuation       *ContinuationCheckpoint         `json:"continuation,omitempty"`
 	Suspension         *Suspension                     `json:"suspension,omitempty"`
 	PublicationAudit   *publication.Audit              `json:"publication_audit,omitempty"`

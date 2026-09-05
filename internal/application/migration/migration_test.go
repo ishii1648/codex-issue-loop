@@ -338,7 +338,7 @@ func TestActiveExecutionAndContinuationBlockRollback(t *testing.T) {
 	}
 	issue := loaded.Issues["63"]
 	identity := state.ExecutionIdentity{RunID: "run_63", Generation: 1}
-	if issue == nil || issue.Generation != identity.Generation || issue.Status != issuedomain.StatusRunning || !state.OwnsActiveExecution(&loaded, 63, identity) {
+	if issue == nil || issue.Generation != identity.Generation || issue.Status != issuedomain.StatusLaunching || issue.LaunchSource != issuedomain.StatusRetryWait || !state.OwnsActiveExecution(&loaded, 63, identity) {
 		t.Fatalf("migrated issue=%+v", issue)
 	}
 	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "active execution") {
@@ -350,8 +350,11 @@ func TestActiveExecutionAndContinuationBlockRollback(t *testing.T) {
 		if err := state.CaptureContinuation(snapshot, item.Number, identity, "checkpoint_63", time.Now().UTC()); err != nil {
 			return err
 		}
-		item.Status = issuedomain.StatusBlocked
-		return nil
+		decision, err := issuedomain.Fail(item.Status, "migration rollback fixture", "issue", true)
+		if err != nil {
+			return err
+		}
+		return state.ApplyIssueTransition(item, decision.Transition)
 	}); err != nil {
 		t.Fatal(err)
 	}

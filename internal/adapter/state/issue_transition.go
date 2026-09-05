@@ -24,6 +24,9 @@ func ApplyIssueTransition(item *Issue, transition issuedomain.Transition) error 
 		item.Suspension = nil
 	}
 	item.Status = transition.To
+	if transition.From == issuedomain.StatusLaunching && transition.To != issuedomain.StatusLaunching {
+		item.LaunchSource = issuedomain.StatusUnset
+	}
 	if transition.To == issuedomain.StatusCompleted {
 		item.Continuation = nil
 		item.Suspension = nil

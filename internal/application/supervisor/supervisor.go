@@ -89,6 +89,7 @@ type workerWorkspaceError struct {
 	expected   string
 	validation worktree.LaunchValidation
 	cause      error
+	terminal   bool
 }
 
 func (e *workerWorkspaceError) Error() string {
@@ -467,22 +468,30 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		return l.processPullRequest(ctx, current)
 	}
 	pendingStatus := current.Status
-	if pendingStatus == issuedomain.StatusResumePending || pendingStatus == issuedomain.StatusRetryWait || pendingStatus == issuedomain.StatusResolvingConflict {
+	if pendingStatus == issuedomain.StatusLaunching {
+		pendingStatus = current.LaunchSource
+	}
+	if current.Status == issuedomain.StatusResumePending || current.Status == issuedomain.StatusRetryWait || current.Status == issuedomain.StatusResolvingConflict {
 		resumed, err := l.ensurePendingExecution(current)
 		if err != nil {
 			return err
 		}
 		current = resumed
 	}
+	if current.Status == issuedomain.StatusClaiming {
+		issue, err := l.getIssue(ctx, current.Number)
+		if err != nil {
+			return failure.Wrap(failure.Transient, "refresh existing GitHub Issue", err)
+		}
+		return l.claimAndRun(ctx, issue, current.RunID)
+	}
+	remote, validationErr := l.validateRemoteLaunch(ctx, current, true)
+	if validationErr != nil {
+		return l.handleLaunchValidationFailure(ctx, current, validationErr)
+	}
+	issue := remote.Issue
 	if pendingStatus == issuedomain.StatusResolvingConflict {
 		return l.processConflictRecovery(ctx, current)
-	}
-	issue, err := l.getIssue(ctx, current.Number)
-	if err != nil {
-		return failure.Wrap(failure.Transient, "refresh existing GitHub Issue", err)
-	}
-	if current.Status == issuedomain.StatusClaiming {
-		return l.claimAndRun(ctx, issue, current.RunID)
 	}
 	if pendingStatus == issuedomain.StatusResumePending {
 		if current.Continuation != nil && current.Continuation.Stage == issuedomain.ContinuationStagePublish {
@@ -494,7 +503,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 			}
 		}
 		if err := l.GitHub.MarkRunning(ctx, l.Config, current.Number); err != nil {
-			return failure.Wrap(failure.Transient, "mark resumed Issue running", err)
+			return l.scheduleRetry(ctx, current, "mark resumed Issue running: "+err.Error())
 		}
 		current.RetryAfter = nil
 		workerCfg := l.Config
@@ -525,7 +534,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		_, err = l.Store.Update("worker_continuation_started", current.Number, current.RunID, map[string]int{"continuation": current.Continuations}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
 			identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
-			if item == nil || item.Status != issuedomain.StatusRunning || !state.OwnsActiveExecution(s, current.Number, identity) {
+			if item == nil || item.Status != issuedomain.StatusLaunching || !state.OwnsActiveExecution(s, current.Number, identity) {
 				return fmt.Errorf("Issue #%d retry execution changed before worker continuation", current.Number)
 			}
 			item.Continuations = current.Continuations
@@ -554,8 +563,8 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 				return transferErr
 			}
 			payload["execution_identity"] = identity
-			if item.Status != issuedomain.StatusRunning {
-				return fmt.Errorf("Issue #%d retry execution is not running", current.Number)
+			if item.Status != issuedomain.StatusLaunching {
+				return fmt.Errorf("Issue #%d retry execution is not launching", current.Number)
 			}
 			item.RunID, item.Attempts, item.SessionID = current.RunID, current.Attempts, ""
 			item.Session = nil
@@ -585,7 +594,29 @@ func (l *Loop) ensurePendingExecution(current state.Issue) (state.Issue, error) 
 	}
 	if active := snapshot.ActiveExecution; active != nil {
 		if active.IssueNumber == current.Number && active.RunID == current.RunID && active.Generation == current.Generation {
-			return current, nil
+			if current.Status == issuedomain.StatusLaunching {
+				return current, nil
+			}
+			if current.Status != issuedomain.StatusResolvingConflict {
+				return state.Issue{}, failure.Wrap(failure.Issue, "acquire pending execution", fmt.Errorf("Issue #%d active execution has status %s", current.Number, current.Status))
+			}
+			transition, transitionErr := issuedomain.StartConflictAttempt(current.Status)
+			if transitionErr != nil {
+				return state.Issue{}, failure.Wrap(failure.Issue, "resume conflict launch", transitionErr)
+			}
+			_, updateErr := l.Store.Update("conflict_launch_resumed", current.Number, current.RunID, nil, func(s *state.Snapshot) error {
+				item := s.Issues[strconv.Itoa(current.Number)]
+				identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
+				if item == nil || item.Status != current.Status || !state.OwnsActiveExecution(s, current.Number, identity) {
+					return fmt.Errorf("Issue #%d conflict launch changed before resume", current.Number)
+				}
+				item.LaunchSource = item.Status
+				return state.ApplyIssueTransition(item, transition)
+			})
+			if updateErr != nil {
+				return state.Issue{}, failure.Wrap(failure.Supervisor, "persist conflict launch resume", updateErr)
+			}
+			return l.issueState(current.Number)
 		}
 		return state.Issue{}, failure.Wrap(failure.Transient, "acquire pending execution", fmt.Errorf("active execution belongs to Issue #%d", active.IssueNumber))
 	}
@@ -608,13 +639,14 @@ func (l *Loop) ensurePendingExecution(current state.Issue) (state.Issue, error) 
 		case issuedomain.StatusRetryWait:
 			transition, transitionErr = issuedomain.StartRetry(item.Status)
 		case issuedomain.StatusResolvingConflict:
-			return nil
+			transition, transitionErr = issuedomain.StartConflictAttempt(item.Status)
 		default:
 			return fmt.Errorf("Issue #%d status %s cannot resume execution", item.Number, item.Status)
 		}
 		if transitionErr != nil {
 			return transitionErr
 		}
+		item.LaunchSource = item.Status
 		if err := state.ApplyIssueTransition(item, transition); err != nil {
 			return err
 		}

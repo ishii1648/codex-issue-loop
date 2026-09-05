@@ -40,9 +40,6 @@ func (l *Loop) suspendWorker(ctx context.Context, number int, reason string) err
 		if item == nil || item.RunID != current.RunID {
 			return fmt.Errorf("Issue #%d run changed while recording worker block", number)
 		}
-		if item.WorkerPID != 0 || item.WorkerPGID != 0 {
-			return fmt.Errorf("Issue #%d worker process identity still exists while suspending", number)
-		}
 		if err := state.CaptureContinuation(s, number, identity, checkpointID, suspendedAt); err != nil {
 			return err
 		}
@@ -81,7 +78,7 @@ func (l *Loop) processPublicationCheckpoint(ctx context.Context, current state.I
 	snapshot, snapshotErr := l.Store.Load()
 	identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 	if checkpoint == nil || checkpoint.Stage != issuedomain.ContinuationStagePublish || checkpoint.Summary == "" || checkpoint.ResultSHA256 == "" ||
-		current.Status != issuedomain.StatusRunning || snapshotErr != nil || !state.OwnsActiveExecution(&snapshot, current.Number, identity) ||
+		current.Status != issuedomain.StatusLaunching || current.LaunchSource != issuedomain.StatusResumePending || snapshotErr != nil || !state.OwnsActiveExecution(&snapshot, current.Number, identity) ||
 		l.Publisher == nil || l.Worktrees == nil {
 		return l.failCheckpointStage(ctx, current, "publication checkpoint is incomplete or no longer owns the active execution")
 	}
@@ -106,7 +103,7 @@ func (l *Loop) processPublicationCheckpoint(ctx context.Context, current state.I
 	l.publicationMu.Unlock()
 	_, auditErr := l.Store.Update("publication_checkpoint_audited", current.Number, current.RunID, audit, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
-		if item == nil || item.Status != issuedomain.StatusRunning || !state.OwnsActiveExecution(snapshot, current.Number, identity) ||
+		if item == nil || item.Status != issuedomain.StatusLaunching || !state.OwnsActiveExecution(snapshot, current.Number, identity) ||
 			item.Continuation == nil || item.Continuation.ID != checkpoint.ID || item.Continuation.ResultSHA256 != checkpoint.ResultSHA256 {
 			return fmt.Errorf("Issue #%d publication checkpoint changed during execution", current.Number)
 		}

@@ -44,6 +44,9 @@ func finalizeLifecycleBoundaries(snapshot *Snapshot, now time.Time) {
 			if issue != nil && issue.Status != issuedomain.StatusCompleted && issue.Status != issuedomain.StatusCanceled {
 				captureContinuation(issue, *active, now)
 			}
+			if issue != nil {
+				issue.WorkerPID, issue.WorkerPGID = 0, 0
+			}
 			snapshot.ActiveExecution = nil
 		}
 	}

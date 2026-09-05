@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,6 +182,17 @@ func TestSnapshotValidateAcceptsSupportedPullRequestReviewDecisions(t *testing.T
 		if err := snapshot.Validate(); err != nil {
 			t.Fatalf("decision=%q err=%v", decision, err)
 		}
+	}
+}
+
+func TestSnapshotValidateRejectsRunningWithoutProcessIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := validSnapshotForInvariantTest()
+	item := snapshot.Issues["1"]
+	item.Status, item.RunID, item.Generation = issuedomain.StatusRunning, "run_1", 1
+	snapshot.ActiveExecution = &ActiveExecution{IssueNumber: 1, RunID: "run_1", Generation: 1, StartedAt: now}
+	if err := snapshot.Validate(); err == nil || !strings.Contains(err.Error(), "running worker process identity is missing") {
+		t.Fatalf("validation error=%v", err)
 	}
 }
 

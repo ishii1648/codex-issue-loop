@@ -19,6 +19,15 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 )
 
+type launchValidationError struct {
+	cause    error
+	terminal bool
+}
+
+func (e *launchValidationError) Error() string { return e.cause.Error() }
+
+func (e *launchValidationError) Unwrap() error { return e.cause }
+
 func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) error {
 	if err := l.GitHub.Claim(ctx, l.Config, issue, runID); err != nil {
 		return failure.Wrap(failure.Transient, "claim GitHub Issue", err)
@@ -71,6 +80,7 @@ func (l *Loop) runClaimed(ctx context.Context, issue gh.Issue, runID string, wt 
 		"expected_cwd": launch.CanonicalCWD, "workspace_validation": launch,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
+		item.LaunchSource = item.Status
 		if err := state.ApplyIssueTransition(item, workerTransition); err != nil {
 			return err
 		}
@@ -95,9 +105,20 @@ func (l *Loop) runClaimed(ctx context.Context, issue gh.Issue, runID string, wt 
 }
 
 func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.Issue, result worker.Result, runErr error) error {
+	fresh, freshErr := l.issueState(current.Number)
+	if freshErr == nil && fresh.RunID == current.RunID && fresh.Generation == current.Generation {
+		current = fresh
+	}
 	var workspaceErr *workerWorkspaceError
 	if errors.As(runErr, &workspaceErr) {
+		if current.Status == issuedomain.StatusLaunching && !workspaceErr.terminal {
+			return l.scheduleRetry(ctx, current, workspaceErr.Error())
+		}
 		return l.blockWorkerWorkspace(ctx, current, workspaceErr)
+	}
+	var launchErr *launchValidationError
+	if errors.As(runErr, &launchErr) {
+		return l.handleLaunchValidationFailure(ctx, current, launchErr)
 	}
 	profile := result.ExecutionProfile
 	if profile == "" {
@@ -112,8 +133,6 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			return errWorkerResultSuperseded
 		}
 		item.ExecutionProfile = profile
-		item.WorkerPID = 0
-		item.WorkerPGID = 0
 		// A fresh worker result supersedes any publisher provenance from an
 		// earlier worker attempt. A new publication failure is recorded below
 		// only if this completed result reaches that boundary again.
@@ -226,7 +245,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			"released_execution": identity, "suspended_at": suspendedAt,
 		}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
-			if item == nil || item.RunID != current.RunID || item.WorkerPID != 0 || item.WorkerPGID != 0 ||
+			if item == nil || item.RunID != current.RunID ||
 				!state.OwnsActiveExecution(s, issue.Number, identity) || item.ConflictRecovery != nil {
 				return fmt.Errorf("Issue #%d no longer has an active needs-input worker boundary", issue.Number)
 			}
@@ -292,6 +311,52 @@ func (l *Loop) answeredResumeRemoteMismatch(issue gh.Issue, current state.Issue)
 	return ""
 }
 
+func (l *Loop) validateRemoteLaunch(ctx context.Context, current state.Issue, allowNeedsInput bool) (gh.RemoteState, error) {
+	remote, err := l.inspectIssue(ctx, current)
+	if err != nil {
+		return gh.RemoteState{}, &launchValidationError{cause: fmt.Errorf("inspect GitHub launch boundary: %w", err)}
+	}
+	if current.Status != issuedomain.StatusLaunching {
+		return gh.RemoteState{}, &launchValidationError{cause: fmt.Errorf("Issue #%d is not in launch state", current.Number), terminal: true}
+	}
+	if allowNeedsInput && current.LaunchSource == issuedomain.StatusResumePending && current.Continuation != nil && current.Continuation.Kind == state.ContinuationKindNeedsInput {
+		if reason := l.answeredResumeRemoteMismatch(remote.Issue, current); reason != "" {
+			return gh.RemoteState{}, &launchValidationError{cause: errors.New(reason), terminal: true}
+		}
+	} else {
+		labels := labelSet(remote.Issue.Labels)
+		if !strings.EqualFold(remote.Issue.State, "open") {
+			return gh.RemoteState{}, &launchValidationError{cause: errors.New("GitHub Issue is no longer open"), terminal: true}
+		}
+		if !labels[l.Config.GitHub.RunningLabel] || labels[l.Config.GitHub.NeedsInputLabel] || labels[l.Config.GitHub.DoneLabel] || labels[l.Config.GitHub.FailedLabel] ||
+			hasAnyLabel(labels, append(append([]string{}, l.Config.GitHub.ReadyLabels...), l.Config.GitHub.ExcludeLabels...)) {
+			return gh.RemoteState{}, &launchValidationError{cause: errors.New("GitHub labels no longer authorize worker launch"), terminal: true}
+		}
+	}
+	if current.PullRequestURL != "" {
+		if len(remote.PullRequests) != 1 || remote.PullRequests[0].URL != current.PullRequestURL ||
+			(current.PullRequestNumber > 0 && remote.PullRequests[0].Number != current.PullRequestNumber) ||
+			(current.HeadSHA != "" && remote.PullRequests[0].HeadSHA != current.HeadSHA) {
+			return gh.RemoteState{}, &launchValidationError{cause: errors.New("saved Pull Request identity changed before worker launch"), terminal: true}
+		}
+	}
+	return remote, nil
+}
+
+func (l *Loop) handleLaunchValidationFailure(ctx context.Context, current state.Issue, validationErr error) error {
+	var launchErr *launchValidationError
+	if errors.As(validationErr, &launchErr) && launchErr.terminal {
+		if current.LaunchSource == issuedomain.StatusResumePending && current.Continuation != nil && current.Continuation.Kind == state.ContinuationKindNeedsInput {
+			return l.rejectAnsweredContinuation(current, launchErr.Error())
+		}
+		return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "reject worker launch", launchErr), true)
+	}
+	if current.ConflictRecovery != nil {
+		return l.scheduleConflictRetry(ctx, current, validationErr.Error())
+	}
+	return l.scheduleRetry(ctx, current, validationErr.Error())
+}
+
 func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) error {
 	now := l.now()
 	decision, decisionErr := issuedomain.RejectAnsweredResume(current.Status, "answered continuation rejected: "+reason, string(failure.Issue))
@@ -301,7 +366,7 @@ func (l *Loop) rejectAnsweredContinuation(current state.Issue, reason string) er
 	_, err := l.Store.Update("answered_resume_rejected", current.Number, current.RunID, map[string]string{"reason": reason}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
 		identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
-		if item == nil || item.Status != issuedomain.StatusResumePending || item.RunID != current.RunID || !state.OwnsActiveExecution(snapshot, current.Number, identity) {
+		if item == nil || item.Status != issuedomain.StatusLaunching || item.RunID != current.RunID || !state.OwnsActiveExecution(snapshot, current.Number, identity) {
 			return fmt.Errorf("Issue #%d answered continuation changed before rejection", current.Number)
 		}
 		if item.Continuation == nil || item.Continuation.Kind != state.ContinuationKindNeedsInput {
@@ -386,15 +451,22 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 	validation := worktree.LaunchValidation{ExpectedCWD: cfg.RepoPath, Checks: map[string]bool{}}
 	fresh, err := l.issueState(expected.Number)
 	if err != nil {
-		return validation, &workerWorkspaceError{expected: cfg.RepoPath, validation: validation, cause: err}
+		return validation, &workerWorkspaceError{expected: cfg.RepoPath, validation: validation, cause: err, terminal: true}
 	}
 	fail := func(cause error) (worktree.LaunchValidation, error) {
+		return validation, &workerWorkspaceError{expected: cfg.RepoPath, validation: validation, cause: cause, terminal: true}
+	}
+	retry := func(cause error) (worktree.LaunchValidation, error) {
 		return validation, &workerWorkspaceError{expected: cfg.RepoPath, validation: validation, cause: cause}
 	}
 	if fresh.RunID == "" || fresh.RunID != expected.RunID {
 		return fail(fmt.Errorf("run changed from %q to %q", expected.RunID, fresh.RunID))
 	}
 	validation.Checks["run_id"] = true
+	if fresh.Status != issuedomain.StatusLaunching || fresh.LaunchSource != expected.LaunchSource {
+		return fail(fmt.Errorf("launch state changed before spawn"))
+	}
+	validation.Checks["launch_state"] = true
 	if fresh.SessionID != expected.SessionID {
 		return fail(fmt.Errorf("session changed before spawn"))
 	}
@@ -424,11 +496,11 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 	validation.CommonDir = local.CommonDir
 	validation.MainCheckout = local.MainCheckout
 	if inspectErr != nil {
-		return fail(inspectErr)
+		return retry(inspectErr)
 	}
 	validation.Valid = local.Valid
 	if !validation.Valid {
-		return fail(fmt.Errorf("worktree validator did not establish a valid launch boundary"))
+		return retry(fmt.Errorf("worktree validator did not establish a valid launch boundary"))
 	}
 
 	workspace := fresh.Workspace
@@ -459,6 +531,9 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 	if err != nil {
 		return fail(err)
 	}
+	if _, remoteErr := l.validateRemoteLaunch(ctx, fresh, false); remoteErr != nil {
+		return validation, remoteErr
+	}
 	return validation, nil
 }
 
@@ -470,7 +545,7 @@ func (l *Loop) recordWorkerPID(expected state.Issue) worker.Started {
 			Checks: map[string]bool{"spawn_cwd": start.ExpectedCWD != "" && start.ActualCWD == start.ExpectedCWD},
 		}
 		fail := func(cause error) error {
-			return &workerWorkspaceError{expected: start.ExpectedCWD, validation: validation, cause: cause}
+			return &workerWorkspaceError{expected: start.ExpectedCWD, validation: validation, cause: cause, terminal: true}
 		}
 		if start.PID <= 0 || start.PGID != start.PID {
 			return fail(fmt.Errorf("Issue #%d run %s reported invalid worker process identity", number, runID))
@@ -489,6 +564,13 @@ func (l *Loop) recordWorkerPID(expected state.Issue) worker.Started {
 			}
 			if item.Workspace == nil || item.Workspace.Path != start.ExpectedCWD {
 				return fmt.Errorf("Issue #%d run %s has no matching saved workspace provenance", number, runID)
+			}
+			transition, transitionErr := issuedomain.ConfirmWorkerStarted(item.Status)
+			if transitionErr != nil {
+				return transitionErr
+			}
+			if err := state.ApplyIssueTransition(item, transition); err != nil {
+				return err
 			}
 			item.WorkerPID = start.PID
 			// All worker backends start their command with Setpgid=true, making

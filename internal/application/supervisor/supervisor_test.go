@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,13 +61,19 @@ func (w *workspaceMutationWorker) result(cfg config.Config) (worker.Result, erro
 	}, nil
 }
 
-func (w *workspaceMutationWorker) Run(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+func (w *workspaceMutationWorker) Run(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, _ string, started worker.Started) (worker.Result, error) {
 	w.runs++
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return w.result(cfg)
 }
 
-func (w *workspaceMutationWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+func (w *workspaceMutationWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, _ string, started worker.Started) (worker.Result, error) {
 	w.resumes++
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return w.result(cfg)
 }
 
@@ -173,7 +181,9 @@ type fakeGitHub struct {
 	mergedPullRequest         bool
 	inspectCalls              int
 	failedCalls               int
+	inspectErr                error
 	claimErr                  error
+	markRunningErr            error
 	doneErr                   error
 	failedErr                 error
 	listErr                   error
@@ -181,6 +191,15 @@ type fakeGitHub struct {
 	authorVerification        *gh.AuthorVerification
 	authorVerificationErr     error
 	authorVerificationHook    func(gh.Issue) (gh.AuthorVerification, error)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func openTestIssue(issue gh.Issue) gh.Issue {
@@ -213,21 +232,31 @@ func (f *fakeGitHub) VerifyIssueAuthor(_ context.Context, _ config.Config, issue
 }
 func (f *fakeGitHub) Inspect(context.Context, config.Config, int, string) (gh.RemoteState, error) {
 	f.inspectCalls++
+	if f.inspectErr != nil {
+		return gh.RemoteState{}, f.inspectErr
+	}
 	if f.inspectHook != nil {
 		f.inspectHook()
 	}
 	if f.remote != nil {
 		return *f.remote, nil
 	}
-	return gh.RemoteState{Issue: f.issue}, nil
+	return gh.RemoteState{Issue: openTestIssue(f.issue)}, nil
 }
-func (f *fakeGitHub) Claim(context.Context, config.Config, gh.Issue, string) error {
+func (f *fakeGitHub) Claim(_ context.Context, cfg config.Config, _ gh.Issue, _ string) error {
 	if f.claimErr != nil {
 		err := f.claimErr
 		f.claimErr = nil
 		return err
 	}
 	f.claimed = true
+	labels := make([]string, 0, len(f.issue.Labels)+1)
+	for _, label := range f.issue.Labels {
+		if !containsString(cfg.GitHub.ReadyLabels, label) {
+			labels = append(labels, label)
+		}
+	}
+	f.issue.Labels = append(labels, cfg.GitHub.RunningLabel)
 	return nil
 }
 func (f *fakeGitHub) MarkNeedsInput(context.Context, config.Config, int, string, string) error {
@@ -253,8 +282,18 @@ func (f *fakeGitHub) MarkFailed(context.Context, config.Config, int, string, boo
 	}
 	return nil
 }
-func (f *fakeGitHub) MarkRunning(context.Context, config.Config, int) error {
+func (f *fakeGitHub) MarkRunning(_ context.Context, cfg config.Config, _ int) error {
+	if f.markRunningErr != nil {
+		return f.markRunningErr
+	}
 	f.markedRunning = true
+	labels := make([]string, 0, len(f.issue.Labels)+1)
+	for _, label := range f.issue.Labels {
+		if label != cfg.GitHub.NeedsInputLabel && !containsString(cfg.GitHub.ReadyLabels, label) {
+			labels = append(labels, label)
+		}
+	}
+	f.issue.Labels = append(labels, cfg.GitHub.RunningLabel)
 	return nil
 }
 func (f *fakeGitHub) MarkConflictRetry(context.Context, config.Config, int, string) error {
@@ -306,6 +345,16 @@ func (f fakeWorktree) ContentDigest(context.Context, string) (string, error) {
 type fakeWorker struct {
 	result worker.Result
 	err    error
+}
+
+type processStartFailureWorker struct{ err error }
+
+func (w processStartFailureWorker) Run(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
+	return worker.Result{}, w.err
+}
+
+func (w processStartFailureWorker) Resume(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
+	return worker.Result{}, w.err
 }
 
 func fixtureWorkspace(loop *Loop, path, branch string) *state.WorkerWorkspace {
@@ -382,34 +431,59 @@ func (s *scriptedWorker) next() (worker.Result, error) {
 	return result, err
 }
 
-func (s *scriptedWorker) Run(_ context.Context, _ config.Config, _ gh.Issue, issue state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+func (s *scriptedWorker) Run(_ context.Context, cfg config.Config, _ gh.Issue, issue state.Issue, _ string, started worker.Started) (worker.Result, error) {
 	s.runs++
 	s.states = append(s.states, issue)
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return s.next()
 }
 
-func (s *scriptedWorker) Resume(_ context.Context, _ config.Config, _ gh.Issue, issue state.Issue, _ string, _ worker.Started) (worker.Result, error) {
+func (s *scriptedWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, issue state.Issue, _ string, started worker.Started) (worker.Result, error) {
 	s.resumes++
 	s.states = append(s.states, issue)
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return s.next()
 }
 
-func (f *recordingWorker) Run(_ context.Context, _ config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
+func (f *recordingWorker) Run(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, prompt string, started worker.Started) (worker.Result, error) {
 	f.runPrompts = append(f.runPrompts, prompt)
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return f.result, nil
 }
 
-func (f *recordingWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, prompt string, _ worker.Started) (worker.Result, error) {
+func (f *recordingWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, prompt string, started worker.Started) (worker.Result, error) {
 	f.resumePrompts = append(f.resumePrompts, prompt)
 	f.resumeConfigPaths = append(f.resumeConfigPaths, cfg.RepoPath)
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return f.result, nil
 }
 
-func (f fakeWorker) Run(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
+func (f fakeWorker) Run(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, _ string, started worker.Started) (worker.Result, error) {
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return f.result, f.err
 }
-func (f fakeWorker) Resume(context.Context, config.Config, gh.Issue, state.Issue, string, worker.Started) (worker.Result, error) {
+func (f fakeWorker) Resume(_ context.Context, cfg config.Config, _ gh.Issue, _ state.Issue, _ string, started worker.Started) (worker.Result, error) {
+	if err := startFixtureWorker(cfg, started); err != nil {
+		return worker.Result{}, err
+	}
 	return f.result, f.err
+}
+
+func startFixtureWorker(cfg config.Config, started worker.Started) error {
+	if started == nil {
+		return nil
+	}
+	return started(worker.ProcessStart{PID: 4242, PGID: 4242, ExpectedCWD: cfg.RepoPath, ActualCWD: cfg.RepoPath})
 }
 
 func testLoop(t *testing.T, result worker.Result) (*Loop, *fakeGitHub) {
@@ -428,7 +502,7 @@ func testLoop(t *testing.T, result worker.Result) (*Loop, *fakeGitHub) {
 	}
 	body := "Implement it"
 	github := &fakeGitHub{issue: gh.Issue{Number: 1, Title: "Test", Body: body, Labels: []string{"codex-loop:ready"}}}
-	return &Loop{Config: cfg, Store: store, GitHub: github, Worktrees: fakeWorktree{path: repo}, Worker: fakeWorker{result: result}}, github
+	return &Loop{Config: cfg, Store: store, GitHub: github, Worktrees: fakeWorktree{path: repo}, Worker: fakeWorker{result: result}, Logger: log.New(io.Discard, "", 0)}, github
 }
 
 func TestClosedIssueIsRejectedBeforeExecutionAndGitHubMutation(t *testing.T) {
@@ -593,7 +667,8 @@ func TestFaultWorkerEnvironmentSuspensionSurvivesGitHubSyncCrashIdempotently(t *
 
 func TestGenericResumeContinuesSameSessionAndWorktree(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", Summary: "verification pending", Retry: &worker.Retry{Reason: "verification pending"}}
-	loop, _ := testLoop(t, result)
+	loop, github := testLoop(t, result)
+	github.issue.Labels = []string{loop.Config.GitHub.RunningLabel}
 	worktreePath := loop.Config.RepoPath
 	_, originalIdentity, err := loop.Store.StartExecution(state.ExecutionStart{
 		IssueNumber: 1, Title: "Test", RunID: "run_environment", StartedAt: time.Now().UTC(),
@@ -673,6 +748,7 @@ func TestResolvedCheckpointRetriesAcrossRestartAndClearsAtCompletion(t *testing.
 		Git: &worker.GitResult{},
 	}
 	loop, github := testLoop(t, retry)
+	github.issue.Labels = []string{loop.Config.GitHub.RunningLabel}
 	loop.Config.Queue.Concurrency = 1
 	loop.Config.Queue.MaxAttempts = 3
 	loop.Config.Worker.Profiles["extended"] = config.Profile{MaxContinuations: 1}
@@ -1574,8 +1650,10 @@ func legacyTestZeitreise442V0619ResumedNeedsInputStartsFencedConflictWorker(t *t
 }
 
 func TestConflictRecoveryRestartRecognizesPublishedCommitWithoutDuplicateWorkerOrPush(t *testing.T) {
-	loop, _ := testLoop(t, worker.Result{})
+	loop, github := testLoop(t, worker.Result{})
 	prURL := "https://example.test/pr/1"
+	github.issue = gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{Number: 1, URL: prURL, State: "OPEN"}}}
 	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "conflict_1", StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
@@ -1606,8 +1684,10 @@ func TestConflictRecoveryRestartRecognizesPublishedCommitWithoutDuplicateWorkerO
 }
 
 func TestConflictRecoveryBlocksOnlyAfterPerBaseBudgetIsExhausted(t *testing.T) {
-	loop, _ := testLoop(t, worker.Result{})
+	loop, github := testLoop(t, worker.Result{})
 	loop.Config.ConflictRecovery.MaxAttemptsPerBase = 3
+	github.issue = gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN"}}}
 	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "conflict_3", StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
@@ -1640,6 +1720,7 @@ func TestConflictRecoveryBlocksOnlyAfterPerBaseBudgetIsExhausted(t *testing.T) {
 func TestConflictWorkerNeedsInputKeepsConflictResumeTarget(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN"}}}
 	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "conflict_1", StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
@@ -1854,6 +1935,86 @@ func TestRunOnceDefaultsAmbiguousFailureToExtended(t *testing.T) {
 	issue := snapshot.Issues["1"]
 	if issue.ExecutionProfile != "extended" || issue.Status != issuedomain.StatusRetryWait || snapshot.ActiveExecution != nil || issue.Continuation == nil {
 		t.Fatalf("issue=%+v", issue)
+	}
+}
+
+func TestProcessStartFailureReleasesLaunchingExecution(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Worker = processStartFailureWorker{err: errors.New("injected process start failure")}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if item == nil || item.Status != issuedomain.StatusRetryWait || item.WorkerPID != 0 || item.WorkerPGID != 0 || snapshot.ActiveExecution != nil {
+		t.Fatalf("process start failure retained execution: %+v", item)
+	}
+}
+
+func TestAnsweredResumeWithSavedPullRequestSuspendsAndReleasesLaunch(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	now := time.Now().UTC()
+	github.issue = gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.NeedsInputLabel}}
+	github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{{Number: 478, URL: "https://example.test/pull/478", State: "OPEN"}}}
+	_, err := loop.Store.Update("answered_resume_fixture", 1, "run_477", nil, func(snapshot *state.Snapshot) error {
+		branch := "codex/issue-477-test"
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "answered", Status: issuedomain.StatusResumePending, RunID: "run_477", Generation: 4,
+			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			PullRequestURL: "https://example.test/pull/478", PullRequestNumber: 478,
+			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_477", Kind: state.ContinuationKindNeedsInput, RequestID: "req_477", CreatedAt: now, RunID: "run_477", Generation: 4, Stage: issuedomain.ContinuationStageResume},
+			UpdatedAt:    now,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if item == nil || item.Status != issuedomain.StatusBlocked || item.Suspension == nil || item.Suspension.CheckpointID != "checkpoint_477" ||
+		item.WorkerPID != 0 || item.WorkerPGID != 0 || snapshot.ActiveExecution != nil {
+		t.Fatalf("answered resume launch did not suspend safely: %+v", item)
+	}
+}
+
+func TestMarkRunningFailureReleasesAnsweredLaunchForRetry(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	now := time.Now().UTC()
+	github.issue = gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.NeedsInputLabel}}
+	github.markRunningErr = errors.New("injected label sync failure")
+	_, err := loop.Store.Update("answered_resume_fixture", 1, "run_resume", nil, func(snapshot *state.Snapshot) error {
+		branch := "codex/issue-1-test"
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "answered", Status: issuedomain.StatusResumePending, RunID: "run_resume", Generation: 1,
+			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_resume", Kind: state.ContinuationKindNeedsInput, RequestID: "req_resume", CreatedAt: now, RunID: "run_resume", Generation: 1, Stage: issuedomain.ContinuationStageResume},
+			UpdatedAt:    now,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if item == nil || item.Status != issuedomain.StatusRetryWait || item.WorkerPID != 0 || item.WorkerPGID != 0 || snapshot.ActiveExecution != nil {
+		t.Fatalf("label failure retained launch authority: %+v", item)
 	}
 }
 
