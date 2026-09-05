@@ -28,6 +28,8 @@ unknown storage/contract version、decode error、non-migratable findingがあ�
 
 旧releaseがsemantic contract不一致を`recovery_blocked`として隔離済みの場合、state/eventを手でcopyしない。repositoryをunloadしたまま`recover-semantic-quarantine --dry-run`でcurrent marker記載のexact backupを確認し、`--confirm-exact-backup`で1段ずつ戻す。`restored_recovery_marker=false`かつ元revision/Issue件数へ戻ったら通常の`status`を挟まず、全repository停止を確認してこの章の`migrate --json`へ進む。
 
+旧releaseがIssue lifecycle API不一致だけを`recovery_blocked`として隔離した場合も手動copyしない。repositoryをunloadし、`recover-lifecycle-quarantine --dry-run`でmarkerのexact reason、source/target version、recorded backup、digest、revision、snapshot/eventと任意のprepared transactionの整合性を確認してから、`--confirm-exact-backup`でbyte-exactに復元する。
+
 ## v4 recovery recordの変換
 
 v4のscenario別recovery fieldは、status、旧lease/park、workspace、session、PR、request/answer、generationを同じsnapshotから読み、決定的にroot `active_execution`とIssue-local `continuation`、`suspension`へfoldする。event件数・順序はauthorityにしない。実行再開を一意に証明できないIssueだけを`recoverability=ambiguous`かつ`suspension.status=quarantined`にし、他Issueのmigrationとqueue進行は継続する。

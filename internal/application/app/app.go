@@ -201,6 +201,8 @@ func (a App) run(ctx context.Context, l layout.Layout, command string, args []st
 		return a.recoverQuarantinedSnapshot(ctx, l, args)
 	case "recover-semantic-quarantine":
 		return a.recoverSemanticQuarantine(ctx, l, args)
+	case "recover-lifecycle-quarantine":
+		return a.recoverLifecycleQuarantine(ctx, l, args)
 	case "logs":
 		return a.logs(l, args)
 	case "cleanup":
@@ -248,6 +250,7 @@ Commands:
   issue         Plan or resolve one typed Issue suspension
   recover-quarantined-snapshot  Restore an exact quarantined snapshot after verifying legacy merged PR identities
   recover-semantic-quarantine   Restore one exact semantic mismatch quarantine backup
+  recover-lifecycle-quarantine  Restore one exact lifecycle mismatch quarantine backup
   export-recovery-fixture  Export sanitized read-only recovery evidence
   verify-recovery-fixture  Fail closed unless a fixture is complete and untampered
   logs          Print supervisor logs

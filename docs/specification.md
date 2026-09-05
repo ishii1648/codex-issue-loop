@@ -411,7 +411,18 @@ agent-loop recover-semantic-quarantine --repo /absolute/path/to/repository --bac
 
 CLIはcurrent revision 1 marker、単一`recovery_blocked` event、exactなversion mismatch reason、marker payload、managed recovery root内の記録済みbackup、state/event digestとsequence、repository identity、prepared transaction不在、LaunchAgent unloaded、worker/active execution/pending request不在を検証する。backupが別のsemantic recovery markerなら1段だけ戻して`next_backup`を返し、元snapshotなら既知のmigration元contractと停止状態を要求する。元backupを変更せずcurrent markerとcompleted journalを別backupへ保存し、state/eventをbyte-exactに復元する。復元後は通常commandを実行せず、全repositoryを停止したまま`migrate --json`と`migrate --apply --json`を行う。
 
-### 6.10 終了コード
+### 6.10 recover-lifecycle-quarantine
+
+Issue lifecycle APIのversion不一致も互換性エラーであり、通常readはstate/event/transactionを変更しない。旧releaseがこの不一致だけを破損として隔離した場合は、LaunchAgentをunloadしたまま次を使う。
+
+```sh
+agent-loop recover-lifecycle-quarantine --repo /absolute/path/to/repository --backup /exact/recovery/backup --dry-run --json
+agent-loop recover-lifecycle-quarantine --repo /absolute/path/to/repository --backup /exact/recovery/backup --confirm-exact-backup --json
+```
+
+CLIはraw markerのlifecycle version、exact reason、revision 1 markerと単一event、repository identity、recorded managed backup、current-runtime-validなsnapshot/event chainを検証する。prepared transactionがあれば、eventとの順序・snapshot revision・repository・lifecycle versionを検証して同じbyte列で復元する。active worker identity、nested marker、別backup、変更されたversion/revision/event/transaction、loadedまたはrunning LaunchAgentがあれば副作用なく拒否する。applyはcurrent markerとjournalを別のmanaged backupへ保存し、元backupを変更しない。
+
+### 6.11 終了コード
 
 | code | 意味 |
 | --- | --- |

@@ -89,6 +89,110 @@ func TestSemanticMismatchRecoveryRestoresOneExactBackupWithoutRewritingIt(t *tes
 	}
 }
 
+func TestLifecycleMismatchRecoveryRestoresExactBackupAndPreparedTransaction(t *testing.T) {
+	store := newStore(t)
+	base, err := store.Update("checkpoint", 0, "", nil, func(*Snapshot) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := base
+	prepared.StateRevision++
+	prepared.Supervisor.UpdatedAt = time.Now().UTC()
+	preparedEvent := Event{Version: CurrentVersion, EventID: NewID("evt"), Sequence: prepared.StateRevision,
+		Timestamp: prepared.Supervisor.UpdatedAt, RepoID: store.RepoID, Type: "prepared_fixture"}
+	if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: prepared, Event: preparedEvent}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := store.quarantineUnlocked(LifecycleAPIVersionError{Version: issuedomain.LifecycleAPICurrent, Current: issuedomain.LifecycleAPIPreviousMinor})
+	if err != nil || blocked.Recovery == nil {
+		t.Fatalf("blocked=%+v err=%v", blocked, err)
+	}
+	backup := blocked.Recovery.BackupDir
+	markerData, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerData = bytes.Replace(markerData,
+		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPICurrent+`"`),
+		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPIPreviousMinor+`"`), 1)
+	if err := os.WriteFile(store.StatePath(), markerData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := map[string][]byte{}
+	for _, name := range []string{"state.json", "events.jsonl", "state.txn.json"} {
+		before[name], err = os.ReadFile(filepath.Join(backup, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := store.PreviewLifecycleMismatchRecovery(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Eligible || !plan.PreparedTransaction || plan.RestoredRevision != prepared.StateRevision ||
+		plan.MarkerLifecycleAPI != issuedomain.LifecycleAPIPreviousMinor || plan.RestoredLifecycleAPI != issuedomain.LifecycleAPICurrent {
+		t.Fatalf("plan=%+v", plan)
+	}
+	applied, markerBackup, err := store.ApplyLifecycleMismatchRecovery(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied.Eligible || markerBackup == "" {
+		t.Fatalf("applied=%+v marker=%q", applied, markerBackup)
+	}
+	for name, want := range before {
+		got, readErr := os.ReadFile(filepath.Join(store.Dir, name))
+		if readErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("restored %s differs from exact backup: %v", name, readErr)
+		}
+	}
+	loaded, err := store.Load()
+	if err != nil || loaded.StateRevision != prepared.StateRevision {
+		t.Fatalf("loaded revision=%d err=%v", loaded.StateRevision, err)
+	}
+	if _, err := os.Stat(store.TransactionPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prepared transaction was not completed: %v", err)
+	}
+	for name, want := range before {
+		got, readErr := os.ReadFile(filepath.Join(backup, name))
+		if readErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("backup %s was modified: %v", name, readErr)
+		}
+	}
+}
+
+func TestLifecycleMismatchRecoveryRejectsChangedEvidence(t *testing.T) {
+	store := newStore(t)
+	if _, err := store.Update("checkpoint", 0, "", nil, func(*Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := store.quarantineUnlocked(LifecycleAPIVersionError{Version: issuedomain.LifecycleAPICurrent, Current: issuedomain.LifecycleAPIPreviousMinor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerData, _ := os.ReadFile(store.StatePath())
+	markerData = bytes.Replace(markerData,
+		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPICurrent+`"`),
+		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPIPreviousMinor+`"`), 1)
+	if err := os.WriteFile(store.StatePath(), markerData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PreviewLifecycleMismatchRecovery(filepath.Join(store.Dir, "recovery", "wrong")); err == nil {
+		t.Fatal("unrecorded lifecycle backup was accepted")
+	}
+	backupState := filepath.Join(blocked.Recovery.BackupDir, "state.json")
+	data, _ := os.ReadFile(backupState)
+	data = bytes.Replace(data,
+		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPICurrent+`"`),
+		[]byte(`"issue_lifecycle_api_version": "99.0"`), 1)
+	if err := os.WriteFile(backupState, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PreviewLifecycleMismatchRecovery(blocked.Recovery.BackupDir); err == nil {
+		t.Fatal("mutated lifecycle backup was accepted")
+	}
+}
+
 func TestLegacyMergedIdentityRecoveryRestoresExactQuarantine(t *testing.T) {
 	store, backup := quarantinedLegacyMergedStore(t, false)
 	plan, err := store.PreviewLegacyMergedIdentityRecovery(backup)
