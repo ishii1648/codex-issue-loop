@@ -270,7 +270,7 @@ func validateUnstartedConflictLaunch(snapshot *Snapshot, issue *Issue) error {
 		return fmt.Errorf("Issue #%d unstarted conflict launch execution identity is inconsistent", issue.Number)
 	}
 	checkpoint := issue.Continuation
-	if checkpoint == nil || checkpoint.ID == "" || checkpoint.RunID != issue.RunID || checkpoint.Generation == 0 || checkpoint.Generation+1 != issue.Generation ||
+	if checkpoint == nil || checkpoint.ID == "" || checkpoint.RunID != issue.RunID || checkpoint.Generation == 0 || checkpoint.Generation >= issue.Generation ||
 		active.StartedAt.Before(checkpoint.CreatedAt) ||
 		checkpoint.BaseSHA != active.BaseSHA || checkpoint.HeadSHA != issue.HeadSHA || checkpoint.PullRequestURL != issue.PullRequestURL ||
 		checkpoint.PullRequestNumber != issue.PullRequestNumber || !reflect.DeepEqual(checkpoint.Workspace, issue.Workspace) {
