@@ -29,6 +29,8 @@
 | リソース枯渇 | 巨大本文、大量コメント、巨大回答 | 入力件数・bytes上限、回答16 KiB上限、worker timeout | `gh`がJSONを返すまでの一時メモリはCLI実装に依存する |
 | 引数・path injection | `../`、悪意あるref、symlinkによるroot逸脱 | shell不使用、argv分離、ref検証、canonical path、root内判定、symlink拒否 | 検査後のTOCTOU。0700と専用macOSユーザーで他プロセスを制限する |
 | 資格情報漏えい | tokenがログ、state、Issueコメントに混入 | 多層redaction、秘密を回答として拒否、0600/0700 | 未登録形式や4文字未満の値、redaction前に外部CLI自身が送るデータ |
+| Issue commentによる権限迂回 | casual comment、bot、spoof marker、権限剥奪後のoperator、別runのrequest ID | 全文一致command、回答時のrepository権限再検証、bot/App拒否、Issue/run/request CAS、管理comment author照合 | allowlistまたはGitHub権限自体を奪取されたactorは正規operatorとして扱われる |
+| comment replay/edit/delete | webhook重複・欠落・順序変更、accepted commentの編集、ack前crash | authoritative一覧、comment ID/body SHA-256 provenance、単一canonical transaction、versioned冪等ack、periodic reconciliation | accepted後の削除は回答を撤回しないため、取消には別の明示的operator操作が必要 |
 | 過大権限 | GitHub tokenやmacOSユーザーが管理者 | 最小権限runbook、sandbox固定、承認なし | Codexはworktree内のソースを変更・pushできる。branch protectionとレビューが必要 |
 | command network bypass | `network_access=true`だけを有効化、upstream proxy、Web Search/MCP/app経由で外部送信 | 固定localhost allowlist、Codex network proxy必須、strict config、user config無視、hosted tool無効化、capability fail-closed | localhostは全port許可のため別loopback service探索が可能。専用標準ユーザー、firewall、brokerを下位境界にする |
 | 永続データ漏えい | Time Machineやサポートbundleがログを収集 | private mode、秘密を保存前にredact、backup手順 | 既存のM2以前のstate/logには遡及redactionしない |

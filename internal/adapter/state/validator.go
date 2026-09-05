@@ -297,6 +297,13 @@ func validateRequestAggregate(snapshot Snapshot, id string, request *Request) er
 			return fmt.Errorf("canceled request %s contains an answer", id)
 		}
 	}
+	if provenance := request.AnswerProvenance; provenance != nil {
+		if request.Status != issuedomain.RequestStatusAnswered || provenance.Source != "github_issue_comment" || provenance.CommentID <= 0 ||
+			strings.TrimSpace(provenance.Actor) == "" || provenance.RequestID != request.ID || provenance.IssueNumber != request.IssueNumber ||
+			provenance.RunID != request.RunID || !validSHA256(provenance.BodySHA256) || provenance.CommentedAt.IsZero() {
+			return fmt.Errorf("request %s has incomplete GitHub answer provenance", id)
+		}
+	}
 	if request.CheckpointID != "" {
 		historicalCompletedRequest := issue.Status == issuedomain.StatusCompleted && issue.Continuation == nil &&
 			request.Status == issuedomain.RequestStatusAnswered && request.ReleasedExecution != nil &&

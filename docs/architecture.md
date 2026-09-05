@@ -100,6 +100,17 @@ Issue aggregateは少なくとも次を一体として保持する。
 - publication identityと結果
 - failure、reconciliation、監査evidence
 
+GitHub Issue commentは共有control planeのtransportであり、状態の正本ではない。adapterは完全なrequest payloadとdigestを含むversioned markerを同期し、webhook mailboxはIssue番号だけをwake intentとして渡す。application層はauthoritative comment一覧とactor権限を再取得し、共通`inputanswer` serviceを経由してcanonical snapshotへCASする。acknowledgementはその後の冪等なGitHub effectなので、state保存後・ack前のcrashは再観測で回復し、workerを二重起動しない。
+
+```text
+issue_comment webhook / reconciliation
+  -> authoritative comments + current actor permission
+  -> strict command + request/run/Issue/body-digest validation
+  -> canonical answer_recorded transaction
+  -> versioned acknowledgement comment
+  -> existing resume_pending / active_execution scheduler gate
+```
+
 scenario別のresume status、sync flag、resource park、recovery substateを追加しない。中断理由の違いはgenericな`Suspension`のreasonとevidenceで表現する。
 
 ## 5. 単一の状態遷移境界

@@ -448,6 +448,20 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 			return result, failure.Wrap(failure.Supervisor, "reload webhook-routed state", err)
 		}
 	}
+	// The durable snapshot is the safety-sweep index for requests that are no
+	// longer in GitHub's ready-Issue collection. This closes webhook loss and
+	// comment edit/delete windows without relying on event delivery.
+	if _, supported := s.loop.inputControlClient(); supported {
+		for _, number := range needsInputIssues(snapshot) {
+			if err := s.loop.reconcileInputIssue(ctx, number); err != nil {
+				return result, failure.Wrap(failure.Transient, "reconcile GitHub input control", err)
+			}
+		}
+		snapshot, err = s.loop.Store.Load()
+		if err != nil {
+			return result, failure.Wrap(failure.Supervisor, "reload input reconciliation state", err)
+		}
+	}
 
 	for _, current := range pendingIssues(snapshot, now, s.loop.Config.Queue.Concurrency) {
 		if _, running := s.active[current.Number]; running || s.retryPending(current.Number) {
@@ -646,6 +660,13 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 			continue
 		}
 		if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
+			if delivery.Event == "issue_comment" && local.Status == issuedomain.StatusNeedsInput {
+				if err := s.loop.reconcileInputIssue(ctx, number); err != nil {
+					return nil, acknowledged, err
+				}
+				acknowledged = append(acknowledged, delivery)
+				continue
+			}
 			if delivery.Event == "issues" && delivery.Action == "collection_exited" {
 				converged, reconcileErr := s.loop.reconcileCollectionExit(ctx, *local, delivery)
 				if reconcileErr != nil {

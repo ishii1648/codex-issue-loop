@@ -66,7 +66,11 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 		if pending == nil {
 			return fmt.Errorf("Issue #%d has no pending request to sync", issue.Number)
 		}
-		err = l.GitHub.MarkNeedsInput(ctx, l.Config, issue.Number, pending.ID, pending.Question)
+		if controller, ok := l.inputControlClient(); ok {
+			err = controller.SyncInputRequest(ctx, l.Config, *pending)
+		} else {
+			err = l.GitHub.MarkNeedsInput(ctx, l.Config, issue.Number, pending.ID, pending.Question)
+		}
 	case issuedomain.EffectRetryConflict:
 		recoveryID := issue.RunID
 		if issue.ConflictRecovery != nil {

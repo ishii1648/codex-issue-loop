@@ -64,6 +64,22 @@ type AnswerRecord struct {
 	AnsweredAt time.Time `json:"answered_at"`
 }
 
+// AnswerProvenance binds a remote answer to the immutable observation that
+// authorized the canonical answer transition. BodySHA256 permits later edits
+// to be detected without retaining an additional copy of the comment body.
+type AnswerProvenance struct {
+	Source        string    `json:"source"`
+	CommentID     int64     `json:"comment_id,omitempty"`
+	Actor         string    `json:"actor,omitempty"`
+	Permission    string    `json:"permission,omitempty"`
+	RequestID     string    `json:"request_id"`
+	IssueNumber   int       `json:"issue_number"`
+	RunID         string    `json:"run_id,omitempty"`
+	BodySHA256    string    `json:"body_sha256"`
+	CommentedAt   time.Time `json:"commented_at,omitempty"`
+	CommentEdited time.Time `json:"comment_edited_at,omitempty"`
+}
+
 type WorkerSession struct {
 	Backend string `json:"backend"`
 	ID      string `json:"id"`
@@ -277,6 +293,7 @@ type Request struct {
 	ReleasedExecution *ExecutionIdentity        `json:"released_execution,omitempty"`
 	Status            issuedomain.RequestStatus `json:"status"`
 	Answer            string                    `json:"answer,omitempty"`
+	AnswerProvenance  *AnswerProvenance         `json:"answer_provenance,omitempty"`
 	CreatedAt         time.Time                 `json:"created_at"`
 	AnsweredAt        *time.Time                `json:"answered_at,omitempty"`
 }

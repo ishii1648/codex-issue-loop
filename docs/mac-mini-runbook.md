@@ -171,6 +171,14 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
 
 記録後、同じrequest IDがansweredになったことをstatusで確認する。別Issueがroot `active_execution`を保持していれば、回答済みIssueはcontinuationを保持して待機し、実行枠が空いた後にschedulerが再開する。ready/running label、state、execution identityを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
+GitHub mobile UIから直接回答する場合は、`codex-loop:needs-input` Issueのmanaged commentに表示されたrequest IDとoption IDをコピーし、新しいcommentの本文全体を次の1 commandだけにする。
+
+```text
+/agent-loop answer req_... option-id
+```
+
+投稿後はmarker付きackが`accepted`になることを確認する。`stale`、`unauthorized`、`malformed`、`conflict`ではworkerは再開しない。元の質問commentや既存回答を編集せず、新しいcommentを投稿する。credential、token、secretを回答に含めない。mobile実機受け入れでは、質問の全field表示、command投稿、accepted ack、同じrequest/run/worktree/sessionでの再開、二重worker不在を記録する。
+
 ### 停止
 
 対象repositoryを確認してから、監視taskへ「状態とworktreeを残してloopを停止して」と依頼する。

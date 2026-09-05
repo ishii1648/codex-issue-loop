@@ -357,6 +357,18 @@ agent-loop answer --request-id req_... --message-file -
 
 通常workerの`needs_input`は`input_requested` transactionでrequestとcontinuation provenanceを保存し、GitHub needs-inputを維持したままrepositoryの実行枠を解放する。回答済みrequestは実行枠が空くまでworker dispatch対象にせず、枠の解放後に同じrequest、run、generationを再検証して`resume_pending`へ進める。manual/security、PR conflict、publication監査、active worker、複数request、未知のlegacy stateは対象Issueに対してfail closedとする。continuationは保存workspaceと新しいgenerationをspawn直前に再検証する。
 
+GitHub control planeでは、`needs_input`ラベルを持つIssueにrequestごとに1件のmanaged commentを同期する。commentはrequest ID、Issue番号、run ID、質問、reason、recommended option、全option ID/label、`allow_free_text`、作成時刻を人間可読に表示し、同じpayloadのcanonical JSON、version、SHA-256をHTML markerへ保持する。supervisor自身が作成したcommentだけを修復・重複除去し、第三者がmarkerを模倣したcommentを管理対象として削除しない。
+
+回答commandはcomment本文全体が次の形式に一致する場合だけ候補とする。
+
+```text
+/agent-loop answer <request-id> <answer>
+```
+
+casual comment、前後の空白、未知のverb、bot/App actor、別Issue・別run・別requestは回答に変換しない。actorの現在のrepository権限を回答時に再取得し、write/maintain/adminまたは明示allowlistだけを許可する。option ID、free-text可否、16 KiB上限、UTF-8/control character、credential/設定済みsecretの拒否はCLIと同じ`inputanswer`境界を使う。accepted answerはCLIと同じ`answer_recorded` transactionへ渡し、source、comment ID、actor、permission、request/Issue/run、comment body SHA-256、作成・更新時刻をprovenanceとして保存する。
+
+各command候補には`accepted`、`stale`、`unauthorized`、`malformed`、`conflict`のversioned acknowledgement markerを1件だけ同期する。commentの重複配送・順序変更はauthoritative comment一覧の作成時刻/comment ID順で処理し、同一comment ID/body digestだけを同一accepted observationとする。edit/delete後もaccepted transitionは取り消さず、編集された再観測はconflictとして扱う。`issue_comment`のcreated/edited/deletedはmailboxをwakeし、webhook欠落時もdurable pending requestをindexとするreconciliationで質問commentと回答を回収する。
+
 ### 6.6 issue plan / issue resolve
 
 ```sh
