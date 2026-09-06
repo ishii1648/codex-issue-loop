@@ -24,7 +24,7 @@ func desiredIssueProjection(cfg config.Config, status issuedomain.Status) (issue
 	p.managed = append(p.managed, cfg.GitHub.RunningLabel, cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel, "needs-human", "codex-loop:needs-input", "triage", "do-not-automate")
 	blocked := cfg.GitHub.FailedLabel
 	for _, label := range cfg.GitHub.ExcludeLabels {
-		if strings.EqualFold(label, "blocked") {
+		if labelKey(label) == "blocked" {
 			blocked = label
 			p.managed = append(p.managed, label)
 		}
@@ -59,18 +59,18 @@ func desiredIssueProjection(cfg config.Config, status issuedomain.Status) (issue
 func (p issueProjection) labelChanges(issue Issue) (add, remove []string) {
 	present := map[string]bool{}
 	for _, label := range issue.Labels {
-		present[strings.ToLower(label)] = true
+		present[labelKey(label)] = true
 	}
-	if p.human && !present[strings.ToLower(p.humanLabel)] {
+	if p.human && !present[labelKey(p.humanLabel)] {
 		add = append(add, p.humanLabel)
 	}
-	if p.label != "" && !present[strings.ToLower(p.label)] {
+	if p.label != "" && !present[labelKey(p.label)] {
 		add = append(add, p.label)
 	}
 	seen := map[string]bool{}
 	for _, label := range p.managed {
-		key := strings.ToLower(label)
-		if label != "" && !(p.human && strings.EqualFold(label, p.humanLabel)) && !strings.EqualFold(label, p.label) && present[key] && !seen[key] {
+		key := labelKey(label)
+		if label != "" && !(p.human && key == labelKey(p.humanLabel)) && key != labelKey(p.label) && present[key] && !seen[key] {
 			remove = append(remove, label)
 			seen[key] = true
 		}

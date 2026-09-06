@@ -12,6 +12,10 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
+func labelKey(name string) string {
+	return strings.ToLower(name)
+}
+
 type LabelSpec struct {
 	Name        string `json:"name"`
 	Color       string `json:"color"`
@@ -52,7 +56,7 @@ func RequiredLabelSpecs(cfg config.Config) []LabelSpec {
 	specs := []LabelSpec{}
 	add := func(names []string, color, description string) {
 		for _, name := range names {
-			key := strings.ToLower(name)
+			key := labelKey(name)
 			if name == "" || seen[key] {
 				continue
 			}
@@ -67,7 +71,7 @@ func RequiredLabelSpecs(cfg config.Config) []LabelSpec {
 	add([]string{cfg.GitHub.DoneLabel}, "5319E7", "Completed by codex-issue-loop")
 	add(cfg.Queue.PriorityLabels, "BFD4F2", "Priority for codex-issue-loop queue ordering")
 	for _, name := range cfg.GitHub.ExcludeLabels {
-		if strings.EqualFold(name, "blocked") {
+		if labelKey(name) == "blocked" {
 			add([]string{name}, "B60205", "Blocked from automated processing")
 		}
 	}
@@ -83,7 +87,7 @@ func (c CLI) BootstrapLabels(ctx context.Context, cfg config.Config, apply bool)
 		return result, err
 	}
 	for _, desired := range RequiredLabelSpecs(cfg) {
-		current, exists := existing[strings.ToLower(desired.Name)]
+		current, exists := existing[labelKey(desired.Name)]
 		action := LabelAction{Action: "create", Desired: desired}
 		if exists {
 			action.Action = "preserve"
@@ -114,7 +118,7 @@ func (c CLI) BootstrapLabels(ctx context.Context, cfg config.Config, apply bool)
 		// Re-read before reporting a failure; never use --force or overwrite it.
 		latest, listErr := c.listLabels(ctx, cfg.GitHub.Repo)
 		if listErr == nil {
-			if current, exists := latest[strings.ToLower(action.Desired.Name)]; exists {
+			if current, exists := latest[labelKey(action.Desired.Name)]; exists {
 				action.Action = "preserve"
 				action.ExistingColor = current.Color
 				action.ExistingDescription = current.Description
@@ -149,7 +153,7 @@ func (c CLI) listLabels(ctx context.Context, repository string) (map[string]Labe
 	}
 	result := make(map[string]LabelSpec, len(labels))
 	for _, label := range labels {
-		result[strings.ToLower(label.Name)] = label
+		result[labelKey(label.Name)] = label
 	}
 	return result, nil
 }
