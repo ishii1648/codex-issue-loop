@@ -72,7 +72,7 @@ func TestStateEventCollectorIsIdempotentAndLinksFixLifecycle(t *testing.T) {
 	prior := DurableState{Version: SchemaVersion, UpdatedAt: now, Episodes: map[string]Episode{
 		fingerprint: {Version: SchemaVersion, ID: "inc-" + fingerprint[:20], Fingerprint: fingerprint, Repository: "owner/repo", CorrelationID: "original", State: "open", StartedAt: now, UpdatedAt: now, OccurrenceCount: 1, SignalIDs: []string{"original"}, LastSignalID: "original", Evidence: []EvidenceRef{}, PrimaryClassification: "suspected_bug", MatchedRules: []string{"repeated-invariant-violation"}, Confidence: "medium", Issue: &IssueRef{Number: 42, URL: "https://github.com/owner/repo/issues/42", Fingerprint: fingerprint, Labels: []string{"codex-loop:ready"}, Status: "created"}, Lifecycle: []LifecycleResult{}},
 	}}
-	if err := target.SaveState(prior, emptyMetrics()); err != nil {
+	if err := target.SaveState(prior, prior.Revision, emptyMetrics()); err != nil {
 		t.Fatal(err)
 	}
 	events := []state.Event{
