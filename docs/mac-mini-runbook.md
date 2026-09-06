@@ -171,6 +171,10 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
 
 記録後、同じrequest IDがansweredになったことをstatusで確認する。別Issueがroot `active_execution`を保持していれば、回答済みIssueはcontinuationを保持して待機し、実行枠が空いた後にschedulerが再開する。ready/running label、state、execution identityを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
+GitHub から回答する場合は、`needs-human` Issue の質問コメントに表示された request ID と option ID を使い、新しいコメントの本文全体を `/agent-loop answer <request-id> <answer>` にする。free text は質問で許可されている場合に使う。repository の write/maintain/admin 権限が必要で、起票者 allowlist は代用にならない。
+
+投稿後は marker 付き ack の `accepted` を確認する。これは回答保存の確認であり、隔離解除や worker 起動の確認ではない。他の outcome では status と現在の質問を確認し、回答や質問コメントを編集して再試行しない。回答コメントを削除しても受領済み回答は取り消されない。credential・secret は投稿しない。
+
 ### 停止
 
 対象repositoryを確認してから、監視taskへ「状態とworktreeを残してloopを停止して」と依頼する。

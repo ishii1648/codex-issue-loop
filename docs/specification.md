@@ -368,6 +368,12 @@ agent-loop answer --request-id req_... --message-file -
 
 通常 worker の質問待ちでは実行枠を解放し、session/workspace を保持する。回答の受領と worker への引き渡しは別の状態であり、worker 起動前の provenance 検証は維持する。新しい質問の checkpoint に前回の解決済み suspension を引き継がず、以前の質問・回答は履歴として保持する。
 
+GitHub コメント回答では、未回答 request ごとに質問・reason・推奨 option・全 option ID/label・free-text 可否・Issue 番号・request ID・作成時刻を表示し、versioned marker に同じ payload と SHA-256 を保存する。自分が投稿した質問コメントだけを冪等に修復する。質問の有無は現行の `needs-human` projection に従う。
+
+コメント本文全体が `/agent-loop answer <request-id> <answer>` に一致する場合だけ回答候補とする。前後空白、casual comment、bot/App、自分自身、別 Issue/request、古い run や質問作成前のコメントは受理しない。actor の現在の repository 権限を再取得し、write/maintain/admin を要求する。起票者 allowlist は回答権限を与えない。CLI と同じ検証で 16 KiB 上限、UTF-8、control character、credential・設定 secret を検査し、選択肢がある質問では option ID または許可された free text を要求する。
+
+回答と source・comment ID・actor・permission・request/Issue/run・body SHA-256・コメント作成/更新時刻を `RecordAnswer` で同時保存する。worker の再開は既存 supervisor に委ねる。`accepted` は受領を意味し、再開成功を意味しない。各 command 候補に `accepted/stale/unauthorized/malformed/conflict` の marker 付き ack を同期する。作成時刻・comment ID 順に処理し、採用後の編集は conflict、削除は保存済み回答を維持する。保存後 ack 前の中断は保存 provenance から回復する。`issue_comment` webhook と既存の managed Issue reconciliation の両方で回収し、隔離中・回答済み request も再照合する。
+
 ### 6.6 issue plan / issue resolve
 
 ```sh

@@ -464,6 +464,11 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		}
 	}
 
+	snapshot, err = s.loop.Store.PrepareAnsweredRequests(now)
+	if err != nil {
+		return result, err
+	}
+
 	for _, current := range pendingIssues(snapshot, now, s.loop.Config.Queue.Concurrency) {
 		if _, running := s.active[current.Number]; running || s.retryPending(current.Number) {
 			continue
@@ -666,6 +671,11 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		if newestByIssue[number] != index {
 			continue
 		}
+		if delivery.Event == "issue_comment" {
+			if err := s.loop.reconcileInputIssue(ctx, number); err != nil {
+				return nil, acknowledged, err
+			}
+		}
 		if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
 			if delivery.Event == "issues" {
 				_, reconcileErr := s.loop.reconcileCollectionExit(ctx, *local, delivery)
@@ -825,6 +835,10 @@ func (s *scheduler) dispatchManagedReconciliation(ctx context.Context, snapshot 
 		delay = 5 * time.Minute
 	}
 	s.terminalPoll[current.Number] = now.Add(delay)
+	if err := s.loop.reconcileInputIssue(ctx, current.Number); err != nil {
+		return false, failure.Wrap(failure.Transient, "reconcile GitHub input control", err)
+	}
+
 	if _, active := s.active[current.Number]; active {
 		if err := s.loop.reconcileIssueProjection(ctx, current.Number); err != nil {
 			if _, limited := cooldownFromError(err, now); limited || failure.KindOf(err) == failure.Supervisor {
