@@ -167,3 +167,32 @@ func TestAnsweredQuestionSurvivesNextCheckpoint(t *testing.T) {
 		t.Fatal("mismatched historical answer accepted")
 	}
 }
+
+func TestResolutionReleasePreservesPublicationHeadBinding(t *testing.T) {
+	for _, stage := range []issuedomain.ContinuationStage{issuedomain.ContinuationStagePublish, issuedomain.ContinuationStageChecks} {
+		t.Run(string(stage), func(t *testing.T) {
+			now := time.Now().UTC()
+			c := &ContinuationCheckpoint{ID: "checkpoint_saved", RunID: "run_saved", Generation: 1, BaseSHA: "base", HeadSHA: "local-head", WorktreeSHA256: "saved-digest", Stage: stage, Summary: "verified repair", ResultSHA256: "saved-result"}
+			item := &Issue{Number: 1, RunID: "run_saved", Generation: 1, Status: issuedomain.StatusFailed, HeadSHA: "remote-head", Continuation: c}
+			snapshot := Snapshot{Issues: map[string]*Issue{"1": item}}
+			if _, err := ResumeContinuation(&snapshot, 1, c.ID, now); err != nil {
+				t.Fatal(err)
+			}
+			transition, err := issuedomain.ResolveSuspension(item.Status, issuedomain.ResolutionRetryStage, stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyIssueTransition(item, transition); err != nil {
+				t.Fatal(err)
+			}
+			finalizeLifecycleBoundaries(&snapshot, now)
+			expectedHead := "remote-head"
+			if stage == issuedomain.ContinuationStagePublish {
+				expectedHead = "local-head"
+			}
+			if snapshot.ActiveExecution != nil || item.Continuation.HeadSHA != expectedHead || item.Continuation.WorktreeSHA256 != "saved-digest" || item.Continuation.ResultSHA256 != "saved-result" || item.Continuation.Generation != 2 || item.HeadSHA != "remote-head" {
+				t.Fatalf("continuation binding changed on execution release: %+v", item.Continuation)
+			}
+		})
+	}
+}
