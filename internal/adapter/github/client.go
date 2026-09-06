@@ -415,7 +415,7 @@ func (c CLI) Claim(ctx context.Context, cfg config.Config, issue Issue, runID st
 		}
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:claim:%s -->", runID)
-	body := fmt.Sprintf("%s\nClaimed by `codex-issue-loop` (run `%s`).", marker, runID)
+	body := fmt.Sprintf("%s\nSupervisor picked up this issue. Preparing the workspace before starting the worker (run `%s`).", marker, runID)
 	return c.ensureComment(ctx, cfg.GitHub.Repo, issue.Number, marker, body)
 }
 
