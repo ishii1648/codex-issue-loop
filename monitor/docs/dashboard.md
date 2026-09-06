@@ -66,7 +66,7 @@ scrapeとdashboardは15秒更新です。monitor停止は既存の`observation_t
 
 詳細表は`/api/details?repo=owner/name`から、既存status計算結果を平坦化した`rows`を読みます。queueが空でも状態・理由・観測エラーを1行返し、未設定のIssue番号と期限はnullです。理由と観測エラーは同じ列に表示します。
 
-Infinityは`/api/timeline`から区間を直接読み、backendの列順に関係なくGrafanaのorganize変換で開始・終了・状態の順へ並べます。選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。replay後は次回取得で反映し、近似や間引きをしません。ピクセルより短い区間は、tableの「正確な区間JSON」リンクで開始・終了・理由を確認できます。Grafana詳細の時刻範囲はtimelineに適用します。失効監視付きURLでは24h/7d/30dまたは日時指定（入力は閲覧端末のローカル時刻、表示はUTC）を選び、同じfrom/toを`/api/report`と`/api/timeline`へ渡します。reportの未観測時間をUNKNOWNへ補完して全長100%のバーと秒数凡例を表示します。細い区間に文字は重ねずhoverで状態と開始・終了を確認でき、ピクセル未満の区間はJSONから確認できます。現在カードは`/api/status`の最新取得、補助3期間集計は各更新時刻を終端とするreportであり、過去の選択期間とは独立です。replayは選択期間・補助集計とも次回取得で反映します。
+Infinityは`/api/timeline`から区間を直接読み、backendの列順に関係なくGrafanaのorganize変換で開始・終了・状態の順へ並べます。選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。replay後は次回取得で反映し、近似や間引きをしません。ピクセルより短い区間は、tableの「正確な区間JSON」リンクで開始・終了・理由を確認できます。Grafana詳細の時刻範囲はtimelineに適用します。失効監視付きURLでは1h/24h/7d/30d（既定は24h）または日時指定（入力・表示は端末のtimezoneによらずJST、Asia/Tokyo・UTC+09:00）を選び、UTC/RFC3339に変換した同じfrom/toを`/api/report`と`/api/timeline`へ渡します。reportの未観測時間をUNKNOWNへ補完して全長100%のバーと秒数凡例を表示します。細い区間に文字は重ねずhoverで状態と開始・終了を確認でき、ピクセル未満の区間はJSONから確認できます。現在カードは`/api/status`の最新取得、補助3期間集計は各更新時刻を終端とするreportであり、過去の選択期間とは独立です。replayは選択期間・補助集計とも次回取得で反映します。
 
 ## CLIとの照合
 
