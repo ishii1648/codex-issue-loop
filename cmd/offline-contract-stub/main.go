@@ -243,7 +243,7 @@ func runCodex(args []string) error {
 		return nil
 	}
 	if contains(args, "--help") {
-		fmt.Println("--json --output-schema --output-last-message --sandbox --cd --ignore-user-config --strict-config --disable")
+		fmt.Println("--json --output-schema --output-last-message --sandbox --cd --approve-for-me --ignore-user-config --strict-config --disable")
 		return nil
 	}
 	prompt, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))

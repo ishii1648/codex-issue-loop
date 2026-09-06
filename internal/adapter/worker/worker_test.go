@@ -490,6 +490,10 @@ fi
 	cfg.RepoPath = filepath.Join(worktree, "nested", "..")
 	cfg.Worker.Command = fake
 	cfg.Worker.Model = "test-model"
+	cfg.Worker.MCPConfig = filepath.Join(t.TempDir(), "browser.json")
+	if err := os.WriteFile(cfg.Worker.MCPConfig, []byte(`{"mcpServers":{"cua_repl":{"command":"node","args":["browser.mjs"],"env":{"SURFACES":"browser"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	adapter := Codex{StateDir: stateDir}
 	issue := gh.Issue{Number: 134, Title: "resume workspace fixture"}
 	initialState := state.Issue{RunID: "run_134", Attempts: 1, Branch: "codex/issue-134-resume-workspace", Worktree: canonicalWorktree}
@@ -555,7 +559,10 @@ fi
 			t.Fatalf("resume argv placed --cd after subcommand: %q", args)
 		}
 		joined := strings.Join(args, " ")
-		for _, expected := range []string{"--sandbox workspace-write", `--config approval_policy="never"`, "--model test-model", "--output-schema", "--output-last-message"} {
+		if strings.Count(joined, "--approve-for-me") != 1 || strings.Contains(joined, "approval_policy=") || strings.Contains(joined, "--sandbox") {
+			t.Fatalf("unexpected approval arguments: %s", joined)
+		}
+		for _, expected := range []string{"--approve-for-me", `sandbox_mode="workspace-write"`, `mcp_servers={"cua_repl"={"args"=["browser.mjs"],"command"="node","env"={"SURFACES"="browser"}}}`, "--model test-model", "--output-schema", "--output-last-message"} {
 			if !strings.Contains(joined, expected) {
 				t.Fatalf("%s argv missing %q: %q", mode, expected, args)
 			}
@@ -647,5 +654,37 @@ func TestLoadLatestCompletedResultRequiresUnpublishedSchemaConformingResult(t *t
 	result, _, err = LoadLatestCompletedResult(dir)
 	if err != nil || result.Summary != "verified" {
 		t.Fatalf("published result must be skipped: result=%+v err=%v", result, err)
+	}
+}
+
+func TestMCPConfigValidation(t *testing.T) {
+	for _, body := range []string{`{} {}`, `{}`, `{"mcpServers":{}}`, `{"mcpServers":{"cua":null}}`, `{"mcpServers":{"cua":{"command":"node"}},"unexpected":true}`} {
+		path := filepath.Join(t.TempDir(), "mcp.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readMCPConfig(path); err == nil {
+			t.Fatalf("accepted invalid MCP config: %s", body)
+		}
+	}
+	if _, err := readMCPConfig(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("accepted missing MCP config")
+	}
+}
+
+func TestCodexBrowserMCPExplicitOptIn(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Worker.CommandNetwork = config.CommandNetwork{Policy: "localhost-only", Proxy: true, AllowedHosts: []string{"localhost", "127.0.0.1"}}
+	cfg.Worker.MCPConfig = "/operator/browser.json"
+	args := strings.Join(codexExecBaseArgs(cfg), " ")
+	for _, feature := range []string{"browser_use", "browser_use_external", "computer_use", "in_app_browser"} {
+		if !strings.Contains(args, "--enable "+feature) || strings.Contains(args, "--disable "+feature) {
+			t.Fatalf("browser opt-in missing: %s", args)
+		}
+	}
+	for _, required := range []string{"--approve-for-me", "--ignore-user-config", "--disable plugins", "--disable apps"} {
+		if !strings.Contains(args, required) {
+			t.Fatalf("missing %s: %s", required, args)
+		}
 	}
 }
