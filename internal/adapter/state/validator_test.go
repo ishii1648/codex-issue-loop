@@ -196,6 +196,25 @@ func TestSnapshotValidateRejectsRunningWithoutProcessIdentity(t *testing.T) {
 	}
 }
 
+func TestSuspensionRejectsAdoptWorktreeAsPersistedResolutionVocabulary(t *testing.T) {
+	now := time.Now().UTC()
+	item := &Issue{Number: 1, Status: issuedomain.StatusBlocked, Suspension: &Suspension{
+		ID: NewID("suspension"), Status: issuedomain.SuspensionActive, ReasonCode: "issue",
+		Recoverability: issuedomain.RecoverabilityOperator, Reason: "fixture",
+		AllowedActions: []issuedomain.ResolutionAction{issuedomain.ResolutionAdoptWorktree}, SuspendedAt: now,
+	}}
+	if err := validateSuspension(item); err == nil || !strings.Contains(err.Error(), "invalid or duplicate action") {
+		t.Fatalf("adopt-worktree was accepted as a persisted allowed action: %v", err)
+	}
+	item.Suspension.AllowedActions = []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}
+	item.Suspension.Status = issuedomain.SuspensionResolved
+	item.Suspension.Resolution = issuedomain.ResolutionAdoptWorktree
+	item.Suspension.ResolvedAt = now
+	if err := validateSuspension(item); err == nil || !strings.Contains(err.Error(), "no valid resolution") {
+		t.Fatalf("adopt-worktree was accepted as a terminal suspension resolution: %v", err)
+	}
+}
+
 func TestStoreUpdateQuarantinesInvalidIssueAndAllowsFollowingIssue(t *testing.T) {
 	store := newStore(t)
 	snapshot, err := store.Update("invalid", 1, "run_1", nil, func(snapshot *Snapshot) error {
