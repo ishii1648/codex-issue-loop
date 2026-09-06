@@ -5,6 +5,113 @@ import (
 	"time"
 )
 
+func TestEvaluateUsesRunningDeadlineWhileOldReadyWaits(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	observation := Observation{ObservedAt: now, Items: []QueueItem{
+		{Number: 1, Phase: Ready, PhaseSince: now.Add(-time.Hour), Deadline: now.Add(-50 * time.Minute)},
+		{Number: 2, Phase: Running, PhaseSince: now.Add(-time.Minute), Deadline: now.Add(time.Hour)},
+	}}
+	status, startedAt, _ := Evaluate(observation)
+	if status != Healthy || !startedAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("Evaluate() = %s at %s", status, startedAt)
+	}
+}
+
+func TestReplayRestoresDeadlineRecoveryAndTerminalIntervalsInOnePoll(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	initial, _, err := Apply(nil, Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(time.Minute),
+		Items:  []QueueItem{{Number: 1, Phase: Ready, PhaseSince: base, Deadline: base.Add(10 * time.Minute)}},
+		Cursor: 100, CursorInitialized: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(40 * time.Minute),
+		Events: []QueueEvent{
+			{ID: 101, IssueNumber: 1, Kind: RunningLabeled, At: base.Add(20 * time.Minute)},
+			{ID: 102, IssueNumber: 1, Kind: QueueExited, At: base.Add(30 * time.Minute)},
+		},
+		Cursor: 102, CursorInitialized: true,
+		AcceptanceTimeout: 10 * time.Minute, ProcessingTimeout: time.Hour,
+	}
+	next, closed, err := Apply(&initial, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Current.Status != Idle || !next.Current.StartedAt.Equal(base.Add(30*time.Minute)) {
+		t.Fatalf("current = %+v", next.Current)
+	}
+	if len(closed) != 3 || closed[0].Status != Healthy || closed[1].Status != Down || closed[2].Status != Healthy {
+		t.Fatalf("closed intervals = %+v", closed)
+	}
+	if !closed[0].EndedAt.Equal(base.Add(10*time.Minute)) || !closed[1].EndedAt.Equal(base.Add(20*time.Minute)) || !closed[2].EndedAt.Equal(base.Add(30*time.Minute)) {
+		t.Fatalf("closed boundaries = %+v", closed)
+	}
+	again, duplicate, err := Apply(&next, observation)
+	if err != nil || len(duplicate) != 0 || again.Current.ID != next.Current.ID {
+		t.Fatalf("duplicate replay: next=%+v closed=%+v err=%v", again, duplicate, err)
+	}
+}
+
+func TestRunningTerminalStartsNextAdmissionWindowAtEvent(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	initial, _, err := Apply(nil, Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(6 * time.Minute), Cursor: 200, CursorInitialized: true,
+		Items: []QueueItem{
+			{Number: 1, Phase: Running, PhaseSince: base.Add(5 * time.Minute), Deadline: base.Add(65 * time.Minute)},
+			{Number: 2, Phase: Ready, PhaseSince: base, Deadline: base.Add(10 * time.Minute)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminalAt := base.Add(20 * time.Minute)
+	next, _, err := Apply(&initial, Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(25 * time.Minute), Cursor: 201, CursorInitialized: true,
+		Items:             []QueueItem{{Number: 2, Phase: Ready}},
+		Events:            []QueueEvent{{ID: 201, IssueNumber: 1, Kind: QueueExited, At: terminalAt}},
+		AcceptanceTimeout: 10 * time.Minute, ProcessingTimeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Current.Status != Healthy || next.QueuePhase != Ready || !next.QueuePhaseSince.Equal(terminalAt) || !next.QueueDeadline.Equal(terminalAt.Add(10*time.Minute)) {
+		t.Fatalf("next admission window = %+v", next)
+	}
+}
+
+func TestRecoveryAfterObservationFailureDoesNotMoveIntervalsBackwards(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	initial, _, err := Apply(nil, Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Cursor: 10, CursorInitialized: true,
+		Items: []QueueItem{{Number: 1, Phase: Ready, PhaseSince: base, Deadline: base.Add(10 * time.Minute)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, _, err := Apply(&initial, Observation{Repository: "owner/repo", ObservedAt: base.Add(5 * time.Minute), Error: "unavailable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, closed, err := Apply(&failed, Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(8 * time.Minute), Cursor: 11, CursorInitialized: true,
+		Items:             []QueueItem{{Number: 1, Phase: Running}},
+		Events:            []QueueEvent{{ID: 11, IssueNumber: 1, Kind: RunningLabeled, At: base.Add(4 * time.Minute)}},
+		ProcessingTimeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Current.Status != Healthy || !recovered.Current.StartedAt.Equal(base.Add(8*time.Minute)) {
+		t.Fatalf("recovered = %+v", recovered.Current)
+	}
+	if len(closed) != 1 || closed[0].Status != Unknown || !closed[0].EndedAt.Equal(base.Add(8*time.Minute)) {
+		t.Fatalf("closed = %+v", closed)
+	}
+}
+
 func TestReplayLabelReplacementBoundaries(t *testing.T) {
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	for _, terminal := range []bool{false, true} {
@@ -14,43 +121,41 @@ func TestReplayLabelReplacementBoundaries(t *testing.T) {
 				initialPhase = Running
 			}
 			initial := QueueItem{Number: 1, Phase: initialPhase, PhaseSince: base, Deadline: base.Add(time.Hour)}
-			previous, _, _ := Apply(nil, Observation{Repository: "owner/repo", ObservedAt: base, Items: []QueueItem{initial}, Cursor: 1})
-			remove := QueueEvent{ID: 2, At: base.Add(time.Minute), Number: 1, Kind: "remove", Item: QueueItem{Phase: initialPhase}}
-			change := QueueEvent{ID: 3, At: base.Add(2 * time.Minute), Number: 1, Kind: "phase", Item: QueueItem{Number: 1, Phase: nextPhase, PhaseSince: base.Add(2 * time.Minute), Deadline: base.Add(time.Hour)}}
+			previous, _, _ := Apply(nil, Observation{Repository: "owner/repo", ObservedAt: base, Items: []QueueItem{initial}, Cursor: 1, CursorInitialized: true})
+			remove := QueueEvent{ID: 2, At: base.Add(time.Minute), IssueNumber: 1, Kind: ReadyUnlabeled}
+			change := QueueEvent{ID: 3, At: base.Add(2 * time.Minute), IssueNumber: 1, Kind: RunningLabeled}
 			if terminal {
-				change.Kind = "exit"
+				remove.Kind = RunningUnlabeled
+			}
+			if terminal {
+				change.Kind = QueueExited
 			}
 			if reversed {
 				remove.ID, change.ID = change.ID, remove.ID
 				remove.At, change.At = change.At, remove.At
-				change.Item.PhaseSince = change.At
 			}
 			events := []QueueEvent{remove, change}
 			if reversed {
 				events = []QueueEvent{change, remove}
 			}
-			items := []QueueItem{change.Item}
+			items := []QueueItem{{Number: 1, Phase: nextPhase}}
 			if terminal {
 				items = nil
 			}
-			obs := Observation{Repository: "owner/repo", ObservedAt: base.Add(3 * time.Minute), Items: items, Events: events, Cursor: 3}
-			steps, err := Replay(&previous, obs)
+			obs := Observation{Repository: "owner/repo", ObservedAt: base.Add(3 * time.Minute), Items: items, Events: events, Cursor: 3, CursorInitialized: true, AcceptanceTimeout: time.Hour, ProcessingTimeout: time.Hour}
+			next, closed, err := Apply(&previous, obs)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, step := range steps {
-				next, closed, err := Apply(&previous, step)
-				if err != nil {
-					t.Fatal(err)
+			for _, interval := range closed {
+				if terminal && interval.Status == Healthy && !interval.EndedAt.Equal(change.At) {
+					t.Fatalf("terminal boundary = %+v", interval)
 				}
-				if terminal && closed != nil && closed.Status == Healthy && !closed.EndedAt.Equal(change.At) {
-					t.Fatalf("terminal boundary = %+v", closed)
+				if !terminal {
+					t.Fatalf("false interval = %+v", interval)
 				}
-				if !terminal && next.Current.Status != Healthy {
-					t.Fatalf("false interval = %+v", next.Current)
-				}
-				previous = next
 			}
+			previous = next
 			if terminal && (previous.Current.Status != Idle || !previous.Current.StartedAt.Equal(change.At)) {
 				t.Fatalf("terminal = %+v", previous.Current)
 			}
@@ -60,8 +165,8 @@ func TestReplayLabelReplacementBoundaries(t *testing.T) {
 
 func TestReplayUnprovenExitAndReentry(t *testing.T) {
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
-	for _, kind := range []string{"remove", "unproven"} {
-		_, err := Replay(nil, Observation{Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Events: []QueueEvent{{ID: 1, Number: 1, At: base, Kind: kind}}})
+	for _, kind := range []EventKind{ReadyUnlabeled, QueueUnproven} {
+		_, err := replayEvents(Snapshot{}, Observation{Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Events: []QueueEvent{{ID: 1, IssueNumber: 1, At: base, Kind: kind}}, Cursor: 1})
 		if err == nil {
 			t.Fatalf("%s accepted", kind)
 		}

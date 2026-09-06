@@ -31,31 +31,30 @@ func TestEvaluateFourStatesAndDeadlineBoundary(t *testing.T) {
 
 func TestApplyStartsDownAtDeadlineAndRecoversAtProgressEvent(t *testing.T) {
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
-	healthy := Observation{Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Items: []QueueItem{{Number: 7, Phase: Ready, PhaseSince: base, Deadline: base.Add(10 * time.Minute)}}, EventIDs: []int64{10}, Cursor: 10}
+	healthy := Observation{Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Items: []QueueItem{{Number: 7, Phase: Ready, PhaseSince: base, Deadline: base.Add(10 * time.Minute)}}, Cursor: 10, CursorInitialized: true}
 	current, closed, err := Apply(nil, healthy)
 	if err != nil || closed != nil || current.Current.Status != Healthy {
 		t.Fatalf("initial apply: state=%+v closed=%+v err=%v", current, closed, err)
 	}
 	overdue := healthy
 	overdue.ObservedAt = base.Add(20 * time.Minute)
-	overdue.EventIDs = []int64{10}
 	current, closed, err = Apply(&current, overdue)
 	if err != nil || current.Current.Status != Down || !current.Current.StartedAt.Equal(base.Add(10*time.Minute)) {
 		t.Fatalf("deadline transition: state=%+v err=%v", current, err)
 	}
-	if closed == nil || closed.Status != Healthy || !closed.EndedAt.Equal(base.Add(10*time.Minute)) {
+	if len(closed) != 1 || closed[0].Status != Healthy || !closed[0].EndedAt.Equal(base.Add(10*time.Minute)) {
 		t.Fatalf("closed healthy interval = %+v", closed)
 	}
 	recoveredAt := base.Add(21 * time.Minute)
-	recovered := Observation{Repository: "owner/repo", ObservedAt: base.Add(22 * time.Minute), Items: []QueueItem{{Number: 7, Phase: Running, PhaseSince: recoveredAt, Deadline: recoveredAt.Add(time.Hour)}}, EventIDs: []int64{11, 10}, Cursor: 11}
+	recovered := Observation{Repository: "owner/repo", ObservedAt: base.Add(22 * time.Minute), Items: []QueueItem{{Number: 7, Phase: Running, PhaseSince: recoveredAt, Deadline: recoveredAt.Add(time.Hour)}}, Events: []QueueEvent{{ID: 11, IssueNumber: 7, Kind: RunningLabeled, At: recoveredAt}}, Cursor: 11, CursorInitialized: true, ProcessingTimeout: time.Hour}
 	current, closed, err = Apply(&current, recovered)
 	if err != nil || current.Current.Status != Healthy || !current.Current.StartedAt.Equal(recoveredAt) {
 		t.Fatalf("recovery: state=%+v err=%v", current, err)
 	}
-	if closed == nil || closed.Status != Down || !closed.EndedAt.Equal(recoveredAt) {
+	if len(closed) != 1 || closed[0].Status != Down || !closed[0].EndedAt.Equal(recoveredAt) {
 		t.Fatalf("closed down interval = %+v", closed)
 	}
-	if len(current.SeenEventIDs) != 2 || current.EventCursor != 11 {
+	if current.EventCursor != 11 || !current.EventCursorInitialized {
 		t.Fatalf("event replay metadata = %+v", current)
 	}
 }
@@ -67,7 +66,7 @@ func TestApplyObservationFailureDoesNotBecomeHealthy(t *testing.T) {
 		t.Fatal(err)
 	}
 	next, closed, err := Apply(&initial, Observation{Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Error: "rate limited"})
-	if err != nil || next.Current.Status != Unknown || closed == nil || closed.Status != Idle {
+	if err != nil || next.Current.Status != Unknown || len(closed) != 1 || closed[0].Status != Idle {
 		t.Fatalf("observation outage: next=%+v closed=%+v err=%v", next, closed, err)
 	}
 }

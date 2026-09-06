@@ -16,13 +16,16 @@ type fakeObserver struct {
 	errors       map[string]error
 }
 
-func (f fakeObserver) Observe(_ context.Context, repo config.Repository, _ int64, at time.Time) (model.Observation, error) {
+func (f fakeObserver) Observe(_ context.Context, repo config.Repository, _ int64, _ bool, at time.Time) (model.Observation, error) {
 	if err := f.errors[repo.Name]; err != nil {
 		return model.Observation{}, err
 	}
 	observation := f.observations[repo.Name]
 	observation.Repository = repo.Name
 	observation.ObservedAt = at
+	observation.CursorInitialized = true
+	observation.AcceptanceTimeout = time.Hour
+	observation.ProcessingTimeout = time.Hour
 	return observation, nil
 }
 
@@ -48,7 +51,7 @@ func TestRepositoryObservationFailuresArePersistedIndependently(t *testing.T) {
 	}
 }
 
-func TestRestartRecordsUnknownObservationGapBeforeRecovery(t *testing.T) {
+func TestRestartReplaysCompleteHistoryWithoutUnknownGap(t *testing.T) {
 	root := t.TempDir()
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	repo := config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done"}, AcceptanceTimeout: config.Duration{Duration: time.Hour}, ProcessingTimeout: config.Duration{Duration: time.Hour}}
@@ -62,14 +65,14 @@ func TestRestartRecordsUnknownObservationGapBeforeRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Current.Status != model.Idle || !current.Current.StartedAt.Equal(base.Add(10*time.Minute)) {
+	if current.Current.Status != model.Idle || !current.Current.StartedAt.Equal(base) {
 		t.Fatalf("recovered current = %+v", current.Current)
 	}
 	history, err := runner.Store.History(repo.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 2 || history[0].Status != model.Idle || !history[0].EndedAt.Equal(base.Add(3*time.Minute)) || history[1].Status != model.Unknown || !history[1].EndedAt.Equal(base.Add(10*time.Minute)) {
+	if len(history) != 0 {
 		t.Fatalf("restart history = %+v", history)
 	}
 }
@@ -81,8 +84,8 @@ func TestSnapshotRaceRetriesVerifiedCursorWithoutDuplicateIntervals(t *testing.T
 			repo := config.Repository{Name: "owner/repo"}
 			ready := model.QueueItem{Number: 1, Phase: model.Ready, PhaseSince: base, Deadline: base.Add(time.Hour)}
 			running := model.QueueItem{Number: 1, Phase: model.Running, PhaseSince: base.Add(time.Minute), Deadline: base.Add(time.Hour)}
-			events := []model.QueueEvent{{ID: 2, Number: 1, At: base.Add(time.Minute), Kind: "remove", Item: ready}, {ID: 3, Number: 1, At: base.Add(time.Minute), Kind: "phase", Item: running}}
-			observer := fakeObserver{observations: map[string]model.Observation{repo.Name: {Items: []model.QueueItem{ready}, Events: []model.QueueEvent{{ID: 1, Number: 1, At: base, Kind: "phase", Item: ready}}, Cursor: 1}}}
+			events := []model.QueueEvent{{ID: 2, IssueNumber: 1, At: base.Add(time.Minute), Kind: model.ReadyUnlabeled}, {ID: 3, IssueNumber: 1, At: base.Add(time.Minute), Kind: model.RunningLabeled}}
+			observer := fakeObserver{observations: map[string]model.Observation{repo.Name: {Items: []model.QueueItem{ready}, Events: []model.QueueEvent{{ID: 1, IssueNumber: 1, At: base, Kind: model.ReadyLabeled}}, Cursor: 1}}}
 			now := base
 			runner := Runner{Observer: observer, Store: store.Store{Root: t.TempDir()}, Now: func() time.Time { return now }}
 			if _, err := runner.Poll(context.Background(), repo); err != nil {
@@ -161,10 +164,14 @@ func TestObservationGapTakesPrecedenceOverDeadline(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !history[0].EndedAt.Equal(item.Deadline) || history[1].Status != model.Unknown || !history[1].StartedAt.Equal(item.Deadline) {
+		want := model.Down
+		if failure {
+			want = model.Unknown
+		}
+		if !history[0].EndedAt.Equal(item.Deadline) || history[1].Status != want || !history[1].StartedAt.Equal(item.Deadline) {
 			t.Fatalf("gap = %+v", history)
 		}
-		if !failure && (got.Current.Status != model.Down || !got.Current.StartedAt.Equal(now)) {
+		if !failure && (got.Current.Status != model.Down || !got.Current.StartedAt.Equal(item.Deadline)) {
 			t.Fatalf("recovery = %+v", got)
 		}
 	}
@@ -180,7 +187,7 @@ func TestTerminalSnapshotRaceConvergesToIdle(t *testing.T) {
 	if _, err := runner.Poll(context.Background(), repo); err != nil {
 		t.Fatal(err)
 	}
-	events := []model.QueueEvent{{ID: 2, Number: 1, At: base.Add(time.Minute), Kind: "exit"}}
+	events := []model.QueueEvent{{ID: 2, IssueNumber: 1, At: base.Add(time.Minute), Kind: model.QueueExited}}
 	observer.observations[repo.Name] = model.Observation{Items: []model.QueueItem{running}, Events: events, Cursor: 2}
 	now = base.Add(2 * time.Minute)
 	got, err := runner.Poll(context.Background(), repo)

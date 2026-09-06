@@ -28,49 +28,38 @@ func (r Runner) Poll(ctx context.Context, repo config.Repository) (model.Snapsho
 		return model.Snapshot{}, err
 	}
 	cursor := int64(0)
+	initialized := false
 	if previous != nil {
 		cursor = previous.EventCursor
-		if r.ObservationTimeout > 0 {
-			gapAt := previous.LastObservationAt.Add(r.ObservationTimeout)
-			if now.After(gapAt) {
-				for _, item := range previous.Queue {
-					if item.Deadline.After(previous.LastObservationAt) && item.Deadline.Before(gapAt) {
-						gapAt = item.Deadline
-					}
+		initialized = previous.EventCursorInitialized
+	}
+	observation, observeErr := r.Observer.Observe(ctx, repo, cursor, initialized, now)
+	var next model.Snapshot
+	var closed []model.Interval
+	if observeErr == nil {
+		next, closed, observeErr = model.Apply(previous, observation)
+	}
+	if observeErr != nil {
+		errorAt := now
+		if previous != nil {
+			if r.ObservationTimeout > 0 {
+				gapAt := previous.LastObservationAt.Add(r.ObservationTimeout)
+				if gapAt.Before(errorAt) {
+					errorAt = gapAt
 				}
-				gap := model.Observation{Repository: repo.Name, ObservedAt: gapAt, Cursor: cursor, Error: "monitor observation history has a gap"}
-				unknown, closed, applyErr := model.Apply(previous, gap)
-				if applyErr != nil {
-					return model.Snapshot{}, applyErr
-				}
-				if commitErr := r.Store.Commit(unknown, closed); commitErr != nil {
-					return model.Snapshot{}, commitErr
-				}
-				previous = &unknown
+			}
+			if deadline := previous.QueueDeadline; deadline.After(previous.LastObservationAt) && deadline.Before(errorAt) {
+				errorAt = deadline
 			}
 		}
-	}
-	observation, observeErr := r.Observer.Observe(ctx, repo, cursor, now)
-	if observeErr != nil {
-		observation = model.Observation{Repository: repo.Name, ObservedAt: now, Cursor: cursor, Error: observeErr.Error()}
-	}
-	steps, replayErr := model.Replay(previous, observation)
-	if replayErr != nil {
-		observeErr = replayErr
-		steps = []model.Observation{{Repository: repo.Name, ObservedAt: now, Cursor: cursor, Error: replayErr.Error()}}
-	}
-	var next model.Snapshot
-	for _, step := range steps {
-		var closed *model.Interval
-		next, closed, err = model.Apply(previous, step)
+		observation = model.Observation{Repository: repo.Name, ObservedAt: errorAt, Cursor: cursor, Error: observeErr.Error()}
+		next, closed, err = model.Apply(previous, observation)
 		if err != nil {
 			return model.Snapshot{}, err
 		}
-		if err := r.Store.Commit(next, closed); err != nil {
-			return model.Snapshot{}, err
-		}
-		copy := next
-		previous = &copy
+	}
+	if err := r.Store.Commit(next, closed); err != nil {
+		return model.Snapshot{}, err
 	}
 	if observeErr != nil {
 		return next, fmt.Errorf("observe %s: %w", repo.Name, observeErr)

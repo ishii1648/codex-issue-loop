@@ -44,7 +44,7 @@ func (s Store) Load(repository string) (*model.Snapshot, error) {
 	return &snapshot, nil
 }
 
-func (s Store) Commit(snapshot model.Snapshot, closed *model.Interval) error {
+func (s Store) Commit(snapshot model.Snapshot, closed []model.Interval) error {
 	if err := s.Ensure(); err != nil {
 		return err
 	}
@@ -55,20 +55,24 @@ func (s Store) Commit(snapshot model.Snapshot, closed *model.Interval) error {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	if closed != nil {
+	if len(closed) > 0 {
 		history, err := s.History(snapshot.Repository)
 		if err != nil {
 			return err
 		}
-		exists := false
+		existing := make(map[string]bool, len(history))
 		for _, interval := range history {
-			if interval.ID == closed.ID {
-				exists = true
-				break
+			existing[interval.ID] = true
+		}
+		changed := false
+		for _, interval := range closed {
+			if !existing[interval.ID] {
+				history = append(history, interval)
+				existing[interval.ID] = true
+				changed = true
 			}
 		}
-		if !exists {
-			history = append(history, *closed)
+		if changed {
 			sort.Slice(history, func(i, j int) bool { return history[i].StartedAt.Before(history[j].StartedAt) })
 			if err := validateHistory(history); err != nil {
 				return err
