@@ -5,7 +5,7 @@
   "version": 1,
   "editable": false,
   "refresh": "15s",
-  "timezone": "utc",
+  "timezone": "Asia/Tokyo",
   "time": {
     "from": "now-24h",
     "to": "now"

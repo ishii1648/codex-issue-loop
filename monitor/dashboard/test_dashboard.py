@@ -48,6 +48,7 @@ class DashboardTests(unittest.TestCase):
                 mappings = panel['fieldConfig']['defaults']['mappings'][0]['options']
                 self.assertEqual(len({v['color'] for v in mappings.values()}), 4)
                 self.assertTrue(all(k == v['text'] for k, v in mappings.items()))
+        self.assertEqual(dashboard['timezone'], 'Asia/Tokyo')
         self.assertIn(dashboard['refresh'], dashboard['timepicker']['refresh_intervals'])
 
     def test_restart_loaded_services_does_not_bootout(self):
