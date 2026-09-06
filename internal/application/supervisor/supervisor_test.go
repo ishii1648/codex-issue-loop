@@ -1876,6 +1876,125 @@ func TestConflictRecoveryPreparationFailureBlocksAfterBudgetIsExhausted(t *testi
 	}
 }
 
+func TestPublishedConflictRecoveryUsesNormalChecksRetry(t *testing.T) {
+	for _, launchFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("launch_failure=%v", launchFailure), func(t *testing.T) {
+			result := worker.Result{Version: 1, Status: "needs_input", ExecutionProfile: "standard", Summary: "choice required",
+				Question: &worker.Question{Text: "Which behavior?", Reason: "requirements choice", AllowFreeText: true}}
+			loop, github := testLoop(t, result)
+			github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
+			pr := gh.PullRequest{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true,
+				HeadRefName: "codex/issue-1-test", ChecksStatus: "failure"}
+			github.remote = &gh.RemoteState{Issue: github.issue, PullRequests: []gh.PullRequest{pr}}
+			if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "conflict_1", StartedAt: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loop.Store.Update("fixture", 1, "conflict_1", nil, func(s *state.Snapshot) error {
+				item := s.Issues["1"]
+				item.Status, item.Branch, item.Worktree = issuedomain.StatusResolvingConflict, pr.HeadRefName, loop.Config.RepoPath
+				item.PullRequestURL, item.PullRequestNumber = pr.URL, pr.Number
+				item.ConflictRecovery = &state.ConflictRecovery{PullRequestURL: pr.URL, TargetBaseSHA: "base-new", Attempts: 1,
+					History: []state.ConflictAttempt{{Number: 1, BaseSHA: "base-new", Status: issuedomain.ConflictAttemptStatusRunning}}}
+				setSupervisorTestWorkspace(s, item)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := loop.issueState(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := loop.finishConflictPublication(current, "merge-commit"); err != nil {
+				t.Fatal(err)
+			}
+			current, err = loop.issueState(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovery := current.ConflictRecovery
+			if current.Status != issuedomain.StatusAwaitingChecks || recovery == nil {
+				t.Fatalf("published issue=%+v", current)
+			}
+			if err := loop.processPullRequest(context.Background(), current); err != nil {
+				t.Fatal(err)
+			}
+			current, err = loop.issueState(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Status != issuedomain.StatusRetryWait {
+				t.Fatalf("checks retry=%+v", current)
+			}
+			if launchFailure {
+				github.inspectErr = errors.New("temporary launch inspection failure")
+			}
+			if err := loop.processExisting(context.Background(), current); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := snapshot.Issues["1"]
+			if snapshot.ActiveExecution != nil || item.WorkerPID != 0 {
+				t.Fatalf("execution retained: active=%+v issue=%+v", snapshot.ActiveExecution, item)
+			}
+			if !reflect.DeepEqual(item.ConflictRecovery, recovery) {
+				t.Fatalf("conflict audit changed: before=%+v after=%+v", recovery, item.ConflictRecovery)
+			}
+			if launchFailure {
+				if item.Status != issuedomain.StatusRetryWait || len(snapshot.PendingRequests) != 0 || !strings.Contains(item.LastError, "temporary launch inspection failure") {
+					t.Fatalf("launch retry=%+v", item)
+				}
+				return
+			}
+			if item.Status != issuedomain.StatusNeedsInput || len(snapshot.PendingRequests) != 1 {
+				t.Fatalf("snapshot=%+v", snapshot)
+			}
+			for _, request := range snapshot.PendingRequests {
+				if request.Question != result.Question.Text || request.ResumeStatus == issuedomain.StatusResolvingConflict || request.CheckpointID == "" {
+					t.Fatalf("request=%+v", request)
+				}
+			}
+		})
+	}
+}
+
+func TestNeedsInputPersistenceFailureReleasesExecution(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "run_1", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loop.Store.Update("fixture", 1, "run_1", nil, func(s *state.Snapshot) error {
+		item := s.Issues["1"]
+		item.Status, item.WorkerPID, item.WorkerPGID = issuedomain.StatusRunning, 12345, 12345
+		setSupervisorTestWorkspace(s, item)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := loop.issueState(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.Clock = fixedClock{}
+	result := worker.Result{Status: "needs_input", Question: &worker.Question{Text: "Choose?"}}
+	if err := loop.handleResult(context.Background(), github.issue, current, result, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["1"]
+	if item.Status != issuedomain.StatusRetryWait || snapshot.ActiveExecution != nil || item.WorkerPID != 0 || len(snapshot.PendingRequests) != 0 ||
+		!strings.Contains(item.LastError, "persist input request") || !strings.Contains(item.LastError, "continuation identity and timestamp are required") {
+		t.Fatalf("issue=%+v active=%+v requests=%+v", item, snapshot.ActiveExecution, snapshot.PendingRequests)
+	}
+}
+
 func TestConflictWorkerNeedsInputKeepsConflictResumeTarget(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	github.issue = gh.Issue{Number: 1, Title: "Test", State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}}
