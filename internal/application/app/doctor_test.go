@@ -413,7 +413,7 @@ exit 2
 	codexScript := `#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.136.0'; exit 0; fi
 if [ "$1 $2" = "login status" ]; then echo 'not logged in' >&2; exit 1; fi
-if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd'; exit 0; fi
+if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd --approve-for-me'; exit 0; fi
 if [ "$1 $2 $3" = "exec resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
 exit 2
 `

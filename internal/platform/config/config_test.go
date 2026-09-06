@@ -485,3 +485,11 @@ func TestLoadRejectsLegacyAndFutureSchemaWithActionableErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestBrowserMCPConfigRequiresCodexAndAbsolutePath(t *testing.T) {
+	for _, body := range []string{"version: 5\ngithub:\n  repo: owner/repo\nworker:\n  sandbox: read-only\n", "version: 5\ngithub:\n  repo: owner/repo\nworker:\n  mcp_config: relative.json\n", "version: 5\ngithub:\n  repo: owner/repo\nworker:\n  backend: claude-code\n  mcp_config: /operator/browser.json\n"} {
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Fatal("accepted invalid worker.mcp_config")
+		}
+	}
+}
