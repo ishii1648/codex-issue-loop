@@ -355,20 +355,20 @@ func pullRequestChecksStatus(mergeState string, checks []checkRollup) string {
 func Eligible(labels []string, cfg config.GitHub) bool {
 	set := map[string]bool{}
 	for _, label := range labels {
-		set[label] = true
+		set[labelKey(label)] = true
 	}
 	for _, label := range cfg.ReadyLabels {
-		if !set[label] {
+		if !set[labelKey(label)] {
 			return false
 		}
 	}
 	for _, label := range cfg.ExcludeLabels {
-		if set[label] {
+		if set[labelKey(label)] {
 			return false
 		}
 	}
 	for _, label := range []string{cfg.RunningLabel, cfg.NeedsInputLabel, cfg.FailedLabel, cfg.DoneLabel} {
-		if label != "" && set[label] {
+		if label != "" && set[labelKey(label)] {
 			return false
 		}
 	}
@@ -397,15 +397,15 @@ func EligibleIssue(issue Issue, cfg config.GitHub) bool {
 func (c CLI) Claim(ctx context.Context, cfg config.Config, issue Issue, runID string) error {
 	labels := map[string]bool{}
 	for _, label := range issue.Labels {
-		labels[label] = true
+		labels[labelKey(label)] = true
 	}
 	add := []string{}
-	if !labels[cfg.GitHub.RunningLabel] {
+	if !labels[labelKey(cfg.GitHub.RunningLabel)] {
 		add = append(add, cfg.GitHub.RunningLabel)
 	}
 	remove := []string{}
 	for _, label := range cfg.GitHub.ReadyLabels {
-		if labels[label] {
+		if labels[labelKey(label)] {
 			remove = append(remove, label)
 		}
 	}

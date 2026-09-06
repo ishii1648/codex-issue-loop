@@ -40,6 +40,82 @@ func TestEligibleIssueRequiresOpenState(t *testing.T) {
 	}
 }
 
+func TestEligibleLabelsIgnoreCase(t *testing.T) {
+	for _, uppercaseConfig := range []bool{false, true} {
+		cfg := config.Defaults().GitHub
+		cfg.ExcludeLabels = []string{"blocked", "do-not-automate"}
+		if uppercaseConfig {
+			cfg.ReadyLabels = []string{"CODEX-LOOP:READY"}
+			cfg.ExcludeLabels = []string{"BLOCKED", "DO-NOT-AUTOMATE"}
+			cfg.RunningLabel = strings.ToUpper(cfg.RunningLabel)
+			cfg.NeedsInputLabel = strings.ToUpper(cfg.NeedsInputLabel)
+			cfg.FailedLabel = strings.ToUpper(cfg.FailedLabel)
+			cfg.DoneLabel = strings.ToUpper(cfg.DoneLabel)
+		}
+		for _, test := range []struct {
+			name   string
+			labels []string
+			want   bool
+		}{
+			{"ready", []string{"Codex-Loop:Ready"}, true},
+			{"missing ready", []string{"unrelated"}, false},
+			{"blocked", []string{"Codex-Loop:Ready", "Blocked"}, false},
+			{"excluded", []string{"Codex-Loop:Ready", "Do-Not-Automate"}, false},
+			{"running", []string{"Codex-Loop:Ready", "Codex-Loop:Running"}, false},
+			{"needs input", []string{"Codex-Loop:Ready", strings.ToUpper(cfg.NeedsInputLabel)}, false},
+			{"failed", []string{"Codex-Loop:Ready", "Codex-Loop:Failed"}, false},
+			{"done", []string{"Codex-Loop:Ready", "Codex-Loop:Done"}, false},
+		} {
+			t.Run(fmt.Sprintf("%s/uppercase_config=%t", test.name, uppercaseConfig), func(t *testing.T) {
+				if got := Eligible(test.labels, cfg); got != test.want {
+					t.Fatalf("Eligible=%t, want %t", got, test.want)
+				}
+				if got := EligibleIssue(Issue{State: "OPEN", Labels: test.labels}, cfg); got != test.want {
+					t.Fatalf("EligibleIssue=%t, want %t", got, test.want)
+				}
+			})
+		}
+	}
+}
+
+func TestClaimLabelsIgnoreCase(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		t.Run(fmt.Sprintf("running=%t", running), func(t *testing.T) {
+			dir := t.TempDir()
+			fake := filepath.Join(dir, "fake-gh")
+			logPath := filepath.Join(dir, "calls.log")
+			script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue edit"|"issue comment") exit 0 ;;
+  "issue view") printf '%%s\n' '' ;;
+  *) exit 2 ;;
+esac
+`, logPath)
+			if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Defaults()
+			cfg.GitHub.Repo = "owner/repo"
+			issue := Issue{Number: 7, Labels: []string{"Codex-Loop:Ready"}}
+			if running {
+				issue.Labels = append(issue.Labels, "Codex-Loop:Running")
+			}
+			if err := (CLI{Path: fake}).Claim(context.Background(), cfg, issue, "run_1"); err != nil {
+				t.Fatal(err)
+			}
+			calls, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(calls)
+			if !strings.Contains(text, "--remove-label codex-loop:ready") || strings.Contains(text, "--add-label codex-loop:running") == running {
+				t.Fatalf("unexpected calls:\n%s", text)
+			}
+		})
+	}
+}
+
 func TestFaultCLIInspectReturnsIssueAndPullRequests(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")
