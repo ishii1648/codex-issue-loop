@@ -2,7 +2,7 @@
 
 ## Issueへの回答
 
-- 「Issue #N に ok と回答して」などの依頼では、本文と質問コメントを読み、agent-loopの質問への回答か確認する。該当する場合は [agent-loop skill](skill/agent-loop/SKILL.md) の「Answer an Issue request」を読み、CLIで回答を保存して同じrequestの `answered` を確認する。GitHubコメントの投稿成功だけで完了にしない。
+- 「Issue #N に ok と回答して」などの依頼では、本文と質問コメントを読み、agent-loopの質問への回答か確認する。該当する場合は [agent-loop skill](skill/agent-loop/SKILL.md) の「Answer an Issue request」を読み、実行ホストではCLIで回答を保存して同じrequestの `answered` を確認する。遠隔では同一ユーザー対応の受信側配備を確認後、明示repository・Issue・requestへ `answer --via github` で送信し、`--check` で認証済みの `accepted` を確認する。`submitted` と正式受理・実行再開を区別する。GitHubコメントの投稿成功だけで完了にしない。
 - ユーザーがコメント投稿だけを明示した場合はその意図を守り、loopへの回答保存とは区別して報告する。
 
 ## Durable Issue lifecycle

@@ -138,35 +138,31 @@ esac
 	}
 }
 
-func TestInputActorRequiresCurrentPermissionEvenForOwnerAndAllowlist(t *testing.T) {
+func TestInputActorRequiresSameAccountID(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "gh")
-	fake := `#!/bin/sh
-case "$*" in
- *"/user"*) printf '%s\n' '{"login":"loop"}' ;;
- *"/collaborators/writer/permission"*) printf '%s\n' '{"permission":"write","user":{"login":"writer"}}' ;;
- *"/collaborators/owner/permission"*) printf '%s\n' '{"permission":"read","user":{"login":"owner"}}' ;;
- *"/collaborators/listed/permission"*) printf '%s\n' '{"permission":"read","user":{"login":"listed"}}' ;;
- *"/collaborators/mismatch/permission"*) printf '%s\n' '{"permission":"admin","user":{"login":"other"}}' ;;
- *) exit 2 ;;
-esac
-`
-	if err := os.WriteFile(script, []byte(fake), 0700); err != nil {
-		t.Fatal(err)
-	}
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
-	cfg.GitHub.TrustedIssueAuthors.AllowLogins = []string{"listed", "robot"}
-	client := CLI{Path: script}
-	for _, test := range []struct {
-		actor, kind string
-		trusted     bool
-	}{
-		{"writer", "User", true}, {"owner", "User", false}, {"listed", "User", false}, {"loop", "User", false}, {"robot", "Bot", false}, {"mismatch", "User", false},
-	} {
-		verification, err := client.VerifyInputActor(context.Background(), cfg, InputComment{Actor: test.actor, ActorType: test.kind})
-		if err != nil || verification.Trusted != test.trusted {
-			t.Fatalf("%s: %+v %v", test.actor, verification, err)
+	cfg.GitHub.TrustedIssueAuthors.AllowLogins = []string{"listed", "admin"}
+	for _, viewer := range []string{`{"id":7,"login":"loop","type":"User"}`, `{"login":"loop","type":"User"}`, `{}`, `{"id":7,"login":"loop","type":"Bot"}`} {
+		fake := "#!/bin/sh\ncase \"$*\" in *\"/user\"*) printf '%s' '" + viewer + "';; *) exit 2;; esac\n"
+		if err := os.WriteFile(script, []byte(fake), 0700); err != nil {
+			t.Fatal(err)
+		}
+		for _, test := range []struct {
+			actor, kind string
+			id          int64
+			trusted     bool
+		}{
+			{"loop", "User", 7, true}, {"renamed", "User", 7, true}, {"loop", "User", 8, false},
+			{"writer", "User", 8, false}, {"admin", "User", 9, false}, {"listed", "User", 10, false},
+			{"loop", "User", 0, false}, {"loop", "Bot", 7, false}, {"", "User", 7, false},
+		} {
+			verification, err := (CLI{Path: script}).VerifyInputActor(context.Background(), cfg, InputComment{Actor: test.actor, ActorType: test.kind, ActorID: test.id})
+			want := test.trusted && strings.Contains(viewer, `"id":7,"login":"loop","type":"User"`)
+			if err != nil || verification.Trusted != want {
+				t.Fatalf("%s %s: %+v %v", viewer, test.actor, verification, err)
+			}
 		}
 	}
 }

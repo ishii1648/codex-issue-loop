@@ -126,7 +126,6 @@ func validateAnswerObservation(snapshot Snapshot, request *Request, provenance *
 		return nil
 	}
 	if provenance.Source != "github_issue_comment" || provenance.CommentID <= 0 || provenance.Actor == "" ||
-		(provenance.Permission != "write" && provenance.Permission != "maintain" && provenance.Permission != "admin") ||
 		provenance.RequestID != request.ID || provenance.IssueNumber != request.IssueNumber || provenance.RunID != request.RunID ||
 		!validSHA256(provenance.BodySHA256) || provenance.CommentedAt.IsZero() || provenance.CommentedAt.Before(request.CreatedAt) ||
 		provenance.CommentEdited.Before(provenance.CommentedAt) {

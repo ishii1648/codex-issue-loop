@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,7 @@ type fakeInputControlGitHub struct {
 	acks         []gh.InputAcknowledgement
 	syncs        int
 	unauthorized bool
+	actorClient  *gh.CLI
 	ackError     error
 }
 
@@ -34,7 +37,10 @@ func (f *fakeInputControlGitHub) ListInputComments(context.Context, config.Confi
 	return append([]gh.InputComment(nil), f.comments...), nil
 }
 
-func (f *fakeInputControlGitHub) VerifyInputActor(context.Context, config.Config, gh.InputComment) (gh.AuthorVerification, error) {
+func (f *fakeInputControlGitHub) VerifyInputActor(ctx context.Context, cfg config.Config, comment gh.InputComment) (gh.AuthorVerification, error) {
+	if f.actorClient != nil {
+		return f.actorClient.VerifyInputActor(ctx, cfg, comment)
+	}
 	return gh.AuthorVerification{Trusted: !f.unauthorized, Login: "operator", Permission: "write", Reason: "repository_permission"}, nil
 }
 
@@ -182,7 +188,8 @@ func TestGitHubInputMailboxValidation(t *testing.T) {
 		unauthorized, otherIssue, older, quarantine, staleRun bool
 	}{
 		{name: "option", answer: "safe", outcome: "accepted"},
-		{name: "permission", answer: "safe", outcome: "unauthorized", unauthorized: true},
+		{name: "edited before receipt", answer: "safe", outcome: "accepted"},
+		{name: "different admin account", answer: "safe", outcome: "unauthorized", unauthorized: true},
 		{name: "unknown option", answer: "unknown", outcome: "malformed"},
 		{name: "control", answer: "sa\x00fe", outcome: "malformed"},
 		{name: "oversize", answer: strings.Repeat("a", state.MaxAnswerBytes+1), outcome: "malformed"},
@@ -224,9 +231,22 @@ func TestGitHubInputMailboxValidation(t *testing.T) {
 			if test.older {
 				created = now.Add(-time.Second)
 			}
-			control := &fakeInputControlGitHub{fakeGitHub: base, unauthorized: test.unauthorized, comments: []gh.InputComment{{
-				ID: 1, Actor: "operator", ActorType: "User", Body: "/agent-loop answer " + request.ID + " " + test.answer, CreatedAt: created, UpdatedAt: created,
+			script := filepath.Join(t.TempDir(), "gh")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' '{\"id\":7,\"login\":\"operator\",\"type\":\"User\"}'\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			actorID := int64(7)
+			if test.unauthorized {
+				actorID = 8
+			}
+			control := &fakeInputControlGitHub{fakeGitHub: base, actorClient: &gh.CLI{Path: script}, comments: []gh.InputComment{{
+				ID: 1, ActorID: actorID, Actor: "operator", ActorType: "User", Body: "/agent-loop answer " + request.ID + " " + test.answer, CreatedAt: created, UpdatedAt: created,
 			}}}
+			if test.name == "edited before receipt" {
+				control.comments[0].UpdatedAt = created.Add(time.Second)
+			}
+			managed := gh.InputComment{ID: 99, ActorID: 7, Actor: "operator", ActorType: "User", Body: "<!-- codex-issue-loop:input-request:v1 -->\n/agent-loop answer " + request.ID + " safe", CreatedAt: created, UpdatedAt: created}
+			control.comments = append(control.comments, managed)
 			loop.GitHub = control
 			if err := loop.reconcileInputIssue(context.Background(), number); err != nil {
 				t.Fatal(err)

@@ -64,3 +64,5 @@ Claude Codeを復元する場合は`--agents claude`を指定する。backupは�
 - `.agent-loop.yaml`の`github.ready_labels`に設定されたready labelだけを使い、Issue作成後に再取得して確認する。不明・不足時は推測やlabel作成をしない。
 - implementation workerは割り当てられたIssueを実装し、同じ依頼を再起票しない。
 - 読み取り専用タスクでは起票しない。ユーザーがloopを使わないよう明示した場合は直接実装してよい。
+
+- Issue回答依頼では本文・質問コメントを確認し、skillで対象requestを照合する。ローカルはanswer後のanswered、遠隔は受信側配備確認後の `answer --via github` と `--check` による認証済みacceptedを確認する。submitted・正式受理・実行再開を区別し、結果不明の投稿を無条件に再送しない。

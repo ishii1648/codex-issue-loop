@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
@@ -128,7 +129,11 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 	const maxAnswerBytes = state.MaxAnswerBytes
 	fs := flag.NewFlagSet("answer", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
-	repo := fs.String("repo", "", "repository path")
+	repo := fs.String("repo", "", "repository path, or owner/repo with --via github")
+	via := fs.String("via", "local", "answer delivery: local or github")
+	issue := fs.Int("issue", 0, "GitHub Issue number")
+	check := fs.Bool("check", false, "check GitHub acceptance without posting")
+	commentID := fs.Int64("comment-id", 0, "submitted GitHub comment ID")
 	requestID := fs.String("request-id", "", "request ID")
 	message := fs.String("message", "", "answer text")
 	messageFile := fs.String("message-file", "", "answer file or - for stdin")
@@ -136,8 +141,29 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
 	}
+	if fs.NArg() != 0 || (*via != "local" && *via != "github") {
+		return exitError{2, fmt.Errorf("invalid answer arguments")}
+	}
+	if *via == "github" && (*check || *messageFile != "-" || *message != "") {
+		if !*check || *messageFile != "" || *message != "" {
+			return exitError{2, fmt.Errorf("GitHub answers require --message-file -; --check accepts no message")}
+		}
+	}
+	if *via == "local" && (*issue != 0 || *check || *commentID != 0) {
+		return exitError{2, fmt.Errorf("GitHub flags require --via github")}
+	}
 	if *requestID == "" {
 		return exitError{2, fmt.Errorf("--request-id is required")}
+	}
+	if *via == "github" && *check {
+		result, err := (gh.CLI{}).CheckInputAnswer(ctx, *repo, *issue, *requestID, *commentID)
+		if err != nil {
+			return err
+		}
+		return a.output(*jsonOut, result)
+	}
+	if *commentID != 0 {
+		return exitError{2, fmt.Errorf("--comment-id requires --check")}
 	}
 	if (*message == "") == (*messageFile == "") {
 		return exitError{2, fmt.Errorf("provide exactly one of --message or --message-file")}
@@ -159,6 +185,9 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 		if err != nil {
 			return err
 		}
+		if *via == "github" && len(data) > maxAnswerBytes {
+			return exitError{2, fmt.Errorf("answer input must not exceed %d bytes", maxAnswerBytes)}
+		}
 		answer = strings.TrimSpace(string(data))
 	}
 	if answer == "" {
@@ -166,6 +195,23 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 	}
 	if len(answer) > maxAnswerBytes {
 		return exitError{2, fmt.Errorf("answer must not exceed %d bytes", maxAnswerBytes)}
+	}
+	if *via == "github" {
+		result, err := (gh.CLI{}).SubmitInputAnswer(ctx, *repo, *issue, *requestID, answer)
+		if err != nil {
+			return err
+		}
+		return a.output(*jsonOut, result)
+	}
+	if l.Root == "" {
+		var err error
+		l, err = layout.New()
+		if err != nil {
+			return err
+		}
+		if err := l.Ensure(); err != nil {
+			return err
+		}
 	}
 	entry, err := a.resolvePath(l, *repo)
 	if err != nil {

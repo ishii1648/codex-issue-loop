@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os/exec"
 	"sort"
 	"strings"
@@ -23,6 +22,7 @@ const InputControlVersion = 1
 type InputComment struct {
 	ID        int64
 	Body      string
+	ActorID   int64
 	Actor     string
 	ActorType string
 	CreatedAt time.Time
@@ -130,6 +130,7 @@ func (c CLI) ListInputComments(ctx context.Context, cfg config.Config, number in
 		CreatedAt time.Time `json:"created_at"`
 		UpdatedAt time.Time `json:"updated_at"`
 		User      struct {
+			ID    int64  `json:"id"`
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
@@ -140,7 +141,7 @@ func (c CLI) ListInputComments(ctx context.Context, cfg config.Config, number in
 	comments := make([]InputComment, 0)
 	for _, page := range pages {
 		for _, raw := range page {
-			comments = append(comments, InputComment{ID: raw.ID, Body: raw.Body, Actor: raw.User.Login, ActorType: raw.User.Type, CreatedAt: raw.CreatedAt, UpdatedAt: raw.UpdatedAt})
+			comments = append(comments, InputComment{ID: raw.ID, Body: raw.Body, ActorID: raw.User.ID, Actor: raw.User.Login, ActorType: raw.User.Type, CreatedAt: raw.CreatedAt, UpdatedAt: raw.UpdatedAt})
 		}
 	}
 	sort.SliceStable(comments, func(i, j int) bool {
@@ -154,26 +155,17 @@ func (c CLI) ListInputComments(ctx context.Context, cfg config.Config, number in
 
 func (c CLI) VerifyInputActor(ctx context.Context, cfg config.Config, comment InputComment) (AuthorVerification, error) {
 	verification := AuthorVerification{Login: strings.ToLower(comment.Actor)}
-	viewer, err := c.viewerLogin(ctx)
-	if err != nil {
+	var viewer struct {
+		ID    int64  `json:"id"`
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	}
+	if err := c.apiJSON(ctx, "/user", &viewer); err != nil {
 		return verification, err
 	}
-	if comment.ActorType != "User" || strings.EqualFold(comment.Actor, viewer) || comment.Actor == "" {
-		return verification, nil
-	}
-	var response struct {
-		Permission string `json:"permission"`
-		User       struct {
-			Login string `json:"login"`
-		} `json:"user"`
-	}
-	endpoint := fmt.Sprintf("/repos/%s/collaborators/%s/permission", cfg.GitHub.Repo, url.PathEscape(comment.Actor))
-	if err := c.apiJSON(ctx, endpoint, &response); err != nil {
-		return verification, err
-	}
-	verification.Permission = response.Permission
-	verification.Trusted = strings.EqualFold(response.User.Login, comment.Actor) &&
-		(response.Permission == "write" || response.Permission == "maintain" || response.Permission == "admin")
+	verification.Trusted = viewer.ID > 0 && viewer.Login != "" && viewer.Type == "User" &&
+		comment.ActorID == viewer.ID && comment.ActorType == "User" && comment.Actor != ""
+
 	return verification, nil
 }
 
