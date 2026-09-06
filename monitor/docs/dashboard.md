@@ -54,9 +54,9 @@ python3 monitor/dashboard/manage.py restart
 
 ## 表示と正確性
 
-失効監視付きURLはAPIから直接描画し、repositoryを左右に比較します。現在状態は正常 HEALTHY=緑、異常 DOWN=赤、待機 IDLE=青、観測不能 UNKNOWN=灰で大きく表示します。選択期間全体の時間内訳・需要時稼働率・coverageと、その直下の正確なtimelineを表示します。現在までの24h/7d/30d集計は補助表、状態開始・最終観測・理由・観測エラー・現在queueのIssue番号と期限は折り畳み詳細です。Issue番号からGitHubへ進めます。queue-level期限と各Issue期限を区別します。履歴に当時のqueue一覧はないため、過去の対象Issueは復元しません。
+失効監視付きURLはAPIから直接描画し、repositoryを左右に比較します。現在状態は正常 HEALTHY=緑、異常 DOWN=赤、待機 IDLE=青で大きく表示し、UNKNOWNは「状態を確認できません」と表示します。選択期間は需要時稼働率を数値で、正確なtimelineをバーで表示します。UNKNOWNと未観測の区間は斜線と「観測できない区間」の凡例で示し、hoverで時刻を確認できます。現在までの24h/7d/30d集計は補助表、状態開始・最終観測・理由・観測エラー・現在queueのIssue番号と期限は折り畳み詳細です。選択期間の観測率と未観測時間も詳細内で確認でき、開閉状態は自動更新後も保持します。Issue番号からGitHubへ進めます。queue-level期限と各Issue期限を区別します。履歴に当時のqueue一覧はないため、過去の対象Issueは復元しません。
 
-需要時稼働率は`HEALTHY秒 / (HEALTHY秒 + DOWN秒)`です。IDLEは分母に入らず、分母0は`N/A（需要なし）`です。UNKNOWNだけでも既知の需要が0なのでN/Aですが、coverageは0であり、需要がなかったとは断定できません。coverageは`(HEALTHY + DOWN + IDLE)秒 / 全期間秒`です。選択期間にDOWNやUNKNOWNがあれば事実の要約を添え、混在期間への単一の正常性判定は行いません。未観測は正常時間に加算しません。
+需要時稼働率は`HEALTHY秒 / (HEALTHY秒 + DOWN秒)`です。IDLEは分母に入らず、分母0は`N/A（需要なし）`です。画面では「観測できた需要時間に対する割合」と説明します。UNKNOWNだけでも既知の需要が0なのでN/Aですが、観測率は0であり、需要がなかったとは断定できません。観測率は`(HEALTHY + DOWN + IDLE)秒 / 全期間秒`です。選択期間にUNKNOWNや未観測時間がある場合のみ「この期間には未観測の時間があります」と添え、混在期間への単一の正常性判定は行いません。未観測は正常時間に加算しません。
 
 `/metrics`はCLIと同じ`effectiveSnapshot`、`effectiveIntervals`、`BuildReport`を使用します。状態コードはUNKNOWN=0、HEALTHY=1、DOWN=2、IDLE=3、需要なしは-1、不明な日時はNaNです。Issue番号・理由・errorをlabelに含めず、counterやscrapeサンプル比率で稼働率を計算しません。基準時刻は秒境界に切り捨て、その同じ時刻で全期間を計算します。読み取り中のsnapshot変更・重複区間・破損はHTTP 503として拒否します。
 
@@ -101,7 +101,7 @@ fixtureは新規directoryだけに生成します。`mixed`は4状態timelineと
 
 本番dashboardの3サービスだけを停止し、fixture rootへ両pluginを導入して同じ`--root`で`start`します。観測monitorやsupervisorは停止しません。fixtureのplistをログイン自動起動へ登録しません。
 
-失効監視付きURLを1280x720と1760x761で開き、現在状態・選択期間の視覚要約がスクロールなしで見えること、timeline・補助3期間と折り畳み詳細を確認します。4色と境界、queueのIssueリンクと期限、idleのN/A、missingのUNKNOWNとcoverage 0、staleのUNKNOWN、corruptのエラーを確認します。
+失効監視付きURLを1280x720と1760x761で開き、現在状態・選択期間の視覚要約がスクロールなしで見えること、timeline・補助3期間と折り畳み詳細を確認します。3状態の色と欠損区間の斜線・境界、queueのIssueリンクと期限、idleのN/A、missingの観測不能表示と詳細内の観測率0、staleの表示失効、corruptのエラーを確認します。
 
 HEALTHY表示中にfixtureのAPI、Prometheus、Grafanaをそれぞれ`launchctl bootout gui/$(id -u)/com.codex-issue-loop.monitor-dashboard.<サービス名>`で停止し、表示が失効することを確認します。API停止は最大45秒、Grafana/Prometheus通信断は次回照会とtimeoutで失効します。観測を更新せず3分待ち、通信成功中でもUNKNOWNへ変わることも確認します。各試験の間に`start`で復旧します。終了後はfixture rootで`stop`、本番rootで`start`します。
 
