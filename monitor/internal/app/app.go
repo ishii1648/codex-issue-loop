@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -62,6 +63,8 @@ func (a App) Run(ctx context.Context, args []string) int {
 	switch args[0] {
 	case "run":
 		err = a.runMonitor(ctx, args[1:])
+	case "serve":
+		err = a.serve(ctx, args[1:])
 	case "status":
 		err = a.status(args[1:])
 	case "history":
@@ -88,6 +91,7 @@ func (a App) usage() {
 
 Commands:
   run       Observe every configured repository
+  serve     Serve read-only dashboard data on localhost
   status    Show each repository's current availability state
   history   Show finalized and current state intervals
   report    Calculate demand availability and observation coverage
@@ -156,6 +160,7 @@ func (a App) runMonitor(ctx context.Context, args []string) error {
 func (a App) status(args []string) error {
 	flags, path, jsonOut := commonFlags("status", a.Err)
 	repository := flags.String("repo", "", "repository owner/name")
+	atValue := flags.String("at", "", "RFC3339 reference time (not before latest observation)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -167,6 +172,13 @@ func (a App) status(args []string) error {
 	if err != nil {
 		return err
 	}
+	at := a.now()
+	if *atValue != "" {
+		at, err = time.Parse(time.RFC3339, *atValue)
+		if err != nil {
+			return fmt.Errorf("invalid --at: %w", err)
+		}
+	}
 	var snapshots []model.Snapshot
 	for _, repo := range repositories {
 		snapshot, loadErr := (store.Store{Root: cfg.StateDir}).Load(repo.Name)
@@ -176,7 +188,10 @@ func (a App) status(args []string) error {
 		if snapshot == nil {
 			snapshots = append(snapshots, model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: repo.Name, Current: model.Interval{Repository: repo.Name, Status: model.Unknown, Reason: "no observations recorded"}})
 		} else {
-			snapshots = append(snapshots, effectiveSnapshot(*snapshot, cfg.ObservationTimeout.Duration, a.now()))
+			if at.Before(snapshot.LastObservationAt) {
+				return errors.New("--at precedes latest observation; use a frozen copy of monitor state")
+			}
+			snapshots = append(snapshots, effectiveSnapshot(*snapshot, cfg.ObservationTimeout.Duration, at))
 		}
 	}
 	if *jsonOut {
@@ -403,13 +418,33 @@ func effectiveSnapshot(snapshot model.Snapshot, timeout time.Duration, now time.
 }
 
 func effectiveIntervals(storage store.Store, repository string, timeout time.Duration, to time.Time) ([]model.Interval, error) {
-	intervals, err := storage.AllIntervals(repository)
+	snapshot, err := storage.Load(repository)
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := storage.Load(repository)
-	if err != nil || snapshot == nil || timeout <= 0 {
-		return intervals, err
+	intervals, err := storage.History(repository)
+	if err != nil {
+		return nil, err
+	}
+	latest, err := storage.Load(repository)
+	if err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(snapshot, latest) {
+		return nil, errors.New("monitor snapshot changed during history read")
+	}
+	if snapshot != nil {
+		intervals = append(intervals, snapshot.Current)
+	} else if len(intervals) > 0 {
+		return nil, errors.New("monitor history has no current snapshot")
+	}
+	for index, interval := range intervals {
+		if index > 0 && (intervals[index-1].EndedAt.IsZero() || interval.StartedAt.Before(intervals[index-1].EndedAt)) {
+			return nil, errors.New("monitor interval commit is incomplete")
+		}
+	}
+	if snapshot == nil || timeout <= 0 {
+		return intervals, nil
 	}
 	expiredAt := snapshot.LastObservationAt.Add(timeout)
 	if !to.After(expiredAt) || snapshot.Current.Status == model.Unknown || len(intervals) == 0 {
