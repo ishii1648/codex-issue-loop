@@ -131,7 +131,7 @@ sleep 3
 "$agent_loop_bin" issue resolve --repo "$PWD" --issue 123 --action cancel --json
 ```
 
-`issue plan`はcanonical snapshotと現在のprocess、worktree/git、GitHub状態だけを読み、event件数や順序には依存しません。state revision、continuation、suspension、全actionの可否と理由をJSONで返し、state/eventを変更しないことも検査します。`issue resolve`はplan時のrevisionとsuspensionを再照合し、`resume` / `retry-stage`ではrepository rootの単一`active_execution`をtransaction内で取得します。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEADだけを採用し、`cancel`はIssueとpending requestをcanceledへ収束させます。GitHubでterminal Issueを`not planned`としてcloseした場合も、安全条件を再検証して同じdurable `canceled`契約へ自動収束します。
+`issue plan`はcanonical snapshotと現在のprocess、worktree/git、GitHub状態だけを読み、event件数や順序には依存しません。state revision、continuation、suspension、全actionの可否と理由をJSONで返し、state/eventを変更しないことも検査します。`issue resolve`はplan時のrevisionとsuspensionを再照合し、`resume` / `retry-stage`ではrepository rootの単一`active_execution`をtransaction内で取得します。`adopt-worktree`は、conflict recovery中に`worktree_sha256`だけを欠いてquarantineされたIssueについて、保存済みhead、PR、`MERGE_HEAD`、変更path scopeが一致するときだけ現在のdigestを採用し、実行は開始しません。現在変更されている未承認pathだけは、planとresolveの両方へ同じ`--allow-path`を明示した場合に限りscopeへ追加され、audit eventへ記録されます。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEADだけを採用し、`cancel`はIssueとpending requestをcanceledへ収束させます。GitHubでterminal Issueを`not planned`としてcloseした場合も、安全条件を再検証して同じdurable `canceled`契約へ自動収束します。
 
 実行中のcapacityはsnapshot rootの`active_execution`だけが表します。中断可能なworkspace・session・base・PR情報はIssueの`continuation`、理由・recoverability・許可actionは`suspension`が保持します。待機・terminal・quarantine状態は`active_execution`とPID/PGIDを保持できず、1 Issueの停止がrepository全体のqueueを停止させません。state、label、continuationは手編集せず、planが拒否した場合は観測された不一致を解消して再planします。
 

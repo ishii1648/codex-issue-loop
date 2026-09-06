@@ -227,7 +227,7 @@ terminal `blocked` / `failed` Issueを復旧するときは、scenario別command
 agent-loop issue plan --repo /absolute/path/to/repository --issue 123 --json
 ```
 
-planの`suspension`、`continuation_checkpoint`、evidence、missing evidence、および`resume|retry-stage|adopt-pr|cancel`それぞれのeligible/refusal codeを確認する。active PID/PGID、root execution identity、pending request、worktree/branch/head、open/merged PR、labelのいずれかが変わればresolveは拒否される。
+planの`suspension`、`continuation_checkpoint`、evidence、missing evidence、および`resume|retry-stage|adopt-worktree|adopt-pr|cancel`それぞれのeligible/refusal codeを確認する。active PID/PGID、root execution identity、pending request、worktree/branch/head、open/merged PR、labelのいずれかが変わればresolveは拒否される。
 
 operatorがplan上eligibleなactionを選択した後だけ適用する。
 
@@ -237,10 +237,12 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 
 - `resume`は保存session/workspaceからworker境界を継続する。
 - `retry-stage`は保存済みpublish/checks/conflict stageへ戻る。completed resultがある場合はSHA-256を照合し、workerを再実行しない。
+- `adopt-worktree`はconflict recovery中に`worktree_sha256`だけを欠くquarantineで、保存済みhead、PR、`MERGE_HEAD`、base ancestry、変更path scopeが一致する場合だけ現在のdigestをcheckpointへ記録する。実行は開始しないため、再度planを確認してから`retry-stage`を実行する。
+- planの`adoption_unapproved_changed_paths`にpathがある場合は、operatorがその現在差分を許可するときだけplanとresolveの両方へ同じ`--allow-path <relative-path>`を指定する。指定pathと追加後scopeは`issue_worktree_adopted` eventへ記録される。
 - `adopt-pr`は保存branch/head/baseと一致するsame-repositoryの一意なmerged PRだけを採用する。commit、push、PR、mergeは作成しない。
 - `cancel`はworkerを起動せずIssueを`canceled`へ収束させる。
 
-terminal Issueはroot `active_execution`を持たず、base SHA、workspace、session、result digestはIssue-local `continuation`へ保持する。成功したresolveだけがgenerationを進めて単一実行枠を取得する。ambiguousなIssueはそのIssueだけをquarantineし、`cancel`以外を許可しないため、後続queueのcapacityを消費しない。
+terminal Issueはroot `active_execution`を持たず、base SHA、workspace、session、result digestはIssue-local `continuation`へ保持する。`resume`または`retry-stage`だけがgenerationを進めて単一実行枠を取得する。ambiguousなIssueはそのIssueだけをquarantineし、上記の限定された`adopt-worktree`または`cancel`以外を許可しないため、後続queueのcapacityを消費しない。
 
 GitHub同期またはtransaction途中で停止した場合も同じ`issue plan`から再確認し、同じactionを再実行して冪等に収束させる。state/event/label/worktreeを手編集せず、別Issueのexecutionを変更せず、欠けたauthorityをevent件数・error文言・現在のbaseから合成しない。旧scenario別recordは全loop停止中のtyped migrationだけがv4 raw入力からgeneric continuationへ変換し、v5に残る旧状態はfail closedとする。
 

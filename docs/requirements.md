@@ -182,7 +182,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-045**: 対象リポジトリのmanifestでauto mergeを選択でき、既定は無効とすること。有効時はbase branchへの追随とCI再確認を行い、conflict時は既存worktree・branch・Pull Requestを維持した永続的な自動復旧を開始すること。
 - **FR-045-A**: conflict recoveryはimmutableなbase SHA、競合file、試行履歴を永続化し、workerへIssue・元PR差分・base追加commit・競合内容・検証要件を渡すこと。workerはGit公開操作を行わず、supervisorが未解消entry、marker、base SHA、path scope、検証結果を確認して通常pushすること。
 - **FR-045-B**: terminal `blocked` / `failed`はrepositoryの実行枠を保持せず、`issue plan`と`issue resolve --action retry-stage`がcanonical snapshotと現在のprocess/git/GitHubを再検証してdurable stateとGitHubを監査付きで同期できること。
-- **FR-045-C**: 継続可能なworkerまたはlifecycle stageはgeneric checkpointへ同一成果物とauthorityを保存し、operator選択後に`issue resolve --action resume|retry-stage|adopt-pr|cancel`で解決できること。ambiguous、manual/security、active worker、inconsistent worktree/PRは副作用なく拒否すること。
+- **FR-045-C**: 継続可能なworkerまたはlifecycle stageはgeneric checkpointへ同一成果物とauthorityを保存し、operator選択後に`issue resolve --action resume|retry-stage|adopt-worktree|adopt-pr|cancel`で解決できること。ambiguous evidenceは原則拒否し、conflict recoveryで`worktree_sha256`だけを欠く場合に限り、保存済みhead、PR、`MERGE_HEAD`、変更path scopeの一致を再検証してdigestを採用できること。scope外pathは、現在の変更差分に存在するpathをoperatorがplanとresolveへ同じ`--allow-path`で明示した場合だけ追加し、auditへ保存すること。manual/security、active worker、inconsistent worktree/PRは副作用なく拒否すること。
 - **FR-046**: Issueを完了扱いにし、設定に応じてcloseするのは対応Pull Requestのmergeを確認した後とすること。
 
 ### 6.6 監視と質問
