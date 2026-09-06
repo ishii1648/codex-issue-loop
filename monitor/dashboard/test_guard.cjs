@@ -29,7 +29,7 @@ function fixture() {
       const durations = Object.fromEntries(states.map((s,i) => [s,(to-from)/1000*f.fractions[i]]));
       let payload;
       if (u.pathname === '/api/freshness') payload = {status:'success',data:{result:f.missing?[]:[{value:[f.now/1000,String(f.sample/1000)]}]}};
-      if (u.pathname === '/api/status') payload = {repositories:[{repository:'owner/repo',current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:new Date(f.now).toISOString()}]};
+      if (u.pathname === '/api/status') payload = {repositories:[{repository:'owner/repo',current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue}]};
       if (u.pathname === '/api/report') payload = {reports:[{repository:'owner/repo',from:new Date(from).toISOString(),to:new Date(to).toISOString(),durations_seconds:durations,demand_availability:durations.HEALTHY+durations.DOWN ? durations.HEALTHY/(durations.HEALTHY+durations.DOWN) : null,observation_coverage:f.fractions.slice(0,3).reduce((a,b)=>a+b,0)}]};
       if (u.pathname === '/api/timeline') {
         let cursor=from;
@@ -83,7 +83,7 @@ test('timeline only, numeric availability, hatched gaps and coverage inside deta
     const missing = fractions.slice(0,3).reduce((a,b)=>a+b,0)<1;
     assert.equal(html.includes('この期間には未観測の時間があります'),missing);
     assert.equal(html.includes('class="segment unobserved"'),missing);
-    if(missing) assert.match(html,/title="観測できない区間 · .* UTC → .* UTC"/);
+    if(missing) assert.match(html,/title="観測できない区間 · .* JST → .* JST"/);
     if(fractions[0]+fractions[1]===0) assert.match(html,/N\/A/);
     if(fractions[1]===0.001) assert.match(html,/width:0.1%/);
   }
@@ -98,7 +98,7 @@ test('range changes share exact bounds and keep current state independent from h
   nodes.from.value='2026-01-01T00:00'; nodes.to.value='2026-01-02T00:00';
   nodes.selection.submit({preventDefault(){}}); await refresh();
   const selected=f.urls.filter(u=>u.startsWith('/api/timeline?')).at(-1);
-  assert.equal(new URL(selected,'http://localhost').searchParams.get('from'),new Date(nodes.from.value).toISOString());
+  assert.equal(new URL(selected,'http://localhost').searchParams.get('from'),'2025-12-31T15:00:00.000Z');
   assert.match(nodes.repos.innerHTML,/<b>HEALTHY<\/b>/);
   assert.match(nodes.range.textContent,/現在カードは最新取得時点/);
   f.now+=15000; f.sample=f.now; await refresh();
@@ -136,4 +136,68 @@ test('refresh preserves open and closed repository details, including recovery a
   nodes.repos.querySelectorAll('details')[0].open=false;
   await refresh();
   assert.equal(nodes.repos.querySelectorAll('details')[0].open,false);
+});
+
+test('JST dates, details and custom bounds are independent of the browser timezone', async () => {
+  const previousTZ = process.env.TZ;
+  try {
+    for (const timezone of ['UTC','America/Los_Angeles','Asia/Tokyo']) {
+      process.env.TZ = timezone;
+      const {f,nodes,context,classes,refresh} = fixture();
+      f.now = f.sample = Date.parse('2026-09-06T15:00:00Z');
+      f.queueDeadline = '2026-09-06T15:30:00Z';
+      f.queue = [{number:1,phase:'ready',deadline:'2026-09-06T16:00:00Z'}];
+      await refresh();
+      assert.equal(classes.has('expired'),false);
+      assert.equal(vm.runInContext("stamp('2026-12-31T15:00:00Z')",context),'2027-01-01 00:00:00 JST');
+      assert.match(nodes.freshness.textContent,/取得 09-07 00:00 JST/);
+      assert.match(nodes.range.textContent,/2026-09-06 00:00:00 JST → 2026-09-07 00:00:00 JST/);
+      const html = nodes.repos.innerHTML;
+      assert.match(html,/状態開始: 2026-09-06 23:59:50 JST/);
+      assert.match(html,/最終観測: 2026-09-07 00:00:00 JST/);
+      assert.match(html,/queue期限: 2026-09-07 00:30:00 JST/);
+      assert.match(html,/期限 2026-09-07 01:00:00 JST/);
+      assert.match(html,/title="正常 · 2026-09-06 00:00:00 JST → 2026-09-06 06:00:00 JST"/);
+      assert.match(html,/<span>09-06 00:00 JST<\/span><span>09-07 00:00 JST<\/span>/);
+      nodes.window.value='custom'; nodes.window.change();
+      nodes.from.value='2026-09-06T23:30'; nodes.to.value='2026-09-07T00:00';
+      nodes.selection.submit({preventDefault(){}}); await refresh();
+      const timeline = f.urls.filter(u=>u.startsWith('/api/timeline?')).at(-1);
+      const query = new URL(timeline,'http://localhost').searchParams;
+      assert.equal(query.get('from'),'2026-09-06T14:30:00.000Z');
+      assert.equal(query.get('to'),'2026-09-06T15:00:00.000Z');
+      assert.ok(f.urls.includes(timeline.replace('/api/timeline','/api/report')));
+      assert.equal(classes.has('expired'),false);
+    }
+  } finally {
+    if (previousTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTZ;
+  }
+});
+
+test('one hour selection sends exactly 3600 seconds and retains default and auxiliary windows', async () => {
+  assert.match(page,/<option value="1">直近1h<\/option>/);
+  assert.match(page,/<option value="24" selected>直近24h<\/option>/);
+  assert.match(page,/開始（JST）/);
+  assert.match(page,/終了（JST）/);
+  const {f,nodes,classes,refresh} = fixture();
+  await refresh();
+  let timeline = f.urls.filter(u=>u.startsWith('/api/timeline?')).at(-1);
+  let query = new URL(timeline,'http://localhost').searchParams;
+  assert.equal(Date.parse(query.get('to'))-Date.parse(query.get('from')),86400000);
+  nodes.window.value='1'; nodes.window.change();
+  f.urls=[];
+  await refresh();
+  timeline = f.urls.find(u=>u.startsWith('/api/timeline?'));
+  query = new URL(timeline,'http://localhost').searchParams;
+  assert.equal(Date.parse(query.get('to'))-Date.parse(query.get('from')),3600000);
+  assert.ok(f.urls.includes(timeline.replace('/api/timeline','/api/report')));
+  const reports = f.urls.filter(u=>u.startsWith('/api/report?')).map(url=> {
+    const params = new URL(url,'http://localhost').searchParams;
+    assert.equal(params.get('to'),query.get('to'));
+    return (Date.parse(params.get('to'))-Date.parse(params.get('from')))/1000;
+  });
+  assert.deepEqual(reports,[3600,86400,604800,2592000]);
+  assert.equal(classes.has('expired'),false);
+  assert.match(nodes.repos.innerHTML,/api\/timeline\?repo=owner%2Frepo&amp;from=/);
 });
