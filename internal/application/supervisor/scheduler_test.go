@@ -933,6 +933,7 @@ type webhookFakeGitHub struct {
 	*fakeGitHub
 	listCalls        int
 	restGets         int
+	restInspections  int
 	restErr          error
 	conditionalCalls int
 	conditionalETags []string
@@ -961,6 +962,7 @@ func (f *webhookFakeGitHub) GetREST(context.Context, config.Config, int) (gh.Iss
 }
 
 func (f *webhookFakeGitHub) InspectPullRequestREST(context.Context, config.Config, int, int, string) (gh.RemoteState, error) {
+	f.restInspections++
 	f.inspectCalls++
 	if f.remote != nil {
 		return *f.remote, nil

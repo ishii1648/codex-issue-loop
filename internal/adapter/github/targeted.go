@@ -81,19 +81,40 @@ func (c CLI) InspectPullRequestREST(ctx context.Context, cfg config.Config, issu
 		issue.Comments = append(issue.Comments, comment.Body)
 	}
 	var raw struct {
-		Number         int        `json:"number"`
-		HTMLURL        string     `json:"html_url"`
-		State          string     `json:"state"`
-		Draft          bool       `json:"draft"`
-		MergedAt       *time.Time `json:"merged_at"`
-		MergeableState string     `json:"mergeable_state"`
-		Head           struct {
+		Number             int               `json:"number"`
+		HTMLURL            string            `json:"html_url"`
+		State              string            `json:"state"`
+		Draft              bool              `json:"draft"`
+		MergedAt           *time.Time        `json:"merged_at"`
+		MergeableState     string            `json:"mergeable_state"`
+		MergeCommitSHA     string            `json:"merge_commit_sha"`
+		RequestedReviewers []json.RawMessage `json:"requested_reviewers"`
+		RequestedTeams     []json.RawMessage `json:"requested_teams"`
+		Base               struct {
 			Ref string `json:"ref"`
-			SHA string `json:"sha"`
+		} `json:"base"`
+		Head struct {
+			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
+			Repo struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
 		} `json:"head"`
 	}
 	if err := c.apiJSON(ctx, fmt.Sprintf("/repos/%s/pulls/%d", cfg.GitHub.Repo, prNumber), &raw); err != nil {
 		return RemoteState{}, fmt.Errorf("get Pull Request #%d with REST: %w", prNumber, err)
+	}
+	reviewDecision, err := c.pullRequestReviewDecisionREST(ctx, cfg, prNumber)
+	if err != nil {
+		return RemoteState{}, err
+	}
+	if reviewDecision != "CHANGES_REQUESTED" && (len(raw.RequestedReviewers) > 0 || len(raw.RequestedTeams) > 0) {
+		reviewDecision = "REVIEW_REQUIRED"
+	}
+	mergeCommitSHA := ""
+	// Before merge, REST exposes a synthetic test merge commit at merge_commit_sha.
+	if raw.MergedAt != nil {
+		mergeCommitSHA = raw.MergeCommitSHA
 	}
 	sha := raw.Head.SHA
 	if sha == "" {
@@ -127,7 +148,48 @@ func (c CLI) InspectPullRequestREST(ctx context.Context, cfg config.Config, issu
 		Number: raw.Number, URL: raw.HTMLURL, State: raw.State, IsDraft: raw.Draft,
 		MergedAt: raw.MergedAt, HeadRefName: raw.Head.Ref, HeadSHA: sha,
 		MergeStateStatus: raw.MergeableState, ChecksStatus: checksStatus,
+		ReviewDecision: reviewDecision, BaseRefName: raw.Base.Ref, HeadRepository: raw.Head.Repo.FullName,
+		MergeSHA: mergeCommitSHA, MergeCommitSHA: mergeCommitSHA,
 	}}}, nil
+}
+
+func (c CLI) pullRequestReviewDecisionREST(ctx context.Context, cfg config.Config, prNumber int) (string, error) {
+	latest := make(map[int64]string)
+	for page := 1; ; page++ {
+		var reviews []struct {
+			State string `json:"state"`
+			User  struct {
+				ID int64 `json:"id"`
+			} `json:"user"`
+		}
+		endpoint := fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100&page=%d", cfg.GitHub.Repo, prNumber, page)
+		if err := c.apiJSON(ctx, endpoint, &reviews); err != nil {
+			return "", fmt.Errorf("get Pull Request #%d reviews with REST: %w", prNumber, err)
+		}
+		// Reviews are chronological; comments and pending reviews do not supersede a submitted decision.
+		for _, review := range reviews {
+			if review.User.ID == 0 {
+				continue
+			}
+			switch review.State {
+			case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+				latest[review.User.ID] = review.State
+			}
+		}
+		if len(reviews) < 100 {
+			break
+		}
+	}
+	decision := ""
+	for _, review := range latest {
+		if review == "CHANGES_REQUESTED" {
+			return "CHANGES_REQUESTED", nil
+		}
+		if review == "APPROVED" {
+			decision = "APPROVED"
+		}
+	}
+	return decision, nil
 }
 
 func (c CLI) apiJSON(ctx context.Context, endpoint string, target any) error {

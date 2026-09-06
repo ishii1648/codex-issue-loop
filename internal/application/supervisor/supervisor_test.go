@@ -2810,3 +2810,53 @@ func TestFailedCheckpointRetainsObservedLocalHead(t *testing.T) {
 		t.Fatalf("checkpoint recorded remote head: %+v", c)
 	}
 }
+
+func TestWebhookReviewDecisionGatesMergeAndPreservesUnknown(t *testing.T) {
+	for _, test := range []struct {
+		name, saved, observed, want string
+		wait                        bool
+	}{
+		{name: "changes requested", observed: "CHANGES_REQUESTED", want: "CHANGES_REQUESTED", wait: true},
+		{name: "unknown after changes requested", saved: "CHANGES_REQUESTED", want: "CHANGES_REQUESTED", wait: true},
+		{name: "unknown after review required", saved: "REVIEW_REQUIRED", want: "REVIEW_REQUIRED", wait: true},
+		{name: "unknown after approval", saved: "APPROVED", want: "APPROVED"},
+		{name: "approval clears gate", saved: "CHANGES_REQUESTED", observed: "APPROVED", want: "APPROVED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+			loop, base := testLoop(t, result)
+			if _, err := loop.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			loop.Config.Completion.AutoMerge = true
+			loop.Config.Webhook.Mode = "webhook"
+			client := &webhookFakeGitHub{fakeGitHub: base}
+			loop.GitHub = client
+			base.remote = &gh.RemoteState{PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "open", IsDraft: true, HeadRefName: "codex/issue-1-test", MergeStateStatus: "clean", ChecksStatus: "success", ReviewDecision: test.observed}}}
+			if _, err := loop.Store.Update("test_review", 1, "", nil, func(s *state.Snapshot) error {
+				s.Issues["1"].ReviewDecision = test.saved
+				s.Issues["1"].PullRequestNumber = 1
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			current, err := loop.issueState(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := loop.processPullRequest(context.Background(), current); err != nil {
+				t.Fatal(err)
+			}
+			updated, err := loop.issueState(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if client.restInspections != 1 || updated.ReviewDecision != test.want || base.mergedPullRequest == test.wait || base.readyPullRequest == test.wait {
+				t.Fatalf("issue=%+v REST inspections=%d ready=%t merged=%t", updated, client.restInspections, base.readyPullRequest, base.mergedPullRequest)
+			}
+			if test.wait && (updated.RetryAfter == nil || updated.LastError != "waiting for required review to pass" || updated.Status != current.Status) {
+				t.Fatalf("review did not schedule a wait: %+v", updated)
+			}
+		})
+	}
+}
