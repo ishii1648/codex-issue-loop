@@ -22,7 +22,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
-	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
 
 func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
@@ -126,7 +125,7 @@ func (a App) watch(ctx context.Context, l layout.Layout, args []string) error {
 }
 
 func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
-	const maxAnswerBytes = 16 * 1024
+	const maxAnswerBytes = state.MaxAnswerBytes
 	fs := flag.NewFlagSet("answer", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
 	repo := fs.String("repo", "", "repository path")
@@ -177,8 +176,8 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 		return err
 	}
 	secrets := cfg.RedactionValues()
-	if redact.StringWithSecrets(answer, secrets) != answer {
-		return exitError{2, fmt.Errorf("answer must not contain a credential or configured secret")}
+	if err := state.ValidateAnswer(nil, answer, secrets); err != nil {
+		return exitError{2, err}
 	}
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: secrets}
 	updated, request, err := store.RecordAnswer(*requestID, answer, time.Now().UTC())

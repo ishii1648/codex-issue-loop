@@ -5,7 +5,9 @@ description: Operate, monitor, and explicitly recover the codex-issue-loop super
 
 # agent-loop
 
-Use the `agent-loop` CLI as the only control interface. The Skill does not own the Issue loop or its durable state.
+Use the `agent-loop` CLI for lifecycle operations; GitHub Issue comments can also record answers. The Skill does not own the Issue loop or its durable state.
+
+When the user chooses GitHub for an answer, use a new Issue comment containing only `/agent-loop answer <request-id> <answer>`, with an advertised option ID or explicitly allowed free text. Require current repository write/maintain/admin permission and the versioned `accepted` acknowledgement. Do not infer worker restart from receipt: CLI and GitHub both save into the canonical mailbox, and the supervisor separately validates continuation and execution eligibility. Editing or deleting an accepted comment does not retract its saved answer. Never post credentials or secrets.
 
 ## Safe workflow
 

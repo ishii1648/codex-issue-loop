@@ -296,6 +296,15 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, failure.Wrap(failure.Supervisor, "load durable state", err)
 	}
+	for _, number := range needsInputIssues(snapshot) {
+		if err := l.reconcileInputIssue(ctx, number); err != nil {
+			return false, failure.Wrap(failure.Transient, "reconcile GitHub input control", err)
+		}
+	}
+	snapshot, err = l.Store.PrepareAnsweredRequests(l.now())
+	if err != nil {
+		return false, err
+	}
 	diskAvailable := l.DiskAvailable
 	if diskAvailable == nil {
 		diskAvailable = retention.AvailableBytes

@@ -1,11 +1,11 @@
 package state
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
@@ -50,39 +50,109 @@ func (s Snapshot) Request(id string) (*Request, error) {
 }
 
 // RecordAnswer commits only the response. Dispatch and recovery cannot roll back its receipt.
-func (s Store) RecordAnswer(id, answer string, now time.Time) (Snapshot, *Request, error) {
+func (s Store) RecordAnswer(id, answer string, now time.Time, observations ...*AnswerProvenance) (Snapshot, *Request, error) {
 	snapshot, err := s.Load()
 	if err != nil {
 		return snapshot, nil, err
 	}
-	if !ValidID(id, "req_") || strings.TrimSpace(answer) == "" || now.IsZero() {
-		return snapshot, nil, fmt.Errorf("answer identity, content and timestamp are required")
+	if !ValidID(id, "req_") || now.IsZero() || len(observations) > 1 {
+		return snapshot, nil, fmt.Errorf("answer identity and timestamp are required")
+	}
+	var provenance *AnswerProvenance
+	if len(observations) == 1 && observations[0] != nil {
+		copy := *observations[0]
+		provenance = &copy
 	}
 	request, err := snapshot.Request(id)
 	if err != nil {
+		return snapshot, nil, ConflictError{Message: "unknown or ambiguous request"}
+	}
+	if err := ValidateAnswer(request, answer, s.Secrets); err != nil {
 		return snapshot, nil, err
 	}
-	if request.Status == issuedomain.RequestStatusAnswered && request.Answer == answer {
+	if err := validateAnswerObservation(snapshot, request, provenance); err != nil {
+		return snapshot, nil, err
+	}
+	if request.Status == issuedomain.RequestStatusAnswered {
+		if request.Answer != answer {
+			return snapshot, nil, ConflictError{Message: "request already has a different answer"}
+		}
 		return snapshot, request, nil
 	}
-	updated, err := s.Update("answer_recorded", request.IssueNumber, request.RunID, map[string]string{"request_id": id}, func(current *Snapshot) error {
+	payload := map[string]any{"request_id": id, "source": "cli"}
+	if provenance != nil {
+		payload["source"], payload["provenance"] = provenance.Source, provenance
+	}
+	updated, err := s.Update("answer_recorded", request.IssueNumber, request.RunID, payload, func(current *Snapshot) error {
 		request, err := current.Request(id)
 		if err != nil {
+			return ConflictError{Message: "unknown or ambiguous request"}
+		}
+		if err := ValidateAnswer(request, answer, s.Secrets); err != nil {
 			return err
 		}
-		if request.Status == issuedomain.RequestStatusAnswered && request.Answer == answer {
-			return nil
+		if err := validateAnswerObservation(*current, request, provenance); err != nil {
+			return err
 		}
-		if request.Status != issuedomain.RequestStatusPending {
-			return fmt.Errorf("request %s is already answered or canceled", id)
+		if request.Status == issuedomain.RequestStatusAnswered {
+			if request.Answer == answer {
+				return errAnswerRecorded
+			}
+			return ConflictError{Message: "request already has a different answer"}
 		}
-		return ApplyRequestAnswer(request, answer, now)
+		if err := ApplyRequestAnswer(request, answer, now); err != nil {
+			return err
+		}
+		request.AnswerProvenance = provenance
+		return nil
 	})
+	if errors.Is(err, errAnswerRecorded) {
+		updated, err = s.Load()
+	}
 	if err != nil {
 		return snapshot, nil, err
 	}
 	request, err = updated.Request(id)
 	return updated, request, err
+}
+
+var errAnswerRecorded = errors.New("answer already recorded")
+
+func validateAnswerObservation(snapshot Snapshot, request *Request, provenance *AnswerProvenance) error {
+	if request.Status != issuedomain.RequestStatusPending && request.Status != issuedomain.RequestStatusAnswered {
+		return ConflictError{Message: "request is canceled"}
+	}
+	if provenance == nil {
+		return nil
+	}
+	if provenance.Source != "github_issue_comment" || provenance.CommentID <= 0 || provenance.Actor == "" ||
+		(provenance.Permission != "write" && provenance.Permission != "maintain" && provenance.Permission != "admin") ||
+		provenance.RequestID != request.ID || provenance.IssueNumber != request.IssueNumber || provenance.RunID != request.RunID ||
+		!validSHA256(provenance.BodySHA256) || provenance.CommentedAt.IsZero() || provenance.CommentedAt.Before(request.CreatedAt) ||
+		provenance.CommentEdited.Before(provenance.CommentedAt) {
+		return ConflictError{Message: "comment observation does not match request"}
+	}
+	if request.Status == issuedomain.RequestStatusAnswered {
+		old := request.AnswerProvenance
+		if old == nil || old.CommentID != provenance.CommentID || old.BodySHA256 != provenance.BodySHA256 ||
+			old.Actor != provenance.Actor || !old.CommentEdited.Equal(provenance.CommentEdited) {
+			return ConflictError{Message: "request was answered by a different observation"}
+		}
+		return nil
+	}
+	key := strconv.Itoa(request.IssueNumber)
+	run := ""
+	if item := snapshot.Issues[key]; item != nil {
+		run = item.RunID
+	} else if item := snapshot.QuarantinedIssues[key]; item != nil {
+		run = item.RunID
+	} else {
+		return ConflictError{Message: "request has no Issue"}
+	}
+	if run != request.RunID {
+		return ConflictError{Message: "request belongs to a stale run"}
+	}
+	return nil
 }
 
 func answeredTransition(snapshot Snapshot, request *Request) (issuedomain.Transition, error) {

@@ -108,6 +108,8 @@ Issue aggregateは少なくとも次を一体として保持する。
 
 scenario別のresume status、sync flag、resource park、recovery substateを追加しない。中断理由の違いはgenericな`Suspension`のreasonとevidenceで表現する。
 
+GitHub コメントは mailbox の transport として扱い、状態の正本にはしない。GitHub adapter が versioned 質問/ack marker を同期し、supervisor が authoritative comment 一覧と actor の現在権限を取得する。CLI と GitHub は共通の `state.RecordAnswer` で回答を保存し、GitHub の observation は任意の `Request.answer_provenance` と同じ transaction に残す。旧 request に provenance は必須としない。回答受領では Issue status・実行枠・checkpoint を変更せず、既存 `PrepareAnsweredRequests` と worker 起動境界が再開を判断する。ack の再同期やコメント編集・削除は保存済み回答を取り消さない。
+
 ## 5. 単一の状態遷移境界
 
 Issueの変更は概念上、次の一つの契約を通す。

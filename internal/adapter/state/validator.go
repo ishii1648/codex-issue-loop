@@ -332,6 +332,14 @@ func validateRequestAggregate(snapshot Snapshot, id string, request *Request) er
 			return fmt.Errorf("canceled request %s contains an answer", id)
 		}
 	}
+	if provenance := request.AnswerProvenance; provenance != nil {
+		if request.Status != issuedomain.RequestStatusAnswered || !validSHA256(provenance.BodySHA256) {
+			return fmt.Errorf("request %s has invalid answer provenance", id)
+		}
+		if err := validateAnswerObservation(snapshot, request, provenance); err != nil {
+			return err
+		}
+	}
 	if request.Status == issuedomain.RequestStatusAnswered {
 		for _, answer := range issue.Answers {
 			if answer.RequestID == request.ID && answer.Question == request.Question && answer.Answer == request.Answer {
