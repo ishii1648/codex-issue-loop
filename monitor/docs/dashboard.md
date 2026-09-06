@@ -54,23 +54,23 @@ python3 monitor/dashboard/manage.py restart
 
 ## 表示と正確性
 
-HEALTHY=緑、DOWN=赤、IDLE=青、UNKNOWN=灰。状態開始・継続時間・最終観測、24h/7d/30d需要時稼働率とcoverage、timeline、理由・観測エラー・現在queueのIssue番号と期限を表示します。Issue番号からGitHubへ進めます。queue-level期限と各Issue期限を区別します。履歴に当時のqueue一覧はないため、過去の対象Issueは復元しません。
+失効監視付きURLはAPIから直接描画し、repositoryを左右に比較します。現在状態は正常 HEALTHY=緑、異常 DOWN=赤、待機 IDLE=青、観測不能 UNKNOWN=灰で大きく表示します。選択期間全体の時間内訳・需要時稼働率・coverageと、その直下の正確なtimelineを表示します。現在までの24h/7d/30d集計は補助表、状態開始・最終観測・理由・観測エラー・現在queueのIssue番号と期限は折り畳み詳細です。Issue番号からGitHubへ進めます。queue-level期限と各Issue期限を区別します。履歴に当時のqueue一覧はないため、過去の対象Issueは復元しません。
 
-需要時稼働率は`HEALTHY秒 / (HEALTHY秒 + DOWN秒)`です。IDLEは分母に入らず、分母0は`N/A（需要なし）`です。UNKNOWNだけでも既知の需要が0なのでN/Aですが、coverageは0であり、需要がなかったとは断定できません。coverageは`(HEALTHY + DOWN + IDLE)秒 / 全期間秒`、100%未満は橙色です。未観測は正常時間に加算しません。
+需要時稼働率は`HEALTHY秒 / (HEALTHY秒 + DOWN秒)`です。IDLEは分母に入らず、分母0は`N/A（需要なし）`です。UNKNOWNだけでも既知の需要が0なのでN/Aですが、coverageは0であり、需要がなかったとは断定できません。coverageは`(HEALTHY + DOWN + IDLE)秒 / 全期間秒`です。選択期間にDOWNやUNKNOWNがあれば事実の要約を添え、混在期間への単一の正常性判定は行いません。未観測は正常時間に加算しません。
 
 `/metrics`はCLIと同じ`effectiveSnapshot`、`effectiveIntervals`、`BuildReport`を使用します。状態コードはUNKNOWN=0、HEALTHY=1、DOWN=2、IDLE=3、需要なしは-1、不明な日時はNaNです。Issue番号・理由・errorをlabelに含めず、counterやscrapeサンプル比率で稼働率を計算しません。基準時刻は秒境界に切り捨て、その同じ時刻で全期間を計算します。読み取り中のsnapshot変更・重複区間・破損はHTTP 503として拒否します。
 
 scrapeとdashboardは15秒更新です。monitor停止は既存の`observation_timeout`でUNKNOWNになり、queue deadlineまで境界が遡る場合があります。API停止は`up=0`、scrape基準時刻が45秒以上古い場合も現在パネルを無効化します。
 
-通常は失効監視付きURLを開きます。ブラウザは15秒ごとにAPI経由でGrafanaのPrometheus datasourceへ基準時刻とupを照会します。通信エラー・欠損は照会時に、45秒以上古い基準時刻は1秒タイマーで検出し、Grafana全体を隠してUNKNOWN / 表示失効を明示します。タブ復帰時も期限を確認します。Grafana詳細を単独で開くとこの失効監視はありません。追加pluginは使いません。
+通常は失効監視付きURLを開きます。ブラウザは15秒ごとにAPI経由でGrafanaのPrometheus datasourceへ基準時刻とupを照会します。通信エラー・欠損は照会時に、45秒以上古い基準時刻は1秒タイマーで検出し、要約全体を隠してUNKNOWN / 表示失効を明示します。status・report・timelineの失敗や、同じ期間のreportとtimelineの秒数が一致しない更新途中も表示を失効させます。タブ復帰時も期限を確認します。Grafana詳細を単独で開くとこの失効監視はありません。追加pluginは使いません。
 
 詳細表は`/api/details?repo=owner/name`から、既存status計算結果を平坦化した`rows`を読みます。queueが空でも状態・理由・観測エラーを1行返し、未設定のIssue番号と期限はnullです。理由と観測エラーは同じ列に表示します。
 
-Infinityは`/api/timeline`から区間を直接読み、backendの列順に関係なくGrafanaのorganize変換で開始・終了・状態の順へ並べます。選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。replay後は次回取得で反映し、近似や間引きをしません。ピクセルより短い区間は、tableの「正確な区間JSON」リンクで開始・終了・理由を確認できます。時刻範囲の選択はtimelineに適用し、現在状態・3期間集計は最新scrapeが基準です。
+Infinityは`/api/timeline`から区間を直接読み、backendの列順に関係なくGrafanaのorganize変換で開始・終了・状態の順へ並べます。選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。replay後は次回取得で反映し、近似や間引きをしません。ピクセルより短い区間は、tableの「正確な区間JSON」リンクで開始・終了・理由を確認できます。Grafana詳細の時刻範囲はtimelineに適用します。失効監視付きURLでは24h/7d/30dまたは日時指定（入力は閲覧端末のローカル時刻、表示はUTC）を選び、同じfrom/toを`/api/report`と`/api/timeline`へ渡します。reportの未観測時間をUNKNOWNへ補完して全長100%のバーと秒数凡例を表示します。細い区間に文字は重ねずhoverで状態と開始・終了を確認でき、ピクセル未満の区間はJSONから確認できます。現在カードは`/api/status`の最新取得、補助3期間集計は各更新時刻を終端とするreportであり、過去の選択期間とは独立です。replayは選択期間・補助集計とも次回取得で反映します。
 
 ## CLIとの照合
 
-観測中のstateを直接変更せず、`repositories/`を隔離directoryにコピーし、`state_dir`だけコピー先にした設定を使います。commit途中の不整合が出たコピーは使わず、取り直します。APIを凍結コピーの設定で起動し、表示上部の取得基準UTCをTとします。`status --at`は最新観測より前を拒否します。
+観測中のstateを直接変更せず、`repositories/`を隔離directoryにコピーし、`state_dir`だけコピー先にした設定を使います。commit途中の不整合が出たコピーは使わず、取り直します。APIを凍結コピーの設定で起動し、表示された選択期間の開始をF、終了をTとします。現在状態の照合には別途現在時刻を用います。`status --at`は最新観測より前を拒否します。
 
 ```sh
 T=2026-09-06T12:00:00Z
@@ -101,7 +101,7 @@ fixtureは新規directoryだけに生成します。`mixed`は4状態timelineと
 
 本番dashboardの3サービスだけを停止し、fixture rootへ両pluginを導入して同じ`--root`で`start`します。観測monitorやsupervisorは停止しません。fixtureのplistをログイン自動起動へ登録しません。
 
-失効監視付きURLを1280x720で開き、状態・日時・3期間・timeline・理由を確認します。4色と境界、queueのIssueリンクと期限、idleのN/A、missingのUNKNOWNとcoverage 0、staleのUNKNOWN、corruptのエラーを確認します。
+失効監視付きURLを1280x720と1760x761で開き、現在状態・選択期間の視覚要約がスクロールなしで見えること、timeline・補助3期間と折り畳み詳細を確認します。4色と境界、queueのIssueリンクと期限、idleのN/A、missingのUNKNOWNとcoverage 0、staleのUNKNOWN、corruptのエラーを確認します。
 
 HEALTHY表示中にfixtureのAPI、Prometheus、Grafanaをそれぞれ`launchctl bootout gui/$(id -u)/com.codex-issue-loop.monitor-dashboard.<サービス名>`で停止し、表示が失効することを確認します。API停止は最大45秒、Grafana/Prometheus通信断は次回照会とtimeoutで失効します。観測を更新せず3分待ち、通信成功中でもUNKNOWNへ変わることも確認します。各試験の間に`start`で復旧します。終了後はfixture rootで`stop`、本番rootで`start`します。
 
@@ -113,4 +113,4 @@ promtool check config /tmp/monitor-dashboard-fixture/prometheus.yml
 make ci
 ```
 
-GoテストはCLI/API一致、4状態、3期間、stale、欠損・破損、履歴再読込、read-only/loopback境界、commit途中の拒否を検証します。PythonはPromQLをpromtoolで評価し、列順の全順列・起動済み/未登録サービスのrestartも検証します。Nodeはブラウザ用スクリプトを隔離し、通信断・古い値・scrape欠損・休止後の失効と復旧を検証します。実Grafanaの描画・1280x720の可読性・ログイン起動は実機で別途確認します。
+GoテストはCLI/API一致、4状態、3期間、stale、欠損・破損、履歴再読込、read-only/loopback境界、commit途中の拒否を検証します。PythonはPromQLをpromtoolで評価し、列順の全順列・起動済み/未登録サービスのrestartも検証します。Nodeはブラウザ用スクリプトを隔離し、4状態・未観測補完・微小区間・期間切替・再取得と、通信断・古い値・scrape欠損・休止後の失効と復旧を検証します。Goは同じfrom/toのCLI reportと補完済みtimelineの秒数・coverage・需要時稼働率も照合します。実Grafanaの描画・1280x720の可読性・ログイン起動は実機で別途確認します。
