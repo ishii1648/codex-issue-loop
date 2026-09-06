@@ -69,7 +69,8 @@ function renderRepository(snapshot, report, rows, windows, from, to, now) {
     timelineValues[row.status] += (end-start)/1000;
     return `<span class="segment${row.status === 'UNKNOWN' ? ' unobserved' : ''}" style="--state:var(--${row.status});width:${(end-start)/(to-from)*100}%" title="${labels[row.status]} · ${stamp(start)} → ${stamp(end)}"></span>`;
   }).join('');
-  if (cursor !== to || states.some(s => Math.abs(timelineValues[s]-values[s]) > 0.001)) throw new Error('集計と区間が更新中です。次回取得で再確認します');
+  // Date.parse truncates sub-millisecond precision at each interval boundary.
+  if (cursor !== to || states.some(s => Math.abs(timelineValues[s]-values[s]) > rows.length * 0.001)) throw new Error('集計と区間が更新中です。次回取得で再確認します');
   const legend = states.map(s => `<span><i class="dot${s === 'UNKNOWN' ? ' unobserved' : ''}" style="--state:var(--${s})"></i>${labels[s]}</span>`).join('');
   const started = Date.parse(snapshot.current.started_at);
   const since = Number.isFinite(started) && started > 0 ? duration(Math.max(0,(now-started)/1000))+'継続' : '開始未観測';
