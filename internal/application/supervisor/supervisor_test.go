@@ -2657,3 +2657,37 @@ func TestIssueResolutionSyncRevalidatesContinuationAuthority(t *testing.T) {
 		t.Fatal("answered checkpoint without immutable failure marker was accepted")
 	}
 }
+
+func TestFailedCheckpointRetainsObservedLocalHead(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	_, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, Title: "repair", RunID: "run_repair", BaseSHA: "base-sha", StartedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Update("fixture", 1, "run_repair", nil, func(s *state.Snapshot) error {
+		i := s.Issues["1"]
+		i.Status = issuedomain.StatusRunning
+		i.Branch = "codex/issue-1-repair"
+		i.Worktree = loop.Config.RepoPath
+		i.HeadSHA = "remote-head"
+		setSupervisorTestWorkspace(s, i)
+		i.Continuation = &state.ContinuationCheckpoint{ID: "checkpoint_repair", CreatedAt: time.Now().UTC(), RunID: i.RunID, Generation: i.Generation, BaseSHA: "base-sha", Workspace: i.Workspace, HeadSHA: "remote-head", Stage: issuedomain.ContinuationStagePublish, Summary: "verified repair", ResultSHA256: strings.Repeat("a", 64)}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.Worktrees = fakeWorktree{path: loop.Config.RepoPath, digest: strings.Repeat("b", 64), inspection: &worktree.Inspection{Exists: true, Valid: true, Branch: "codex/issue-1-repair", Head: "local-head", LocalBranchExists: true}}
+	if err := loop.failCheckpointStage(context.Background(), *snapshot.Issues["1"], "publication failed"); err != nil {
+		saved, _ := loop.Store.Load()
+		t.Fatalf("%v: quarantine=%+v", err, saved.QuarantinedIssues["1"])
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := snapshot.Issues["1"].Continuation
+	if c.HeadSHA != "local-head" || c.WorktreeSHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("checkpoint recorded remote head: %+v", c)
+	}
+}

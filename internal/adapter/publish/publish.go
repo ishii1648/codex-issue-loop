@@ -130,9 +130,7 @@ func (m Manager) validateExistingPullRequest(ctx context.Context, cfg config.Con
 	}
 	if localHead != pr.HeadRefOID {
 		if _, err := m.run(ctx, git, "-C", worktreePath, "merge-base", "--is-ancestor", localHead, pr.HeadRefOID); err == nil {
-			if _, err := m.run(ctx, git, "-C", worktreePath, "merge", "--ff-only", pr.HeadRefOID); err != nil {
-				return "", nil, publication.PullRequestMismatchError{Detail: "fast-forward to published head without replacing worker changes: " + err.Error()}
-			}
+			return fallbackBase, pr, nil
 		} else if _, err := m.run(ctx, git, "-C", worktreePath, "merge-base", "--is-ancestor", pr.HeadRefOID, localHead); err != nil {
 			return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("worktree HEAD diverges from Pull Request head: local=%s pr=%s", localHead, pr.HeadRefOID)}
 		}
@@ -366,6 +364,24 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 		}
 		if _, err := m.run(ctx, git, "-c", "commit.gpgsign=false", "-C", worktreePath, "commit", "-m", commitTitle(issue)); err != nil {
 			return worker.GitResult{}, audit, fmt.Errorf("commit publish changes: %w", err)
+		}
+	}
+	if existingPR != nil {
+		if _, err := m.run(ctx, git, "-C", worktreePath, "merge-base", "--is-ancestor", existingPR.HeadRefOID, "HEAD"); err != nil {
+			if _, err := m.run(ctx, git, "-c", "commit.gpgsign=false", "-C", worktreePath, "merge", "--no-edit", existingPR.HeadRefOID); err != nil {
+				audit.Reason = publication.ReasonPullRequestMismatch
+				if _, mergeErr := m.run(ctx, git, "-C", worktreePath, "rev-parse", "--verify", "MERGE_HEAD"); mergeErr == nil {
+					if _, abortErr := m.run(ctx, git, "-C", worktreePath, "merge", "--abort"); abortErr != nil {
+						return worker.GitResult{}, audit, publication.PullRequestMismatchError{Detail: fmt.Sprintf("merge published head: %v; abort merge: %v", err, abortErr)}
+					}
+				}
+				return worker.GitResult{}, audit, publication.PullRequestMismatchError{Detail: "merge published head while preserving the worker commit: " + err.Error()}
+			}
+		}
+		audit.BaseSHA = existingPR.BaseRefOID
+		audit.ChangedPaths, err = m.changedPaths(ctx, git, worktreePath, audit.BaseSHA)
+		if err != nil {
+			return worker.GitResult{}, audit, err
 		}
 	}
 	commit, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "HEAD")

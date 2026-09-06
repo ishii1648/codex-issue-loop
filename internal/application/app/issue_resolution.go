@@ -186,14 +186,18 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 	if missingOnlyWorktreeDigest(item) && launchErr == nil && launch.Valid && inspectErr == nil && inspection.Valid {
 		adoption, adoptionErr = inspectWorktreeAdoption(ctx, entry.Commands["git"], item)
 	}
-	actions := plannedIssueActions(cfg, item, snapshot.ActiveExecution, workerLive, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, pending, remote, remoteErr, resultErr, adoption, adoptionErr, adoptionAllowPaths)
+	publicationHeadRepair := remoteErr == nil && resultErr == nil && item.Continuation != nil &&
+		resultSummary == item.Continuation.Summary && resultSHA256 == item.Continuation.ResultSHA256 &&
+		publicationCheckpointHeadRepair(ctx, cfg, entry.Commands["gh"], item, inspection, remote)
+	actions := plannedIssueActions(cfg, item, snapshot.ActiveExecution, workerLive, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, pending, remote, remoteErr, resultErr, adoption, adoptionErr, adoptionAllowPaths, publicationHeadRepair)
 	after, readErr := os.ReadFile(store.StatePath())
 	readOnly := readErr == nil && bytes.Equal(before, after)
 	report := issuePlanReport{
 		SchemaVersion: 1, IssueNumber: number, StateRevision: snapshot.StateRevision, Status: item.Status,
 		Suspension: item.Suspension, Checkpoint: item.Continuation,
 		Observations: map[string]any{
-			"worker_live": workerLive, "workspace_valid": launchErr == nil && launch.Valid,
+			"publication_head_repair": publicationHeadRepair,
+			"worker_live":             workerLive, "workspace_valid": launchErr == nil && launch.Valid,
 			"workspace_error": errorText(launchErr), "github_observed": remoteErr == nil,
 			"github_state_reason": remote.Issue.StateReason,
 			"git_valid":           inspectErr == nil && inspection.Valid,
@@ -224,7 +228,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *state.ActiveExecution, workerLive bool, launch worktree.LaunchValidation, launchErr error,
 	inspection worktree.Inspection, inspectErr error, worktreeSHA256 string, worktreeDigestErr error,
 	baseOK bool, baseErr error, pending []string, remote gh.RemoteState, remoteErr error,
-	resultErr error, adoption worktreeAdoptionObservation, adoptionErr error, adoptionAllowPaths []string,
+	resultErr error, adoption worktreeAdoptionObservation, adoptionErr error, adoptionAllowPaths []string, publicationHeadRepair bool,
 ) []issueActionPlan {
 	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionResume, issuedomain.ResolutionRetryStage, issuedomain.ResolutionAdoptInput, issuedomain.ResolutionAdoptHead, issuedomain.ResolutionAdoptWorktree, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel}
 	result := make([]issueActionPlan, 0, len(actions))
@@ -269,7 +273,7 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 				reasons = append(reasons, "checkpoint base is not an ancestor of the worktree head")
 			}
 			if item.Continuation != nil && (item.Continuation.Stage == issuedomain.ContinuationStageResume || item.Continuation.Stage == issuedomain.ContinuationStagePublish) {
-				if item.Continuation.HeadSHA == "" || inspection.Head != item.Continuation.HeadSHA {
+				if (item.Continuation.HeadSHA == "" || inspection.Head != item.Continuation.HeadSHA) && !(action == issuedomain.ResolutionRetryStage && publicationHeadRepair) {
 					reasons = append(reasons, "worktree head differs from the continuation checkpoint")
 				}
 				if item.Continuation.WorktreeSHA256 == "" || worktreeDigestErr != nil || worktreeSHA256 != item.Continuation.WorktreeSHA256 {
@@ -378,6 +382,10 @@ func issueResolutionAudit(planned issuePlanningContext, action issuedomain.Resol
 	}
 	if action == issuedomain.ResolutionRetryStage && planned.issue.Continuation != nil && planned.issue.Continuation.Stage == issuedomain.ContinuationStagePublish {
 		payload["publication_result_sha256"] = planned.resultSHA256
+		if planned.report.Observations["publication_head_repair"] == true {
+			payload["previous_head_sha"] = planned.issue.Continuation.HeadSHA
+			payload["adopted_head_sha"] = planned.inspection.Head
+		}
 	}
 	if action == issuedomain.ResolutionRetryStage && planned.issue.ConflictRecovery != nil {
 		payload["conflict_attempts_reset"] = planned.issue.ConflictRecovery.Attempts
@@ -509,6 +517,12 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 			if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStagePublish {
 				if planned.resultErr != nil || planned.resultSummary == "" || planned.resultSHA256 == "" {
 					return fmt.Errorf("Issue #%d saved completed worker result changed after planning", *number)
+				}
+				if planned.report.Observations["publication_head_repair"] == true {
+					if err := verifyPublicationCheckpointHeadRepair(ctx, planned, l.Root); err != nil {
+						return err
+					}
+					item.Continuation.HeadSHA = planned.inspection.Head
 				}
 				item.Continuation.Summary = planned.resultSummary
 				item.Continuation.ResultSHA256 = planned.resultSHA256

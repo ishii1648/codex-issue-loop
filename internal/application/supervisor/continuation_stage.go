@@ -180,6 +180,7 @@ func (l *Loop) failCheckpointStage(ctx context.Context, current state.Issue, rea
 		return failure.Wrap(failure.Issue, "decide checkpoint stage failure", err)
 	}
 	worktreeSHA256, _ := l.continuationWorktreeDigest(ctx, current)
+	headSHA := l.continuationWorktreeHead(ctx, current)
 	_, err = l.Store.Update("continuation_stage_failed", current.Number, current.RunID, map[string]string{"reason": reason}, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
 		identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
@@ -191,6 +192,7 @@ func (l *Loop) failCheckpointStage(ctx context.Context, current state.Issue, rea
 		}
 		if item.Continuation != nil {
 			item.Continuation.WorktreeSHA256 = worktreeSHA256
+			item.Continuation.HeadSHA = headSHA
 		}
 		item.LastError, item.FailureKind, item.RetryAfter = decision.LastError, decision.FailureKind, nil
 		if err := state.SetEffect(snapshot, item.Number, item.RunID, decision.Effect, l.now()); err != nil {

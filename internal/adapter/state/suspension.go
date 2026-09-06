@@ -27,7 +27,10 @@ func captureContinuation(issue *Issue, active ActiveExecution, now time.Time) {
 	checkpoint.BaseSHA = active.BaseSHA
 	checkpoint.Workspace = cloneWorkspace(issue.Workspace)
 	checkpoint.Session = cloneSession(issue.Session)
-	checkpoint.HeadSHA = issue.HeadSHA
+	// Publication fingerprints bind the local HEAD; Issue.HeadSHA may be the remote PR head.
+	if checkpoint.Stage != issuedomain.ContinuationStagePublish || checkpoint.WorktreeSHA256 == "" {
+		checkpoint.HeadSHA = issue.HeadSHA
+	}
 	checkpoint.PullRequestURL = issue.PullRequestURL
 	checkpoint.PullRequestNumber = issue.PullRequestNumber
 	if checkpoint.Stage.Validate() != nil {
