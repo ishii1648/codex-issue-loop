@@ -82,12 +82,21 @@ type scheduler struct {
 }
 
 type scheduleResult struct {
-	dispatched      bool
-	githubAttempted bool
-	githubSucceeded bool
+	dispatched            bool
+	githubAttempted       bool
+	githubSucceeded       bool
+	githubAccessSucceeded bool
 }
 
 type lifecycleGateContextKey struct{}
+
+type scheduleGitHubAccessContextKey struct{}
+
+func recordScheduleGitHubSuccess(ctx context.Context, err error) {
+	if succeeded, ok := ctx.Value(scheduleGitHubAccessContextKey{}).(*bool); ok && succeeded != nil && err == nil {
+		*succeeded = true
+	}
+}
 
 func (l *Loop) runScheduler(ctx context.Context, watcher *fsnotify.Watcher) error {
 	var watchEvents <-chan fsnotify.Event
@@ -203,7 +212,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				s.cancelAndDrain()
 				return fatal
 			}
-		} else if result.githubSucceeded && (s.consecutiveFailures > 0 || s.rateLimitActive) {
+		} else if (result.githubSucceeded || result.githubAccessSucceeded) && (s.consecutiveFailures > 0 || s.rateLimitActive) {
 			if resetErr := l.resetSupervisorFailures(s.consecutiveFailures); resetErr != nil {
 				s.cancelAndDrain()
 				return BlockedError{Err: failure.Wrap(failure.Supervisor, "reset supervisor failure counter", resetErr)}
@@ -376,6 +385,7 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	result := scheduleResult{}
+	ctx = context.WithValue(ctx, scheduleGitHubAccessContextKey{}, &result.githubAccessSucceeded)
 	snapshot, err := s.loop.Store.Load()
 	if err != nil {
 		return result, failure.Wrap(failure.Supervisor, "load durable state", err)
@@ -932,6 +942,8 @@ func (s *scheduler) preflight(snapshot state.Snapshot) error {
 }
 
 func (s *scheduler) dispatch(ctx context.Context, number int, runID string, slot int, run func(context.Context) error) {
+	// Asynchronous jobs report their outcome separately from the scheduling cycle.
+	ctx = context.WithValue(ctx, scheduleGitHubAccessContextKey{}, (*bool)(nil))
 	jobCtx, cancel := context.WithCancel(ctx)
 	s.active[number] = activeJob{runID: runID, slot: slot, cancel: cancel}
 	delete(s.issueRetry, number)
