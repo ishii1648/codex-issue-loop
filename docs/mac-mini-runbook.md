@@ -29,6 +29,7 @@ FileVaultを利用するMacでは、OS再起動後に利用者がdiskをunlock�
 
 ```sh
 cd /absolute/path/to/codex-issue-loop
+make install-shellcheck
 make ci
 ./bin/agent-loop --version
 ./bin/agent-loop install --json

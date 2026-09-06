@@ -15,6 +15,8 @@ usage() {
   exit 2
 }
 
+# ShellCheck does not trace the EXIT trap's call to on_exit and cleanup.
+# shellcheck disable=SC2329
 cleanup() {
   if [ "$cleaned" -eq 1 ]; then
     return
@@ -35,6 +37,8 @@ cleanup() {
   fi
 }
 
+# Invoked by the EXIT trap.
+# shellcheck disable=SC2329
 on_exit() {
   exit_status=$?
   trap - EXIT HUP INT TERM
@@ -42,6 +46,8 @@ on_exit() {
   exit "$exit_status"
 }
 
+# Invoked by the signal traps.
+# shellcheck disable=SC2329
 on_signal() {
   exit_status=$1
   if [ -n "$child_pid" ]; then

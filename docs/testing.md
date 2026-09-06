@@ -6,10 +6,14 @@
 make test
 make fault-test
 make test-race
+make install-shellcheck
+make workflow-shell-check
 scripts/check-release.sh
 ```
 
 通常suite、`TestFault`障害注入suite、race detector、release gateを独立して成功させる。外部GitHub APIやCodex inferenceを使うcontract testは置かず、local bare Git remote、fake GitHub/worker、fixture replay、隔離したHOMEで再現する。
+
+`make workflow-shell-check`は固定版のactionlintとShellCheckで全workflowの`run`と`scripts/*.sh`を検査し、通常PR CIと`make ci`でも実行する。初回または`make clean`後は`make install-shellcheck`で開発用の`bin/shellcheck`を取得する。未導入・version不一致・実行失敗は検査失敗になる。
 
 ## 中核ドメイン契約
 

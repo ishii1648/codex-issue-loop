@@ -60,6 +60,9 @@ jobs:
           test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${RELEASE_COMMIT}"
           git merge-base --is-ancestor "${RELEASE_COMMIT}" origin/main
 
+      - name: Install pinned ShellCheck
+        run: make install-shellcheck
+
       - name: Run release quality gates
         run: make ci
 
@@ -278,7 +281,7 @@ jobs:
           candidate_tag="candidate-${RELEASE_TAG}-${GITHUB_RUN_ID}"
           mkdir -p production-state
           found=false
-          for attempt in $(seq 1 180); do
+          for _ in $(seq 1 180); do
             if gh release download "$candidate_tag" --pattern production-state-report.json --dir production-state --clobber >/dev/null 2>&1; then
               found=true
               break

@@ -52,6 +52,8 @@ jobs:
           fi
           {
             printf '%s\n\n' 'GitHubが公開するwebhook送信元CIDRが記録値と一致しない。'
+            # Backticks are Markdown code delimiters in the issue body.
+            # shellcheck disable=SC2016
             printf '%s\n\n' 'reverse proxyのallowlistと`.github/github-hooks-cidr.txt`を更新する。CIDR制限はHMAC検証の代用ではないため、更新までの間もsignature検証は有効である。'
             printf '%s\n' '```'
             printf '%s\n' "$REPORT"
