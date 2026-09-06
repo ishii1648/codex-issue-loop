@@ -1,11 +1,21 @@
 ---
 name: agent-loop
-description: Operate, monitor, and explicitly recover the codex-issue-loop supervisor from Codex. Use for starting, stopping, inspecting, watching, answering, narrowly recovering, or safely cleaning up a loop-managed GitHub Issue queue.
+description: Operate, monitor, and explicitly recover the codex-issue-loop supervisor from Codex. Use for starting, stopping, inspecting, watching, answering (including requests such as "Issue #N に ok と返信して"), narrowly recovering, or safely cleaning up a loop-managed GitHub Issue queue.
 ---
 
 # agent-loop
 
 Use the `agent-loop` CLI as the only control interface. The Skill does not own the Issue loop or its durable state.
+
+## Answer an Issue request
+
+Treat a request such as "Issue #N に ok と回答して" as a possible answer to a loop question, not merely a request to post a GitHub comment. Read the Issue body and question comments, resolve the named repository to its registered local path, and run `agent-loop status --repo <path> --json`. Use the installed CLI; if it is absent from PATH on macOS, check `~/Library/Application Support/codex-issue-loop/bin/agent-loop`. A missing executable or inaccessible host is not a reason to substitute a comment.
+
+Match the Issue and question to the canonical request, including the request ID from the question comment when present. Never redirect a reply to a newer request just because it is the only pending one. If the target is ambiguous or the supplied answer does not satisfy the advertised options/free-text contract, ask only for the missing clarification. Preserve an already supplied answer and authorization; do not ask the same question again. Do not convert a generic "ok" into an arbitrary recommended option. For an ordinary worker request, apply the continuation identity checks in the safe workflow below.
+
+Record the supplied answer once using `agent-loop answer --repo <path> --request-id <id> --message-file -`, with the answer on standard input. Confirm the same request's `answered` status and stored answer with `status --json`. After an uncertain command result, inspect that request before retrying. If already answered, report its saved answer without overwriting it or answering another request. Report receipt separately from worker dispatch, waiting, or suspension; a successful comment POST is not proof of receipt. Do not add a GitHub comment as a second delivery channel. Resume watch only when this task was asked to monitor; a one-off answer request ends after verification.
+
+If the user explicitly requests only a GitHub comment, honor that scope and report it as a comment, not a recorded loop answer. For an ordinary Issue with no loop question, use normal commenting. If a loop question exists but its canonical request cannot be verified, report the unresolved state instead of silently falling back to a comment.
 
 ## Safe workflow
 
@@ -27,7 +37,7 @@ Use the `agent-loop` CLI as the only control interface. The Skill does not own t
 6. Do not implement a Codex-side polling loop. The Go watch process combines OS events with reconciliation polling internally.
 7. When watch returns `needs_input`, preserve the request ID and all question fields described above, then ask the user. Never merge multiple requests or infer an answer for one request from another.
 8. Record the answer exactly once with `agent-loop answer --repo <path> --request-id <id> --message-file -`, passing the answer through standard input rather than interpolating it into a shell command. Confirm with one `status --json` call that the named request is answered. Receipt does not imply worker dispatch: the supervisor validates and prepares continuation separately. Never ask the user to repeat a recorded answer because execution is blocked or quarantined.
-9. Return to one blocking watch call in the same monitoring task after the answer is recorded. After a task disconnect, Desktop restart, or Mac restart, begin again with `status --json`; re-present any durable pending request before reconnecting watch.
+9. In a monitoring task, return to one blocking watch call after the answer is recorded. A one-off answer request ends after verification. After a task disconnect, Desktop restart, or Mac restart, begin again with `status --json`; re-present any durable pending request before reconnecting watch.
 
 For an ordinary worker `needs_input`, verify that `status --json` shows exactly one matching `pending_requests[]` entry with the same request ID, `checkpoint_id`, and `released_execution`, and that the Issue's generic `continuation` has matching request, checkpoint, run, and generation identities. `answer` may return `execution_waiting=true`; this means the answer is durable and the supervisor is waiting for the repository's single `active_execution`, not that the answer failed. Report the current `state.active_execution` and wait for its normal release. Never add ready/running labels, alter another Issue's `active_execution`, edit state, or submit a second request ID to force progress. After scheduler admission, verify that `state.active_execution` matches the Issue, run, and incremented generation, confirm the same worktree/branch/session, and let the supervisor's launch validation gate the generic continuation.
 
