@@ -2,11 +2,19 @@ const {readFileSync} = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const {test} = require('node:test');
-const code = readFileSync(__dirname + '/../internal/app/dashboard.html', 'utf8').split('<script>')[1].split('</script>')[0];
+const page = readFileSync(__dirname + '/../internal/app/dashboard.html', 'utf8');
+const code = page.split('<script>')[1].split('</script>')[0];
 function fixture() {
   const f = {now:1800000000000, sample:1800000000000, failure:'', missing:false, state:'HEALTHY', fractions:[0.25,0.25,0.25,0.25], urls:[]};
   const classes = new Set(['expired']);
   const nodes = Object.fromEntries(['freshness','error','repos','range','window','custom','selection','from','to'].map(id => [id,{addEventListener(name,fn){this[name]=fn;},classList:{toggle(){}}}]));
+  let details = [];
+  let html = '';
+  Object.defineProperty(nodes.repos, 'innerHTML', {
+    get:()=>html,
+    set:value=>{ html=value; details=[...value.matchAll(/<details data-repository="([^"]+)"/g)].map(match=>({dataset:{repository:match[1]},open:false})); },
+  });
+  nodes.repos.querySelectorAll = selector => details.filter(detail => selector !== 'details[open]' || detail.open);
   const context = vm.createContext({
     document:{body:{classList:{add:x=>classes.add(x),remove:x=>classes.delete(x)}},getElementById:x=>nodes[x],addEventListener(){}},
     window:{addEventListener(){}},Date:class extends Date {static now(){return f.now;}},
@@ -52,21 +60,32 @@ test('transport failures, stale and missing scrape, sleep expire all displayed v
   f.missing=true; await refresh(); assert.equal(classes.has('expired'),true);
   f.missing=false; await refresh(); assert.equal(classes.has('expired'),false);
   f.now+=45000; vm.runInContext('checkExpiry()',context); assert.equal(classes.has('expired'),true);
-  assert.match(nodes.error.textContent,/UNKNOWN/);
+  assert.match(nodes.error.textContent,/状態を確認できません/);
+  assert.doesNotMatch(nodes.error.textContent,/UNKNOWN/);
 });
-test('four-state time summary, no demand, gaps, tiny slices and replay use report and exact timeline', async () => {
+test('timeline only, numeric availability, hatched gaps and coverage inside details', async () => {
+  assert.match(page,/\.unobserved\{background:repeating-linear-gradient\(135deg,/);
+  assert.doesNotMatch(page.split('<script>')[0].split('<body')[1],/UNKNOWN|coverage/);
   const {f,nodes,classes,refresh} = fixture();
   for (const [state,fractions] of [['HEALTHY',[1,0,0,0]],['DOWN',[0,1,0,0]],['IDLE',[0,0,1,0]],['UNKNOWN',[0,0,0,1]],['UNKNOWN',[0,0,0,0]],['DOWN',[0.25,0.25,0.25,0.25]],['HEALTHY',[0.999,0.001,0,0]]]) {
     f.state=state; f.fractions=fractions; await refresh();
     assert.equal(classes.has('expired'),false,nodes.error.textContent);
     const html=nodes.repos.innerHTML;
-    assert.match(html,new RegExp(`<b>${state}</b>`));
+    if(state === 'UNKNOWN') assert.match(html,/状態を確認できません/);
+    else assert.match(html,new RegExp(`<b>${state}</b>`));
     assert.match(html,/&lt;script&gt;unsafe/);
     assert.doesNotMatch(html,/<script>unsafe/);
-    assert.equal(html.includes('期間中DOWNあり'),fractions[1]>0);
-    assert.equal(html.includes('観測不足（UNKNOWN'),fractions.slice(0,3).reduce((a,b)=>a+b,0)<1);
+    const normal = html.split('<details')[0];
+    assert.doesNotMatch(normal,/>UNKNOWN<|title="UNKNOWN|coverage|観測率|選択期間全体/);
+    assert.equal((normal.match(/class="bar/g)||[]).length,1);
+    assert.match(normal,/観測できた需要時間に対する割合/);
+    assert.match(html.split('<details')[1],/選択期間の観測率:.*未観測時間:/);
+    const missing = fractions.slice(0,3).reduce((a,b)=>a+b,0)<1;
+    assert.equal(html.includes('この期間には未観測の時間があります'),missing);
+    assert.equal(html.includes('class="segment unobserved"'),missing);
+    if(missing) assert.match(html,/title="観測できない区間 · .* UTC → .* UTC"/);
     if(fractions[0]+fractions[1]===0) assert.match(html,/N\/A/);
-    if(fractions[1]===0.001) assert.match(html,/86.4秒/);
+    if(fractions[1]===0.001) assert.match(html,/width:0.1%/);
   }
 });
 test('range changes share exact bounds and keep current state independent from historical selection', async () => {
@@ -101,4 +120,20 @@ test('inconsistent replay expires and a late response cannot replace a new selec
   release(); await old;
   assert.equal(nodes.range.textContent,range);
   assert.equal(classes.has('expired'),false);
+});
+
+test('refresh preserves open and closed repository details, including recovery and selection changes', async () => {
+  const {f,nodes,refresh} = fixture();
+  await refresh();
+  nodes.repos.querySelectorAll('details')[0].open=true;
+  await refresh();
+  assert.equal(nodes.repos.querySelectorAll('details')[0].open,true);
+  f.failure='/api/status'; await refresh();
+  f.failure=''; await refresh();
+  assert.equal(nodes.repos.querySelectorAll('details')[0].open,true);
+  nodes.window.value='168'; nodes.window.change(); await refresh();
+  assert.equal(nodes.repos.querySelectorAll('details')[0].open,true);
+  nodes.repos.querySelectorAll('details')[0].open=false;
+  await refresh();
+  assert.equal(nodes.repos.querySelectorAll('details')[0].open,false);
 });
