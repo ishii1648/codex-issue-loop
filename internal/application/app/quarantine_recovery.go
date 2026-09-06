@@ -35,6 +35,79 @@ type semanticMismatchRecoveryReport struct {
 	RecoveryMarkerBackup string         `json:"recovery_marker_backup,omitempty"`
 }
 
+type lifecycleMismatchRecoveryReport struct {
+	state.LifecycleMismatchRecoveryPlan
+	Repository           string         `json:"repository"`
+	RepositoryPath       string         `json:"repository_path"`
+	Launchd              launchd.Status `json:"launchd"`
+	Applied              bool           `json:"applied"`
+	RecoveryMarkerBackup string         `json:"recovery_marker_backup,omitempty"`
+}
+
+func (a App) recoverLifecycleQuarantine(ctx context.Context, l layout.Layout, args []string) error {
+	fs := flag.NewFlagSet("recover-lifecycle-quarantine", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	repo := fs.String("repo", "", "repository path")
+	backup := fs.String("backup", "", "exact recovery backup path recorded by the current marker")
+	dryRun := fs.Bool("dry-run", false, "preview exact recovery predicates without mutation")
+	confirmed := fs.Bool("confirm-exact-backup", false, "confirm one exact lifecycle mismatch recovery step")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitError{2, err}
+	}
+	if fs.NArg() != 0 {
+		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	if *backup == "" {
+		return exitError{2, fmt.Errorf("--backup is required")}
+	}
+	if *dryRun == *confirmed {
+		return exitError{2, fmt.Errorf("exactly one of --dry-run or --confirm-exact-backup is required")}
+	}
+	entry, err := a.resolvePath(l, *repo)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(entry.RepoPath)
+	if err != nil {
+		return err
+	}
+	manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+	launchStatus, err := manager.Status(ctx, entry)
+	if err != nil {
+		return err
+	}
+	if launchStatus.Loaded || launchStatus.Running {
+		return exitError{4, fmt.Errorf("repository LaunchAgent must be unloaded during lifecycle quarantine recovery")}
+	}
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
+	plan, err := store.PreviewLifecycleMismatchRecovery(*backup)
+	if err != nil {
+		return exitError{4, err}
+	}
+	report := lifecycleMismatchRecoveryReport{LifecycleMismatchRecoveryPlan: plan, Repository: cfg.GitHub.Repo,
+		RepositoryPath: entry.RepoPath, Launchd: launchStatus}
+	if *dryRun {
+		return a.output(*jsonOut, report)
+	}
+	launchStatus, err = manager.Status(ctx, entry)
+	if err != nil {
+		return err
+	}
+	if launchStatus.Loaded || launchStatus.Running {
+		return exitError{4, fmt.Errorf("repository LaunchAgent changed while lifecycle recovery was being verified")}
+	}
+	plan, markerBackup, err := store.ApplyLifecycleMismatchRecovery(*backup)
+	if err != nil {
+		return exitError{4, err}
+	}
+	report.LifecycleMismatchRecoveryPlan = plan
+	report.Launchd = launchStatus
+	report.Applied = true
+	report.RecoveryMarkerBackup = markerBackup
+	return a.output(*jsonOut, report)
+}
+
 func (a App) recoverSemanticQuarantine(ctx context.Context, l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("recover-semantic-quarantine", flag.ContinueOnError)
 	fs.SetOutput(a.Err)

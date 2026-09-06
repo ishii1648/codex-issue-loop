@@ -1,5 +1,7 @@
 # Release gates
 
+外形監視のcursor/snapshot境界変更（Issue #282）はmonitor schema version 1と既存のstate配置を維持する。rollback evidenceは`monitor/internal/github`の固定page上限fixture、`monitor/internal/model`のlabel更新順序・terminal境界fixture、`monitor/internal/monitor`のsnapshot競合retry・非重複interval・観測gap優先順位fixtureと、`go test ./...`、monitor race、`go vet ./...`、`scripts/check-release.sh`の検証結果で確認する。配備前は変更commitのrevertで戻せる。配備後はmonitorを停止して専用stateを保全し、旧releaseのmonitor binaryでinstall/register/restartする（`monitor/docs/runbook.md`）。永続schema migrationやsupervisor stateの変更はない。旧版へ戻すとfail-closed保証も旧挙動へ戻るため、既存UNKNOWN区間を再分類せず保持する。productionでのrollback drill実施済みを意味する証拠ではなく、release公開には下記の既存gateを引き続き要求する。
+
 Stable Releaseはsuffixのないannotated `vMAJOR.MINOR.PATCH` tagだけを起点にし、alpha/beta/RC suffixをstableへ昇格しない。stableが唯一の正式releaseであり、GAを別の段階として定義しない。tag pushだけでは公開されない。`build-candidate`が作成したbinary、SBOM、manifest、checksumsを唯一の配布正本とし、比較用buildを配布へ使わない。
 
 Release公開とproduction assignmentは別のtransactionである。Release workflowはstable公開と同一artifact readbackで完了し、repositoryを更新しない。production rolloutは独立した`Repository rollout health` workflowで、先行repository、typed rollback drill、同じartifactの再適用、対象外repository不変を検証する。rollout失敗はstableを未公開・未GAへ戻さず、対象assignmentの失敗として扱う。時間経過だけを目的とするEnvironment waitやartifact再取得waitはgateとして扱わない。

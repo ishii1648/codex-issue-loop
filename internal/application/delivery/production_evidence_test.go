@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"gopkg.in/yaml.v3"
 )
@@ -435,6 +436,32 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	semanticPredicate := fmt.Sprintf(".semantic_contract_current == %d", statecontract.CurrentVersion)
 	if strings.Count(text, semanticPredicate) != 1 {
 		t.Fatalf("release workflow does not require current semantic contract %d", statecontract.CurrentVersion)
+	}
+	checkData, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts", "check-release.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkText := string(checkData)
+	for _, contract := range []struct {
+		field   string
+		version string
+	}{
+		{field: "current", version: issuedomain.LifecycleAPICurrent},
+		{field: "minimum", version: issuedomain.LifecycleAPIMinimum},
+	} {
+		workflowPrefix := ".issue_lifecycle_api_" + contract.field + ` == "`
+		workflowPredicate := workflowPrefix + contract.version + `"`
+		if strings.Count(text, workflowPrefix) != 1 || strings.Count(text, workflowPredicate) != 1 {
+			t.Fatalf("release workflow lifecycle %s does not match domain contract %q", contract.field, contract.version)
+		}
+		binaryPrefix := fmt.Sprintf(`'"issue_lifecycle_api_%s":"`, contract.field)
+		binaryCheck := binaryPrefix + contract.version + `"'`
+		manifestPrefix := fmt.Sprintf(`'"issue_lifecycle_api_%s": "`, contract.field)
+		manifestCheck := manifestPrefix + contract.version + `"'`
+		if strings.Count(checkText, binaryPrefix) != 1 || strings.Count(checkText, binaryCheck) != 1 ||
+			strings.Count(checkText, manifestPrefix) != 1 || strings.Count(checkText, manifestCheck) != 1 {
+			t.Fatalf("local release check lifecycle %s does not match domain contract %q", contract.field, contract.version)
+		}
 	}
 	if !strings.Contains(text, `[[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]`) ||
 		strings.Contains(text, `([.-][0-9A-Za-z.-]+)?`) {

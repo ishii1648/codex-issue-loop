@@ -604,6 +604,79 @@ func TestAssignmentRetryCompletesExactRollbackFailedTarget(t *testing.T) {
 	}
 }
 
+func TestAssignmentRetryConvergesUnloadedUnstartedLaunchToStoppedState(t *testing.T) {
+	l, configPath, entries, _ := assignmentFixture(t)
+	runner := &releaseRunner{}
+	controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: runner, Now: func() time.Time {
+		return time.Date(2026, 9, 6, 1, 0, 0, 0, time.UTC)
+	}}
+	if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := cfg.Assignments[entries[0].RepoID]
+	candidate, err := (Verifier{GH: "gh", Runner: runner, CacheDir: RuntimePaths(l.Root).Cache, ExpectedVersion: "v1.2.3"}).Check(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := SlotRef(l, candidate.Manifest.Version, candidate.Manifest.Commit, candidate.Digest)
+	if err := StageSlot(l, desired, filepath.Join(candidate.Dir, BinaryAsset)); err != nil {
+		t.Fatal(err)
+	}
+	manager := launchd.Manager{Layout: l, Launchctl: entries[0].Commands["launchctl"]}
+	if err := manager.WritePlist(entries[0], current.Slot); err != nil {
+		t.Fatal(err)
+	}
+	stateStore := state.Store{Dir: l.RepoDir(entries[0].RepoID), RepoID: entries[0].RepoID, RepoPath: entries[0].RepoPath}
+	startedAt := time.Date(2026, 9, 5, 15, 0, 0, 0, time.UTC)
+	if _, err := stateStore.Update("fixture_launching", 277, "run_277", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.State = state.SupervisorStatePolling
+		snapshot.Supervisor.PID = 82762
+		snapshot.Issues["277"] = &state.Issue{Number: 277, Status: issuedomain.StatusLaunching,
+			LaunchSource: issuedomain.StatusRetryWait, RunID: "run_277", Generation: 5, UpdatedAt: startedAt}
+		snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: 277, RunID: "run_277", Generation: 5, StartedAt: startedAt}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tx := AssignmentTransaction{
+		RepositoryID: entries[0].RepoID, Operation: AssignmentOperationApply, Phase: AssignmentRollbackFailed,
+		ExpectedGeneration: 1, TargetGeneration: 2, Current: current.AssignmentRef, Desired: desired, WasLoaded: false,
+		Result: "rollback_failed", Reason: "stopped assignment requires supervisor state stopped, got polling", StartedAt: startedAt,
+	}
+	if err := SaveAssignmentTransaction(l.DeliveryAssignmentTransactionPath(entries[0].RepoID), tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entries[0].RepoID), Maintenance{
+		Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: startedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := controller.Retry(context.Background(), entries[0].RepoPath, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Result != "succeeded" || report.Assignment.AssignmentRef != desired {
+		t.Fatalf("report=%+v", report)
+	}
+	loaded, err := stateStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := loaded.Issues["277"]
+	if loaded.Supervisor.State != state.SupervisorStateStopped || loaded.Supervisor.PID != 0 || loaded.ActiveExecution != nil ||
+		issue.Status != issuedomain.StatusRetryWait || issue.LaunchSource != issuedomain.StatusUnset || issue.Generation != 5 {
+		t.Fatalf("state=%+v issue=%+v", loaded, issue)
+	}
+	events, err := os.ReadFile(stateStore.EventsPath())
+	if err != nil || !strings.Contains(string(events), `"type":"assignment_stopped_state_reconciled"`) {
+		t.Fatalf("events=%s err=%v", events, err)
+	}
+}
+
 func TestAssignmentRetryRejectsMismatchedRetainedFence(t *testing.T) {
 	l, configPath, entries, _ := assignmentFixture(t)
 	runner := &releaseRunner{}

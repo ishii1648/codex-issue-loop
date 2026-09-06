@@ -356,6 +356,17 @@ semantic contract更新前後のbinaryでreadした結果、version mismatchだ�
 
 unloaded、worker/active execution/pending request 0、exact mismatch reason、digest、revision、Issue件数、`next_backup`を確認してから`--dry-run`を`--confirm-exact-backup`へ置き換える。元snapshotへ戻ったら新binaryの`status`や`doctor`を先に実行せず、全repositoryを停止して`migrate --json` / `migrate --apply --json`を実行する。
 
+Issue lifecycle API不一致だけを理由とするmarkerなら、同じ停止条件で専用commandを使う。
+
+```sh
+/absolute/verified/agent-loop_Darwin_arm64 recover-lifecycle-quarantine \
+  --repo /absolute/path/to/repository \
+  --backup '/exact/managed/recovery-backup' \
+  --dry-run --json
+```
+
+source/target lifecycle version、state/event/transaction digest、revision、Issue/worker/execution/request件数を確認し、`--confirm-exact-backup`で1回だけ復元する。prepared transactionは検証後にbyte-exactで復元され、次の正規readで完了する。marker記載外のbackup、nested marker、active worker、loaded runtimeでは実行しない。
+
 初回導入とrelease前の実Mac E2Eでは、test repositoryと検証済みstable releaseを使い、次を記録する。
 
 1. login後にdelivery LaunchAgentがstable releaseを検出する。

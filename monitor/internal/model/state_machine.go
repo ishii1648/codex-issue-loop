@@ -58,13 +58,18 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 	replay.snapshot.LastSuccessAt = observation.ObservedAt
 	replay.snapshot.LastError = ""
 	replay.ensureQueuePhase()
-	events := append([]QueueEvent(nil), observation.Events...)
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].At.Equal(events[j].At) {
-			return events[i].ID < events[j].ID
-		}
-		return events[i].At.Before(events[j].At)
-	})
+	if !previous.EventCursorInitialized {
+		replay.snapshot.Queue = append([]QueueItem(nil), observation.Items...)
+		replay.setAggregateFromQueue()
+		replay.snapshot.EventCursor = observation.Cursor
+		replay.snapshot.EventCursorInitialized = true
+		replay.recoverAt(observation.ObservedAt)
+		return replay.snapshot, replay.closed, nil
+	}
+	events, err := replayEvents(*previous, observation)
+	if err != nil {
+		return Snapshot{}, nil, err
+	}
 	for _, event := range events {
 		if event.ID <= 0 || event.IssueNumber <= 0 || event.At.IsZero() {
 			return Snapshot{}, nil, fmt.Errorf("invalid queue event")
@@ -73,7 +78,7 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 			continue
 		}
 		event.At = event.At.UTC()
-		if event.At.Before(replay.snapshot.Current.StartedAt) {
+		if previous.Current.Status == Unknown || event.At.Before(replay.snapshot.Current.StartedAt) {
 			if replay.snapshot.Current.Status != Unknown {
 				return Snapshot{}, nil, fmt.Errorf("queue event time moved backwards")
 			}
@@ -95,20 +100,13 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 			return Snapshot{}, nil, err
 		}
 	}
-	queueMismatch := !sameQueue(replay.snapshot.Queue, observation.Items)
-	if queueMismatch {
-		replay.snapshot.Queue = append([]QueueItem(nil), observation.Items...)
-		replay.setAggregateFromQueue()
-		if err := replay.transition(Unknown, observation.ObservedAt, "queue history is insufficient"); err != nil {
-			return Snapshot{}, nil, err
-		}
-	} else if err := replay.advanceDeadline(observation.ObservedAt); err != nil {
+	if err := replay.advanceDeadline(observation.ObservedAt); err != nil {
 		return Snapshot{}, nil, err
 	}
 	replay.snapshot.EventCursor = observation.Cursor
 	replay.snapshot.EventCursorInitialized = true
 	sortQueue(replay.snapshot.Queue)
-	if replay.snapshot.Current.Status == Unknown && (!queueMismatch || !previous.EventCursorInitialized) {
+	if replay.snapshot.Current.Status == Unknown {
 		replay.recoverAt(observation.ObservedAt)
 	}
 	return replay.snapshot, replay.closed, nil

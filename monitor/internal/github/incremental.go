@@ -194,6 +194,10 @@ func queueEvent(repo config.Repository, event rawEvent) (model.QueueEvent, bool)
 		return model.QueueEvent{}, false
 	}
 	converted := model.QueueEvent{ID: event.ID, IssueNumber: event.Issue.Number, At: event.CreatedAt.UTC()}
+	if event.Event == "reopened" {
+		converted.Kind = model.QueueUnproven
+		return converted, true
+	}
 	if event.Event == "closed" {
 		converted.Kind = model.QueueExited
 		return converted, true
@@ -216,7 +220,8 @@ func queueEvent(repo config.Repository, event rawEvent) (model.QueueEvent, bool)
 		}
 	case stringSet(append(append([]string{}, repo.TerminalLabels...), repo.ExcludeLabels...))[eventLabel(event)]:
 		if event.Event != "labeled" {
-			return model.QueueEvent{}, false
+			converted.Kind = model.QueueUnproven
+			return converted, true
 		}
 		converted.Kind = model.QueueExited
 	default:

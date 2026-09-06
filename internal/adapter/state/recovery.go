@@ -449,5 +449,9 @@ func isVersionCompatibilityError(err error) bool {
 		return true
 	}
 	var semanticError SemanticContractVersionError
-	return errors.As(err, &semanticError)
+	if errors.As(err, &semanticError) {
+		return true
+	}
+	var lifecycleError LifecycleAPIVersionError
+	return errors.As(err, &lifecycleError)
 }

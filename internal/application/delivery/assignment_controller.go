@@ -13,6 +13,7 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
@@ -618,7 +619,8 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 		return AssignmentReport{}, err
 	}
 	if retrying {
-		snapshot, loadErr := (state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}).Load()
+		stateStore := state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+		snapshot, loadErr := stateStore.Load()
 		if loadErr != nil {
 			return AssignmentReport{}, fmt.Errorf("inspect retained assignment state: %w", loadErr)
 		}
@@ -635,6 +637,14 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 			}
 			if status.Loaded || status.Running {
 				return AssignmentReport{}, errors.New("retained assignment runtime did not stop")
+			}
+		}
+		if status.Running {
+			return AssignmentReport{}, errors.New("retained assignment retry refuses a running unloaded runtime")
+		}
+		if !tx.WasLoaded {
+			if err := reconcileStoppedAssignmentState(stateStore, c.now()); err != nil {
+				return AssignmentReport{}, fmt.Errorf("reconcile stopped retained assignment state: %w", err)
 			}
 		}
 		tx.Phase = AssignmentPlanned
@@ -744,6 +754,39 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 	report, err := c.assignmentReport(ctx, entry, current)
 	report.Result = "succeeded"
 	return report, err
+}
+
+func reconcileStoppedAssignmentState(store state.Store, now time.Time) error {
+	_, err := store.Update("assignment_stopped_state_reconciled", 0, "", map[string]string{"reason": "retained stopped assignment retry"}, func(snapshot *state.Snapshot) error {
+		if snapshotHasWorker(*snapshot) {
+			return errors.New("stopped assignment state retains a worker process identity")
+		}
+		if active := snapshot.ActiveExecution; active != nil {
+			item := snapshot.Issues[fmt.Sprint(active.IssueNumber)]
+			if item == nil || item.Status != issuedomain.StatusLaunching || item.WorkerPID != 0 || item.WorkerPGID != 0 ||
+				item.RunID != active.RunID || item.Generation != active.Generation {
+				return errors.New("stopped assignment active execution is not an unstarted worker launch")
+			}
+			transition, transitionErr := issuedomain.AbortWorkerLaunch(item.Status, item.LaunchSource)
+			if transitionErr != nil {
+				return transitionErr
+			}
+			identity := state.ExecutionIdentity{RunID: active.RunID, Generation: active.Generation}
+			if releaseErr := state.ReleaseExecution(snapshot, item.Number, identity); releaseErr != nil {
+				return releaseErr
+			}
+			if transitionErr := state.ApplyIssueTransition(item, transition); transitionErr != nil {
+				return transitionErr
+			}
+			item.UpdatedAt = now.UTC()
+		}
+		snapshot.Supervisor.State = state.SupervisorStateStopped
+		snapshot.Supervisor.PID = 0
+		snapshot.Supervisor.Message = "retained stopped assignment retry"
+		snapshot.Supervisor.UpdatedAt = now.UTC()
+		return nil
+	})
+	return err
 }
 
 func (c AssignmentController) rollbackSwitch(ctx context.Context, cfg Config, entry registry.Entry, current RepositoryAssignment, tx *AssignmentTransaction, cause error) (AssignmentReport, error) {

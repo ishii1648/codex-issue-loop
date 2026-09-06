@@ -1455,6 +1455,68 @@ func TestUnsupportedSemanticContractVersionIsRejectedWithoutQuarantine(t *testin
 	}
 }
 
+func TestUnsupportedLifecycleAPIVersionIsRejectedWithoutQuarantine(t *testing.T) {
+	store := newStore(t)
+	if _, err := store.Update("checkpoint", 0, "", nil, func(*Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	stateData, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(stateData, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.IssueLifecycleAPIVersion = "99.0"
+	modifiedState, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modifiedState = append(modifiedState, '\n')
+	if err := os.WriteFile(store.StatePath(), modifiedState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transactionSnapshot := snapshot
+	transactionSnapshot.StateRevision++
+	prepared := transaction{Version: CurrentVersion, Snapshot: transactionSnapshot, Event: Event{
+		Version: CurrentVersion, EventID: NewID("evt"), Sequence: transactionSnapshot.StateRevision,
+		Timestamp: time.Now().UTC(), RepoID: store.RepoID, Type: "prepared_fixture",
+	}}
+	if err := fsutil.WriteJSON(store.TransactionPath(), prepared, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	modifiedTransaction, err := os.ReadFile(store.TransactionPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsBefore, err := os.ReadFile(store.EventsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(); err == nil {
+		t.Fatal("unsupported lifecycle API was accepted")
+	} else {
+		var versionErr LifecycleAPIVersionError
+		if !errors.As(err, &versionErr) || versionErr.Version != "99.0" || versionErr.Current != issuedomain.LifecycleAPICurrent {
+			t.Fatalf("error=%T %v", err, err)
+		}
+	}
+	for path, before := range map[string][]byte{
+		store.StatePath():       modifiedState,
+		store.EventsPath():      eventsBefore,
+		store.TransactionPath(): modifiedTransaction,
+	} {
+		after, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(after, before) {
+			t.Fatalf("version mismatch modified %s: err=%v", filepath.Base(path), readErr)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir, "recovery")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsupported lifecycle state was quarantined: %v", err)
+	}
+}
+
 func TestValidIDRejectsRunDirectoryTraversal(t *testing.T) {
 	if !ValidID("run_abc-123", "run_") {
 		t.Fatal("valid run ID was rejected")

@@ -27,6 +27,7 @@ const (
 	RunningLabeled   EventKind = "running_labeled"
 	ReadyUnlabeled   EventKind = "ready_unlabeled"
 	RunningUnlabeled EventKind = "running_unlabeled"
+	QueueUnproven    EventKind = "queue_unproven"
 	QueueExited      EventKind = "queue_exited"
 )
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,13 +67,34 @@ type SemanticMismatchRecoveryPlan struct {
 	MutationScope             []string `json:"mutation_scope"`
 }
 
+type LifecycleMismatchRecoveryPlan struct {
+	Eligible                 bool     `json:"eligible"`
+	ConfirmationRequired     bool     `json:"confirmation_required"`
+	Backup                   string   `json:"backup"`
+	RecoveryReason           string   `json:"recovery_reason"`
+	MarkerLifecycleAPI       string   `json:"marker_lifecycle_api"`
+	RestoredLifecycleAPI     string   `json:"restored_lifecycle_api"`
+	RestoredRevision         uint64   `json:"restored_revision"`
+	RestoredIssueCount       int      `json:"restored_issue_count"`
+	RestoredActiveWorkers    int      `json:"restored_active_workers"`
+	RestoredActiveExecutions int      `json:"restored_active_executions"`
+	RestoredPendingRequests  int      `json:"restored_pending_requests"`
+	PreparedTransaction      bool     `json:"prepared_transaction"`
+	StateSHA256              string   `json:"state_sha256"`
+	EventsSHA256             string   `json:"events_sha256"`
+	TransactionSHA256        string   `json:"transaction_sha256,omitempty"`
+	MutationScope            []string `json:"mutation_scope"`
+}
+
 type quarantineRecoveryTransaction struct {
-	Version      int    `json:"version"`
-	RepoID       string `json:"repo_id"`
-	StateFile    string `json:"state_file"`
-	EventsFile   string `json:"events_file"`
-	StateSHA256  string `json:"state_sha256"`
-	EventsSHA256 string `json:"events_sha256"`
+	Version           int    `json:"version"`
+	RepoID            string `json:"repo_id"`
+	StateFile         string `json:"state_file"`
+	EventsFile        string `json:"events_file"`
+	TransactionFile   string `json:"transaction_file,omitempty"`
+	StateSHA256       string `json:"state_sha256"`
+	EventsSHA256      string `json:"events_sha256"`
+	TransactionSHA256 string `json:"transaction_sha256,omitempty"`
 }
 
 func (s Store) PreviewLegacyMergedIdentityRecovery(expectedBackup string) (QuarantinedSnapshotRecoveryPlan, error) {
@@ -98,6 +120,19 @@ func (s Store) PreviewSemanticMismatchRecovery(expectedBackup string) (SemanticM
 	}
 	defer unlock(lock)
 	_, plan, err := s.semanticMismatchRecoveryPlanUnlocked(expectedBackup)
+	return plan, err
+}
+
+func (s Store) PreviewLifecycleMismatchRecovery(expectedBackup string) (LifecycleMismatchRecoveryPlan, error) {
+	if err := s.ensureDir(); err != nil {
+		return LifecycleMismatchRecoveryPlan{}, err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return LifecycleMismatchRecoveryPlan{}, err
+	}
+	defer unlock(lock)
+	_, plan, err := s.lifecycleMismatchRecoveryPlanUnlocked(expectedBackup)
 	return plan, err
 }
 
@@ -241,6 +276,253 @@ func (s Store) semanticMismatchRecoveryPlanUnlocked(expectedBackup string) (Snap
 		MutationScope:             []string{"current recovery marker backup", "exact state snapshot restore", "exact event log restore", "recovery journal"},
 	}
 	return restored, plan, nil
+}
+
+func lifecycleMismatchVersions(reason string) (string, string, bool) {
+	var source, target string
+	n, err := fmt.Sscanf(reason, "snapshot Issue lifecycle API version %q does not match %q", &source, &target)
+	return source, target, err == nil && n == 2 && reason == (LifecycleAPIVersionError{Version: source, Current: target}).Error()
+}
+
+func rawLifecycleAPI(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var envelope struct {
+		IssueLifecycleAPIVersion string `json:"issue_lifecycle_api_version"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return "", err
+	}
+	return envelope.IssueLifecycleAPIVersion, nil
+}
+
+func rawTransactionLifecycleAPI(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var envelope struct {
+		Snapshot struct {
+			IssueLifecycleAPIVersion string `json:"issue_lifecycle_api_version"`
+		} `json:"snapshot"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return "", err
+	}
+	return envelope.Snapshot.IssueLifecycleAPIVersion, nil
+}
+
+func validateLifecycleBackupFiles(backup string) error {
+	entries, err := os.ReadDir(backup)
+	if err != nil {
+		return err
+	}
+	allowed := map[string]bool{"state.json": true, "events.jsonl": true, "state.txn.json": true}
+	for _, entry := range entries {
+		if !allowed[entry.Name()] {
+			return fmt.Errorf("lifecycle recovery backup contains unexpected entry %s", entry.Name())
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("lifecycle recovery backup entry %s is not a regular file", entry.Name())
+		}
+	}
+	for _, name := range []string{"state.json", "events.jsonl"} {
+		if _, err := os.Stat(filepath.Join(backup, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s Store) validateLifecycleRecoveryMarker(snapshot Snapshot, rawLifecycle string, events []Event) (string, string, error) {
+	if snapshot.Recovery == nil || snapshot.Recovery.Status != RecoveryStateBlocked || snapshot.Supervisor.State != SupervisorStateBlocked ||
+		snapshot.StateRevision != 1 || len(snapshot.Issues) != 0 || len(snapshot.PendingEffects) != 0 ||
+		len(snapshot.QuarantinedIssues) != 0 || len(snapshot.IntakeVerifications) != 0 || len(snapshot.PendingRequests) != 0 ||
+		snapshot.ActiveExecution != nil || snapshot.Supervisor.PID != 0 || snapshot.Supervisor.UpdatedAt.IsZero() ||
+		snapshot.Recovery.DetectedAt.IsZero() || !snapshot.Supervisor.UpdatedAt.Equal(snapshot.Recovery.DetectedAt) {
+		return "", "", errors.New("snapshot is not an exact lifecycle recovery marker")
+	}
+	if len(events) != 1 || events[0].Type != "recovery_blocked" || events[0].Sequence != 1 || events[0].IssueNumber != 0 || events[0].RunID != "" ||
+		!ValidID(events[0].EventID, "evt_") || !events[0].Timestamp.Equal(snapshot.Recovery.DetectedAt) {
+		return "", "", errors.New("lifecycle recovery marker event chain is not exact")
+	}
+	source, target, ok := lifecycleMismatchVersions(snapshot.Recovery.Reason)
+	if !ok || source != issuedomain.LifecycleAPICurrent || target != rawLifecycle || source == target {
+		return "", "", fmt.Errorf("recovery reason is not the exact supported lifecycle mismatch: %s", snapshot.Recovery.Reason)
+	}
+	expectedMessage := fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
+	if snapshot.Supervisor.Message != expectedMessage {
+		return "", "", errors.New("lifecycle recovery marker supervisor message does not match its recovery record")
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil || len(payload) != 2 || payload["reason"] != snapshot.Recovery.Reason ||
+		filepath.Clean(payload["backup_dir"]) != filepath.Clean(snapshot.Recovery.BackupDir) {
+		return "", "", errors.New("lifecycle recovery marker payload does not match its snapshot")
+	}
+	if err := s.validateConsistency(snapshot, events); err != nil {
+		return "", "", fmt.Errorf("validate lifecycle recovery marker: %w", err)
+	}
+	return source, target, nil
+}
+
+func validatePreparedRecoveryState(store Store, snapshot Snapshot, events []Event, txn transaction, exists bool) (Snapshot, error) {
+	if !exists {
+		if err := store.validateConsistency(snapshot, events); err != nil {
+			return Snapshot{}, err
+		}
+		return snapshot, nil
+	}
+	if err := store.validateTransaction(txn); err != nil {
+		return Snapshot{}, err
+	}
+	last := uint64(0)
+	if len(events) > 0 {
+		last = events[len(events)-1].Sequence
+	}
+	switch {
+	case last == txn.Event.Sequence:
+		if len(events) == 0 || !sameEvent(events[len(events)-1], txn.Event) {
+			return Snapshot{}, fmt.Errorf("prepared transaction conflicts with event sequence %d", last)
+		}
+	case last+1 == txn.Event.Sequence:
+		events = append(append([]Event(nil), events...), txn.Event)
+	default:
+		return Snapshot{}, fmt.Errorf("prepared transaction event sequence %d does not follow event log sequence %d", txn.Event.Sequence, last)
+	}
+	final := snapshot
+	switch {
+	case snapshot.StateRevision == txn.Snapshot.StateRevision:
+		if !reflect.DeepEqual(snapshot, txn.Snapshot) {
+			return Snapshot{}, fmt.Errorf("prepared transaction snapshot conflicts at revision %d", snapshot.StateRevision)
+		}
+	case snapshot.StateRevision < txn.Snapshot.StateRevision:
+		final = txn.Snapshot
+	default:
+		return Snapshot{}, fmt.Errorf("state revision %d is ahead of prepared transaction revision %d", snapshot.StateRevision, txn.Snapshot.StateRevision)
+	}
+	if err := store.validateConsistency(final, events); err != nil {
+		return Snapshot{}, err
+	}
+	return final, nil
+}
+
+func (s Store) lifecycleMismatchRecoveryPlanUnlocked(expectedBackup string) (Snapshot, LifecycleMismatchRecoveryPlan, error) {
+	current, exists, err := s.loadSnapshotUnlocked()
+	if err != nil || !exists {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("load lifecycle recovery marker: %w", err)
+	}
+	rawMarkerLifecycle, err := rawLifecycleAPI(s.StatePath())
+	if err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("read lifecycle recovery marker version: %w", err)
+	}
+	currentEvents, _, partial, err := s.readEventsUnlocked()
+	if err != nil || partial {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("read lifecycle recovery marker events: partial=%t: %w", partial, err)
+	}
+	source, target, err := s.validateLifecycleRecoveryMarker(current, rawMarkerLifecycle, currentEvents)
+	if err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, err
+	}
+	backup, err := s.validateExactRecoveryBackup(expectedBackup, current.Recovery.BackupDir)
+	if err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, err
+	}
+	if err := validateLifecycleBackupFiles(backup); err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, err
+	}
+	for _, path := range []string{s.TransactionPath(), s.quarantineRecoveryTransactionPath()} {
+		if _, statErr := os.Stat(path); statErr == nil {
+			return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("lifecycle recovery marker has an active transaction: %s", filepath.Base(path))
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return Snapshot{}, LifecycleMismatchRecoveryPlan{}, statErr
+		}
+	}
+	backupStore := Store{Dir: backup, RepoID: s.RepoID, RepoPath: s.RepoPath, Secrets: s.Secrets}
+	rawBackupLifecycle, err := rawLifecycleAPI(backupStore.StatePath())
+	if err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("read backup lifecycle API version: %w", err)
+	}
+	if rawBackupLifecycle != source {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("backup lifecycle API version is %q, expected mismatch source %q", rawBackupLifecycle, source)
+	}
+	restored, exists, err := backupStore.loadSnapshotUnlocked()
+	if err != nil || !exists {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("load lifecycle recovery backup: %w", err)
+	}
+	if restored.Recovery != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, errors.New("lifecycle recovery backup contains a nested recovery marker")
+	}
+	events, _, partial, err := backupStore.readEventsUnlocked()
+	if err != nil || partial {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("read lifecycle recovery backup events: partial=%t: %w", partial, err)
+	}
+	txn, txnExists, err := backupStore.loadTransactionUnlocked()
+	if err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("load lifecycle recovery backup transaction: %w", err)
+	}
+	if txnExists {
+		rawTxnLifecycle, rawErr := rawTransactionLifecycleAPI(backupStore.TransactionPath())
+		if rawErr != nil {
+			return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("read backup transaction lifecycle API version: %w", rawErr)
+		}
+		if rawTxnLifecycle != source {
+			return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("backup transaction lifecycle API version is %q, expected mismatch source %q", rawTxnLifecycle, source)
+		}
+	}
+	final, err := validatePreparedRecoveryState(backupStore, restored, events, txn, txnExists)
+	if err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("validate lifecycle recovery backup: %w", err)
+	}
+	activeWorkers := 0
+	for _, issue := range final.Issues {
+		if issue != nil && (issue.WorkerPID != 0 || issue.WorkerPGID != 0) {
+			activeWorkers++
+		}
+	}
+	pendingRequests := 0
+	for _, request := range final.PendingRequests {
+		if request != nil && request.Status == issuedomain.RequestStatusPending {
+			pendingRequests++
+		}
+	}
+	if activeWorkers != 0 {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, fmt.Errorf("restored snapshot retains %d active workers", activeWorkers)
+	}
+	stateData, err := os.ReadFile(backupStore.StatePath())
+	if err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, err
+	}
+	eventsData, err := os.ReadFile(backupStore.EventsPath())
+	if err != nil {
+		return Snapshot{}, LifecycleMismatchRecoveryPlan{}, err
+	}
+	transactionSHA := ""
+	if txnExists {
+		transactionData, readErr := os.ReadFile(backupStore.TransactionPath())
+		if readErr != nil {
+			return Snapshot{}, LifecycleMismatchRecoveryPlan{}, readErr
+		}
+		transactionSHA = fileSHA256(transactionData)
+	}
+	activeExecutions := 0
+	if final.ActiveExecution != nil {
+		activeExecutions = 1
+	}
+	return final, LifecycleMismatchRecoveryPlan{
+		Eligible: true, ConfirmationRequired: true, Backup: backup, RecoveryReason: current.Recovery.Reason,
+		MarkerLifecycleAPI: target, RestoredLifecycleAPI: source, RestoredRevision: final.StateRevision,
+		RestoredIssueCount: len(final.Issues), RestoredActiveWorkers: activeWorkers,
+		RestoredActiveExecutions: activeExecutions, RestoredPendingRequests: pendingRequests,
+		PreparedTransaction: txnExists, StateSHA256: fileSHA256(stateData), EventsSHA256: fileSHA256(eventsData),
+		TransactionSHA256: transactionSHA,
+		MutationScope:     []string{"current recovery marker backup", "exact state snapshot restore", "exact event log restore", "exact prepared transaction restore", "recovery journal"},
+	}, nil
 }
 
 func (s Store) loadSnapshotForSemanticRecoveryUnlocked() (Snapshot, bool, error) {
@@ -457,6 +739,22 @@ func (s Store) completeQuarantineRecoveryUnlocked() error {
 	if fileSHA256(stateData) != txn.StateSHA256 || fileSHA256(eventsData) != txn.EventsSHA256 {
 		return errors.New("staged quarantined snapshot recovery digest changed")
 	}
+	var transactionData []byte
+	if txn.TransactionFile != "" {
+		if err := s.validateManagedRecoveryFile(txn.TransactionFile); err != nil {
+			return err
+		}
+		transactionData, err = os.ReadFile(txn.TransactionFile)
+		if err != nil {
+			return err
+		}
+		if fileSHA256(transactionData) != txn.TransactionSHA256 {
+			return errors.New("staged quarantined snapshot recovery transaction digest changed")
+		}
+		if err := fsutil.WriteFile(s.TransactionPath(), transactionData, 0o600); err != nil {
+			return err
+		}
+	}
 	if err := fsutil.WriteFile(s.EventsPath(), eventsData, 0o600); err != nil {
 		return err
 	}
@@ -467,6 +765,63 @@ func (s Store) completeQuarantineRecoveryUnlocked() error {
 		return err
 	}
 	return syncDirectory(s.Dir)
+}
+
+func (s Store) ApplyLifecycleMismatchRecovery(expectedBackup string) (LifecycleMismatchRecoveryPlan, string, error) {
+	if err := s.ensureDir(); err != nil {
+		return LifecycleMismatchRecoveryPlan{}, "", err
+	}
+	lock, err := s.lock(true)
+	if err != nil {
+		return LifecycleMismatchRecoveryPlan{}, "", err
+	}
+	defer unlock(lock)
+	_, plan, err := s.lifecycleMismatchRecoveryPlanUnlocked(expectedBackup)
+	if err != nil {
+		return LifecycleMismatchRecoveryPlan{}, "", err
+	}
+	markerBackup := filepath.Join(s.Dir, "recovery", time.Now().UTC().Format("20060102T150405.000000000Z")+"-lifecycle-recovery-marker_"+strings.TrimPrefix(NewID("marker"), "marker_"))
+	if err := os.MkdirAll(markerBackup, 0o700); err != nil {
+		return LifecycleMismatchRecoveryPlan{}, "", err
+	}
+	for _, name := range []string{"state.json", "events.jsonl"} {
+		data, readErr := os.ReadFile(filepath.Join(s.Dir, name))
+		if readErr != nil {
+			return LifecycleMismatchRecoveryPlan{}, markerBackup, readErr
+		}
+		if writeErr := fsutil.WriteFile(filepath.Join(markerBackup, name), data, 0o600); writeErr != nil {
+			return LifecycleMismatchRecoveryPlan{}, markerBackup, writeErr
+		}
+	}
+	journal := map[string]any{
+		"version": 1, "status": "prepared", "reason": plan.RecoveryReason, "backup": plan.Backup,
+		"marker_backup": markerBackup, "state_sha256": plan.StateSHA256, "events_sha256": plan.EventsSHA256,
+		"transaction_sha256":    plan.TransactionSHA256,
+		"operator_confirmation": map[string]bool{"exact_lifecycle_mismatch_backup": true},
+	}
+	journalPath := filepath.Join(markerBackup, "restore-journal.json")
+	if err := fsutil.WriteJSON(journalPath, journal, 0o600); err != nil {
+		return LifecycleMismatchRecoveryPlan{}, markerBackup, err
+	}
+	txn := quarantineRecoveryTransaction{
+		Version: 1, RepoID: s.RepoID, StateFile: filepath.Join(plan.Backup, "state.json"), EventsFile: filepath.Join(plan.Backup, "events.jsonl"),
+		StateSHA256: plan.StateSHA256, EventsSHA256: plan.EventsSHA256,
+	}
+	if plan.PreparedTransaction {
+		txn.TransactionFile = filepath.Join(plan.Backup, "state.txn.json")
+		txn.TransactionSHA256 = plan.TransactionSHA256
+	}
+	if err := fsutil.WriteJSON(s.quarantineRecoveryTransactionPath(), txn, 0o600); err != nil {
+		return LifecycleMismatchRecoveryPlan{}, markerBackup, err
+	}
+	if err := s.completeQuarantineRecoveryUnlocked(); err != nil {
+		return LifecycleMismatchRecoveryPlan{}, markerBackup, err
+	}
+	journal["status"] = "completed"
+	if err := fsutil.WriteJSON(journalPath, journal, 0o600); err != nil {
+		return LifecycleMismatchRecoveryPlan{}, markerBackup, err
+	}
+	return plan, markerBackup, nil
 }
 
 func (s Store) ApplySemanticMismatchRecovery(expectedBackup string) (SemanticMismatchRecoveryPlan, string, error) {

@@ -34,19 +34,29 @@ func (r Runner) Poll(ctx context.Context, repo config.Repository) (model.Snapsho
 		initialized = previous.EventCursorInitialized
 	}
 	observation, observeErr := r.Observer.Observe(ctx, repo, cursor, initialized, now)
+	var next model.Snapshot
+	var closed []model.Interval
+	if observeErr == nil {
+		next, closed, observeErr = model.Apply(previous, observation)
+	}
 	if observeErr != nil {
 		errorAt := now
-		if previous != nil && r.ObservationTimeout > 0 {
-			gapAt := previous.LastObservationAt.Add(r.ObservationTimeout)
-			if gapAt.Before(errorAt) {
-				errorAt = gapAt
+		if previous != nil {
+			if r.ObservationTimeout > 0 {
+				gapAt := previous.LastObservationAt.Add(r.ObservationTimeout)
+				if gapAt.Before(errorAt) {
+					errorAt = gapAt
+				}
+			}
+			if deadline := previous.QueueDeadline; deadline.After(previous.LastObservationAt) && deadline.Before(errorAt) {
+				errorAt = deadline
 			}
 		}
 		observation = model.Observation{Repository: repo.Name, ObservedAt: errorAt, Cursor: cursor, Error: observeErr.Error()}
-	}
-	next, closed, err := model.Apply(previous, observation)
-	if err != nil {
-		return model.Snapshot{}, err
+		next, closed, err = model.Apply(previous, observation)
+		if err != nil {
+			return model.Snapshot{}, err
+		}
 	}
 	if err := r.Store.Commit(next, closed); err != nil {
 		return model.Snapshot{}, err

@@ -9,6 +9,7 @@
 - runningが存在する間はprocessing deadlineを使い、待機中readyのacceptance deadlineを無視する。
 - runningのterminal event後にreadyが残る場合は、そのevent時刻から次のadmission windowを開始する。
 - `DOWN.started_at`、復旧、terminalによる`IDLE`をdeadlineまたはevent時刻に記録し、poll時刻に丸めない。
+- 履歴の検証失敗ではcursorとqueueを保持し、UNKNOWNからの復旧は検証できたpoll時刻から開始する。
 - `IDLE`を需要時稼働率の分母から除外し、`UNKNOWN`を正常へ補完しない。
 - cursorとtransition IDでreplayを冪等にし、event ID集合を無制限に保持せず、再起動後も確定区間を重複させない。
 - repository eventはcursorを発見したpageで取得を止め、履歴の完全性を証明できない場合は`UNKNOWN`とする。

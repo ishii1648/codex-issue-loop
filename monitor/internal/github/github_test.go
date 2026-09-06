@@ -93,3 +93,80 @@ esac
 		})
 	}
 }
+
+func TestCursorSearchStopsAtPageLimit(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "gh")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+ *events\?*)
+ printf '['
+ i=0
+ while [ "$i" -lt 100 ]; do
+  [ "$i" -eq 0 ] || printf ','
+  printf '{"id":1000,"event":"renamed"}'
+  i=$((i+1))
+ done
+ printf ']'
+ ;;
+ *) printf '[[]]' ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (CLI{Path: script}).Observe(context.Background(), config.Repository{Name: "owner/repo"}, 1, true, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("error = %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "/issues/events?"); got != maxEventPages {
+		t.Fatalf("event requests = %d", got)
+	}
+	if strings.Contains(string(data), "page=11") || strings.Contains(string(data), "--paginate --slurp repos/owner/repo/issues/events") {
+		t.Fatalf("unbounded requests: %s", data)
+	}
+}
+
+func TestQueueExitAndReentryEventContract(t *testing.T) {
+	for _, test := range []struct {
+		event, label string
+		kind         model.EventKind
+	}{
+		{"unlabeled", "ready", model.ReadyUnlabeled},
+		{"unlabeled", "running", model.RunningUnlabeled},
+		{"unlabeled", "excluded", model.QueueUnproven},
+		{"unlabeled", "done", model.QueueUnproven},
+		{"reopened", "", model.QueueUnproven},
+		{"closed", "", model.QueueExited},
+		{"labeled", "done", model.QueueExited},
+		{"labeled", "excluded", model.QueueExited},
+	} {
+		t.Run(test.event+"/"+test.label, func(t *testing.T) {
+			dir := t.TempDir()
+			script := filepath.Join(dir, "gh")
+			body := `#!/bin/sh
+case "$*" in
+ *events\?*) printf '%s' '[{"id":2,"event":"` + test.event + `","created_at":"2026-09-05T10:01:00Z","label":{"name":"` + test.label + `"},"issue":{"number":1}},{"id":1,"event":"renamed"}]' ;;
+ *) printf '[[]]' ;;
+esac
+`
+			if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+				t.Fatal(err)
+			}
+			repo := config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done"}, ExcludeLabels: []string{"excluded"}}
+			observation, err := (CLI{Path: script}).Observe(context.Background(), repo, 1, true, time.Date(2026, 9, 5, 10, 2, 0, 0, time.UTC))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(observation.Events) != 1 || observation.Events[0].Kind != test.kind || observation.Cursor != 2 {
+				t.Fatalf("observation = %+v", observation)
+			}
+		})
+	}
+}

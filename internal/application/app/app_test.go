@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"io"
 	"os"
 	"os/exec"
@@ -27,6 +26,9 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/application/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/application/operatorcontrol"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	queuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/queue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
@@ -1089,6 +1091,90 @@ func TestRecoverSemanticQuarantineRequiresAndRestoresExactRecordedBackup(t *test
 	var restored state.Snapshot
 	if err := json.Unmarshal(restoredData, &restored); err != nil || restored.StateRevision != original.StateRevision || restored.SemanticContractVersion != original.SemanticContractVersion {
 		t.Fatalf("restored=%+v err=%v", restored, err)
+	}
+}
+
+func TestRecoverLifecycleQuarantineRequiresUnloadedExactBackup(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := (registry.Store{Path: l.RegistryPath}).Add(mustConfig(t, repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedPath := filepath.Join(t.TempDir(), "loaded")
+	launchctl := filepath.Join(t.TempDir(), "launchctl")
+	script := "#!/bin/sh\ncase \"$1\" in\n print) test -f \"$LIFECYCLE_RECOVERY_LOADED\" && printf 'state = running\\npid = 123\\n' ;;\n *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIFECYCLE_RECOVERY_LOADED", loadedPath)
+	entry.Commands["launchctl"] = launchctl
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	if err := store.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update("checkpoint", 0, "", nil, func(*state.Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(store.Dir, "recovery", "exact-lifecycle")
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"state.json", "events.jsonl"} {
+		data, readErr := os.ReadFile(filepath.Join(store.Dir, name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(backup, name), data, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	now := time.Now().UTC()
+	reason := (state.LifecycleAPIVersionError{Version: issuedomain.LifecycleAPICurrent, Current: issuedomain.LifecycleAPIPreviousMinor}).Error()
+	marker := state.Snapshot{Version: state.CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion,
+		IssueLifecycleAPIVersion: issuedomain.LifecycleAPIPreviousMinor,
+		RepoID:                   entry.RepoID, RepoPath: entry.RepoPath, StateRevision: 1,
+		Supervisor: state.Supervisor{State: state.SupervisorStateBlocked, UpdatedAt: now,
+			Message: fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", reason, backup)},
+		Issues: map[string]*state.Issue{}, PendingEffects: map[string]*state.EffectIntent{},
+		QuarantinedIssues: map[string]*state.QuarantineRecord{}, IntakeVerifications: map[string]*queuedomain.AuthorVerification{},
+		PendingRequests: map[string]*state.Request{},
+		Recovery:        &state.Recovery{Status: state.RecoveryStateBlocked, Reason: reason, BackupDir: backup, DetectedAt: now}}
+	writeJSONFixture(t, store.StatePath(), marker)
+	payload, _ := json.Marshal(map[string]string{"reason": reason, "backup_dir": backup})
+	event, _ := json.Marshal(state.Event{Version: state.CurrentVersion, EventID: "evt_marker", Sequence: 1, Timestamp: now,
+		RepoID: entry.RepoID, Type: "recovery_blocked", Payload: payload})
+	if err := os.WriteFile(store.EventsPath(), append(event, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a := App{Out: &out, Err: io.Discard}
+	if err := a.recoverLifecycleQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--dry-run", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var preview lifecycleMismatchRecoveryReport
+	if err := json.Unmarshal(out.Bytes(), &preview); err != nil || !preview.Eligible || preview.Applied || preview.RestoredLifecycleAPI != issuedomain.LifecycleAPICurrent {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+	if err := os.WriteFile(loadedPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.recoverLifecycleQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--confirm-exact-backup", "--json"}); err == nil || !strings.Contains(err.Error(), "must be unloaded") {
+		t.Fatalf("loaded recovery error=%v", err)
+	}
+	if err := os.Remove(loadedPath); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := a.recoverLifecycleQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--confirm-exact-backup", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var applied lifecycleMismatchRecoveryReport
+	if err := json.Unmarshal(out.Bytes(), &applied); err != nil || !applied.Applied || applied.RecoveryMarkerBackup == "" {
+		t.Fatalf("applied=%+v err=%v", applied, err)
 	}
 }
 
