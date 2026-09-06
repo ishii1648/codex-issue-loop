@@ -7,6 +7,10 @@ description: Operate, monitor, and explicitly recover the codex-issue-loop super
 
 Use the `agent-loop` CLI for lifecycle operations; GitHub Issue comments can also record answers. The Skill does not own the Issue loop or its durable state.
 
+## Create an Issue
+
+When creating a new Issue, use only the ready labels configured in the target repository's `.agent-loop.yaml` under `github.ready_labels`. Do not add `area:` labels. Re-fetch the created Issue and verify its labels. If the configured labels are unknown or missing, report that state without guessing or creating labels.
+
 ## Answer an Issue request
 
 Treat "Issue #N に ok と回答して" as a possible loop answer. Read the specified repository's Issue body and question comments. Preserve the question's request ID, Issue, run, options and free-text contract; never redirect an old reply to a newer request. Ask only if the target or supplied answer is ambiguous. Do not turn a generic "ok" into an arbitrary recommended option or ask for an already supplied answer again.

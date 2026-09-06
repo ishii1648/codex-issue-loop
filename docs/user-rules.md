@@ -61,7 +61,7 @@ Claude Codeを復元する場合は`--agents claude`を指定する。backupは�
 
 - 変更依頼では対象repositoryを確定し、rootまたはdefault branchの`.agent-loop.yaml`を確認する。
 - 設定があり、agent-loop implementation workerでなければ、重複Issueを確認してから自ら実装せずIssueを起票する。設定がなければ通常どおり作業する。
-- `.agent-loop.yaml`の`github.ready_labels`に設定されたready labelだけを使い、Issue作成後に再取得して確認する。不明・不足時は推測やlabel作成をしない。
+- `.agent-loop.yaml`の`github.ready_labels`に設定されたready labelだけを使い、`area:`ラベルは付けない。Issue作成後に再取得して確認する。不明・不足時は推測やlabel作成をしない。
 - implementation workerは割り当てられたIssueを実装し、同じ依頼を再起票しない。
 - 読み取り専用タスクでは起票しない。ユーザーがloopを使わないよう明示した場合は直接実装してよい。
 
