@@ -172,3 +172,26 @@ func TestReplayUnprovenExitAndReentry(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifiedResyncPreservesUnknownAndDeadline(t *testing.T) {
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	previous, _, _ := Apply(nil, Observation{Repository: "owner/repo", ObservedAt: base, Cursor: 1, CursorInitialized: true, Items: []QueueItem{{Number: 1, Phase: Ready, PhaseSince: base, Deadline: base.Add(time.Minute)}, {Number: 2, Phase: Ready, PhaseSince: base.Add(-time.Minute), Deadline: base.Add(11 * time.Minute)}}})
+	obs := Observation{Repository: "owner/repo", ObservedAt: base.Add(10 * time.Minute), Cursor: 3, CursorInitialized: true, CurrentVerified: true, Resynchronized: true, Items: []QueueItem{{Number: 2, Phase: Ready, PhaseSince: base.Add(-time.Minute), Deadline: base.Add(11 * time.Minute)}}}
+	next, closed, err := Apply(&previous, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Current.Status != Down || !next.QueueDeadline.Equal(base.Add(time.Minute)) || len(closed) != 1 || closed[0].Status != Unknown || !closed[0].StartedAt.Equal(base) || !closed[0].EndedAt.Equal(obs.ObservedAt) {
+		t.Fatalf("next=%+v closed=%+v", next, closed)
+	}
+}
+
+func TestUnknownDemandRecoversWhenHistoryBecomesAvailable(t *testing.T) {
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	previous, _, _ := Apply(nil, Observation{Repository: "owner/repo", ObservedAt: base, Cursor: 1, CursorInitialized: true, Items: []QueueItem{{Number: 1, Phase: Ready}}})
+	obs := Observation{Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Cursor: 1, CursorInitialized: true, CurrentVerified: true, Items: []QueueItem{{Number: 1, Phase: Ready, PhaseSince: base.Add(-time.Hour), Deadline: base.Add(-time.Minute)}}}
+	next, closed, err := Apply(&previous, obs)
+	if err != nil || next.Current.Status != Down || len(closed) != 1 || closed[0].Status != Unknown || !closed[0].EndedAt.Equal(obs.ObservedAt) {
+		t.Fatalf("next=%+v closed=%+v err=%v", next, closed, err)
+	}
+}

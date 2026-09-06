@@ -46,6 +46,8 @@ type QueueItem struct {
 }
 
 type Observation struct {
+	CurrentVerified   bool          `json:"-"`
+	Resynchronized    bool          `json:"-"`
 	Repository        string        `json:"repository"`
 	ObservedAt        time.Time     `json:"observed_at"`
 	Items             []QueueItem   `json:"queue"`

@@ -19,7 +19,8 @@ func TestCLIObservesOnlyRelevantLabelProgress(t *testing.T) {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
-  *issues/events*) printf '%s\n' '[{"id":12,"event":"labeled","created_at":"2026-09-05T10:03:00Z","label":{"name":"codex-loop:running"},"issue":{"number":1}},{"id":11,"event":"renamed","created_at":"2026-09-05T10:02:00Z","label":{"name":""},"issue":{"number":1}},{"id":10,"event":"labeled","created_at":"2026-09-05T10:01:00Z","label":{"name":"codex-loop:ready"},"issue":{"number":1}}]' ;;
+  *issues/events*) printf '%s\n' '[{"id":12,"event":"labeled","created_at":"2026-09-05T10:03:00Z","label":{"name":"codex-loop:running"},"issue":{"number":1}},{"id":11,"event":"unlabeled","created_at":"2026-09-05T10:02:00Z","label":{"name":"codex-loop:ready"},"issue":{"number":1}},{"id":10,"event":"labeled","created_at":"2026-09-05T10:01:00Z","label":{"name":"codex-loop:ready"},"issue":{"number":1}}]' ;;
+  *issues/1/events*) printf '%s' '[[{"id":10,"event":"labeled","created_at":"2026-09-05T10:01:00Z","label":{"name":"codex-loop:ready"}},{"id":11,"event":"unlabeled","created_at":"2026-09-05T10:02:00Z","label":{"name":"codex-loop:ready"}},{"id":12,"event":"labeled","created_at":"2026-09-05T10:03:00Z","label":{"name":"codex-loop:running"}}]]' ;;
   *issues\?*) printf '%s\n' '[[{"number":1,"created_at":"2026-09-05T10:00:00Z","labels":[{"name":"codex-loop:running"}]},{"number":2,"created_at":"2026-09-05T10:00:00Z","labels":[{"name":"codex-loop:done"}]}]]' ;;
 esac
 `
@@ -62,10 +63,15 @@ func TestCLITerminalEventsEndQueueAtGitHubTime(t *testing.T) {
 			body := `#!/bin/sh
 case "$*" in
   *issues/events*) printf '%s\n' '[{"id":11,` + event + `,"created_at":"2026-09-05T10:10:00Z","issue":{"number":1}},{"id":10}]' ;;
+  *issues/1/events*) printf '%s' '[[{"id":9,"event":"labeled","created_at":"2026-09-05T10:00:00Z","label":{"name":"running"}},{"id":11,` + event + `,"created_at":"2026-09-05T10:10:00Z"}]]' ;;
+  *issues/1) printf '%s' '{"number":1,"state":"closed","labels":[{"name":"running"}]}' ;;
   *issues\?*) printf '%s\n' '[[]]' ;;
   *) exit 9 ;;
 esac
 `
+			if strings.Contains(event, "labeled") {
+				body = strings.Replace(body, "'[[]]'", "'[[{\"number\":1,\"state\":\"open\",\"labels\":[{\"name\":\"running\"},{\"name\":\"done\"}]}]]'", 1)
+			}
 			if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -117,15 +123,15 @@ esac
 	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
-	_, err := (CLI{Path: script}).Observe(context.Background(), config.Repository{Name: "owner/repo"}, 1, true, time.Now())
-	if err == nil || !strings.Contains(err.Error(), "was not found") {
+	observation, err := (CLI{Path: script}).Observe(context.Background(), config.Repository{Name: "owner/repo"}, 1, true, time.Now())
+	if err != nil || !observation.Resynchronized || len(observation.Items) != 0 {
 		t.Fatalf("error = %v", err)
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(data), "/issues/events?"); got != maxEventPages {
+	if got := strings.Count(string(data), "/issues/events?"); got != maxEventPages+2 {
 		t.Fatalf("event requests = %d", got)
 	}
 	if strings.Contains(string(data), "page=11") || strings.Contains(string(data), "--paginate --slurp repos/owner/repo/issues/events") {
@@ -148,24 +154,12 @@ func TestQueueExitAndReentryEventContract(t *testing.T) {
 		{"labeled", "excluded", model.QueueExited},
 	} {
 		t.Run(test.event+"/"+test.label, func(t *testing.T) {
-			dir := t.TempDir()
-			script := filepath.Join(dir, "gh")
-			body := `#!/bin/sh
-case "$*" in
- *events\?*) printf '%s' '[{"id":2,"event":"` + test.event + `","created_at":"2026-09-05T10:01:00Z","label":{"name":"` + test.label + `"},"issue":{"number":1}},{"id":1,"event":"renamed"}]' ;;
- *) printf '[[]]' ;;
-esac
-`
-			if err := os.WriteFile(script, []byte(body), 0700); err != nil {
-				t.Fatal(err)
-			}
-			repo := config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done"}, ExcludeLabels: []string{"excluded"}}
-			observation, err := (CLI{Path: script}).Observe(context.Background(), repo, 1, true, time.Date(2026, 9, 5, 10, 2, 0, 0, time.UTC))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(observation.Events) != 1 || observation.Events[0].Kind != test.kind || observation.Cursor != 2 {
-				t.Fatalf("observation = %+v", observation)
+			repo := config.Repository{ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done"}, ExcludeLabels: []string{"excluded"}}
+			event := rawEvent{Event: test.event}
+			event.Label.Name = test.label
+			converted, ok := queueEvent(repo, event)
+			if !ok || converted.Kind != test.kind {
+				t.Fatalf("event = %+v", converted)
 			}
 		})
 	}
