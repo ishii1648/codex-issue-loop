@@ -34,8 +34,6 @@ func ApplyIssueTransition(item *Issue, transition issuedomain.Transition) error 
 	return nil
 }
 
-// ApplyNotPlannedCancellation is the single persistence boundary used by
-// startup, periodic, webhook, and safety-sweep reconciliation.
 func ApplyNotPlannedCancellation(snapshot *Snapshot, issueNumber int, expected *Issue, now time.Time) (string, error) {
 	if snapshot == nil || expected == nil || now.IsZero() {
 		return "", fmt.Errorf("not planned cancellation requires snapshot, expected Issue, and time")
@@ -110,4 +108,34 @@ func CancelPendingRequests(snapshot *Snapshot, issueNumber int) {
 			request.Status = issuedomain.RequestStatusCanceled
 		}
 	}
+}
+
+func CancelQuarantinedIssue(snapshot *Snapshot, issueNumber int, now time.Time) error {
+	key := strconv.Itoa(issueNumber)
+	record := snapshot.QuarantinedIssues[key]
+	if record == nil || snapshot.Issues[key] != nil || now.IsZero() {
+		return fmt.Errorf("Issue #%d quarantine is unavailable", issueNumber)
+	}
+	if snapshot.ActiveExecution != nil && snapshot.ActiveExecution.IssueNumber == issueNumber {
+		return fmt.Errorf("Issue #%d quarantine retains execution authority", issueNumber)
+	}
+	item := &Issue{Number: issueNumber, RunID: record.RunID, Generation: record.Generation, Status: issuedomain.StatusBlocked}
+	if saved := record.LastValid; saved != nil {
+		item.Title, item.Branch, item.Worktree, item.Workspace = saved.Title, saved.Branch, saved.Worktree, saved.Workspace
+		item.Session, item.SessionID, item.Answers = saved.Session, saved.SessionID, saved.Answers
+		item.Attempts, item.Continuations, item.ExecutionProfile, item.WorkerIdentity = saved.Attempts, saved.Continuations, saved.ExecutionProfile, saved.WorkerIdentity
+		item.PullRequestURL, item.PullRequestNumber, item.HeadSHA, item.PullRequestMerged = saved.PullRequestURL, saved.PullRequestNumber, saved.HeadSHA, saved.PullRequestMerged
+	}
+	transition, err := issuedomain.ResolveSuspension(item.Status, issuedomain.ResolutionCancel, issuedomain.ContinuationStageNone)
+	if err != nil {
+		return err
+	}
+	if err := ApplyIssueTransition(item, transition); err != nil {
+		return err
+	}
+	item.Cancellation = &Cancellation{Source: "operator_quarantine_resolution", PreviousStatus: issuedomain.StatusBlocked, ExecutionReleaseResult: "not_present", CanceledAt: now}
+	item.UpdatedAt = now
+	snapshot.Issues[key] = item
+	delete(snapshot.QuarantinedIssues, key)
+	return nil
 }

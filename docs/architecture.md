@@ -178,9 +178,21 @@ Suspension
 
 checkpointは同じ作業を継続するためのworkspace、branch、base、session、run、generation、publication identityを保持する。回答、retry、resume、cancelは保存済みcheckpointと現在の外部事実を再検証してからlifecycle intentとして適用する。
 
-reconcilerは「workerが消えた」「PRが既に存在する」「merge済み」「label同期が不足」などの事実を正規化し、通常と同じ`Decide`へ渡す。事実ごとの専用status、専用command、専用state mutationを作らない。event logの文言や件数からauthorityを合成しない。
+管理対象Issueのlifecycle authorityはcanonical snapshotに置く。worker結果、supervisorが検証したPR・process・worktreeの事実、正式なoperator commandがdomain decisionを経て内部状態を変更する。GitHubの管理labelとIssueの開閉状態はその投影であり、手動変更から内部status、実行権、retryを決めない。未管理Issueのready/exclusionによる受付と、正式なrequestへの回答は入力として扱う。
 
-GitHub Issueがauthoritativeに`NOT_PLANNED`でcloseされている場合、terminal `blocked` / `failed`かつPID/PGID、pending request、active processがなく、保存済みPR identityが一意に一致するときだけ共通reconcilerが`canceled`へ遷移する。対象Issueにroot `active_execution`が残っていればIssue/run/generation一致をtransaction内で再検証して解放し、不一致ならfail closedとする。別Issueの`active_execution`は所有権を照合して保持する。worktreeと成果物は変更せず、`issue_canceled`をsnapshotと同じtransactionへ記録する。
+reconciliationの責務は二つに分ける。実行復旧はprocess・worktree・PR identityを検証してdomain decisionを適用する。表示同期は現在の内部statusから期待する管理label・開閉状態を導出し、GitHubの差分だけを書き戻す。`completed`、`canceled`、quarantined Issueも表示同期の対象とする。quarantineからworkerを再開せず、GitHubにはblocked相当を表示する。
+
+```text
+worker / supervisor / operator command
+                 ↓ 検証・transaction
+             内部状態（正本）
+                 ↓ 起動時・状態変更後・定期同期
+          GitHub の管理label・開閉状態
+```
+
+`pending_effects`はcommentなどの未完了副作用を再試行するための記録であり、表示同期の必要性を決める唯一の根拠にはしない。成功にはGitHubの再取得による期待状態との一致を要求する。marker commentだけで未完了のcloseを完了扱いにしない。同期中に内部状態が変わった場合は古い結果を確定せず、最新状態で再同期する。ネットワーク待機中はstate transaction lockを保持しない。
+
+worker起動前には、GitHubへの投影を同期・再取得して確認した後、内部のIssue/run/generationと`active_execution`を再検証する。同期失敗では起動せず、内部状態をGitHubへ合わせてcancel・completeにはしない。schedulerの既存lifecycle gateで同一process内の同期と状態変更を直列化し、実行中workerの表示同期は新しい実行jobや実行枠を作らない。手動close・除外labelによる停止はサポートせず、正式なoperator commandを使う。PR mergeはラベルと異なる外部事実なので、保存済みpublication identityを検証してから完了とし、予期しないmergeを自動revertしない。
 
 ## 9. 障害境界
 
@@ -192,7 +204,7 @@ GitHub Issueがauthoritativeに`NOT_PLANNED`でcloseされている場合、term
 
 Issue番号、run ID、generation、Issue lifecycle intentを持つerrorは、分類不能でもIssue-local境界で処理する。未分類errorを自動的にrepository-wideへ昇格させない。
 
-GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠解放を妨げない。同期はdurable effectとして再試行し、別Issueのworker起動を継続する。
+GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠解放を妨げない。未完了effectと定期的な表示同期で再試行し、別Issueのworker起動を継続する。
 
 ## 10. Issue lifecycle APIと互換性
 

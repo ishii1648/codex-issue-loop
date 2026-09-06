@@ -1011,13 +1011,16 @@ func TestWebhookMailboxClaimsReadyIssueWithoutQueuePolling(t *testing.T) {
 	if result, err := s.schedule(context.Background(), false); err != nil || !result.dispatched {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	select {
-	case event := <-s.events:
-		if err := s.handleEvent(event); err != nil {
-			t.Fatal(err)
+	defer s.cancelAndDrain()
+	for len(s.active) > 0 {
+		select {
+		case event := <-s.events:
+			if err := s.handleEvent(event); err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("webhook-started job did not finish")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("webhook-started job did not finish")
 	}
 	if !github.claimed || github.restGets == 0 || github.listCalls != 0 {
 		t.Fatalf("claimed=%v rest_gets=%d list_calls=%d", github.claimed, github.restGets, github.listCalls)
@@ -1065,6 +1068,8 @@ func TestWebhookMailboxCompactsSafeIntentsBeforeTargetReconciliationFailure(t *t
 	loop, baseGitHub := testLoop(t, worker.Result{})
 	loop.Config.Webhook.Mode = "webhook"
 	github := &webhookFakeGitHub{fakeGitHub: baseGitHub, restErr: errors.New("temporary targeted read failure")}
+	projectionReads := 0
+	github.projectionHook = func(int, issuedomain.Status) error { projectionReads++; return github.restErr }
 	loop.GitHub = github
 	_, err := loop.Store.Update("terminal_fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusFailed, RunID: "run-1"}
@@ -1091,8 +1096,8 @@ func TestWebhookMailboxCompactsSafeIntentsBeforeTargetReconciliationFailure(t *t
 	if err != nil || len(remaining) != 1 || remaining[0].DeliveryID != "issue-new" {
 		t.Fatalf("remaining=%v err=%v", remaining, err)
 	}
-	if github.restGets != 1 {
-		t.Fatalf("targeted reads=%d want=1", github.restGets)
+	if projectionReads != 1 {
+		t.Fatalf("projection reads=%d want=1", projectionReads)
 	}
 }
 
@@ -1234,7 +1239,7 @@ func TestTwoWebhookRepositorySchedulersMakeZeroQueueRequestsAcrossFakeHour(t *te
 	}
 }
 
-func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T) {
+func TestWebhookPreservesCanonicalIssueLifecycle(t *testing.T) {
 	mergedAt := time.Date(2026, 8, 17, 2, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name       string
@@ -1252,7 +1257,7 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open"}, PullRequests: []gh.PullRequest{{
 				Number: 7, URL: "https://example.test/owner/repo/pull/7", State: "closed", MergedAt: &mergedAt, HeadSHA: "head-7",
 			}}},
-			wantStatus: "completed", wantMerged: true,
+			wantStatus: "completed", wantMerged: false,
 		},
 		{
 			name: "failed observes PR closed without merge",
@@ -1262,21 +1267,21 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open"}, PullRequests: []gh.PullRequest{{
 				Number: 7, URL: "https://example.test/owner/repo/pull/7", State: "closed",
 			}}},
-			wantStatus: "blocked",
+			wantStatus: "failed",
 		},
 		{
 			name:       "needs input observes Issue close",
 			current:    state.Issue{Number: 1, Status: issuedomain.StatusNeedsInput, RunID: "run-1"},
 			delivery:   webhook.Delivery{DeliveryID: "terminal-issue-closed", Event: "issues", Action: "closed", IssueNumber: 1},
 			remote:     gh.RemoteState{Issue: gh.Issue{Number: 1, State: "closed"}},
-			wantStatus: "blocked",
+			wantStatus: "needs_input",
 		},
 		{
 			name:       "blocked observes done label",
 			current:    state.Issue{Number: 1, Status: issuedomain.StatusBlocked, RunID: "run-1"},
 			delivery:   webhook.Delivery{DeliveryID: "terminal-done", Event: "issues", Action: "labeled", IssueNumber: 1},
 			remote:     gh.RemoteState{Issue: gh.Issue{Number: 1, State: "open", Labels: []string{"codex-loop:done"}}},
-			wantStatus: "completed",
+			wantStatus: "blocked",
 		},
 		{
 			name:       "failed label removal does not resume",
@@ -1333,7 +1338,7 @@ func TestWebhookTerminalStatesConvergeOnlyToRemoteTerminalAuthority(t *testing.T
 	}
 }
 
-func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *testing.T) {
+func TestSweepCollectionExitRepairsProjectionWithoutStoppingWorker(t *testing.T) {
 	loop, baseGitHub := testLoop(t, worker.Result{})
 	loop.Config.Webhook.Mode = "webhook"
 	github := &webhookFakeGitHub{fakeGitHub: baseGitHub}
@@ -1370,12 +1375,12 @@ func TestSweepCollectionExitUsesTargetedAuthorityAndBlocksManualExclusion(t *tes
 		t.Fatal(err)
 	}
 	candidates, acknowledged, err := s.processMailbox(context.Background(), snapshot)
-	if err != nil || len(candidates) != 0 || len(acknowledged) != 1 || github.restGets != 1 {
+	if err != nil || len(candidates) != 0 || len(acknowledged) != 1 || gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusRunning) != nil {
 		t.Fatalf("candidates=%v acknowledged=%v rest_gets=%d err=%v", candidates, acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()
 	item := snapshot.Issues["1"]
-	if err != nil || item == nil || item.Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil {
+	if err != nil || item == nil || item.Status != issuedomain.StatusRunning || snapshot.ActiveExecution == nil {
 		t.Fatalf("issue=%+v err=%v", snapshot.Issues["1"], err)
 	}
 }
@@ -1411,7 +1416,7 @@ func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testin
 	s := &scheduler{loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
 	snapshot, _ := loop.Store.Load()
 	_, acknowledged, err := s.processMailbox(context.Background(), snapshot)
-	if err != nil || len(acknowledged) != 1 || github.restGets != 1 {
+	if err != nil || len(acknowledged) != 1 || gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusRunning) != nil {
 		t.Fatalf("acknowledged=%v rest_gets=%d err=%v", acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()

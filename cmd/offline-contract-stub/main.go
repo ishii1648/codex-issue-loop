@@ -17,14 +17,15 @@ import (
 )
 
 type issue struct {
-	Number    int      `json:"number"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body"`
-	URL       string   `json:"url"`
-	CreatedAt string   `json:"createdAt"`
-	State     string   `json:"state"`
-	Labels    []string `json:"labels"`
-	Comments  []string `json:"comments"`
+	Number      int      `json:"number"`
+	Title       string   `json:"title"`
+	Body        string   `json:"body"`
+	URL         string   `json:"url"`
+	CreatedAt   string   `json:"createdAt"`
+	State       string   `json:"state"`
+	StateReason string   `json:"stateReason"`
+	Labels      []string `json:"labels"`
+	Comments    []string `json:"comments"`
 }
 
 type pullRequest struct {
@@ -178,6 +179,7 @@ func runGH(args []string) error {
 			return err
 		}
 		item.State = "CLOSED"
+		item.StateReason = "COMPLETED"
 		return nil
 	case "pr list":
 		return listPullRequests(state, args)
@@ -212,6 +214,21 @@ func runGH(args []string) error {
 		fmt.Println(`{"resources":{"graphql":{"remaining":1000,"reset":4102444800}}}`)
 		return nil
 	default:
+		if args[0] == "api" && strings.HasPrefix(args[1], "repos/offline/repository/issues/") && option(args, "--method") == "PATCH" {
+			item, err := findIssue(state, strings.TrimPrefix(args[1], "repos/offline/repository/issues/"))
+			if err != nil {
+				return err
+			}
+			for _, argument := range args[2:] {
+				if strings.HasPrefix(argument, "state=") {
+					item.State = strings.ToUpper(strings.TrimPrefix(argument, "state="))
+				}
+				if strings.HasPrefix(argument, "state_reason=") {
+					item.StateReason = strings.ToUpper(strings.TrimPrefix(argument, "state_reason="))
+				}
+			}
+			return writeIssue(item)
+		}
 		return fmt.Errorf("unsupported offline gh call: %s", strings.Join(args, " "))
 	}
 }
@@ -329,7 +346,7 @@ func listPullRequests(state contractState, args []string) error {
 func writeIssue(item *issue) error {
 	value := map[string]any{
 		"number": item.Number, "title": item.Title, "body": item.Body, "url": item.URL, "createdAt": item.CreatedAt,
-		"state": item.State, "labels": labels(item.Labels), "assignees": []any{}, "milestone": nil, "comments": comments(item.Comments),
+		"state": item.State, "stateReason": item.StateReason, "labels": labels(item.Labels), "assignees": []any{}, "milestone": nil, "comments": comments(item.Comments),
 		"author": map[string]any{"login": "offline", "is_bot": false},
 	}
 	return json.NewEncoder(os.Stdout).Encode(value)

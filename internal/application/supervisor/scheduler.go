@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -501,11 +502,13 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		}
 	}
 
+	if dispatched, reconcileErr := s.dispatchManagedReconciliation(ctx, snapshot); reconcileErr != nil {
+		return result, reconcileErr
+	} else if dispatched {
+		result.dispatched = true
+	}
 	if !pollCandidates {
 		return result, s.markPollingIfIdle(snapshot, "")
-	}
-	if s.dispatchTerminalPullRequestReconciliation(ctx, snapshot) {
-		result.dispatched = true
 	}
 	if !s.hasFreeSlot() {
 		s.pollAt = s.loop.now().Add(s.pollDelay())
@@ -660,8 +663,8 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 			continue
 		}
 		if local := snapshot.Issues[fmt.Sprint(number)]; local != nil {
-			if delivery.Event == "issues" && delivery.Action == "collection_exited" {
-				converged, reconcileErr := s.loop.reconcileCollectionExit(ctx, *local, delivery)
+			if delivery.Event == "issues" {
+				_, reconcileErr := s.loop.reconcileCollectionExit(ctx, *local, delivery)
 				if reconcileErr != nil {
 					if failure.KindOf(reconcileErr) == failure.Issue {
 						s.loop.Logger.Printf("Issue #%d webhook reconciliation failed without stopping the queue: %v", number, reconcileErr)
@@ -669,11 +672,6 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 						continue
 					}
 					return nil, acknowledged, reconcileErr
-				}
-				if converged {
-					if job, active := s.active[number]; active && job.runID == local.RunID {
-						job.cancel()
-					}
 				}
 				acknowledged = append(acknowledged, delivery)
 				continue
@@ -724,6 +722,13 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 			acknowledged = append(acknowledged, delivery)
 			continue
 		}
+		if snapshot.QuarantinedIssues[fmt.Sprint(number)] != nil {
+			if err := s.loop.reconcileIssueProjection(ctx, number); err != nil {
+				return nil, acknowledged, err
+			}
+			acknowledged = append(acknowledged, delivery)
+			continue
+		}
 		if delivery.Event != "issues" && delivery.Event != "issue_comment" {
 			acknowledged = append(acknowledged, delivery)
 			continue
@@ -766,13 +771,12 @@ func mailboxIssueNumber(snapshot state.Snapshot, delivery webhook.Delivery) int 
 	return 0
 }
 
-// dispatchTerminalPullRequestReconciliation checks at most one terminal Issue
-// per queue poll. Per-Issue cooldowns keep sticky/manual blocks from consuming
-// GitHub API budget every cycle while still allowing all candidates to make
-// progress without restarting the repository supervisor.
-func (s *scheduler) dispatchTerminalPullRequestReconciliation(ctx context.Context, snapshot state.Snapshot) bool {
+// The scheduler lifecycle gate serializes projection with lifecycle writes.
+// A live worker keeps its original job and execution slot; its projection runs
+// inline under that gate and cannot dispatch work or reconcile its lifecycle.
+func (s *scheduler) dispatchManagedReconciliation(ctx context.Context, snapshot state.Snapshot) (bool, error) {
 	if s.hasMaintenanceJob() {
-		return false
+		return false, nil
 	}
 	if s.terminalPoll == nil {
 		s.terminalPoll = map[int]time.Time{}
@@ -780,10 +784,7 @@ func (s *scheduler) dispatchTerminalPullRequestReconciliation(ctx context.Contex
 	now := s.loop.now()
 	candidates := make([]state.Issue, 0)
 	for _, issue := range snapshot.Issues {
-		if issue == nil || !terminalReconciliationCandidate(*issue) {
-			continue
-		}
-		if _, active := s.active[issue.Number]; active {
+		if issue == nil {
 			continue
 		}
 		if s.retryPending(issue.Number) {
@@ -794,8 +795,18 @@ func (s *scheduler) dispatchTerminalPullRequestReconciliation(ctx context.Contex
 		}
 		candidates = append(candidates, *issue)
 	}
+	for key, quarantine := range snapshot.QuarantinedIssues {
+		number, err := strconv.Atoi(key)
+		if err != nil || quarantine == nil || s.retryPending(number) || s.terminalPoll[number].After(now) {
+			continue
+		}
+		if _, active := s.active[number]; active {
+			continue
+		}
+		candidates = append(candidates, state.Issue{Number: number})
+	}
 	if len(candidates) == 0 {
-		return false
+		return false, nil
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		left, right := s.terminalPoll[candidates[i].Number], s.terminalPoll[candidates[j].Number]
@@ -810,10 +821,22 @@ func (s *scheduler) dispatchTerminalPullRequestReconciliation(ctx context.Contex
 		delay = 5 * time.Minute
 	}
 	s.terminalPoll[current.Number] = now.Add(delay)
+	if _, active := s.active[current.Number]; active {
+		if err := s.loop.reconcileIssueProjection(ctx, current.Number); err != nil {
+			if _, limited := cooldownFromError(err, now); limited || failure.KindOf(err) == failure.Supervisor {
+				return false, err
+			}
+			s.loop.Logger.Printf("Issue #%d running projection deferred without changing execution: %v", current.Number, err)
+		}
+		return false, nil
+	}
 	s.dispatch(ctx, current.Number, current.RunID, -1, func(jobCtx context.Context) error {
+		if err := s.loop.reconcileIssueProjection(jobCtx, current.Number); err != nil {
+			return err
+		}
 		return s.loop.reconcileTerminalPullRequest(jobCtx, current)
 	})
-	return true
+	return true, nil
 }
 
 func hasPendingRequests(snapshot state.Snapshot) bool {

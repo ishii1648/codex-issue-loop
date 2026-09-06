@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
@@ -69,6 +71,7 @@ type Client interface {
 	MarkDone(context.Context, config.Config, int, string) error
 	MarkFailed(context.Context, config.Config, int, string, bool) error
 	MarkRunning(context.Context, config.Config, int) error
+	ReconcileIssue(context.Context, config.Config, int, issuedomain.Status) error
 	MarkConflictRetry(context.Context, config.Config, int, string) error
 	ReadyPullRequest(context.Context, config.Config, string) error
 	UpdatePullRequest(context.Context, config.Config, string) error

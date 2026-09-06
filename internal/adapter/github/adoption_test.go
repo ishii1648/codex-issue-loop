@@ -34,10 +34,6 @@ func TestValidateMergedPullRequestFailsClosed(t *testing.T) {
 		name   string
 		mutate func(*RemoteState)
 	}{
-		{name: "missing failure marker", mutate: func(remote *RemoteState) { remote.Issue.Comments = nil }},
-		{name: "manual exclusion", mutate: func(remote *RemoteState) { remote.Issue.Labels = append(remote.Issue.Labels, "do-not-automate") }},
-		{name: "running label", mutate: func(remote *RemoteState) { remote.Issue.Labels = append(remote.Issue.Labels, cfg.GitHub.RunningLabel) }},
-		{name: "conflicting failed label", mutate: func(remote *RemoteState) { remote.Issue.Labels = append(remote.Issue.Labels, cfg.GitHub.FailedLabel) }},
 		{name: "zero Pull Requests", mutate: func(remote *RemoteState) { remote.PullRequests = nil }},
 		{name: "multiple Pull Requests", mutate: func(remote *RemoteState) { remote.PullRequests = append(remote.PullRequests, remote.PullRequests[0]) }},
 		{name: "open Pull Request", mutate: func(remote *RemoteState) {
@@ -80,7 +76,7 @@ func TestValidateMergedPullRequestFailsClosed(t *testing.T) {
 		t.Fatalf("idempotent done synchronization was rejected: %v", err)
 	}
 	done.Issue.Labels = append(done.Issue.Labels, cfg.GitHub.FailedLabel)
-	if _, err := ValidateMergedPullRequest(cfg, done, expected); err == nil {
-		t.Fatal("ambiguous done/failed synchronization was accepted")
+	if _, err := ValidateMergedPullRequest(cfg, done, expected); err != nil {
+		t.Fatal("projected labels affected verified adoption")
 	}
 }

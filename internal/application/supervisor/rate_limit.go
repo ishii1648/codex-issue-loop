@@ -6,6 +6,7 @@ import (
 	"time"
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
 )
@@ -20,6 +21,13 @@ type primaryRateLimitStatusObserver interface {
 type rateLimitedGitHub struct {
 	loop     *Loop
 	delegate gh.Client
+}
+
+func (c *rateLimitedGitHub) ReconcileIssue(ctx context.Context, cfg config.Config, number int, status issuedomain.Status) error {
+	if err := c.before(); err != nil {
+		return err
+	}
+	return c.delegate.ReconcileIssue(ctx, cfg, number, status)
 }
 
 func (c *rateLimitedGitHub) before() error {

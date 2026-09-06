@@ -73,7 +73,7 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 		{
 			name: "closed PR blocks", current: base, inspection: valid,
 			remote: gh.RemoteState{Issue: runningIssue, PullRequests: []gh.PullRequest{{Number: 11, URL: "https://example.test/pull/11", State: "CLOSED"}}},
-			status: issuedomain.StatusBlocked, prURL: "https://example.test/pull/11", reason: "closed without merge",
+			status: issuedomain.StatusBlocked, effect: issuedomain.EffectMarkBlocked, prURL: "https://example.test/pull/11", reason: "closed without merge",
 		},
 		{
 			name: "open PR is discovered before retry", current: base, inspection: valid,
@@ -84,16 +84,16 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 			name: "deleted open PR branch blocks", current: base,
 			inspection: worktree.Inspection{Exists: true, Valid: true, Branch: base.Branch, LocalBranchExists: true},
 			remote:     gh.RemoteState{Issue: runningIssue, PullRequests: []gh.PullRequest{{Number: 11, State: "OPEN", HeadRefName: base.Branch}}},
-			status:     issuedomain.StatusBlocked, reason: "head branch is missing",
+			status:     issuedomain.StatusBlocked, effect: issuedomain.EffectMarkBlocked, reason: "head branch is missing",
 		},
 		{
-			name: "manual exclusion label blocks", current: base, inspection: valid,
+			name: "manual exclusion does not change recovery", current: base, inspection: valid,
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked"}}},
-			status: issuedomain.StatusBlocked, reason: "exclusion label",
+			status: issuedomain.StatusRetryWait, reason: "dead worker",
 		},
 		{
 			name: "live saved PID blocks duplicate worker", current: base, inspection: valid, alive: true,
-			remote: gh.RemoteState{Issue: runningIssue}, status: issuedomain.StatusBlocked, reason: "still alive",
+			remote: gh.RemoteState{Issue: runningIssue}, status: issuedomain.StatusBlocked, effect: issuedomain.EffectMarkBlocked, reason: "still alive",
 		},
 		{
 			name: "completed claim retries from durable work ahead", current: func() state.Issue {
@@ -103,15 +103,15 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 				value.WorkerPID = 0
 				return value
 			}(),
-			remote: gh.RemoteState{Issue: runningIssue}, status: issuedomain.StatusRetryWait, reason: "write-ahead claim",
+			remote: gh.RemoteState{Issue: runningIssue}, status: issuedomain.StatusClaiming, reason: "idempotently",
 		},
 		{
-			name: "done label preserves pending completion effect", current: base,
+			name: "done label cannot complete a worker", current: base, inspection: valid,
 			remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.DoneLabel}}},
-			status: issuedomain.StatusCompleted, reason: "done label",
+			status: issuedomain.StatusRetryWait, reason: "dead worker",
 		},
 		{
-			name: "legacy completed draft returns to check monitoring", current: func() state.Issue {
+			name: "completed lifecycle remains canonical", current: func() state.Issue {
 				value := base
 				value.Status = issuedomain.StatusCompleted
 				value.PullRequestURL = "https://example.test/pull/11"
@@ -121,7 +121,7 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 				Issue:        gh.Issue{Number: 7, State: "OPEN", Labels: []string{cfg.GitHub.DoneLabel}},
 				PullRequests: []gh.PullRequest{{Number: 11, URL: "https://example.test/pull/11", State: "OPEN", IsDraft: true, HeadRefName: base.Branch, ChecksStatus: "success"}},
 			},
-			inspection: valid, status: issuedomain.StatusAwaitingChecks, prURL: "https://example.test/pull/11", reason: "legacy completed",
+			inspection: valid, status: issuedomain.StatusCompleted, prURL: "https://example.test/pull/11", reason: "already converged",
 		},
 		{
 			name: "done label cannot release unmerged PR lease", current: func() state.Issue {
@@ -150,7 +150,7 @@ func TestFaultWorkerAndGitHubStateReconciliationDecisions(t *testing.T) {
 					{Number: 11, URL: "https://example.test/pull/11", State: "CLOSED", MergedAt: timePointer(), HeadRefName: base.Branch, HeadSHA: "head-11"},
 				},
 			},
-			inspection: valid, status: issuedomain.StatusBlocked, prURL: "https://example.test/pull/11", reason: "multiple Pull Requests",
+			inspection: valid, status: issuedomain.StatusBlocked, effect: issuedomain.EffectMarkBlocked, prURL: "https://example.test/pull/11", reason: "multiple Pull Requests",
 		},
 	}
 
@@ -194,8 +194,8 @@ func TestTerminalPullRequestReconciliationRequiresAuthoritativeSavedMerge(t *tes
 		{name: "multiple PRs remain sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{matching, matching}}, reasonPart: "multiple Pull Requests"},
 		{name: "different saved URL remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.URL += "-other"; return value }()}}, reasonPart: "does not match"},
 		{name: "different head remains sticky", current: base, remote: gh.RemoteState{Issue: automationIssue, PullRequests: []gh.PullRequest{func() gh.PullRequest { value := matching; value.HeadRefName += "-other"; return value }()}}, reasonPart: "head does not match"},
-		{name: "manual blocked label remains sticky", current: func() state.Issue { value := base; value.FailureKind = ""; return value }(), remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked"}}, PullRequests: []gh.PullRequest{matching}}, reasonPart: "applied manually"},
-		{name: "manual exclusion remains sticky", current: base, remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked", "do-not-automate"}, Comments: automationIssue.Comments}, PullRequests: []gh.PullRequest{matching}}, reasonPart: "applied manually"},
+		{name: "manual blocked label remains sticky", current: func() state.Issue { value := base; value.FailureKind = ""; return value }(), remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked"}}, PullRequests: []gh.PullRequest{matching}}, completed: true, reasonPart: "merge discovered"},
+		{name: "manual exclusion remains sticky", current: base, remote: gh.RemoteState{Issue: gh.Issue{Number: 7, State: "OPEN", Labels: []string{"blocked", "do-not-automate"}, Comments: automationIssue.Comments}, PullRequests: []gh.PullRequest{matching}}, completed: true, reasonPart: "merge discovered"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -260,7 +260,7 @@ func TestPeriodicTerminalReconciliationCompletesAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestStartupNotPlannedCancellationPreservesArtifactsAndIsIdempotent(t *testing.T) {
+func TestStartupManualClosePreservesLifecycleAndArtifacts(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	loop.Clock = fixedClock{value: now}
@@ -307,9 +307,8 @@ func TestStartupNotPlannedCancellationPreservesArtifactsAndIsIdempotent(t *testi
 		t.Fatal(err)
 	}
 	item := after.Issues["93"]
-	if item.Status != issuedomain.StatusCanceled || item.GitHubStateReason != "NOT_PLANNED" || item.Cancellation == nil ||
-		item.Cancellation.PreviousStatus != issuedomain.StatusBlocked || item.Cancellation.ExecutionReleaseResult != "not_present" {
-		t.Fatalf("cancellation=%+v issue=%+v", item.Cancellation, item)
+	if item.Status != issuedomain.StatusBlocked || item.Cancellation != nil || github.remote.Issue.State != "OPEN" {
+		t.Fatalf("manual close overrode canonical state: %+v remote=%+v", item, github.remote)
 	}
 	if item.Worktree != original.Worktree || item.Branch != original.Branch || item.SessionID != original.SessionID ||
 		item.Attempts != original.Attempts || item.Continuations != original.Continuations || item.PullRequestURL != original.PullRequestURL ||
@@ -319,29 +318,19 @@ func TestStartupNotPlannedCancellationPreservesArtifactsAndIsIdempotent(t *testi
 	if dirty, err := os.ReadFile(dirtyPath); err != nil || string(dirty) != "preserve me\n" {
 		t.Fatalf("dirty worktree content changed: content=%q err=%v", dirty, err)
 	}
-	if reason, attention := after.Attention(false); attention {
-		t.Fatalf("canceled Issue remained sticky attention: %s", reason)
-	}
-	events, err := os.ReadFile(loop.Store.EventsPath())
-	if err != nil || strings.Count(string(events), `"type":"issue_canceled"`) != 1 ||
-		!strings.Contains(string(events), `"github_state_reason":"NOT_PLANNED"`) || !strings.Contains(string(events), `"run_id":"run_93"`) ||
-		!strings.Contains(string(events), `"previous_status":"blocked"`) || !strings.Contains(string(events), `"execution_release_result":"not_present"`) ||
-		!strings.Contains(string(events), `"url":"`+prURL+`"`) || !strings.Contains(string(events), `"canceled_at":"`+now.Format(time.RFC3339)+`"`) {
-		t.Fatalf("events=%s err=%v", events, err)
-	}
 	if err := loop.reconcileStartup(context.Background(), after); err != nil {
 		t.Fatal(err)
 	}
-	replayed, err := os.ReadFile(loop.Store.EventsPath())
-	if err != nil || strings.Count(string(replayed), `"type":"issue_canceled"`) != 1 || github.inspectCalls != 1 {
-		t.Fatalf("replay events=%s inspections=%d err=%v", replayed, github.inspectCalls, err)
+	events, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil || strings.Contains(string(events), `"type":"issue_canceled"`) {
+		t.Fatalf("events=%s err=%v", events, err)
 	}
 	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 94, Title: "Next", RunID: "run_94", StartedAt: now.Add(time.Minute)}); err != nil {
 		t.Fatalf("next Issue was not admitted: %v", err)
 	}
 }
 
-func TestNotPlannedCancellationUsesPeriodicWebhookAndSafetySweepPaths(t *testing.T) {
+func TestManualCloseCannotCancelViaReconciliationRoutes(t *testing.T) {
 	routes := []struct {
 		name string
 		run  func(*Loop, state.Issue) error
@@ -377,14 +366,14 @@ func TestNotPlannedCancellationUsesPeriodicWebhookAndSafetySweepPaths(t *testing
 				t.Fatal(err)
 			}
 			snapshot, err := loop.Store.Load()
-			if err != nil || snapshot.Issues["7"].Status != issuedomain.StatusCanceled || state.PendingEffect(&snapshot, 7) != nil {
+			if err != nil || snapshot.Issues["7"].Status != issuedomain.StatusFailed || state.PendingEffect(&snapshot, 7) == nil {
 				t.Fatalf("issue=%+v err=%v", snapshot.Issues["7"], err)
 			}
 		})
 	}
 }
 
-func TestNotPlannedCancellationPreservesUnrelatedActiveExecution(t *testing.T) {
+func TestManualClosePreservesUnrelatedActiveExecution(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	_, activeIdentity, err := loop.Store.StartExecution(state.ExecutionStart{
 		IssueNumber: 8, Title: "Running", RunID: "run_8", StartedAt: loop.now(),
@@ -411,7 +400,7 @@ func TestNotPlannedCancellationPreservesUnrelatedActiveExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Issues["7"].Status != issuedomain.StatusCanceled ||
+	if snapshot.Issues["7"].Status != issuedomain.StatusBlocked ||
 		snapshot.ActiveExecution == nil || snapshot.ActiveExecution.IssueNumber != 8 ||
 		snapshot.ActiveExecution.RunID != activeIdentity.RunID || snapshot.ActiveExecution.Generation != activeIdentity.Generation {
 		t.Fatalf("canceled=%+v active=%+v", snapshot.Issues["7"], snapshot.ActiveExecution)
