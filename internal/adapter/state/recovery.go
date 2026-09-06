@@ -218,7 +218,7 @@ func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("open event log: %w", err)
 	}
-	defer f.Close()
+	defer io.Closer(f).Close()
 
 	reader := bufio.NewReader(f)
 	events := []Event{}
@@ -341,12 +341,10 @@ func (s Store) appendEventUnlocked(event Event) error {
 		return fmt.Errorf("open event log: %w", err)
 	}
 	if _, err := events.Write(append(line, '\n')); err != nil {
-		events.Close()
-		return fmt.Errorf("append event: %w", err)
+		return fmt.Errorf("append event: %w", errors.Join(err, events.Close()))
 	}
 	if err := events.Sync(); err != nil {
-		events.Close()
-		return fmt.Errorf("sync event log: %w", err)
+		return fmt.Errorf("sync event log: %w", errors.Join(err, events.Close()))
 	}
 	if err := events.Close(); err != nil {
 		return err
@@ -420,7 +418,10 @@ func (s Store) quarantineUnlocked(cause error) (Snapshot, error) {
 		Message: fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", safeCause, backupDir),
 	}
 	snapshot.Recovery = &Recovery{Status: RecoveryStateBlocked, Reason: safeCause, BackupDir: backupDir, DetectedAt: now}
-	payload, _ := redact.Marshal(map[string]string{"reason": safeCause, "backup_dir": backupDir}, s.Secrets)
+	payload, err := redact.Marshal(map[string]string{"reason": safeCause, "backup_dir": backupDir}, s.Secrets)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	event := Event{
 		Version: CurrentVersion, EventID: NewID("evt"), Sequence: 1, Timestamp: now,
 		RepoID: s.RepoID, Type: "recovery_blocked", Payload: payload,
@@ -439,7 +440,7 @@ func syncDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer io.Closer(dir).Close()
 	return dir.Sync()
 }
 

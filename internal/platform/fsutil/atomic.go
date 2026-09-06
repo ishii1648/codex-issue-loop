@@ -2,7 +2,9 @@ package fsutil
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -29,16 +31,13 @@ func WriteFile(path string, data []byte, mode os.FileMode) error {
 	defer os.Remove(tmpName)
 
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temporary file for %s: %w", path, err)
+		return fmt.Errorf("chmod temporary file for %s: %w", path, errors.Join(err, tmp.Close()))
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temporary file for %s: %w", path, err)
+		return fmt.Errorf("write temporary file for %s: %w", path, errors.Join(err, tmp.Close()))
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("sync temporary file for %s: %w", path, err)
+		return fmt.Errorf("sync temporary file for %s: %w", path, errors.Join(err, tmp.Close()))
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary file for %s: %w", path, err)
@@ -47,10 +46,14 @@ func WriteFile(path string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
 
+	// Directory durability is best effort after the atomic replacement.
 	d, err := os.Open(dir)
-	if err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	if err != nil {
+		return nil
+	}
+	defer io.Closer(d).Close()
+	if err := d.Sync(); err != nil {
+		return nil
 	}
 	return nil
 }

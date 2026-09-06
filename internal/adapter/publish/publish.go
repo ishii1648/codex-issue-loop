@@ -268,7 +268,7 @@ func fileDigest(path string) ([sha256.Size]byte, error) {
 	if err != nil {
 		return [sha256.Size]byte{}, err
 	}
-	defer file.Close()
+	defer io.Closer(file).Close()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return [sha256.Size]byte{}, err

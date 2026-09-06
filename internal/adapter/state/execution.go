@@ -323,7 +323,9 @@ func NormalizeLegacyWorkerLaunches(snapshot *Snapshot) {
 		if ok {
 			transition, err := issuedomain.RecoverUnstartedWorker(issue.Status, issuedomain.StatusLaunching)
 			if err == nil {
-				_ = ApplyIssueTransition(issue, transition)
+				if err := ApplyIssueTransition(issue, transition); err != nil {
+					continue
+				}
 				issue.LaunchSource = source
 			}
 			continue
@@ -333,10 +335,12 @@ func NormalizeLegacyWorkerLaunches(snapshot *Snapshot) {
 		if err != nil {
 			continue
 		}
+		if err := ApplyIssueTransition(issue, transition); err != nil {
+			continue
+		}
 		if snapshot.ActiveExecution != nil && snapshot.ActiveExecution.IssueNumber == issue.Number {
 			snapshot.ActiveExecution = nil
 		}
-		_ = ApplyIssueTransition(issue, transition)
 		issue.WorkerPID, issue.WorkerPGID = 0, 0
 		issue.LastError = legacyLaunchAuthorityReason + ": " + reason
 		issue.FailureKind = "issue"
