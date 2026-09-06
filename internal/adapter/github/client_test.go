@@ -508,3 +508,82 @@ func TestGitHubCommentsAndErrorsRedactSecrets(t *testing.T) {
 		t.Fatalf("secret sent to GitHub command: %s", data)
 	}
 }
+
+func TestCLIInspectPullRequestRESTReviewDecision(t *testing.T) {
+	for _, test := range []struct {
+		name, reviews, requests, teams, want string
+		merged                               bool
+		fail                                 bool
+	}{
+		{name: "changes requested", reviews: `[{"user":{"id":1},"state":"CHANGES_REQUESTED"},{"user":{"id":2},"state":"APPROVED"}]`, want: "CHANGES_REQUESTED"},
+		{name: "later approval", reviews: `[{"user":{"id":1},"state":"CHANGES_REQUESTED"},{"user":{"id":1},"state":"APPROVED"}]`, want: "APPROVED", merged: true},
+		{name: "comment preserves decision", reviews: `[{"user":{"id":1},"state":"CHANGES_REQUESTED"},{"user":{"id":1},"state":"COMMENTED"},{"user":{"id":1},"state":"PENDING"}]`, want: "CHANGES_REQUESTED"},
+		{name: "dismissed", reviews: `[{"user":{"id":1},"state":"DISMISSED"}]`},
+		{name: "unknown", reviews: `[]`},
+		{name: "requested reviewer", reviews: `[{"user":{"id":1},"state":"APPROVED"}]`, requests: `[{"id":2}]`, want: "REVIEW_REQUIRED"},
+		{name: "requested team", reviews: `[]`, teams: `[{"id":3}]`, want: "REVIEW_REQUIRED"},
+		{name: "changes precede requests", reviews: `[{"user":{"id":1},"state":"CHANGES_REQUESTED"}]`, requests: `[{"id":2}]`, want: "CHANGES_REQUESTED"},
+		{name: "next page supersedes", reviews: `[` + strings.Repeat(`{"user":{"id":1},"state":"CHANGES_REQUESTED"},`, 99) + `{"user":{"id":1},"state":"CHANGES_REQUESTED"}]`, want: "APPROVED"},
+		{name: "reviews unavailable", fail: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fake := filepath.Join(dir, "gh")
+			requests, teams, mergedAt := test.requests, test.teams, "null"
+			if requests == "" {
+				requests = "[]"
+			}
+			if teams == "" {
+				teams = "[]"
+			}
+			if test.merged {
+				mergedAt = `"2026-08-18T00:00:00Z"`
+			}
+			reviewsCommand := "cat <<'JSON'\n" + test.reviews + "\nJSON"
+			if test.fail {
+				reviewsCommand = "exit 1"
+			}
+			script := fmt.Sprintf(`#!/bin/sh
+for endpoint do :; done
+case "$endpoint" in
+  /repos/owner/repo/issues/7) echo '{"number":7,"state":"open"}' ;;
+  /repos/owner/repo/issues/7/comments*) echo '[{"body":"claim"}]' ;;
+  /repos/owner/repo/pulls/11) echo '{"number":11,"html_url":"https://example.test/pull/11","state":"open","base":{"ref":"main"},"head":{"ref":"feature","sha":"head123","repo":{"full_name":"fork/repo"}},"merged_at":%s,"merge_commit_sha":"merge123","mergeable_state":"clean","requested_reviewers":%s,"requested_teams":%s}' ;;
+  '/repos/owner/repo/pulls/11/reviews?per_page=100&page=1')
+%s
+    ;;
+  '/repos/owner/repo/pulls/11/reviews?per_page=100&page=2') echo '[{"user":{"id":1},"state":"APPROVED"}]' ;;
+  /repos/owner/repo/commits/head123/check-runs*) echo '{"check_runs":[{"status":"completed","conclusion":"success"}]}' ;;
+  /repos/owner/repo/commits/head123/status) echo '{"state":"success","statuses":[]}' ;;
+  *) exit 2 ;;
+esac
+`, mergedAt, requests, teams, reviewsCommand)
+			if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Defaults()
+			cfg.GitHub.Repo = "owner/repo"
+			remote, err := (CLI{Path: fake}).InspectPullRequestREST(context.Background(), cfg, 7, 11, "old-sha")
+			if test.fail {
+				if err == nil || !strings.Contains(err.Error(), "reviews with REST") {
+					t.Fatalf("error=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(remote.PullRequests) != 1 {
+				t.Fatalf("remote=%+v", remote)
+			}
+			pr := remote.PullRequests[0]
+			mergeSHA := ""
+			if test.merged {
+				mergeSHA = "merge123"
+			}
+			if pr.ReviewDecision != test.want || pr.BaseRefName != "main" || pr.HeadRepository != "fork/repo" || pr.MergeCommitSHA != mergeSHA || pr.MergeSHA != mergeSHA || pr.HeadSHA != "head123" || pr.ChecksStatus != "success" {
+				t.Fatalf("PullRequest=%+v, want review decision %q", pr, test.want)
+			}
+		})
+	}
+}
