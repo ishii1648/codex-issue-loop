@@ -237,7 +237,7 @@ func validateSuspension(issue *Issue) error {
 			return fmt.Errorf("active suspension contains a resolution")
 		}
 	case issuedomain.SuspensionResolved:
-		if suspension.ResolvedAt.IsZero() || suspension.Resolution.Validate() != nil {
+		if suspension.ResolvedAt.IsZero() || suspension.Resolution.Validate() != nil || suspension.Resolution == issuedomain.ResolutionAdoptWorktree {
 			return fmt.Errorf("resolved suspension has no valid resolution")
 		}
 	default:
@@ -251,7 +251,7 @@ func validateSuspension(issue *Issue) error {
 	}
 	seen := map[issuedomain.ResolutionAction]bool{}
 	for _, action := range suspension.AllowedActions {
-		if err := action.Validate(); err != nil || seen[action] {
+		if err := action.Validate(); err != nil || action == issuedomain.ResolutionAdoptWorktree || seen[action] {
 			return fmt.Errorf("suspension contains an invalid or duplicate action %q", action)
 		}
 		seen[action] = true

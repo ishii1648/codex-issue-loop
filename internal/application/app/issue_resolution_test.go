@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -343,6 +344,126 @@ func TestIssueResolveAdoptPRRequiresExactCleanMergedHead(t *testing.T) {
 	}
 }
 
+func TestIssueResolveAdoptWorktreeRecordsExactConflictEvidenceWithoutStartingExecution(t *testing.T) {
+	fixture := newIssueResolutionFixture(t, 285, "OPEN", nil)
+	target := fixture.prepareQuarantinedConflict(t, 285)
+	fixture.rewritePullRequests(t, []map[string]any{{
+		"number": 285, "url": "https://example.test/pull/285", "state": "OPEN", "isDraft": false,
+		"mergedAt": nil, "headRefName": fixture.branch, "baseRefName": "main", "headRefOid": fixture.head,
+		"mergeCommit": nil, "headRepository": map[string]any{"name": "repo"},
+		"headRepositoryOwner": map[string]any{"login": "owner"}, "mergeStateStatus": "DIRTY", "statusCheckRollup": []any{},
+	}})
+
+	before, err := os.ReadFile(fixture.store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	if code := a.Run(context.Background(), []string{"issue", "plan", "--repo", fixture.repo, "--issue", "285", "--json"}); code != 0 {
+		t.Fatalf("plan code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	var report issuePlanReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if plan := findActionPlan(t, report.Actions, issuedomain.ResolutionAdoptWorktree); !plan.Eligible {
+		t.Fatalf("adopt-worktree plan=%+v observations=%+v", plan, report.Observations)
+	}
+	afterPlan, err := os.ReadFile(fixture.store.StatePath())
+	if err != nil || !bytes.Equal(before, afterPlan) {
+		t.Fatalf("plan changed state: err=%v", err)
+	}
+
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "285", "--action", "adopt-worktree", "--json"}); code != 0 {
+		t.Fatalf("resolve code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	snapshot, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["285"]
+	if snapshot.ActiveExecution != nil || state.PendingEffect(&snapshot, 285) != nil || item.Status != issuedomain.StatusBlocked ||
+		item.Continuation == nil || item.Continuation.Stage != issuedomain.ContinuationStageConflict || item.Continuation.WorktreeSHA256 == "" ||
+		item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionActive || item.Suspension.Recoverability != issuedomain.RecoverabilityOperator ||
+		len(item.Suspension.MissingEvidence) != 0 || !reflect.DeepEqual(item.Suspension.AllowedActions, []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionRetryStage}) ||
+		item.ConflictRecovery == nil || item.ConflictRecovery.TargetBaseSHA != target {
+		t.Fatalf("adopted conflict state=%+v", item)
+	}
+
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), []string{"issue", "plan", "--repo", fixture.repo, "--issue", "285", "--json"}); code != 0 {
+		t.Fatalf("post-adoption plan code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if plan := findActionPlan(t, report.Actions, issuedomain.ResolutionRetryStage); !plan.Eligible {
+		t.Fatalf("retry-stage plan=%+v observations=%+v", plan, report.Observations)
+	}
+}
+
+func TestIssueResolveAdoptWorktreeRequiresExplicitExactScopeExtension(t *testing.T) {
+	fixture := newIssueResolutionFixture(t, 286, "OPEN", nil)
+	fixture.prepareQuarantinedConflict(t, 286)
+	fixture.rewritePullRequests(t, []map[string]any{{
+		"number": 286, "url": "https://example.test/pull/286", "state": "OPEN", "isDraft": false,
+		"mergedAt": nil, "headRefName": fixture.branch, "baseRefName": "main", "headRefOid": fixture.head,
+		"mergeCommit": nil, "headRepository": map[string]any{"name": "repo"},
+		"headRepositoryOwner": map[string]any{"login": "owner"}, "mergeStateStatus": "DIRTY", "statusCheckRollup": []any{},
+	}})
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "outside.txt"), []byte("outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	args := []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "286", "--action", "adopt-worktree", "--json"}
+	if code := a.Run(context.Background(), args); code == 0 || !strings.Contains(stderr.String(), "outside the recorded scope") {
+		t.Fatalf("out-of-scope worktree was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	after, err := fixture.store.Load()
+	if err != nil || after.StateRevision != before.StateRevision || !reflect.DeepEqual(after.Issues["286"].Suspension, before.Issues["286"].Suspension) ||
+		after.Issues["286"].Continuation.WorktreeSHA256 != "" {
+		t.Fatalf("rejected adoption changed state: before=%+v after=%+v err=%v", before.Issues["286"], after.Issues["286"], err)
+	}
+
+	out.Reset()
+	stderr.Reset()
+	wrong := append(args, "--allow-path", "future.txt")
+	if code := a.Run(context.Background(), wrong); code == 0 || !strings.Contains(stderr.String(), "not a current unapproved change") {
+		t.Fatalf("unrelated scope extension was accepted: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+
+	out.Reset()
+	stderr.Reset()
+	approved := append(args, "--allow-path", "outside.txt")
+	if code := a.Run(context.Background(), approved); code != 0 {
+		t.Fatalf("exact scope extension failed: code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	resolved, err := fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := resolved.Issues["286"]
+	if item.Continuation == nil || item.Continuation.WorktreeSHA256 == "" || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionActive ||
+		item.ConflictRecovery == nil || !reflect.DeepEqual(item.ConflictRecovery.AllowedPaths, []string{"change.txt", "outside.txt"}) {
+		t.Fatalf("exact scope extension was not durably adopted: %+v", item)
+	}
+	events, err := os.ReadFile(fixture.store.EventsPath())
+	if err != nil || !strings.Contains(string(events), `"type":"issue_worktree_adopted"`) ||
+		!strings.Contains(string(events), `"allowed_paths_added":["outside.txt"]`) {
+		t.Fatalf("scope extension audit is missing: err=%v events=%s", err, events)
+	}
+}
+
 func TestIssueResolveCancelClearsPendingAttentionWithoutExecution(t *testing.T) {
 	fixture := newIssueResolutionFixture(t, 183, "OPEN", nil)
 	fixture.block(t, issuedomain.StatusRunning, "stat worktree: no such file or directory", false, "")
@@ -623,6 +744,40 @@ func (f *issueResolutionFixture) rewritePullRequests(t *testing.T, pullRequests 
 	t.Helper()
 	f.pullRequests = pullRequests
 	f.writeGH(t)
+}
+
+func (f *issueResolutionFixture) prepareQuarantinedConflict(t *testing.T, number int) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.repo, "change.txt"), []byte("base changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runIssueGit(t, f.repo, "add", "change.txt")
+	runIssueGit(t, f.repo, "commit", "-m", "advance base")
+	runIssueGit(t, f.repo, "push", "origin", "main")
+	target := runIssueGit(t, f.repo, "rev-parse", "HEAD")
+	if output, err := exec.Command("git", "-C", f.worktree, "merge", "--no-ff", "--no-commit", target).CombinedOutput(); err == nil {
+		t.Fatalf("fixture merge unexpectedly succeeded: %s", output)
+	}
+	f.block(t, issuedomain.StatusRunning, "conflict worker stopped before checkpoint fingerprinting", false, "https://example.test/pull/"+strconv.Itoa(number))
+	if _, err := f.store.Update("fixture_quarantine_conflict", number, f.runID, nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues[strconv.Itoa(number)]
+		item.PullRequestNumber = number
+		item.Continuation.WorktreeSHA256 = ""
+		item.Continuation.Stage = issuedomain.ContinuationStageResume
+		item.ConflictRecovery = &state.ConflictRecovery{
+			PullRequestURL: item.PullRequestURL, PreviousBaseSHA: f.base, TargetBaseSHA: target,
+			OriginalHeadSHA: f.head, ConflictFiles: []string{"change.txt"}, AllowedPaths: []string{"change.txt"},
+			Attempts: 1, BaseUpdates: 1, LastReason: item.LastError, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}
+		item.Suspension.Status = issuedomain.SuspensionQuarantined
+		item.Suspension.Recoverability = issuedomain.RecoverabilityAmbiguous
+		item.Suspension.MissingEvidence = []string{"worktree_sha256"}
+		item.Suspension.AllowedActions = []issuedomain.ResolutionAction{issuedomain.ResolutionCancel}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return target
 }
 
 func (f *issueResolutionFixture) writeGH(t *testing.T) {

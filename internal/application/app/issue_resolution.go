@@ -45,28 +45,31 @@ type issuePlanReport struct {
 }
 
 type issuePlanningContext struct {
-	ghPath            string
-	cfg               config.Config
-	store             state.Store
-	snapshot          state.Snapshot
-	issue             *state.Issue
-	quarantine        *state.QuarantineRecord
-	remote            gh.RemoteState
-	remoteErr         error
-	launch            worktree.LaunchValidation
-	launchErr         error
-	inspection        worktree.Inspection
-	inspectErr        error
-	worktreeSHA256    string
-	worktreeDigestErr error
-	baseOK            bool
-	baseErr           error
-	workerLive        bool
-	pending           []string
-	resultSummary     string
-	resultSHA256      string
-	resultErr         error
-	report            issuePlanReport
+	ghPath             string
+	cfg                config.Config
+	store              state.Store
+	snapshot           state.Snapshot
+	issue              *state.Issue
+	quarantine         *state.QuarantineRecord
+	remote             gh.RemoteState
+	remoteErr          error
+	launch             worktree.LaunchValidation
+	launchErr          error
+	inspection         worktree.Inspection
+	inspectErr         error
+	worktreeSHA256     string
+	worktreeDigestErr  error
+	baseOK             bool
+	baseErr            error
+	workerLive         bool
+	pending            []string
+	resultSummary      string
+	resultSHA256       string
+	resultErr          error
+	adoption           worktreeAdoptionObservation
+	adoptionErr        error
+	adoptionAllowPaths []string
+	report             issuePlanReport
 }
 
 func (a App) issueCommand(ctx context.Context, l layout.Layout, args []string) error {
@@ -79,7 +82,7 @@ func (a App) issueCommand(ctx context.Context, l layout.Layout, args []string) e
 	case "resolve":
 		return a.issueResolve(ctx, l, args[1:])
 	case "help", "--help", "-h":
-		fmt.Fprintln(a.Out, "Usage: agent-loop issue plan --repo PATH --issue N --json\n       agent-loop issue resolve --repo PATH --issue N --action resume|retry-stage|adopt-pr|cancel --json")
+		fmt.Fprintln(a.Out, "Usage: agent-loop issue plan --repo PATH --issue N [--allow-path PATH] --json\n       agent-loop issue resolve --repo PATH --issue N --action resume|retry-stage|adopt-worktree|adopt-pr|cancel [--allow-path PATH] --json")
 		return nil
 	default:
 		return exitError{2, fmt.Errorf("unknown issue command %q", args[0])}
@@ -87,32 +90,38 @@ func (a App) issueCommand(ctx context.Context, l layout.Layout, args []string) e
 }
 
 func (a App) issuePlan(ctx context.Context, l layout.Layout, args []string) error {
-	repo, number, jsonOut, err := parseIssuePlanArgs(args)
+	repo, number, allowPaths, jsonOut, err := parseIssuePlanArgs(args)
 	if err != nil {
 		return err
 	}
-	planned, err := a.buildIssuePlan(ctx, l, repo, number)
+	planned, err := a.buildIssuePlan(ctx, l, repo, number, allowPaths)
 	if err != nil {
 		return err
 	}
 	return a.output(jsonOut, planned.report)
 }
 
-func parseIssuePlanArgs(args []string) (string, int, bool, error) {
+func parseIssuePlanArgs(args []string) (string, int, []string, bool, error) {
 	fs := flag.NewFlagSet("issue plan", flag.ContinueOnError)
 	repo := fs.String("repo", "", "repository path")
 	number := fs.Int("issue", 0, "Issue number")
+	var allowPaths pathListFlag
+	fs.Var(&allowPaths, "allow-path", "explicit changed path to add to conflict recovery scope; repeatable")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
-		return "", 0, false, exitError{2, err}
+		return "", 0, nil, false, exitError{2, err}
 	}
 	if *number <= 0 || fs.NArg() != 0 {
-		return "", 0, false, exitError{2, fmt.Errorf("--issue must be a positive Issue number")}
+		return "", 0, nil, false, exitError{2, fmt.Errorf("--issue must be a positive Issue number")}
 	}
-	return *repo, *number, *jsonOut, nil
+	normalized, err := normalizeAdoptionAllowPaths(allowPaths)
+	if err != nil {
+		return "", 0, nil, false, exitError{2, err}
+	}
+	return *repo, *number, normalized, *jsonOut, nil
 }
 
-func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, number int) (issuePlanningContext, error) {
+func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, number int, adoptionAllowPaths []string) (issuePlanningContext, error) {
 	entry, err := a.resolvePath(l, repo)
 	if err != nil {
 		return issuePlanningContext{}, err
@@ -145,6 +154,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 				Actions: []issueActionPlan{
 					{Action: issuedomain.ResolutionResume, Eligible: false, Reasons: []string{"Issue is quarantined"}},
 					{Action: issuedomain.ResolutionRetryStage, Eligible: false, Reasons: []string{"Issue is quarantined"}},
+					{Action: issuedomain.ResolutionAdoptWorktree, Eligible: false, Reasons: []string{"Issue is quarantined"}},
 					{Action: issuedomain.ResolutionAdoptPR, Eligible: false, Reasons: []string{"Issue is quarantined"}},
 					{Action: issuedomain.ResolutionCancel, Eligible: true},
 				},
@@ -187,7 +197,11 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 			resultSHA256 = fmt.Sprintf("%x", sha256.Sum256(encoded))
 		}
 	}
-	actions := plannedIssueActions(cfg, item, snapshot.ActiveExecution, workerLive, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, pending, remote, remoteErr, resultErr)
+	adoption, adoptionErr := worktreeAdoptionObservation{}, error(nil)
+	if missingOnlyWorktreeDigest(item) && launchErr == nil && launch.Valid && inspectErr == nil && inspection.Valid {
+		adoption, adoptionErr = inspectWorktreeAdoption(ctx, entry.Commands["git"], item)
+	}
+	actions := plannedIssueActions(cfg, item, snapshot.ActiveExecution, workerLive, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, pending, remote, remoteErr, resultErr, adoption, adoptionErr, adoptionAllowPaths)
 	after, readErr := os.ReadFile(store.StatePath())
 	readOnly := readErr == nil && bytes.Equal(before, after)
 	report := issuePlanReport{
@@ -207,6 +221,10 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 			"pending_request_ids":       pending,
 			"publication_result_sha256": resultSHA256,
 			"publication_result_error":  errorText(resultErr),
+			"adoption_merge_head":       adoption.MergeHead, "adoption_changed_paths": adoption.ChangedPaths,
+			"adoption_unmerged_paths": adoption.UnmergedPaths, "adoption_error": errorText(adoptionErr),
+			"adoption_allow_paths":              append([]string(nil), adoptionAllowPaths...),
+			"adoption_unapproved_changed_paths": adoptionUnapprovedPaths(item, adoption, adoptionAllowPaths),
 		},
 		Actions: actions, ReadOnly: readOnly,
 	}
@@ -214,21 +232,25 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 		remote: remote, remoteErr: remoteErr, launch: launch, launchErr: launchErr,
 		inspection: inspection, inspectErr: inspectErr, worktreeSHA256: worktreeSHA256, worktreeDigestErr: worktreeDigestErr,
 		baseOK: baseOK, baseErr: baseErr,
-		workerLive: workerLive, pending: pending, resultSummary: resultSummary, resultSHA256: resultSHA256, resultErr: resultErr, report: report}, nil
+		workerLive: workerLive, pending: pending, resultSummary: resultSummary, resultSHA256: resultSHA256, resultErr: resultErr,
+		adoption: adoption, adoptionErr: adoptionErr, adoptionAllowPaths: append([]string(nil), adoptionAllowPaths...), report: report}, nil
 }
 
 func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *state.ActiveExecution, workerLive bool, launch worktree.LaunchValidation, launchErr error,
 	inspection worktree.Inspection, inspectErr error, worktreeSHA256 string, worktreeDigestErr error,
 	baseOK bool, baseErr error, pending []string, remote gh.RemoteState, remoteErr error,
-	resultErr error,
+	resultErr error, adoption worktreeAdoptionObservation, adoptionErr error, adoptionAllowPaths []string,
 ) []issueActionPlan {
-	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionResume, issuedomain.ResolutionRetryStage, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel}
+	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionResume, issuedomain.ResolutionRetryStage, issuedomain.ResolutionAdoptWorktree, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel}
 	result := make([]issueActionPlan, 0, len(actions))
 	for _, action := range actions {
 		reasons := []string{}
 		suspensionEligible := item.Suspension != nil && containsAction(item.Suspension.AllowedActions, action) &&
 			(item.Suspension.Status == issuedomain.SuspensionActive ||
 				(item.Suspension.Status == issuedomain.SuspensionQuarantined && action == issuedomain.ResolutionCancel))
+		if action == issuedomain.ResolutionAdoptWorktree {
+			suspensionEligible = missingOnlyWorktreeDigest(item)
+		}
 		if !suspensionEligible {
 			reasons = append(reasons, "action is not allowed by the active suspension")
 		}
@@ -236,6 +258,9 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 			reasons = append(reasons, "worker process is alive")
 		}
 		if resolutionRequiresExecutionSlot(action) && activeExecution != nil {
+			reasons = append(reasons, fmt.Sprintf("repository active execution is occupied by Issue #%d", activeExecution.IssueNumber))
+		}
+		if action == issuedomain.ResolutionAdoptWorktree && activeExecution != nil {
 			reasons = append(reasons, fmt.Sprintf("repository active execution is occupied by Issue #%d", activeExecution.IssueNumber))
 		}
 		if len(pending) > 0 && action != issuedomain.ResolutionCancel {
@@ -285,6 +310,8 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 			if action == issuedomain.ResolutionRetryStage && item.Continuation != nil && item.Continuation.Stage == issuedomain.ContinuationStagePublish && resultErr != nil {
 				reasons = append(reasons, "saved completed worker result is unavailable")
 			}
+		case issuedomain.ResolutionAdoptWorktree:
+			reasons = append(reasons, worktreeAdoptionReasons(cfg, item, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, remote, remoteErr, adoption, adoptionErr, adoptionAllowPaths)...)
 		case issuedomain.ResolutionAdoptPR:
 			if remoteErr != nil {
 				reasons = append(reasons, "GitHub state was not observed")
@@ -338,6 +365,13 @@ func issueResolutionAudit(planned issuePlanningContext, action issuedomain.Resol
 		"open_pull_requests":  countOpenPullRequests(planned.remote.PullRequests),
 		"pending_request_ids": append([]string(nil), planned.pending...),
 	}
+	if action == issuedomain.ResolutionAdoptWorktree {
+		payload["target_base_sha"] = planned.issue.ConflictRecovery.TargetBaseSHA
+		payload["changed_paths"] = append([]string(nil), planned.adoption.ChangedPaths...)
+		payload["unmerged_paths"] = append([]string(nil), planned.adoption.UnmergedPaths...)
+		payload["allowed_paths_added"] = append([]string(nil), planned.adoptionAllowPaths...)
+		return "issue_worktree_adopted", payload
+	}
 	if action == issuedomain.ResolutionRetryStage && planned.issue.Continuation != nil && planned.issue.Continuation.Stage == issuedomain.ContinuationStagePublish {
 		payload["publication_result_sha256"] = planned.resultSHA256
 	}
@@ -364,7 +398,9 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	fs := flag.NewFlagSet("issue resolve", flag.ContinueOnError)
 	repo := fs.String("repo", "", "repository path")
 	number := fs.Int("issue", 0, "Issue number")
-	actionText := fs.String("action", "", "resume, retry-stage, adopt-pr, or cancel")
+	actionText := fs.String("action", "", "resume, retry-stage, adopt-worktree, adopt-pr, or cancel")
+	var allowPaths pathListFlag
+	fs.Var(&allowPaths, "allow-path", "explicit changed path to add to conflict recovery scope; repeatable")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
@@ -373,7 +409,14 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	if *number <= 0 || action.Validate() != nil || fs.NArg() != 0 {
 		return exitError{2, fmt.Errorf("--issue and a valid --action are required")}
 	}
-	planned, err := a.buildIssuePlan(ctx, l, *repo, *number)
+	normalizedAllowPaths, err := normalizeAdoptionAllowPaths(allowPaths)
+	if err != nil {
+		return exitError{2, err}
+	}
+	if len(normalizedAllowPaths) > 0 && action != issuedomain.ResolutionAdoptWorktree {
+		return exitError{2, fmt.Errorf("--allow-path is valid only with --action adopt-worktree")}
+	}
+	planned, err := a.buildIssuePlan(ctx, l, *repo, *number, normalizedAllowPaths)
 	if err != nil {
 		return err
 	}
@@ -410,7 +453,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	if !eligible {
 		return exitError{4, fmt.Errorf("Issue #%d action %s is not eligible: %s", *number, action, strings.Join(reasons, "; "))}
 	}
-	revalidated, err := a.buildIssuePlan(ctx, l, *repo, *number)
+	revalidated, err := a.buildIssuePlan(ctx, l, *repo, *number, normalizedAllowPaths)
 	if err != nil {
 		return err
 	}
@@ -446,7 +489,15 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 			if resolutionRequiresExecutionSlot(action) && snapshot.ActiveExecution != nil {
 				return fmt.Errorf("Issue #%d execution slot changed after planning", *number)
 			}
-			if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
+			if action == issuedomain.ResolutionAdoptWorktree {
+				item.Continuation.WorktreeSHA256 = planned.worktreeSHA256
+				item.Continuation.Stage = issuedomain.ContinuationStageConflict
+				item.ConflictRecovery.AllowedPaths = mergeAdoptionPaths(item.ConflictRecovery.AllowedPaths, planned.adoptionAllowPaths)
+				item.Suspension.Status = issuedomain.SuspensionActive
+				item.Suspension.Recoverability = issuedomain.RecoverabilityOperator
+				item.Suspension.MissingEvidence = nil
+				item.Suspension.AllowedActions = []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionRetryStage}
+			} else if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
 				if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStagePublish {
 					if planned.resultErr != nil || planned.resultSummary == "" || planned.resultSHA256 == "" {
 						return fmt.Errorf("Issue #%d saved completed worker result changed after planning", *number)
@@ -512,7 +563,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 				}
 				item.GitHubStateReason = planned.remote.Issue.StateReason
 			}
-			if item.Suspension != nil {
+			if item.Suspension != nil && action != issuedomain.ResolutionAdoptWorktree {
 				item.Suspension.Status = issuedomain.SuspensionResolved
 				item.Suspension.Resolution = action
 				item.Suspension.ResolvedAt = now
@@ -523,7 +574,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	if err != nil {
 		return exitError{4, err}
 	}
-	if action != issuedomain.ResolutionCancel {
+	if action != issuedomain.ResolutionCancel && action != issuedomain.ResolutionAdoptWorktree {
 		planned.snapshot = result
 		planned.issue = result.Issues[strconv.Itoa(*number)]
 		if err := a.synchronizeIssueResolution(ctx, planned, action, *number); err != nil {
@@ -537,7 +588,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 func (a App) resolveQuarantinedIssue(ctx context.Context, l layout.Layout, repo string, number int,
 	action issuedomain.ResolutionAction, jsonOut bool, planned issuePlanningContext,
 ) error {
-	revalidated, err := a.buildIssuePlan(ctx, l, repo, number)
+	revalidated, err := a.buildIssuePlan(ctx, l, repo, number, nil)
 	if err != nil {
 		return err
 	}

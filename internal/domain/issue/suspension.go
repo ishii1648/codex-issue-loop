@@ -5,16 +5,17 @@ import "fmt"
 type ResolutionAction string
 
 const (
-	ResolutionNone       ResolutionAction = ""
-	ResolutionResume     ResolutionAction = "resume"
-	ResolutionRetryStage ResolutionAction = "retry-stage"
-	ResolutionAdoptPR    ResolutionAction = "adopt-pr"
-	ResolutionCancel     ResolutionAction = "cancel"
+	ResolutionNone          ResolutionAction = ""
+	ResolutionResume        ResolutionAction = "resume"
+	ResolutionRetryStage    ResolutionAction = "retry-stage"
+	ResolutionAdoptWorktree ResolutionAction = "adopt-worktree"
+	ResolutionAdoptPR       ResolutionAction = "adopt-pr"
+	ResolutionCancel        ResolutionAction = "cancel"
 )
 
 func (a ResolutionAction) Validate() error {
 	switch a {
-	case ResolutionResume, ResolutionRetryStage, ResolutionAdoptPR, ResolutionCancel:
+	case ResolutionResume, ResolutionRetryStage, ResolutionAdoptWorktree, ResolutionAdoptPR, ResolutionCancel:
 		return nil
 	default:
 		return fmt.Errorf("unknown Issue resolution action %q", a)
