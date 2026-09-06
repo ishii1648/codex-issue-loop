@@ -1353,6 +1353,73 @@ func TestFailedPullRequestChecksReturnWorkerToRetry(t *testing.T) {
 	}
 }
 
+func TestAnsweredWorkerCanRetryFailedPullRequestChecks(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, worker.Result{
+		Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "decision", SessionID: "session",
+		Question: &worker.Question{Text: "Which source?", Reason: "dating", AllowFreeText: true},
+	})
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	asked, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asked.PendingRequests) != 1 {
+		t.Fatalf("requests=%+v", asked.PendingRequests)
+	}
+	var requestID string
+	for id := range asked.PendingRequests {
+		requestID = id
+	}
+	if _, _, err := loop.Store.RecordAnswer(requestID, "Use a dated source", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.Store.PrepareAnsweredRequests(time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	loop.Worker = &recordingWorker{result: result}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", IsDraft: true, HeadRefName: "codex/issue-1-test", ChecksStatus: "failure"}},
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := loop.Store.Load()
+	if snapshot.Issues["1"].Status != issuedomain.StatusRetryWait || !strings.Contains(snapshot.Issues["1"].LastError, "checks failed") {
+		t.Fatalf("issue=%+v", snapshot.Issues["1"])
+	}
+	recorder := &recordingWorker{result: worker.Result{
+		Version: 1, Status: "retryable_failure", ExecutionProfile: "extended", SessionID: "session", Summary: "retry later",
+	}}
+	loop.Worker = recorder
+	_, err = loop.Store.Update("test_retry_due", 1, "", nil, func(s *state.Snapshot) error {
+		s.Issues["1"].RetryAfter = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.resumePrompts) != 1 || !strings.Contains(recorder.resumePrompts[0], "https://example.test/pr/1") {
+		t.Fatalf("resume prompts=%q", recorder.resumePrompts)
+	}
+	after, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.QuarantinedIssues["1"] != nil || len(after.Issues["1"].Answers) != 1 || after.PendingRequests[requestID].Answer != "Use a dated source" {
+		t.Fatalf("answer or execution lost: %+v", after)
+	}
+}
+
 func TestFailedChecksWhileAwaitingAutoMergeReturnIssueToRetry(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
 	loop, github := testLoop(t, result)

@@ -2,6 +2,7 @@ package state
 
 import (
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -60,5 +61,24 @@ func TestInputRecoveryRejectsOtherQuarantines(t *testing.T) {
 		if _, err := InputRecoveryCandidate(q); err == nil {
 			t.Fatal("ambiguous recovery accepted")
 		}
+	}
+}
+
+func TestAnsweredPublicationBoundaryPreservesQuestionIdentity(t *testing.T) {
+	snapshot := legacyAnsweredLaunchFixture()
+	item := snapshot.Issues["1"]
+	questionCheckpoint := *item.Continuation
+	request := *snapshot.PendingRequests["req_1"]
+	answers := append([]AnswerRecord(nil), item.Answers...)
+	item.Status = issuedomain.StatusAwaitingChecks
+	item.HeadSHA = strings.Repeat("a", 40)
+	item.PullRequestURL, item.PullRequestNumber = "https://example.test/pull/1", 1
+	finalizeLifecycleBoundaries(&snapshot, time.Now().UTC())
+	checkpoint := item.Continuation
+	if snapshot.ActiveExecution != nil || checkpoint.ID == questionCheckpoint.ID || checkpoint.Kind != "" || checkpoint.RequestID != "" || checkpoint.Generation != 4 || checkpoint.Stage != issuedomain.ContinuationStageChecks || checkpoint.HeadSHA != item.HeadSHA {
+		t.Fatalf("publication reused answer authority: %+v", checkpoint)
+	}
+	if !reflect.DeepEqual(request, *snapshot.PendingRequests["req_1"]) || !reflect.DeepEqual(answers, item.Answers) || request.ReleasedExecution.Generation != 3 {
+		t.Fatal("publication changed the saved question or answer")
 	}
 }
