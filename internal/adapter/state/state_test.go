@@ -23,7 +23,11 @@ func TestLoadDoesNotEmitPermissionWatchEventsWhenModesAreSecure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer watcher.Close()
+	defer func() {
+		if err := watcher.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if err := watcher.Add(store.Dir); err != nil {
 		t.Fatal(err)
 	}
@@ -993,7 +997,10 @@ func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, _ := store.Load()
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if reason, ok := snapshot.Attention(false, true); !ok || reason != "needs_input" {
 		t.Fatalf("reason=%q ok=%v", reason, ok)
 	}
@@ -1001,7 +1008,10 @@ func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, _ = store.Load()
+	snapshot, err = store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if reason, ok := snapshot.Attention(false, true); !ok || reason != "needs_input" {
 		t.Fatalf("request was not sticky")
 	}
@@ -1334,7 +1344,10 @@ func TestFaultRevisionMismatchIsQuarantined(t *testing.T) {
 	if _, err := store.Update("first", 0, "", nil, func(s *Snapshot) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	payload, _ := json.Marshal(map[string]string{"cause": "missing transaction"})
+	payload, err := json.Marshal(map[string]string{"cause": "missing transaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.appendEventUnlocked(Event{
 		Version: CurrentVersion, EventID: "evt_orphan", Sequence: 2, Timestamp: time.Now().UTC(),
 		RepoID: store.RepoID, Type: "orphan", Payload: payload,

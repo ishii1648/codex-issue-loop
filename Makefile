@@ -1,8 +1,10 @@
-.PHONY: build test fault-test conformance-test incident-e2e test-race vet vuln-check install-shellcheck workflow-shell-check fmt-check schema-check tidy-check release-check ci clean
+.PHONY: build test fault-test conformance-test incident-e2e test-race vet staticcheck errcheck vuln-check install-shellcheck workflow-shell-check fmt-check schema-check tidy-check release-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
 GOVULNCHECK_VERSION ?= v1.6.0
+STATICCHECK_VERSION := v0.7.0
+ERRCHECK_VERSION := v1.10.0
 ACTIONLINT_VERSION := v1.7.12
 SHELLCHECK_VERSION := 0.11.0
 GO_TOOLCHAIN ?= go1.25.13
@@ -33,6 +35,12 @@ test-race:
 
 vet:
 	$(GO) vet ./...
+
+staticcheck:
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -checks='SA*' ./...
+
+errcheck:
+	$(GO) run github.com/kisielk/errcheck@$(ERRCHECK_VERSION) -blank -exclude scripts/errcheck-excludes.txt ./internal/platform/fsutil ./internal/adapter/state ./internal/adapter/publish
 
 vuln-check:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
@@ -76,7 +84,7 @@ tidy-check:
 release-check:
 	scripts/check-release.sh
 
-ci: workflow-shell-check fmt-check schema-check tidy-check test fault-test conformance-test test-race vet vuln-check build release-check
+ci: workflow-shell-check fmt-check schema-check tidy-check test fault-test conformance-test test-race vet staticcheck errcheck vuln-check build release-check
 
 clean:
 	$(GO) clean

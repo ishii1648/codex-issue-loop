@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -354,8 +355,7 @@ func (snapshot *Snapshot) UnmarshalJSON(data []byte) error {
 				}
 			}
 			var status string
-			_ = json.Unmarshal(issue["status"], &status)
-			if status == "environment_resume_pending" || status == "publication_recovery_pending" || status == "pull_request_checks_recovery_pending" {
+			if err := json.Unmarshal(issue["status"], &status); err == nil && (status == "environment_resume_pending" || status == "publication_recovery_pending" || status == "pull_request_checks_recovery_pending") {
 				return fmt.Errorf("Issue %s uses removed v5 status %q", number, status)
 			}
 			if _, exists := issue["github_sync"]; exists {
@@ -631,8 +631,7 @@ func (s Store) AcquireSupervisorLock() (*os.File, error) {
 		return nil, err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("another supervisor holds %s: %w", path, err)
+		return nil, fmt.Errorf("another supervisor holds %s: %w", path, errors.Join(err, f.Close()))
 	}
 	return f, nil
 }
@@ -701,8 +700,7 @@ func ReleaseSupervisorLock(f *os.File) {
 	if f == nil {
 		return
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	_ = f.Close()
+	unlock(f)
 }
 
 func (s Store) lock(exclusive bool) (*os.File, error) {
@@ -715,15 +713,17 @@ func (s Store) lock(exclusive bool) (*os.File, error) {
 		how = syscall.LOCK_EX
 	}
 	if err := syscall.Flock(int(f.Fd()), how); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("lock state: %w", err)
+		return nil, fmt.Errorf("lock state: %w", errors.Join(err, f.Close()))
 	}
 	return f, nil
 }
 
 func unlock(f *os.File) {
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	_ = f.Close()
+	// Closing the descriptor also releases the lock if explicit unlock fails.
+	defer io.Closer(f).Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+		return
+	}
 }
 
 func (s Snapshot) Attention(untilIdle, autoMerge bool) (string, bool) {

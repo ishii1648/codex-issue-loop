@@ -1,0 +1,9 @@
+// Explicit io.Closer conversions mark read-only or lock cleanup descriptors.
+// Write-side *os.File.Close calls must remain checked, including failure paths.
+(io.Closer).Close
+
+// The only unchecked Remove is deferred removal of the temporary atomic-write file.
+os.Remove
+
+// Issue map keys are validated separately; these conversions only order/display them.
+strconv.Atoi

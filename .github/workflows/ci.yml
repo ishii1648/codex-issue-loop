@@ -62,6 +62,12 @@ jobs:
       - name: Run go vet
         run: make vet
 
+      - name: Run Staticcheck SA checks
+        run: make staticcheck
+
+      - name: Check persistence and publication errors
+        run: make errcheck
+
       - name: Scan reachable Go vulnerabilities
         run: make vuln-check
 

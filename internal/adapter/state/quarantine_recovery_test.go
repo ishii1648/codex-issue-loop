@@ -82,8 +82,14 @@ func TestSemanticMismatchRecoveryRestoresOneExactBackupWithoutRewritingIt(t *tes
 			t.Fatalf("missing marker audit %s: %v", name, err)
 		}
 	}
-	backupStateAfter, _ := os.ReadFile(filepath.Join(backup, "state.json"))
-	backupEventsAfter, _ := os.ReadFile(filepath.Join(backup, "events.jsonl"))
+	backupStateAfter, err := os.ReadFile(filepath.Join(backup, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupEventsAfter, err := os.ReadFile(filepath.Join(backup, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(backupStateBefore, backupStateAfter) || !bytes.Equal(backupEventsBefore, backupEventsAfter) {
 		t.Fatal("exact semantic recovery backup was modified")
 	}
@@ -170,7 +176,10 @@ func TestLifecycleMismatchRecoveryRejectsChangedEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markerData, _ := os.ReadFile(store.StatePath())
+	markerData, err := os.ReadFile(store.StatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
 	markerData = bytes.Replace(markerData,
 		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPICurrent+`"`),
 		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPIPreviousMinor+`"`), 1)
@@ -181,7 +190,10 @@ func TestLifecycleMismatchRecoveryRejectsChangedEvidence(t *testing.T) {
 		t.Fatal("unrecorded lifecycle backup was accepted")
 	}
 	backupState := filepath.Join(blocked.Recovery.BackupDir, "state.json")
-	data, _ := os.ReadFile(backupState)
+	data, err := os.ReadFile(backupState)
+	if err != nil {
+		t.Fatal(err)
+	}
 	data = bytes.Replace(data,
 		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPICurrent+`"`),
 		[]byte(`"issue_lifecycle_api_version": "99.0"`), 1)
