@@ -299,15 +299,17 @@ func (f *fakeGitHub) MarkRunning(_ context.Context, cfg config.Config, _ int) er
 	return nil
 }
 
-func (f *fakeGitHub) ReconcileIssue(_ context.Context, cfg config.Config, number int, status issuedomain.Status) error {
+func (f *fakeGitHub) ReconcileIssue(_ context.Context, cfg config.Config, number int, status issuedomain.Status, human bool) error {
 	if f.projectionHook != nil {
 		return f.projectionHook(number, status)
 	}
 	label := cfg.GitHub.RunningLabel
 	state, reason := "OPEN", ""
 	switch status {
+	case issuedomain.StatusUnset:
+		label = ""
 	case issuedomain.StatusNeedsInput:
-		label = cfg.GitHub.NeedsInputLabel
+		label = ""
 	case issuedomain.StatusBlocked:
 		label = "blocked"
 	case issuedomain.StatusFailed:
@@ -320,12 +322,18 @@ func (f *fakeGitHub) ReconcileIssue(_ context.Context, cfg config.Config, number
 	case issuedomain.StatusCanceled:
 		label, state, reason = "", "CLOSED", "NOT_PLANNED"
 	}
+	if human && label == cfg.GitHub.RunningLabel {
+		label = ""
+	}
 	project := func(issue *gh.Issue) {
 		labels := []string{}
 		for _, existing := range issue.Labels {
-			if existing != cfg.GitHub.RunningLabel && existing != cfg.GitHub.NeedsInputLabel && existing != cfg.GitHub.FailedLabel && existing != cfg.GitHub.DoneLabel && existing != "blocked" && !containsString(cfg.GitHub.ReadyLabels, existing) {
+			if existing != cfg.GitHub.RunningLabel && existing != cfg.GitHub.NeedsInputLabel && existing != cfg.GitHub.FailedLabel && existing != cfg.GitHub.DoneLabel && existing != "blocked" && existing != "needs-human" && existing != "codex-loop:needs-input" && existing != "triage" && existing != "do-not-automate" && !containsString(cfg.GitHub.ReadyLabels, existing) {
 				labels = append(labels, existing)
 			}
+		}
+		if human {
+			labels = append(labels, cfg.GitHub.NeedsInputLabel)
 		}
 		if label != "" {
 			labels = append(labels, label)

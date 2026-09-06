@@ -994,7 +994,7 @@ func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, _ := store.Load()
-	if reason, ok := snapshot.Attention(false); !ok || reason != "needs_input" {
+	if reason, ok := snapshot.Attention(false, true); !ok || reason != "needs_input" {
 		t.Fatalf("reason=%q ok=%v", reason, ok)
 	}
 	_, err = store.Update("unrelated", 0, "", nil, func(s *Snapshot) error { s.Supervisor.State = "polling"; return nil })
@@ -1002,7 +1002,7 @@ func TestFaultAttentionRemainsStickyUntilAnswered(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, _ = store.Load()
-	if reason, ok := snapshot.Attention(false); !ok || reason != "needs_input" {
+	if reason, ok := snapshot.Attention(false, true); !ok || reason != "needs_input" {
 		t.Fatalf("request was not sticky")
 	}
 }
@@ -1014,7 +1014,7 @@ func TestUntilIdleWaitsForPullRequestLifecycle(t *testing.T) {
 				Supervisor: Supervisor{State: "polling"},
 				Issues:     map[string]*Issue{"7": {Number: 7, Status: issuedomain.Status(status)}},
 			}
-			if reason, ok := snapshot.Attention(true); ok {
+			if reason, ok := snapshot.Attention(true, true); ok {
 				t.Fatalf("reason=%q ok=%v", reason, ok)
 			}
 		})
@@ -1059,10 +1059,10 @@ func TestAttentionReportsOneBlockedIssueWhileAnotherWorkerIsActive(t *testing.T)
 			"2": {Number: 2, Status: issuedomain.StatusBlocked},
 		},
 	}
-	if reason, ok := snapshot.Attention(false); !ok || reason != "blocked" {
+	if reason, ok := snapshot.Attention(false, true); !ok || reason != "blocked" {
 		t.Fatalf("reason=%q ok=%v", reason, ok)
 	}
-	if reason, ok := snapshot.Attention(true); !ok || reason != "blocked" {
+	if reason, ok := snapshot.Attention(true, true); !ok || reason != "blocked" {
 		t.Fatalf("until-idle reason=%q ok=%v", reason, ok)
 	}
 }
@@ -1078,10 +1078,10 @@ func TestCanceledIssueIsTerminalWithoutStickyAttention(t *testing.T) {
 		}},
 		PendingEffects: map[string]*EffectIntent{}, PendingRequests: map[string]*Request{},
 	}
-	if reason, ok := snapshot.Attention(false); ok {
+	if reason, ok := snapshot.Attention(false, true); ok {
 		t.Fatalf("reason=%q ok=%v", reason, ok)
 	}
-	if reason, ok := snapshot.Attention(true); !ok || reason != "idle" {
+	if reason, ok := snapshot.Attention(true, true); !ok || reason != "idle" {
 		t.Fatalf("until-idle reason=%q ok=%v", reason, ok)
 	}
 }

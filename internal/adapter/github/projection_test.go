@@ -28,7 +28,7 @@ func TestIssueProjectionCoversEveryLifecycleState(t *testing.T) {
 		{issuedomain.StatusResolvingConflict, cfg.GitHub.RunningLabel, "OPEN", ""},
 		{issuedomain.StatusAwaitingChecks, cfg.GitHub.RunningLabel, "OPEN", ""},
 		{issuedomain.StatusAwaitingMerge, cfg.GitHub.RunningLabel, "OPEN", ""},
-		{issuedomain.StatusNeedsInput, cfg.GitHub.NeedsInputLabel, "OPEN", ""},
+		{issuedomain.StatusNeedsInput, "", "OPEN", ""},
 		{issuedomain.StatusBlocked, "blocked", "OPEN", ""},
 		{issuedomain.StatusFailed, cfg.GitHub.FailedLabel, "OPEN", ""},
 		{issuedomain.StatusCompleted, cfg.GitHub.DoneLabel, "CLOSED", "COMPLETED"},
@@ -40,11 +40,14 @@ func TestIssueProjectionCoversEveryLifecycleState(t *testing.T) {
 			if err != nil || p.label != test.label || p.state != test.state || p.reason != test.reason {
 				t.Fatalf("projection=%+v err=%v", p, err)
 			}
-			remote := Issue{State: test.state, StateReason: test.reason, Labels: []string{"bug", "do-not-automate"}}
+			remote := Issue{State: test.state, StateReason: test.reason, Labels: []string{"bug"}}
+			if test.status == issuedomain.StatusNeedsInput {
+				remote.Labels = append(remote.Labels, cfg.GitHub.NeedsInputLabel)
+			}
 			if test.label != "" {
 				remote.Labels = append(remote.Labels, strings.ToUpper(test.label))
 			}
-			if err := ValidateIssueProjection(cfg, remote, test.status); err != nil {
+			if err := ValidateIssueProjection(cfg, remote, test.status, test.status == issuedomain.StatusNeedsInput); err != nil {
 				t.Fatal(err)
 			}
 			remote.Labels = append(remote.Labels, cfg.GitHub.ReadyLabels...)
@@ -55,11 +58,11 @@ func TestIssueProjectionCoversEveryLifecycleState(t *testing.T) {
 		})
 	}
 	cfg.Completion.CloseIssue = false
-	if err := ValidateIssueProjection(cfg, Issue{State: "OPEN", Labels: []string{cfg.GitHub.DoneLabel}}, issuedomain.StatusCompleted); err != nil {
+	if err := ValidateIssueProjection(cfg, Issue{State: "OPEN", Labels: []string{cfg.GitHub.DoneLabel}}, issuedomain.StatusCompleted, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := desiredIssueProjection(cfg, issuedomain.StatusUnset); err == nil {
-		t.Fatal("unmanaged status accepted")
+	if _, err := desiredIssueProjection(cfg, issuedomain.StatusUnset); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -104,13 +107,13 @@ esac
 				t.Fatal(err)
 			}
 			client := CLI{Path: path}
-			if err := client.ReconcileIssue(context.Background(), cfg, 7, issuedomain.StatusCompleted); err == nil {
+			if err := client.ReconcileIssue(context.Background(), cfg, 7, issuedomain.StatusCompleted, false); err == nil {
 				t.Fatal("partial or unconfirmed close was accepted")
 			}
-			if err := client.ReconcileIssue(context.Background(), cfg, 7, issuedomain.StatusCompleted); err != nil {
+			if err := client.ReconcileIssue(context.Background(), cfg, 7, issuedomain.StatusCompleted, false); err != nil {
 				t.Fatal(err)
 			}
-			if err := client.ReconcileIssue(context.Background(), cfg, 7, issuedomain.StatusCompleted); err != nil {
+			if err := client.ReconcileIssue(context.Background(), cfg, 7, issuedomain.StatusCompleted, false); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(filepath.Join(dir, "calls"))
@@ -122,5 +125,39 @@ esac
 				t.Fatal(calls)
 			}
 		})
+	}
+}
+
+func TestHumanProjectionRemovesResolvedAttentionAndRetiredLabels(t *testing.T) {
+	cfg := config.Defaults()
+	p, err := desiredIssueProjection(cfg, issuedomain.StatusRunning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	add, remove := p.labelChanges(Issue{Labels: []string{"needs-human", "codex-loop:needs-input", "triage", "do-not-automate", "bug"}})
+	if !reflect.DeepEqual(add, []string{cfg.GitHub.RunningLabel}) {
+		t.Fatal(add)
+	}
+	for _, old := range []string{"needs-human", "codex-loop:needs-input", "triage", "do-not-automate"} {
+		found := false
+		for _, label := range remove {
+			if label == old {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("retired attention label %s retained: %v", old, remove)
+		}
+	}
+	for _, label := range remove {
+		if label == "bug" {
+			t.Fatal("classification label removed")
+		}
+	}
+	p.human = true
+	p.label = ""
+	add, remove = p.labelChanges(Issue{Labels: []string{cfg.GitHub.RunningLabel}})
+	if !reflect.DeepEqual(add, []string{"needs-human"}) || !reflect.DeepEqual(remove, []string{cfg.GitHub.RunningLabel}) {
+		t.Fatalf("human handoff: add=%v remove=%v", add, remove)
 	}
 }

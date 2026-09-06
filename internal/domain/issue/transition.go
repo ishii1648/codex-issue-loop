@@ -271,3 +271,7 @@ func ReconcileObservation(from, to Status) (Transition, error) {
 		return Transition{}, fmt.Errorf("reconciliation does not allow status %q to converge to %q", from, to)
 	}
 }
+
+func RestoreRejectedInput(from Status) (Transition, error) {
+	return newAllowedTransition("restore_rejected_input", from, StatusNeedsInput, StatusRunning)
+}

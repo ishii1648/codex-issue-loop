@@ -72,23 +72,6 @@ type issuePlanningContext struct {
 	report             issuePlanReport
 }
 
-func (a App) issueCommand(ctx context.Context, l layout.Layout, args []string) error {
-	if len(args) == 0 {
-		return exitError{2, fmt.Errorf("issue requires plan or resolve")}
-	}
-	switch args[0] {
-	case "plan":
-		return a.issuePlan(ctx, l, args[1:])
-	case "resolve":
-		return a.issueResolve(ctx, l, args[1:])
-	case "help", "--help", "-h":
-		fmt.Fprintln(a.Out, "Usage: agent-loop issue plan --repo PATH --issue N [--allow-path PATH] --json\n       agent-loop issue resolve --repo PATH --issue N --action resume|retry-stage|adopt-head|adopt-worktree|adopt-pr|cancel [--expected-head SHA] [--allow-path PATH] --json")
-		return nil
-	default:
-		return exitError{2, fmt.Errorf("unknown issue command %q", args[0])}
-	}
-}
-
 func (a App) issuePlan(ctx context.Context, l layout.Layout, args []string) error {
 	repo, number, allowPaths, jsonOut, err := parseIssuePlanArgs(args)
 	if err != nil {
@@ -161,7 +144,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 				},
 				ReadOnly: readErr == nil && bytes.Equal(before, after),
 			}
-			return issuePlanningContext{ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, quarantine: quarantine, report: report}, nil
+			return a.inspectInputAdoption(ctx, l, issuePlanningContext{ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, quarantine: quarantine, report: report}), nil
 		}
 		return issuePlanningContext{}, exitError{4, fmt.Errorf("Issue #%d is missing from canonical state", number)}
 	}
@@ -242,7 +225,7 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 	baseOK bool, baseErr error, pending []string, remote gh.RemoteState, remoteErr error,
 	resultErr error, adoption worktreeAdoptionObservation, adoptionErr error, adoptionAllowPaths []string,
 ) []issueActionPlan {
-	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionResume, issuedomain.ResolutionRetryStage, issuedomain.ResolutionAdoptHead, issuedomain.ResolutionAdoptWorktree, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel}
+	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionResume, issuedomain.ResolutionRetryStage, issuedomain.ResolutionAdoptInput, issuedomain.ResolutionAdoptHead, issuedomain.ResolutionAdoptWorktree, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel}
 	result := make([]issueActionPlan, 0, len(actions))
 	for _, action := range actions {
 		reasons := []string{}
@@ -428,14 +411,17 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	if err != nil {
 		return err
 	}
-	if planned.issue == nil && planned.quarantine != nil {
+	if planned.quarantine != nil {
+		if action == issuedomain.ResolutionAdoptInput {
+			return a.resolveInputAdoption(ctx, l, opts, planned)
+		}
 		if action != issuedomain.ResolutionCancel {
 			return exitError{4, fmt.Errorf("Issue #%d is quarantined; only cancel is eligible", *number)}
 		}
 		return a.resolveQuarantinedIssue(ctx, l, *repo, *number, action, *jsonOut, planned)
 	}
 	if action == issuedomain.ResolutionCancel && planned.issue.Status == issuedomain.StatusCanceled {
-		if err := (gh.CLI{Path: planned.ghPath, Secrets: planned.cfg.RedactionValues()}).ReconcileIssue(ctx, planned.cfg, *number, planned.issue.Status); err != nil {
+		if err := (gh.CLI{Path: planned.ghPath, Secrets: planned.cfg.RedactionValues()}).ReconcileIssue(ctx, planned.cfg, *number, planned.issue.Status, planned.snapshot.NeedsHuman(*number, planned.cfg.Completion.AutoMerge)); err != nil {
 			return err
 		}
 		return a.output(*jsonOut, map[string]any{"schema_version": 1, "issue_number": *number, "action": action, "idempotent": true, "status": planned.issue.Status})
@@ -686,7 +672,7 @@ func (a App) synchronizeIssueResolution(ctx context.Context, planned issuePlanni
 		err = client.MarkRunning(ctx, planned.cfg, number)
 	}
 	if err == nil {
-		err = client.ReconcileIssue(ctx, planned.cfg, number, planned.issue.Status)
+		err = client.ReconcileIssue(ctx, planned.cfg, number, planned.issue.Status, before.NeedsHuman(number, planned.cfg.Completion.AutoMerge))
 	}
 	if err != nil {
 		return fmt.Errorf("synchronize Issue #%d resolution %s: %w", number, action, err)

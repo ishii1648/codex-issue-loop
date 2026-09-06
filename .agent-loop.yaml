@@ -4,7 +4,7 @@ github:
   repo: ishii1648/codex-issue-loop
   repository_id: 1334901081
   ready_labels: [codex-loop:ready]
-  exclude_labels: [blocked, do-not-automate]
+  exclude_labels: [blocked]
   trusted_issue_authors:
     minimum_permission: write
     allow_logins: []

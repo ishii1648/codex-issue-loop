@@ -61,6 +61,11 @@ func (s Store) StartExecution(start ExecutionStart) (Snapshot, ExecutionIdentity
 			identity = ExecutionIdentity{RunID: active.RunID, Generation: active.Generation}
 			return nil
 		}
+		for _, request := range snapshot.PendingRequests {
+			if request.IssueNumber == start.IssueNumber && request.Status == issuedomain.RequestStatusPending {
+				return fmt.Errorf("Issue #%d has an unanswered question", start.IssueNumber)
+			}
+		}
 		issue := snapshot.Issues[key]
 		if issue == nil {
 			issue = &Issue{Number: start.IssueNumber}
@@ -76,6 +81,20 @@ func (s Store) StartExecution(start ExecutionStart) (Snapshot, ExecutionIdentity
 		issue.Generation++
 		identity = ExecutionIdentity{RunID: start.RunID, Generation: issue.Generation}
 		issue.Title, issue.RunID = start.Title, start.RunID
+		for _, request := range snapshot.PendingRequests {
+			if request.IssueNumber != start.IssueNumber || request.RunID != "" || request.Status != issuedomain.RequestStatusAnswered || request.AnsweredAt == nil {
+				continue
+			}
+			found := false
+			for _, answer := range issue.Answers {
+				if answer.RequestID == request.ID {
+					found = true
+				}
+			}
+			if !found {
+				issue.Answers = append(issue.Answers, AnswerRecord{RequestID: request.ID, Question: request.Question, Answer: request.Answer, AnsweredAt: *request.AnsweredAt})
+			}
+		}
 		if start.AuthorVerification != nil {
 			verification := *start.AuthorVerification
 			issue.AuthorVerification = &verification
@@ -139,6 +158,9 @@ func CaptureContinuation(snapshot *Snapshot, issueNumber int, identity Execution
 	issue := snapshot.Issues[strconv.Itoa(issueNumber)]
 	if issue == nil {
 		return fmt.Errorf("Issue #%d is missing", issueNumber)
+	}
+	if issue.Suspension != nil && issue.Suspension.Status == issuedomain.SuspensionResolved {
+		issue.Suspension = nil
 	}
 	active := snapshot.ActiveExecution
 	issue.Continuation = &ContinuationCheckpoint{

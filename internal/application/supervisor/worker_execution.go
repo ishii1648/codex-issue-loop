@@ -239,6 +239,8 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		checkpointID := state.NewID("checkpoint")
 		suspendedAt := l.now()
 		identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
+		headSHA := l.continuationWorktreeHead(ctx, current)
+		worktreeSHA256, _ := l.continuationWorktreeDigest(ctx, current)
 		_, err := l.Store.Update("input_requested", issue.Number, current.RunID, map[string]any{
 			"question": q, "request_id": requestID, "checkpoint_id": checkpointID,
 			"released_execution": identity, "suspended_at": suspendedAt,
@@ -251,6 +253,8 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			if err := state.CaptureContinuation(s, issue.Number, identity, checkpointID, suspendedAt); err != nil {
 				return err
 			}
+			item.Continuation.HeadSHA = headSHA
+			item.Continuation.WorktreeSHA256 = worktreeSHA256
 			item.Continuation.Kind = state.ContinuationKindNeedsInput
 			item.Continuation.RequestID = requestID
 			if err := state.ApplyIssueTransition(item, inputDecision.Transition); err != nil {
@@ -291,7 +295,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 }
 
 func (l *Loop) answeredResumeRemoteMismatch(issue gh.Issue, current state.Issue) string {
-	if err := gh.ValidateIssueProjection(l.Config, issue, current.Status); err != nil {
+	if err := gh.ValidateIssueProjection(l.Config, issue, current.Status, false); err != nil {
 		return err.Error()
 	}
 	if current.PullRequestURL != "" {
@@ -311,7 +315,7 @@ func (l *Loop) validateRemoteLaunch(ctx context.Context, current state.Issue, al
 	if current.Status != issuedomain.StatusLaunching {
 		return gh.RemoteState{}, &launchValidationError{cause: fmt.Errorf("Issue #%d is not in launch state", current.Number), terminal: true}
 	}
-	if err := gh.ValidateIssueProjection(l.Config, remote.Issue, current.Status); err != nil {
+	if err := gh.ValidateIssueProjection(l.Config, remote.Issue, current.Status, false); err != nil {
 		return gh.RemoteState{}, &launchValidationError{cause: err}
 	}
 	if allowNeedsInput && current.LaunchSource == issuedomain.StatusResumePending && current.Continuation != nil && current.Continuation.Kind == state.ContinuationKindNeedsInput {

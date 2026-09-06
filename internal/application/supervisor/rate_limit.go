@@ -23,11 +23,11 @@ type rateLimitedGitHub struct {
 	delegate gh.Client
 }
 
-func (c *rateLimitedGitHub) ReconcileIssue(ctx context.Context, cfg config.Config, number int, status issuedomain.Status) error {
+func (c *rateLimitedGitHub) ReconcileIssue(ctx context.Context, cfg config.Config, number int, status issuedomain.Status, human bool) error {
 	if err := c.before(); err != nil {
 		return err
 	}
-	return c.delegate.ReconcileIssue(ctx, cfg, number, status)
+	return c.delegate.ReconcileIssue(ctx, cfg, number, status, human)
 }
 
 func (c *rateLimitedGitHub) before() error {

@@ -86,7 +86,7 @@ func (resumedWorkspaceGitHub) MarkFailed(context.Context, config.Config, int, st
 	return nil
 }
 func (resumedWorkspaceGitHub) MarkRunning(context.Context, config.Config, int) error { return nil }
-func (resumedWorkspaceGitHub) ReconcileIssue(context.Context, config.Config, int, issuedomain.Status) error {
+func (resumedWorkspaceGitHub) ReconcileIssue(context.Context, config.Config, int, issuedomain.Status, bool) error {
 	return nil
 }
 func (resumedWorkspaceGitHub) MarkConflictRetry(context.Context, config.Config, int, string) error {
@@ -447,6 +447,9 @@ func TestAnswerIsRecordedAndIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := store.PrepareAnsweredRequests(time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	snapshot, _ := store.Load()
 	if snapshot.Issues["4"].Status != issuedomain.StatusResumePending || len(snapshot.Issues["4"].Answers) != 1 {
 		t.Fatalf("issue=%+v", snapshot.Issues["4"])
@@ -539,11 +542,14 @@ func TestWatchAnswerReconnectRoundTripPreservesQuestionContract(t *testing.T) {
 	if request := snapshot.PendingRequests[firstRequest.ID]; request.Status != issuedomain.RequestStatusAnswered || request.Answer != "safe" {
 		t.Fatalf("answered request=%+v", request)
 	}
-	if issue := snapshot.Issues["89"]; issue.Status != issuedomain.StatusResumePending || len(issue.Answers) != 1 || issue.Answers[0].RequestID != firstRequest.ID {
+	if issue := snapshot.Issues["89"]; issue.Status != issuedomain.StatusNeedsInput || len(issue.Answers) != 0 {
 		t.Fatalf("issue after answer=%+v", issue)
 	}
 	if snapshot.StateRevision != firstAnswerRevision {
 		t.Fatalf("idempotent answer created a second durable revision: first=%d final=%d", firstAnswerRevision, snapshot.StateRevision)
+	}
+	if _, err := store.PrepareAnsweredRequests(time.Now()); err != nil {
+		t.Fatal(err)
 	}
 
 	// The same monitor can return to one blocking watch. A later durable
@@ -1251,6 +1257,9 @@ func TestAnswerChangesOnlyTheRequestAndIssueNamedByRequestID(t *testing.T) {
 	if code := a.Run(context.Background(), []string{"answer", "--repo", repo, "--request-id", "req_7", "--message", "seven", "--json"}); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
+	if _, err := store.PrepareAnsweredRequests(time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -1303,6 +1312,9 @@ func TestAnswerDurablyWaitsWithoutStealingActiveExecution(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"execution_waiting": true`) || !strings.Contains(out.String(), `"checkpoint_id": "checkpoint_req_4"`) {
 		t.Fatalf("structured waiting output=%s", out.String())
+	}
+	if _, err := store.PrepareAnsweredRequests(time.Now()); err != nil {
+		t.Fatal(err)
 	}
 	afterFirst, err := store.Load()
 	if err != nil {

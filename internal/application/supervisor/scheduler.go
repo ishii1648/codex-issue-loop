@@ -407,6 +407,10 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 		return result, err
 	}
 	now := s.loop.now()
+	snapshot, err = s.loop.Store.PrepareAnsweredRequests(now)
+	if err != nil {
+		return result, err
+	}
 	if snapshot.Supervisor.RetryAfter != nil && snapshot.Supervisor.RetryAfter.After(s.pollAt) {
 		s.pollAt = *snapshot.Supervisor.RetryAfter
 	}
@@ -855,6 +859,9 @@ func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot
 	candidates := append([]gh.Issue(nil), issues...)
 	gh.OrderIssues(candidates, s.loop.Config.Queue)
 	for _, candidate := range candidates {
+		if snapshot.NeedsHuman(candidate.Number, s.loop.Config.Completion.AutoMerge) {
+			continue
+		}
 		if !gh.EligibleIssue(candidate, s.loop.Config.GitHub) {
 			continue
 		}

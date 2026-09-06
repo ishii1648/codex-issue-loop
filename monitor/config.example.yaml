@@ -5,15 +5,15 @@ state_dir: /Users/example/Library/Application Support/codex-issue-loop-monitor
 repositories:
   - name: ishii1648/codex-issue-loop
     ready_labels: [codex-loop:ready]
-    exclude_labels: [blocked, do-not-automate]
+    exclude_labels: [blocked]
     running_label: codex-loop:running
-    terminal_labels: [codex-loop:done, codex-loop:needs-input, codex-loop:failed, blocked]
+    terminal_labels: [codex-loop:done, needs-human, codex-loop:failed, blocked]
     acceptance_timeout: 10m
     processing_timeout: 2h
   - name: ishii1648/zeitreise
     ready_labels: [codex-loop:ready]
-    exclude_labels: [blocked, do-not-automate]
+    exclude_labels: [blocked]
     running_label: codex-loop:running
-    terminal_labels: [codex-loop:done, codex-loop:needs-input, codex-loop:failed, blocked]
+    terminal_labels: [codex-loop:done, needs-human, codex-loop:failed, blocked]
     acceptance_timeout: 10m
     processing_timeout: 2h

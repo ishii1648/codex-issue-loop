@@ -1,8 +1,10 @@
 package app
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 )
@@ -20,8 +22,8 @@ func parseIssueResolveArgs(args []string) (*issueResolveOptions, error) {
 	fs := flag.NewFlagSet("issue resolve", flag.ContinueOnError)
 	repo := fs.String("repo", "", "repository path")
 	number := fs.Int("issue", 0, "Issue number")
-	actionText := fs.String("action", "", "resume, retry-stage, adopt-head, adopt-worktree, adopt-pr, or cancel")
-	expectedHead := fs.String("expected-head", "", "exact current HEAD approved for adopt-head")
+	actionText := fs.String("action", "", "resume, retry-stage, adopt-head, adopt-input, adopt-worktree, adopt-pr, or cancel")
+	expectedHead := fs.String("expected-head", "", "exact current HEAD approved for adopt-head or adopt-input")
 	var allowPaths pathListFlag
 	fs.Var(&allowPaths, "allow-path", "explicit changed path to add to conflict recovery scope; repeatable")
 	jsonOut := fs.Bool("json", false, "emit JSON")
@@ -32,8 +34,8 @@ func parseIssueResolveArgs(args []string) (*issueResolveOptions, error) {
 	if *number <= 0 || action.Validate() != nil || fs.NArg() != 0 {
 		return nil, exitError{2, fmt.Errorf("--issue and a valid --action are required")}
 	}
-	if (action == issuedomain.ResolutionAdoptHead) != (*expectedHead != "") {
-		return nil, exitError{2, fmt.Errorf("--expected-head is required only for adopt-head")}
+	if (action == issuedomain.ResolutionAdoptHead || action == issuedomain.ResolutionAdoptInput) != (*expectedHead != "") {
+		return nil, exitError{2, fmt.Errorf("--expected-head is required only for adopt-head or adopt-input")}
 	}
 	normalizedAllowPaths, err := normalizeAdoptionAllowPaths(allowPaths)
 	if err != nil {
@@ -43,4 +45,23 @@ func parseIssueResolveArgs(args []string) (*issueResolveOptions, error) {
 		return nil, exitError{2, fmt.Errorf("--allow-path is valid only with --action adopt-worktree")}
 	}
 	return &issueResolveOptions{*repo, *number, action, *expectedHead, normalizedAllowPaths, *jsonOut}, nil
+}
+
+func (a App) issueCommand(ctx context.Context, l layout.Layout, args []string) error {
+	if len(args) == 0 {
+		return exitError{2, fmt.Errorf("issue requires ask, plan or resolve")}
+	}
+	switch args[0] {
+	case "ask":
+		return a.issueAsk(ctx, l, args[1:])
+	case "plan":
+		return a.issuePlan(ctx, l, args[1:])
+	case "resolve":
+		return a.issueResolve(ctx, l, args[1:])
+	case "help", "--help", "-h":
+		fmt.Fprintln(a.Out, "Usage: agent-loop issue ask --repo PATH --issue N --json < question.json\n       agent-loop issue plan --repo PATH --issue N [--allow-path PATH] --json\n       agent-loop issue resolve --repo PATH --issue N --action resume|retry-stage|adopt-head|adopt-input|adopt-worktree|adopt-pr|cancel [--expected-head SHA] [--allow-path PATH] --json")
+		return nil
+	default:
+		return exitError{2, fmt.Errorf("unknown issue command %q", args[0])}
+	}
 }
