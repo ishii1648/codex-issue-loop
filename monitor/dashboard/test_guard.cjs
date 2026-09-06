@@ -76,15 +76,19 @@ test('timeline only, numeric availability, hatched gaps and coverage inside deta
     assert.match(html,/&lt;script&gt;unsafe/);
     assert.doesNotMatch(html,/<script>unsafe/);
     const normal = html.split('<details')[0];
-    assert.doesNotMatch(normal,/>UNKNOWN<|title="UNKNOWN|coverage|観測率|選択期間全体/);
+    assert.doesNotMatch(normal,/>UNKNOWN<|title="UNKNOWN|coverage|観測率/);
     assert.equal((normal.match(/class="bar/g)||[]).length,1);
-    assert.match(normal,/観測できた需要時間に対する割合/);
+    assert.match(normal,/選択期間全体の時間に対する割合/);
+    assert.doesNotMatch(page,/需要時稼働率|補助集計|class="windows"/);
+    assert.doesNotMatch(normal,/<table/);
+    const metrics = [...normal.matchAll(/<strong>([\d.,]+)%<\/strong>/g)].map(match=>Number(match[1]));
+    assert.deepEqual(metrics,[fractions[0]*100,Math.round((fractions[0]+fractions[2])*10000)/100]);
     assert.match(html.split('<details')[1],/選択期間の観測率:.*未観測時間:/);
     const missing = fractions.slice(0,3).reduce((a,b)=>a+b,0)<1;
     assert.equal(html.includes('この期間には未観測の時間があります'),missing);
     assert.equal(html.includes('class="segment unobserved"'),missing);
     if(missing) assert.match(html,/title="観測できない区間 · .* JST → .* JST"/);
-    if(fractions[0]+fractions[1]===0) assert.match(html,/N\/A/);
+    assert.doesNotMatch(normal,/N\/A/);
     if(fractions[1]===0.001) assert.match(html,/width:0.1%/);
   }
 });
@@ -175,7 +179,7 @@ test('JST dates, details and custom bounds are independent of the browser timezo
   }
 });
 
-test('one hour selection sends exactly 3600 seconds and retains default and auxiliary windows', async () => {
+test('one hour selection sends exactly 3600 seconds and retains the default without auxiliary requests', async () => {
   assert.match(page,/<option value="1">直近1h<\/option>/);
   assert.match(page,/<option value="24" selected>直近24h<\/option>/);
   assert.match(page,/開始（JST）/);
@@ -197,46 +201,42 @@ test('one hour selection sends exactly 3600 seconds and retains default and auxi
     assert.equal(params.get('to'),query.get('to'));
     return (Date.parse(params.get('to'))-Date.parse(params.get('from')))/1000;
   });
-  assert.deepEqual(reports,[3600,3600,86400,604800,2592000]);
+  assert.deepEqual(reports,[3600]);
   assert.equal(classes.has('expired'),false);
   assert.match(nodes.repos.innerHTML,/api\/timeline\?repo=owner%2Frepo&amp;from=/);
 });
 
 
-test('auxiliary windows keep exact current bounds and ordered repository values for historical selection', async () => {
+test('historical 100 second metrics use state durations and include unknown and unobserved time in the denominator', async () => {
   const {f,nodes,classes,refresh} = fixture();
   await refresh();
   f.repositories=['ishii1648/codex-issue-loop','ishii1648/zeitreise'];
-  const seconds=[3600,86400,604800,2592000];
-  const availability=[[null,0.24,0.7,0.3],[0.1,0.48,0.77,1]];
-  f.report=(from,to,index)=>to===f.now ? {demand_availability:availability[index][seconds.indexOf((to-from)/1000)]} : {};
-  nodes.from.value='2026-01-01T00:00'; nodes.to.value='2026-01-02T00:00';
+  f.fractions=[0.4,0.2,0.3,0.1];
+  nodes.from.value='2026-01-01T00:00:00'; nodes.to.value='2026-01-01T00:01:40';
   nodes.selection.submit({preventDefault(){}});
-  for (let update=0;update<2;update++) {
+  for (const unknown of [10,0]) {
+    f.report=()=>({durations_seconds:{HEALTHY:40,DOWN:20,IDLE:30,UNKNOWN:unknown},demand_availability:null});
     f.now+=15000; f.sample=f.now; f.urls=[];
     await refresh();
     assert.equal(classes.has('expired'),false,nodes.error.textContent);
     const reports=f.urls.filter(u=>u.startsWith('/api/report?')).map(url=>new URL(url,'http://localhost').searchParams);
-    assert.equal(reports.length,5);
-    assert.equal(reports[0].get('to'),'2026-01-01T15:00:00.000Z');
-    assert.deepEqual(reports.slice(1).map(params=>{
-      assert.equal(Date.parse(params.get('to')),f.now);
-      return (Date.parse(params.get('to'))-Date.parse(params.get('from')))/1000;
-    }),seconds);
+    assert.equal(reports.length,1);
+    assert.equal(reports[0].get('from'),'2025-12-31T15:00:00.000Z');
+    assert.equal(reports[0].get('to'),'2025-12-31T15:01:40.000Z');
     const articles=nodes.repos.innerHTML.split('<article>').slice(1);
     assert.equal(articles.length,2);
     articles.forEach((html,index)=>{
       assert.ok(html.startsWith(`<h2>${f.repositories[index]}</h2>`));
-      const rows=[...html.matchAll(/<tr><th>([^<]+)<\/th><td>([^<]+)<\/td><\/tr>/g)].map(match=>match.slice(1));
-      assert.deepEqual(rows,index===0 ? [['1h','N/A'],['24h','24%'],['7d','70%'],['30d','30%']] : [['1h','10%'],['24h','48%'],['7d','77%'],['30d','100%']]);
+      assert.match(html,/稼働率（正常のみ）<strong>40%<\/strong>/);
+      assert.match(html,/正常動作率（正常\+待機）<strong>70%<\/strong>/);
+      assert.match(html,/未観測時間: 10秒/);
+      assert.doesNotMatch(html,/<table|需要時稼働率|N\/A/);
     });
   }
-  for (const duration of seconds) {
-    for (const boundary of ['from','to']) {
-      f.report=(from,to,index)=>index===1 && to===f.now && (to-from)/1000===duration ? {[boundary]:new Date((boundary==='from' ? from : to)+1000).toISOString()} : {};
-      await refresh();
-      assert.equal(classes.has('expired'),true);
-      assert.match(nodes.error.textContent,/期間集計が不一致/);
-    }
+  for (const boundary of ['from','to']) {
+    f.report=(from,to,index)=>index===1 ? {[boundary]:new Date((boundary==='from' ? from : to)+1000).toISOString()} : {};
+    await refresh();
+    assert.equal(classes.has('expired'),true);
+    assert.match(nodes.error.textContent,/期間集計が不一致/);
   }
 });
