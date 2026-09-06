@@ -646,7 +646,7 @@
         "x": 0,
         "y": 10,
         "w": 12,
-        "h": 3
+        "h": 5
       },
       "datasource": {
         "type": "yesoreyeram-infinity-datasource",
@@ -773,12 +773,25 @@
                 "value": "time:MM-DD HH:mm:ss"
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "理由 / 観測エラー"
+            },
+            "properties": [
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
           }
         ]
       },
       "options": {
         "showHeader": true,
-        "cellHeight": "sm"
+        "cellHeight": "sm",
+        "maxRowHeight": 56
       },
       "links": [
         {
@@ -1444,7 +1457,7 @@
         "x": 12,
         "y": 10,
         "w": 12,
-        "h": 3
+        "h": 5
       },
       "datasource": {
         "type": "yesoreyeram-infinity-datasource",
@@ -1571,12 +1584,25 @@
                 "value": "time:MM-DD HH:mm:ss"
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "理由 / 観測エラー"
+            },
+            "properties": [
+              {
+                "id": "custom.inspect",
+                "value": true
+              }
+            ]
           }
         ]
       },
       "options": {
         "showHeader": true,
-        "cellHeight": "sm"
+        "cellHeight": "sm",
+        "maxRowHeight": 56
       },
       "links": [
         {
