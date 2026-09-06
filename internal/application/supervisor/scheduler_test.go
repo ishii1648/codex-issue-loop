@@ -1957,3 +1957,66 @@ func TestWorkerProcessCallbackFencesRunAndPersistsProcessGroup(t *testing.T) {
 		t.Fatalf("spawn cwd audit missing: err=%v events=%s", err, events)
 	}
 }
+
+func TestSchedulerSkipsReadyIssueWithRetainedLifecycle(t *testing.T) {
+	for _, status := range []issuedomain.Status{
+		issuedomain.StatusAwaitingChecks, issuedomain.StatusRetryWait,
+		issuedomain.StatusAwaitingMerge, issuedomain.StatusFailed,
+	} {
+		t.Run(status.String(), func(t *testing.T) {
+			loop, github := testLoop(t, worker.Result{})
+			loop.Config.Completion.AutoMerge = true
+			now := time.Now().UTC()
+			loop.Clock = fixedClock{value: now}
+			next := now.Add(time.Hour)
+			before, err := loop.Store.Update("retained_fixture", 1, "old_run", nil, func(snapshot *state.Snapshot) error {
+				item := &state.Issue{Number: 1, Status: status, RunID: "old_run", Generation: 1, RetryAfter: &next}
+				setSupervisorTestWorkspace(snapshot, item)
+				snapshot.Issues["1"] = item
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Issues["1"] == nil || before.QuarantinedIssues["1"] != nil {
+				t.Fatalf("invalid fixture: %+v", before)
+			}
+			s := &scheduler{
+				loop: loop, active: map[int]activeJob{}, events: make(chan schedulerEvent, 1),
+				issueRetry: map[int]time.Time{1: next}, issueFails: map[int]int{},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result, err := s.schedule(ctx, true)
+			if err != nil || result.dispatched || !result.githubSucceeded {
+				t.Fatalf("schedule=%+v err=%v", result, err)
+			}
+			selected, ok, err := s.selectReady(ctx, []gh.Issue{
+				github.issue,
+				{Number: 2, State: "OPEN", Labels: loop.Config.GitHub.ReadyLabels},
+			}, before)
+			if err != nil || !ok || selected.Number != 2 {
+				t.Fatalf("selected=%+v ok=%v err=%v", selected, ok, err)
+			}
+			cause := loop.startIssue(ctx, github.issue, "new_run")
+			var mutation state.IssueMutationError
+			if cause == nil || failure.KindOf(cause) != failure.Issue || !errors.As(cause, &mutation) || mutation.IssueNumber != 1 {
+				t.Fatalf("claim rejection must be Issue-local: %v", cause)
+			}
+			for range 6 {
+				if err := s.handleCycleError(cause); err != nil {
+					t.Fatal(err)
+				}
+			}
+			after, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Supervisor.State == state.SupervisorStateBlocked || s.consecutiveFailures != 0 ||
+				after.ActiveExecution != nil || github.claimed || after.QuarantinedIssues["1"] != nil ||
+				!reflect.DeepEqual(before.Issues["1"], after.Issues["1"]) {
+				t.Fatalf("retained Issue changed or supervisor stopped: issue=%+v supervisor=%+v", after.Issues["1"], after.Supervisor)
+			}
+		})
+	}
+}

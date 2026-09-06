@@ -268,8 +268,8 @@ func TestStatusSchedulingPredicates(t *testing.T) {
 		{status: StatusLaunching, pending: true, retainsLogs: true, preventsIdle: true, ineligible: true, dispatches: true},
 		{status: StatusRunning, retainsLogs: true, preventsIdle: true, ineligible: true},
 		{status: StatusNeedsInput, retainsLogs: true, ineligible: true},
-		{status: StatusAwaitingChecks, pending: true, retainsLogs: true, preventsIdle: true},
-		{status: StatusAwaitingMerge, pending: true, retainsLogs: true, preventsIdle: true},
+		{status: StatusAwaitingChecks, pending: true, retainsLogs: true, preventsIdle: true, ineligible: true},
+		{status: StatusAwaitingMerge, pending: true, retainsLogs: true, preventsIdle: true, ineligible: true},
 		{status: StatusCompleted, ineligible: true},
 		{status: StatusCanceled, ineligible: true},
 	}
@@ -329,5 +329,19 @@ func TestEffectVocabularyAndCombinedDispatch(t *testing.T) {
 	}
 	if StatusRunning.DispatchesWorkerWhile(true) {
 		t.Fatal("pending effect must not dispatch a worker")
+	}
+}
+
+func TestAdmissionMatchesStartClaim(t *testing.T) {
+	for _, status := range AllStatuses() {
+		t.Run(status.String(), func(t *testing.T) {
+			_, err := StartClaim(status)
+			if got := status.IneligibleForAdmission(); got != (err != nil) {
+				t.Fatalf("IneligibleForAdmission=%v StartClaim error=%v", got, err)
+			}
+		})
+	}
+	if _, err := StartClaim(StatusFailed); err == nil {
+		t.Fatal("failed Issue must resume through suspension resolution")
 	}
 }
