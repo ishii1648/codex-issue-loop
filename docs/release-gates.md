@@ -1,5 +1,7 @@
 # Release gates
 
+ローカルの`make ci`と通常PR CIは、Go 1.25.13でStaticcheck v0.7.0のSA系（`make staticcheck`）とerrcheck v1.10.0の`-blank`（`make errcheck`）を必須とする。errcheckは`internal/platform/fsutil`、`internal/adapter/state`、`internal/adapter/publish`をテスト込みで検査し、限定除外とその理由は`scripts/errcheck-excludes.txt`で管理する。lint導入を戻す場合は導入commitをrevertし、`make ci`で従来の品質ゲートを再検証する。この導入によるruntime依存、永続schema、公開APIの変更はなく、state migrationやproduction stateの書き換えは不要である。
+
 外形監視のcursor/snapshot境界変更（Issue #282）はmonitor schema version 1と既存のstate配置を維持する。rollback evidenceは`monitor/internal/github`の固定page上限fixture、`monitor/internal/model`のlabel更新順序・terminal境界fixture、`monitor/internal/monitor`のsnapshot競合retry・非重複interval・観測gap優先順位fixtureと、`go test ./...`、monitor race、`go vet ./...`、`scripts/check-release.sh`の検証結果で確認する。配備前は変更commitのrevertで戻せる。配備後はmonitorを停止して専用stateを保全し、旧releaseのmonitor binaryでinstall/register/restartする（`monitor/docs/runbook.md`）。永続schema migrationやsupervisor stateの変更はない。旧版へ戻すとfail-closed保証も旧挙動へ戻るため、既存UNKNOWN区間を再分類せず保持する。productionでのrollback drill実施済みを意味する証拠ではなく、release公開には下記の既存gateを引き続き要求する。
 
 Stable Releaseはsuffixのないannotated `vMAJOR.MINOR.PATCH` tagだけを起点にし、alpha/beta/RC suffixをstableへ昇格しない。stableが唯一の正式releaseであり、GAを別の段階として定義しない。tag pushだけでは公開されない。`build-candidate`が作成したbinary、SBOM、manifest、checksumsを唯一の配布正本とし、比較用buildを配布へ使わない。
