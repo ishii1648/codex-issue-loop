@@ -617,6 +617,9 @@ func TestWorkerEnvironmentBlockReleasesExecutionAndPreservesContinuation(t *test
 		Summary: "local HTTP binding is unavailable", SessionID: "session-blocked",
 	}
 	loop, _ := testLoop(t, result)
+	w := loop.Worktrees.(fakeWorktree)
+	w.inspection = &worktree.Inspection{Valid: true, Branch: "codex/issue-1-test", Head: "worker-commit"}
+	loop.Worktrees = w
 	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
 		t.Fatalf("worked=%v err=%v", worked, err)
 	}
@@ -632,7 +635,7 @@ func TestWorkerEnvironmentBlockReleasesExecutionAndPreservesContinuation(t *test
 		!reflect.DeepEqual(issue.Suspension.AllowedActions, []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionResume}) {
 		t.Fatalf("generic suspension=%+v", issue.Suspension)
 	}
-	if issue.Continuation.Generation != issue.Generation || issue.Continuation.WorktreeSHA256 == "" {
+	if issue.Continuation.Generation != issue.Generation || issue.Continuation.WorktreeSHA256 == "" || issue.Continuation.HeadSHA != "worker-commit" {
 		t.Fatalf("continuation evidence was not preserved: %+v", issue.Continuation)
 	}
 }

@@ -227,7 +227,7 @@ terminal `blocked` / `failed` Issueを復旧するときは、scenario別command
 agent-loop issue plan --repo /absolute/path/to/repository --issue 123 --json
 ```
 
-planの`suspension`、`continuation_checkpoint`、evidence、missing evidence、および`resume|retry-stage|adopt-worktree|adopt-pr|cancel`それぞれのeligible/refusal codeを確認する。active PID/PGID、root execution identity、pending request、worktree/branch/head、open/merged PR、labelのいずれかが変わればresolveは拒否される。
+planの`suspension`、`continuation_checkpoint`、evidence、missing evidence、および`resume|retry-stage|adopt-head|adopt-worktree|adopt-pr|cancel`それぞれのeligible/refusal codeを確認する。active PID/PGID、root execution identity、pending request、worktree/branch/head、open/merged PR、labelのいずれかが変わればresolveは拒否される。
 
 operatorがplan上eligibleなactionを選択した後だけ適用する。
 

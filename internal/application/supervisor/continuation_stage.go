@@ -32,6 +32,7 @@ func (l *Loop) suspendWorker(ctx context.Context, number int, reason string) err
 	checkpointID, suspendedAt := state.NewID("checkpoint"), l.now()
 	identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 	worktreeSHA256, digestErr := l.continuationWorktreeDigest(ctx, current)
+	headSHA := l.continuationWorktreeHead(ctx, current)
 	_, err = l.Store.Update("issue_blocked", number, current.RunID, map[string]any{
 		"error": cause.Error(), "failure_kind": string(failure.Issue), "blocked_origin": "worker", "blocked_kind": "environment",
 		"checkpoint_id": checkpointID, "released_execution": identity, "suspended_at": suspendedAt,
@@ -44,6 +45,7 @@ func (l *Loop) suspendWorker(ctx context.Context, number int, reason string) err
 			return err
 		}
 		item.Continuation.WorktreeSHA256 = worktreeSHA256
+		item.Continuation.HeadSHA = headSHA
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
@@ -220,4 +222,13 @@ func (l *Loop) continuationWorktreeDigest(ctx context.Context, current state.Iss
 		return "", fmt.Errorf("continuation worktree digest is empty")
 	}
 	return digest, nil
+}
+
+func (l *Loop) continuationWorktreeHead(ctx context.Context, current state.Issue) string {
+	if l.Worktrees != nil {
+		if inspection, err := l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch); err == nil && inspection.Valid && inspection.Branch == current.Branch {
+			return inspection.Head
+		}
+	}
+	return ""
 }

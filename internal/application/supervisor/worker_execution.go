@@ -661,6 +661,7 @@ func (l *Loop) failIssueAtStage(ctx context.Context, number int, cause error, bl
 		return failure.Wrap(failure.Issue, "decide Issue failure", decisionErr)
 	}
 	worktreeSHA256, _ := l.continuationWorktreeDigest(ctx, current)
+	headSHA := l.continuationWorktreeHead(ctx, current)
 	_, err := l.Store.Update("issue_"+decision.Transition.To.String(), number, current.RunID, map[string]string{"error": cause.Error(), "failure_kind": string(kind)}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(number)]
 		if item == nil {
@@ -690,6 +691,7 @@ func (l *Loop) failIssueAtStage(ctx context.Context, number int, cause error, bl
 		}
 		if item.Continuation != nil {
 			item.Continuation.WorktreeSHA256 = worktreeSHA256
+			item.Continuation.HeadSHA = headSHA
 		}
 		item.LastError = decision.LastError
 		item.SessionID = ""
