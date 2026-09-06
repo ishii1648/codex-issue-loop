@@ -100,6 +100,15 @@ func (m Manager) validateExistingPullRequest(ctx context.Context, cfg config.Con
 	if _, err := m.run(ctx, git, "-C", worktreePath, "merge-base", "--is-ancestor", pr.BaseRefOID, remoteBase); err != nil {
 		return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("Pull Request base SHA diverged during validation: pr=%s remote=%s", pr.BaseRefOID, remoteBase)}
 	}
+	if _, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "--verify", pr.HeadRefOID+"^{commit}"); err != nil {
+		if _, err := m.run(ctx, git, "-C", worktreePath, "fetch", "--no-tags", "origin", "refs/heads/"+branch); err != nil {
+			return "", nil, publication.PullRequestMismatchError{Detail: "fetch authoritative Pull Request head: " + err.Error()}
+		}
+		fetched, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "FETCH_HEAD")
+		if err != nil || strings.TrimSpace(fetched) != pr.HeadRefOID {
+			return "", nil, publication.PullRequestMismatchError{Detail: "Pull Request head changed during fetch"}
+		}
+	}
 	for name, sha := range map[string]string{"base": pr.BaseRefOID, "head": pr.HeadRefOID} {
 		if _, err := m.run(ctx, git, "-C", worktreePath, "rev-parse", "--verify", sha+"^{commit}"); err != nil {
 			return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("Pull Request %s SHA is unavailable: %s", name, sha)}
@@ -120,9 +129,11 @@ func (m Manager) validateExistingPullRequest(ctx context.Context, cfg config.Con
 		return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("durable publication base is not an ancestor of worktree HEAD: base=%s head=%s", fallbackBase, localHead)}
 	}
 	if localHead != pr.HeadRefOID {
-		// A previous publisher attempt may have committed locally and failed
-		// before push. Only that forward-only relationship is retryable.
-		if _, err := m.run(ctx, git, "-C", worktreePath, "merge-base", "--is-ancestor", pr.HeadRefOID, localHead); err != nil {
+		if _, err := m.run(ctx, git, "-C", worktreePath, "merge-base", "--is-ancestor", localHead, pr.HeadRefOID); err == nil {
+			if _, err := m.run(ctx, git, "-C", worktreePath, "merge", "--ff-only", pr.HeadRefOID); err != nil {
+				return "", nil, publication.PullRequestMismatchError{Detail: "fast-forward to published head without replacing worker changes: " + err.Error()}
+			}
+		} else if _, err := m.run(ctx, git, "-C", worktreePath, "merge-base", "--is-ancestor", pr.HeadRefOID, localHead); err != nil {
 			return "", nil, publication.PullRequestMismatchError{Detail: fmt.Sprintf("worktree HEAD diverges from Pull Request head: local=%s pr=%s", localHead, pr.HeadRefOID)}
 		}
 	}

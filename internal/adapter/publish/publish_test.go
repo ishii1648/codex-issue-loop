@@ -586,3 +586,64 @@ func setupPublishRepo(t *testing.T) (root, remote, repo, baseSHA string) {
 	baseSHA = runGit(t, repo, "rev-parse", "HEAD")
 	return root, remote, repo, baseSHA
 }
+
+func TestPublishRetriesAfterRemotePullRequestHeadAdvances(t *testing.T) {
+	for _, overlap := range []bool{false, true} {
+		t.Run(fmt.Sprint("overlap=", overlap), func(t *testing.T) {
+			root, remote, repo, base := setupPublishRepo(t)
+			branch := "codex/issue-459-retry"
+			runGit(t, repo, "switch", "-c", branch)
+			if err := os.WriteFile(filepath.Join(repo, "issue.txt"), []byte("published work\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, repo, "add", "issue.txt")
+			runGit(t, repo, "commit", "-m", "worker result")
+			runGit(t, repo, "push", "-u", "origin", branch)
+			localHead := runGit(t, repo, "rev-parse", "HEAD")
+			other := filepath.Join(root, "remote-update")
+			runGit(t, root, "clone", "-b", branch, remote, other)
+			runGit(t, other, "config", "user.name", "Remote Updater")
+			runGit(t, other, "config", "user.email", "updater@example.invalid")
+			path := "base-update.txt"
+			if overlap {
+				path = "issue.txt"
+			}
+			if err := os.WriteFile(filepath.Join(other, path), []byte("remote change\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, other, "add", path)
+			runGit(t, other, "commit", "-m", "advance published head")
+			runGit(t, other, "push", "origin", branch)
+			remoteHead := runGit(t, other, "rev-parse", "HEAD")
+			repair := []byte("verified CI fix\n")
+			if err := os.WriteFile(filepath.Join(repo, "issue.txt"), repair, 0600); err != nil {
+				t.Fatal(err)
+			}
+			fakeGH := filepath.Join(root, "gh")
+			payload := fmt.Sprintf(`[{"url":"https://github.example/owner/repo/pull/493","state":"OPEN","mergedAt":null,"baseRefName":"main","baseRefOid":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"nameWithOwner":"owner/repo"}}]`, base, branch, remoteHead)
+			if err := os.WriteFile(fakeGH, []byte("#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Defaults()
+			cfg.GitHub.Repo = "owner/repo"
+			result, _, err := (Manager{GitPath: "git", GHPath: fakeGH}).Publish(context.Background(), cfg, gh.Issue{Number: 459}, repo, branch, "https://github.example/owner/repo/pull/493", "repair CI", base)
+			content, readErr := os.ReadFile(filepath.Join(repo, "issue.txt"))
+			if readErr != nil || !bytes.Equal(content, repair) {
+				t.Fatalf("worker repair changed: %q %v", content, readErr)
+			}
+			if overlap {
+				if err == nil || runGit(t, repo, "rev-parse", "HEAD") != localHead || runGit(t, remote, "rev-parse", branch) != remoteHead {
+					t.Fatalf("overlapping changes accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, repo, "merge-base", "--is-ancestor", remoteHead, result.Commit)
+			if runGit(t, remote, "rev-parse", branch) != result.Commit {
+				t.Fatal("repair was not published")
+			}
+		})
+	}
+}
