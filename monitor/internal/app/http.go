@@ -85,9 +85,9 @@ func (a App) monitorHandler(cfg config.Config) http.Handler {
 		args := []string{"--config", cfg.Path, "--json"}
 		query := r.URL.Query()
 		switch r.URL.Path {
-		case "/api/status", "/api/history", "/api/report", "/api/timeline":
+		case "/api/status", "/api/details", "/api/history", "/api/report", "/api/timeline":
 			allowed := map[string]bool{"repo": true}
-			if r.URL.Path == "/api/status" {
+			if r.URL.Path == "/api/status" || r.URL.Path == "/api/details" {
 				allowed["at"] = true
 			} else {
 				allowed["from"] = true
@@ -101,8 +101,11 @@ func (a App) monitorHandler(cfg config.Config) http.Handler {
 				args = append(args, "--"+key, values[0])
 			}
 			switch r.URL.Path {
-			case "/api/status":
+			case "/api/status", "/api/details":
 				err = reader.status(args)
+				if err == nil && r.URL.Path == "/api/details" {
+					err = flattenDetails(&out)
+				}
 			case "/api/history", "/api/timeline":
 				err = reader.history(args)
 				if err == nil && r.URL.Path == "/api/timeline" {
@@ -248,4 +251,46 @@ func normalizeTimeline(data *bytes.Buffer, repositories []config.Repository) err
 	}
 	data.Reset()
 	return json.NewEncoder(data).Encode(history)
+}
+
+func flattenDetails(data *bytes.Buffer) error {
+	var result struct {
+		Repositories []model.Snapshot `json:"repositories"`
+	}
+	if err := json.Unmarshal(data.Bytes(), &result); err != nil {
+		return err
+	}
+	type row struct {
+		Status       model.Status `json:"status"`
+		Detail       string       `json:"detail"`
+		Issue        *int         `json:"issue"`
+		Deadline     *time.Time   `json:"deadline"`
+		ItemDeadline *time.Time   `json:"item_deadline"`
+	}
+	rows := []row{}
+	for _, snapshot := range result.Repositories {
+		base := row{Status: snapshot.Current.Status, Detail: snapshot.Current.Reason}
+		if snapshot.LastError != "" {
+			if base.Detail != "" {
+				base.Detail += "\n"
+			}
+			base.Detail += "観測エラー: " + snapshot.LastError
+		}
+		if !snapshot.QueueDeadline.IsZero() {
+			base.Deadline = &snapshot.QueueDeadline
+		}
+		if len(snapshot.Queue) == 0 {
+			rows = append(rows, base)
+		}
+		for _, item := range snapshot.Queue {
+			detail := base
+			detail.Issue = &item.Number
+			if !item.Deadline.IsZero() {
+				detail.ItemDeadline = &item.Deadline
+			}
+			rows = append(rows, detail)
+		}
+	}
+	data.Reset()
+	return json.NewEncoder(data).Encode(map[string]any{"rows": rows})
 }

@@ -8,9 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +177,10 @@ func TestDashboardReadOnlyBoundary(t *testing.T) {
 		code        int
 	}{
 		{"POST", "http://127.0.0.1:19110/api/status", 405},
+		{"POST", "http://127.0.0.1:19110/api/details", 405},
+		{"GET", "http://attacker.example/api/details", 403},
+		{"GET", "http://127.0.0.1:19110/api/details?config=/etc/passwd", 400},
+		{"GET", "http://127.0.0.1:19110/api/details?repo=unknown/repo", 503},
 		{"GET", "http://attacker.example/api/status", 403},
 		{"GET", "http://127.0.0.1:19110/api/status?config=/etc/passwd", 400},
 		{"GET", "http://127.0.0.1:19110/api/status?at=invalid", 503},
@@ -300,5 +306,166 @@ func TestFreshnessQueriesGrafanaDatasourceAndFailsClosed(t *testing.T) {
 	page := request(t, (App{}).monitorHandler(cfg), "/")
 	if page.Code != 200 || !strings.Contains(page.Body.String(), `body class="expired"`) {
 		t.Fatal(page)
+	}
+}
+
+func TestDashboardDetailTargets(t *testing.T) {
+	data, err := os.ReadFile("../../dashboard/dashboard.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dashboard struct {
+		Panels []struct {
+			Type    string
+			Targets []struct {
+				URL          string
+				Parser       string
+				RootSelector string `json:"root_selector"`
+				Columns      []struct{ Selector, Text, Type string }
+			}
+			FieldConfig struct {
+				Overrides []struct {
+					Matcher    struct{ Options string }
+					Properties []struct {
+						ID    string
+						Value json.RawMessage
+					}
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal(data, &dashboard); err != nil {
+		t.Fatal(err)
+	}
+	tables := 0
+	for _, panel := range dashboard.Panels {
+		if panel.Type != "table" {
+			continue
+		}
+		tables++
+		target := panel.Targets[0]
+		if target.Parser != "backend" || target.RootSelector != "rows" {
+			t.Fatalf("expected simple backend rows selector: %+v", target)
+		}
+		u, err := url.Parse(target.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo := u.Query().Get("repo")
+		link := ""
+		for _, override := range panel.FieldConfig.Overrides {
+			if override.Matcher.Options != "Issue" {
+				continue
+			}
+			for _, property := range override.Properties {
+				if property.ID != "links" {
+					continue
+				}
+				var links []struct{ URL string }
+				if err := json.Unmarshal(property.Value, &links); err != nil {
+					t.Fatal(err)
+				}
+				link = links[0].URL
+			}
+		}
+		for _, scenario := range []string{"multiple", "down-empty", "idle", "unknown", "missing", "stale"} {
+			t.Run(repo+"/"+scenario, func(t *testing.T) {
+				cfg, storage, at := dashboardFixture(t)
+				configData, err := os.ReadFile(cfg.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(cfg.Path, bytes.ReplaceAll(configData, []byte("owner/repo"), []byte(repo)), 0600); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err = config.Load(cfg.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: repo, LastObservationAt: at, Current: model.Interval{ID: "current", Repository: repo, Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "queue progress deadline exceeded"}}
+				wantStatus, wantDetail := "DOWN", snapshot.Current.Reason
+				numbers := []int{}
+				switch scenario {
+				case "multiple":
+					numbers = []int{239, 271, 297}
+					snapshot.QueueDeadline = at.Add(-time.Minute)
+					for i, number := range numbers {
+						snapshot.Queue = append(snapshot.Queue, model.QueueItem{Number: number, Phase: model.Ready, PhaseSince: at.Add(-time.Hour), Deadline: at.Add(time.Duration(i) * time.Minute)})
+					}
+				case "idle":
+					snapshot.Current.Status, snapshot.Current.Reason = model.Idle, "queue empty"
+					wantStatus, wantDetail = "IDLE", "queue empty"
+				case "unknown":
+					snapshot.Current.Status, snapshot.Current.Reason = model.Unknown, "observation failed"
+					snapshot.LastError = "GitHub unavailable"
+					wantStatus, wantDetail = "UNKNOWN", "observation failed\n観測エラー: GitHub unavailable"
+				case "missing":
+					wantStatus, wantDetail = "UNKNOWN", "no observations recorded"
+				case "stale":
+					snapshot.LastObservationAt = at.Add(-time.Hour)
+					wantStatus, wantDetail = "UNKNOWN", "monitor observation history has a gap\n観測エラー: monitor observation history has a gap"
+				}
+				if scenario != "missing" {
+					if err := storage.Commit(snapshot, nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := storage.Load(repo)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response := request(t, (App{Now: func() time.Time { return at }}).monitorHandler(cfg), u.RequestURI())
+				if response.Code != 200 {
+					t.Fatal(response.Body.String())
+				}
+				var payload map[string][]map[string]any
+				if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+					t.Fatal(err)
+				}
+				rows := payload[target.RootSelector]
+				wantCount := len(numbers)
+				if wantCount == 0 {
+					wantCount = 1
+				}
+				if len(rows) != wantCount {
+					t.Fatalf("rows = %+v", rows)
+				}
+				for i, row := range rows {
+					cells := map[string]any{}
+					for _, column := range target.Columns {
+						value, exists := row[column.Selector]
+						if !exists {
+							t.Fatalf("missing column %s", column.Selector)
+						}
+						cells[column.Text] = value
+						if value != nil && column.Type == "timestamp" {
+							if _, err := time.Parse(time.RFC3339, value.(string)); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					want := map[string]any{"状態": wantStatus, "理由 / 観測エラー": wantDetail, "Issue": nil, "queue期限": nil, "Issue期限": nil}
+					if len(numbers) > 0 {
+						want["Issue"] = float64(numbers[i])
+						want["queue期限"] = snapshot.QueueDeadline.Format(time.RFC3339)
+						want["Issue期限"] = snapshot.Queue[i].Deadline.Format(time.RFC3339)
+						actualLink := strings.ReplaceAll(link, "${__value.raw}", strconv.Itoa(int(cells["Issue"].(float64))))
+						if actualLink != fmt.Sprintf("https://github.com/%s/issues/%d", repo, numbers[i]) {
+							t.Fatal(actualLink)
+						}
+					}
+					if !reflect.DeepEqual(cells, want) {
+						t.Fatalf("cells = %+v, want %+v", cells, want)
+					}
+				}
+				after, err := storage.Load(repo)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatal("details read mutated store", err)
+				}
+			})
+		}
+	}
+	if tables != 2 {
+		t.Fatalf("table count = %d", tables)
 	}
 }
