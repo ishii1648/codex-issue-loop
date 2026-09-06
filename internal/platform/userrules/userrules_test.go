@@ -94,7 +94,7 @@ func TestPlanIsReadOnlyAndApplyCreatesBothRulesIdempotently(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(data), "agent-loop implementation worker") || !strings.Contains(string(data), ".agent-loop.yaml") || !strings.Contains(string(data), "ready label") {
+		if !strings.Contains(string(data), "agent-loop implementation worker") || !strings.Contains(string(data), ".agent-loop.yaml") || !strings.Contains(string(data), "`github.ready_labels` に設定されたready labelだけ") || !strings.Contains(string(data), "`area:` ラベルは付けない") {
 			t.Fatalf("required behavior missing from %s: %s", target.Path, data)
 		}
 		if target.Agent == AgentClaude && strings.HasPrefix(string(data), "---\n") {
@@ -120,6 +120,45 @@ func TestPlanIsReadOnlyAndApplyCreatesBothRulesIdempotently(t *testing.T) {
 	for _, target := range second.Targets {
 		if target.Status != StatusCurrent || target.Action != ActionNone || target.ApplyResult != ResultUnchanged {
 			t.Fatalf("second target=%+v", target)
+		}
+	}
+}
+
+func TestSameVersionRuleBodyChangeIsUpdated(t *testing.T) {
+	config := testConfig(t)
+	before := strings.Replace(ManagedBlock(), "ready labelだけを使用し、`area:` ラベルは付けない。", "ready labelだけを使用する。", 1) + "\n"
+	for _, path := range []string{
+		filepath.Join(config.CodexHome, "AGENTS.md"),
+		filepath.Join(config.ClaudeConfigDir, "rules", "codex-issue-loop.md"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := Plan(config, []Agent{AgentCodex, AgentClaude})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range report.Targets {
+		if target.Status != StatusOutdated || target.Action != ActionUpdate {
+			t.Fatalf("target=%+v", target)
+		}
+	}
+	applied, err := Apply(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range applied.Targets {
+		data, err := os.ReadFile(target.Path)
+		if err != nil || string(data) != ManagedBlock()+"\n" {
+			t.Fatalf("updated rule=%q err=%v", data, err)
+		}
+		backup, err := os.ReadFile(target.BackupPath)
+		if err != nil || string(backup) != before {
+			t.Fatalf("backup=%q err=%v", backup, err)
 		}
 	}
 }
