@@ -221,7 +221,7 @@ func (m Manager) ContentDigest(ctx context.Context, path string) (string, error)
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 var validRepoID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,100}$`)
 
-func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, issueNumber int, title string) (Result, error) {
+func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, issueNumber int, title, savedBranch string) (Result, error) {
 	if !validRepoID.MatchString(repoID) {
 		return Result{}, fmt.Errorf("invalid repository ID %q", repoID)
 	}
@@ -260,6 +260,29 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 	if !within(secureRoot, canonicalRepoRoot) {
 		return Result{}, fmt.Errorf("worktree repository directory escapes configured root")
 	}
+	path := filepath.Join(canonicalRepoRoot, fmt.Sprintf("issue-%d", issueNumber))
+	if !within(secureRoot, path) {
+		return Result{}, fmt.Errorf("worktree path escapes configured root")
+	}
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return Result{}, fmt.Errorf("worktree path must not be a symbolic link: %s", path)
+	} else if err == nil && info.IsDir() {
+		inspection, inspectErr := m.Inspect(ctx, cfg, path, savedBranch)
+		if inspectErr != nil {
+			return Result{}, fmt.Errorf("inspect existing worktree: %w", inspectErr)
+		}
+		branch := savedBranch
+		if branch == "" {
+			branch = inspection.Branch
+		}
+		if !inspection.Valid || branch == "" || inspection.Branch != branch {
+			return Result{}, fmt.Errorf("existing worktree path is incomplete or belongs to another branch: %s", path)
+		}
+		if _, err := m.ValidateLaunch(ctx, cfg, path, branch); err != nil {
+			return Result{}, fmt.Errorf("validate existing worktree: %w", err)
+		}
+		return Result{Path: path, Branch: branch}, nil
+	}
 	slug := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(title), "-"), "-")
 	if slug == "" {
 		slug = "issue"
@@ -268,22 +291,6 @@ func (m Manager) Ensure(ctx context.Context, cfg config.Config, repoID string, i
 		slug = strings.Trim(slug[:40], "-")
 	}
 	branch := fmt.Sprintf("%s%d-%s", cfg.Git.BranchPrefix, issueNumber, slug)
-	path := filepath.Join(canonicalRepoRoot, fmt.Sprintf("issue-%d", issueNumber))
-	if !within(secureRoot, path) {
-		return Result{}, fmt.Errorf("worktree path escapes configured root")
-	}
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return Result{}, fmt.Errorf("worktree path must not be a symbolic link: %s", path)
-	} else if err == nil && info.IsDir() {
-		inspection, inspectErr := m.Inspect(ctx, cfg, path, branch)
-		if inspectErr != nil {
-			return Result{}, fmt.Errorf("inspect existing worktree: %w", inspectErr)
-		}
-		if !inspection.Valid || inspection.Branch != branch || !inspection.LocalBranchExists {
-			return Result{}, fmt.Errorf("existing worktree path is incomplete or belongs to another branch: %s", path)
-		}
-		return Result{Path: path, Branch: branch}, nil
-	}
 	git := m.GitPath
 	if git == "" {
 		git = "git"

@@ -36,7 +36,7 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
 	issues := map[string]*state.Issue{}
 	for number, status := range map[int]string{1: "completed", 2: "completed", 3: "failed", 4: "completed", 5: "needs_input", 6: "resume_pending", 7: "canceled"} {
-		result, err := worktrees.Ensure(ctx, cfg, "repo-id", number, fmt.Sprintf("Issue %d", number))
+		result, err := worktrees.Ensure(ctx, cfg, "repo-id", number, fmt.Sprintf("Issue %d", number), "")
 		if err != nil {
 			t.Fatalf("ensure #%d: %v", number, err)
 		}
@@ -138,7 +138,7 @@ func TestPurgeRequiresExactConfirmationAndCanRemoveDirtyWorktree(t *testing.T) {
 	ctx := context.Background()
 	cfg, stateRoot := lifecycleRepository(t)
 	worktrees := worktree.Manager{StateRoot: stateRoot, GitPath: "git"}
-	created, err := worktrees.Ensure(ctx, cfg, "repo-id", 9, "dirty")
+	created, err := worktrees.Ensure(ctx, cfg, "repo-id", 9, "dirty", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestPurgeCanRemoveExplicitlyConfirmedOrphanWorktree(t *testing.T) {
 	ctx := context.Background()
 	cfg, stateRoot := lifecycleRepository(t)
 	worktrees := worktree.Manager{StateRoot: stateRoot, GitPath: "git"}
-	created, err := worktrees.Ensure(ctx, cfg, "repo-id", 10, "orphan")
+	created, err := worktrees.Ensure(ctx, cfg, "repo-id", 10, "orphan", "")
 	if err != nil {
 		t.Fatal(err)
 	}

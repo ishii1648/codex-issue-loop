@@ -371,7 +371,7 @@ type fakeWorktree struct {
 	digest     string
 }
 
-func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error) {
+func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string, string) (worktree.Result, error) {
 	return worktree.Result{Path: f.path, Branch: "codex/issue-1-test"}, nil
 }
 func (f fakeWorktree) Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error) {
