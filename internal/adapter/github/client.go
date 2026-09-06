@@ -71,7 +71,7 @@ type Client interface {
 	MarkDone(context.Context, config.Config, int, string) error
 	MarkFailed(context.Context, config.Config, int, string, bool) error
 	MarkRunning(context.Context, config.Config, int) error
-	ReconcileIssue(context.Context, config.Config, int, issuedomain.Status) error
+	ReconcileIssue(context.Context, config.Config, int, issuedomain.Status, bool) error
 	MarkConflictRetry(context.Context, config.Config, int, string) error
 	ReadyPullRequest(context.Context, config.Config, string) error
 	UpdatePullRequest(context.Context, config.Config, string) error

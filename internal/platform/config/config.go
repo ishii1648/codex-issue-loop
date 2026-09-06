@@ -263,9 +263,9 @@ func Defaults() Config {
 		Version: CurrentVersion,
 		GitHub: GitHub{
 			ReadyLabels:         []string{"codex-loop:ready"},
-			ExcludeLabels:       []string{"blocked", "do-not-automate"},
+			ExcludeLabels:       []string{"blocked"},
 			RunningLabel:        "codex-loop:running",
-			NeedsInputLabel:     "codex-loop:needs-input",
+			NeedsInputLabel:     "needs-human",
 			FailedLabel:         "codex-loop:failed",
 			DoneLabel:           "codex-loop:done",
 			TrustedIssueAuthors: TrustedIssueAuthors{MinimumPermission: "write"},
@@ -348,6 +348,9 @@ func Load(repoPath string) (Config, error) {
 		return Config{}, fmt.Errorf("decode trailing YAML: %w", err)
 	} else if err == nil {
 		return Config{}, fmt.Errorf("%s must contain one YAML document", FileName)
+	}
+	if cfg.GitHub.NeedsInputLabel == "codex-loop:needs-input" {
+		cfg.GitHub.NeedsInputLabel = "needs-human"
 	}
 	cfg.RepoPath = canonical
 	if err := cfg.Validate(); err != nil {

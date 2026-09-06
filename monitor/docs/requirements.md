@@ -5,7 +5,7 @@
 - GitHubのopen Issue、label、Issue event時刻だけを観測する。
 - synthetic/canary Issueを作らず、GitHubへのmutationを行わない。
 - repositoryごとに`IDLE`、`HEALTHY`、`DOWN`、`UNKNOWN`の非重複区間を記録する。
-- `ready -> running`を受付進捗、`running -> done|needs-input|failed|blocked`を処理進捗とする。
+- `ready -> running`を受付進捗、`running -> done|needs-human|failed|blocked`を処理進捗とする。
 - runningが存在する間はprocessing deadlineを使い、待機中readyのacceptance deadlineを無視する。
 - runningのterminal event後にreadyが残る場合は、そのevent時刻から次のadmission windowを開始する。
 - `DOWN.started_at`、復旧、terminalによる`IDLE`をdeadlineまたはevent時刻に記録し、poll時刻に丸めない。

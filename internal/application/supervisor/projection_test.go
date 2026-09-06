@@ -31,10 +31,10 @@ func TestProjectionWithoutPendingEffectDoesNotChangeLifecycle(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("projection changed canonical state: %v", err)
 	}
-	if err := gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusFailed); err != nil {
+	if err := gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusFailed, after.NeedsHuman(1, loop.Config.Completion.AutoMerge)); err != nil {
 		t.Fatal(err)
 	}
-	if !containsString(github.issue.Labels, "bug") || !containsString(github.issue.Labels, "do-not-automate") {
+	if !containsString(github.issue.Labels, "bug") || containsString(github.issue.Labels, "do-not-automate") {
 		t.Fatal(github.issue.Labels)
 	}
 }
@@ -65,7 +65,7 @@ func TestProjectionRejectsConcurrentCanonicalChangeAndConvergesNextTime(t *testi
 	if err := loop.reconcileIssueProjection(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusBlocked); err != nil {
+	if err := gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusBlocked, true); err != nil {
 		t.Fatal(err)
 	}
 }

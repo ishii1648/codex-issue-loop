@@ -14,9 +14,10 @@ import (
 )
 
 type Result struct {
-	Reason          string           `json:"reason"`
-	PendingRequests []*state.Request `json:"pending_requests"`
-	Snapshot        state.Snapshot   `json:"snapshot"`
+	HumanNeeds      []state.HumanNeed `json:"human_needs"`
+	Reason          string            `json:"reason"`
+	PendingRequests []*state.Request  `json:"pending_requests"`
+	Snapshot        state.Snapshot    `json:"snapshot"`
 }
 
 type eventSubscription struct {
@@ -27,20 +28,20 @@ type eventSubscription struct {
 
 type subscribeFunc func(context.Context, string) (eventSubscription, error)
 
-func Wait(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool) (Result, error) {
-	return waitWithSubscription(ctx, store, interval, jitter, untilIdle, subscribeFSNotify, nil)
+func Wait(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle, autoMerge bool) (Result, error) {
+	return waitWithSubscription(ctx, store, interval, jitter, untilIdle, autoMerge, subscribeFSNotify, nil)
 }
 
-func waitWithSubscribeHook(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool, subscribed func()) (Result, error) {
-	return waitWithSubscription(ctx, store, interval, jitter, untilIdle, subscribeFSNotify, subscribed)
+func waitWithSubscribeHook(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle, autoMerge bool, subscribed func()) (Result, error) {
+	return waitWithSubscription(ctx, store, interval, jitter, untilIdle, autoMerge, subscribeFSNotify, subscribed)
 }
 
-func waitWithSubscription(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool, subscribe subscribeFunc, subscribed func()) (Result, error) {
+func waitWithSubscription(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle, autoMerge bool, subscribe subscribeFunc, subscribed func()) (Result, error) {
 	if interval <= 0 {
 		return Result{}, fmt.Errorf("reconcile interval must be positive")
 	}
-	if snapshot, result, err := check(store, untilIdle); err != nil || result != "" {
-		return newResult(result, snapshot), err
+	if snapshot, result, err := check(store, untilIdle, autoMerge); err != nil || result != "" {
+		return newResult(result, snapshot, autoMerge), err
 	}
 
 	subscription, err := subscribe(ctx, filepath.Clean(store.Dir))
@@ -48,7 +49,7 @@ func waitWithSubscription(ctx context.Context, store state.Store, interval time.
 		// Event delivery is only a latency optimization. Descriptor exhaustion,
 		// backend errors, or a temporarily unavailable directory must not disable
 		// durable reconciliation.
-		return wait(ctx, store, interval, jitter, untilIdle, nil, nil)
+		return wait(ctx, store, interval, jitter, untilIdle, autoMerge, nil, nil)
 	}
 	if subscription.close != nil {
 		defer func() { _ = subscription.close() }()
@@ -59,11 +60,11 @@ func waitWithSubscription(ctx context.Context, store state.Store, interval time.
 
 	// Read again after subscribing so a transition between the first read and
 	// event registration cannot be lost.
-	if snapshot, result, err := check(store, untilIdle); err != nil || result != "" {
-		return newResult(result, snapshot), err
+	if snapshot, result, err := check(store, untilIdle, autoMerge); err != nil || result != "" {
+		return newResult(result, snapshot, autoMerge), err
 	}
 
-	return wait(ctx, store, interval, jitter, untilIdle, subscription.wake, subscription.errors)
+	return wait(ctx, store, interval, jitter, untilIdle, autoMerge, subscription.wake, subscription.errors)
 }
 
 func subscribeFSNotify(ctx context.Context, directory string) (eventSubscription, error) {
@@ -109,12 +110,12 @@ func subscribeFSNotify(ctx context.Context, directory string) (eventSubscription
 	return eventSubscription{wake: wake, errors: errors, close: w.Close}, nil
 }
 
-func wait(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle bool, wake <-chan struct{}, eventErrors <-chan error) (Result, error) {
+func wait(ctx context.Context, store state.Store, interval time.Duration, jitter float64, untilIdle, autoMerge bool, wake <-chan struct{}, eventErrors <-chan error) (Result, error) {
 	if interval <= 0 {
 		return Result{}, fmt.Errorf("reconcile interval must be positive")
 	}
-	if snapshot, result, err := check(store, untilIdle); err != nil || result != "" {
-		return newResult(result, snapshot), err
+	if snapshot, result, err := check(store, untilIdle, autoMerge); err != nil || result != "" {
+		return newResult(result, snapshot, autoMerge), err
 	}
 	timer := time.NewTimer(jittered(interval, jitter))
 	defer timer.Stop()
@@ -133,23 +134,23 @@ func wait(ctx context.Context, store state.Store, interval time.Duration, jitter
 		case <-timer.C:
 		}
 
-		snapshot, result, err := check(store, untilIdle)
+		snapshot, result, err := check(store, untilIdle, autoMerge)
 		if err != nil {
 			return Result{}, err
 		}
 		if result != "" {
-			return newResult(result, snapshot), nil
+			return newResult(result, snapshot, autoMerge), nil
 		}
 		timer.Reset(jittered(interval, jitter))
 	}
 }
 
-func check(store state.Store, untilIdle bool) (state.Snapshot, string, error) {
+func check(store state.Store, untilIdle, autoMerge bool) (state.Snapshot, string, error) {
 	snapshot, err := store.Load()
 	if err != nil {
 		return state.Snapshot{}, "", err
 	}
-	reason, ok := snapshot.Attention(untilIdle)
+	reason, ok := snapshot.Attention(untilIdle, autoMerge)
 	if !ok {
 		return snapshot, "", nil
 	}
@@ -158,7 +159,7 @@ func check(store state.Store, untilIdle bool) (state.Snapshot, string, error) {
 
 func pendingRequests(snapshot state.Snapshot) []*state.Request {
 	requests := make([]*state.Request, 0)
-	for _, request := range snapshot.PendingRequests {
+	for _, request := range snapshot.Requests() {
 		if request != nil && request.Status == issuedomain.RequestStatusPending {
 			copy := *request
 			copy.Options = append([]state.Option(nil), request.Options...)
@@ -169,8 +170,8 @@ func pendingRequests(snapshot state.Snapshot) []*state.Request {
 	return requests
 }
 
-func newResult(reason string, snapshot state.Snapshot) Result {
-	return Result{Reason: reason, PendingRequests: pendingRequests(snapshot), Snapshot: snapshot}
+func newResult(reason string, snapshot state.Snapshot, autoMerge bool) Result {
+	return Result{HumanNeeds: snapshot.HumanNeeds(autoMerge), Reason: reason, PendingRequests: pendingRequests(snapshot), Snapshot: snapshot}
 }
 
 func jittered(base time.Duration, ratio float64) time.Duration {

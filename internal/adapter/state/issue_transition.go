@@ -139,3 +139,48 @@ func CancelQuarantinedIssue(snapshot *Snapshot, issueNumber int, now time.Time) 
 	delete(snapshot.QuarantinedIssues, key)
 	return nil
 }
+
+func ApplyRequestAnswer(request *Request, answer string, now time.Time) error {
+	status, err := issuedomain.AnswerRequest(request.Status, request.Answer, answer)
+	if err != nil {
+		return err
+	}
+	if request.Status == status {
+		return nil
+	}
+	at := now.UTC()
+	request.Status, request.Answer, request.AnsweredAt = status, answer, &at
+	return nil
+}
+
+func RestoreInput(snapshot *Snapshot, number int, head, digest string, now time.Time) error {
+	q := snapshot.QuarantinedIssues[strconv.Itoa(number)]
+	item, err := InputRecoveryCandidate(q)
+	if err != nil {
+		return err
+	}
+	if snapshot.Issues[strconv.Itoa(number)] != nil || snapshot.ActiveExecution != nil || head == "" || digest == "" || now.IsZero() {
+		return fmt.Errorf("input recovery boundary changed")
+	}
+	r := q.Requests[0]
+	if snapshot.PendingRequests[r.ID] != nil {
+		return fmt.Errorf("input request ID already exists")
+	}
+	transition, err := issuedomain.RestoreRejectedInput(item.Status)
+	if err != nil {
+		return err
+	}
+	base := item.Continuation.BaseSHA
+	item.Suspension = nil
+	item.WorkerPID, item.WorkerPGID = 0, 0
+	item.Continuation = &ContinuationCheckpoint{ID: r.CheckpointID, CreatedAt: r.CreatedAt, RunID: item.RunID, Generation: item.Generation, BaseSHA: base, Workspace: cloneWorkspace(item.Workspace), Session: cloneSession(item.Session), HeadSHA: head, WorktreeSHA256: digest, Kind: ContinuationKindNeedsInput, RequestID: r.ID, Stage: issuedomain.ContinuationStageResume}
+	if err := ApplyIssueTransition(item, transition); err != nil {
+		return err
+	}
+	item.LastError, item.FailureKind = "", ""
+	item.RetryAfter, item.UpdatedAt = nil, now.UTC()
+	snapshot.Issues[strconv.Itoa(number)] = item
+	snapshot.PendingRequests[r.ID] = r
+	delete(snapshot.QuarantinedIssues, strconv.Itoa(number))
+	return nil
+}

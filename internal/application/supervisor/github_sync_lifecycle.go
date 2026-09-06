@@ -151,7 +151,7 @@ func (l *Loop) reconcileIssueProjection(ctx context.Context, number int) error {
 	} else if quarantine == nil {
 		return nil
 	}
-	if err := l.GitHub.ReconcileIssue(ctx, l.Config, number, status); err != nil {
+	if err := l.GitHub.ReconcileIssue(ctx, l.Config, number, status, snapshot.NeedsHuman(number, l.Config.Completion.AutoMerge)); err != nil {
 		return failure.Wrap(failure.Transient, "reconcile GitHub Issue projection", err)
 	}
 	latest, err := l.Store.Load()

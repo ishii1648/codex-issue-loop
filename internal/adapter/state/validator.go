@@ -332,6 +332,13 @@ func validateRequestAggregate(snapshot Snapshot, id string, request *Request) er
 			return fmt.Errorf("canceled request %s contains an answer", id)
 		}
 	}
+	if request.Status == issuedomain.RequestStatusAnswered {
+		for _, answer := range issue.Answers {
+			if answer.RequestID == request.ID && answer.Question == request.Question && answer.Answer == request.Answer {
+				return nil
+			}
+		}
+	}
 	if request.CheckpointID != "" {
 		historicalCompletedRequest := issue.Status == issuedomain.StatusCompleted && issue.Continuation == nil &&
 			request.Status == issuedomain.RequestStatusAnswered && request.ReleasedExecution != nil &&

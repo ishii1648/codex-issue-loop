@@ -6,7 +6,7 @@ github:
   # repository_id: 123456789
   # Labels that people use to admit or exclude work are repository policy.
   ready_labels: [codex-loop:ready]
-  exclude_labels: [blocked, do-not-automate]
+  exclude_labels: [blocked]
   trusted_issue_authors:
     minimum_permission: write
     allow_logins: []

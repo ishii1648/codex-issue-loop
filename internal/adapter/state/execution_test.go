@@ -137,3 +137,33 @@ func TestPendingEffectIsRootScopedAndFenced(t *testing.T) {
 		t.Fatalf("clear err=%v effect=%+v", err, PendingEffect(&snapshot, 1))
 	}
 }
+
+func TestCaptureNewQuestionAfterResolvedSuspension(t *testing.T) {
+	now := time.Now().UTC()
+	identity := ExecutionIdentity{RunID: "run_1", Generation: 6}
+	item := &Issue{Number: 1, RunID: identity.RunID, Generation: identity.Generation,
+		Status:       issuedomain.StatusRunning,
+		Continuation: &ContinuationCheckpoint{ID: "checkpoint_old"},
+		Suspension:   &Suspension{Status: issuedomain.SuspensionResolved, CheckpointID: "checkpoint_old"},
+	}
+	snapshot := Snapshot{Issues: map[string]*Issue{"1": item}, ActiveExecution: &ActiveExecution{IssueNumber: 1, RunID: identity.RunID, Generation: identity.Generation}}
+	if err := CaptureContinuation(&snapshot, 1, identity, "checkpoint_new", now); err != nil {
+		t.Fatal(err)
+	}
+	if item.Suspension != nil || item.Continuation.ID != "checkpoint_new" || snapshot.ActiveExecution != nil {
+		t.Fatalf("new boundary retains old suspension: %+v", item)
+	}
+}
+
+func TestAnsweredQuestionSurvivesNextCheckpoint(t *testing.T) {
+	request := &Request{ID: "req_first", IssueNumber: 1, RunID: "run_1", CheckpointID: "checkpoint_first", Status: issuedomain.RequestStatusAnswered, Question: "Choose?", Answer: "yes"}
+	item := &Issue{Number: 1, RunID: "run_1", Continuation: &ContinuationCheckpoint{ID: "checkpoint_second"}, Answers: []AnswerRecord{{RequestID: request.ID, Question: request.Question, Answer: request.Answer}}}
+	snapshot := Snapshot{Issues: map[string]*Issue{"1": item}}
+	if err := validateRequestAggregate(snapshot, request.ID, request); err != nil {
+		t.Fatal(err)
+	}
+	item.Answers[0].Answer = "different"
+	if err := validateRequestAggregate(snapshot, request.ID, request); err == nil {
+		t.Fatal("mismatched historical answer accepted")
+	}
+}

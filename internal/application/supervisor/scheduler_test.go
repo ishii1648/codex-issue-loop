@@ -1375,7 +1375,7 @@ func TestSweepCollectionExitRepairsProjectionWithoutStoppingWorker(t *testing.T)
 		t.Fatal(err)
 	}
 	candidates, acknowledged, err := s.processMailbox(context.Background(), snapshot)
-	if err != nil || len(candidates) != 0 || len(acknowledged) != 1 || gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusRunning) != nil {
+	if err != nil || len(candidates) != 0 || len(acknowledged) != 1 || gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusRunning, false) != nil {
 		t.Fatalf("candidates=%v acknowledged=%v rest_gets=%d err=%v", candidates, acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()
@@ -1416,7 +1416,7 @@ func TestSweepCollectionExitDoesNotMisreadNormalClaimAsManualExclusion(t *testin
 	s := &scheduler{loop: loop, events: make(chan schedulerEvent, 1), active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
 	snapshot, _ := loop.Store.Load()
 	_, acknowledged, err := s.processMailbox(context.Background(), snapshot)
-	if err != nil || len(acknowledged) != 1 || gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusRunning) != nil {
+	if err != nil || len(acknowledged) != 1 || gh.ValidateIssueProjection(loop.Config, github.issue, issuedomain.StatusRunning, false) != nil {
 		t.Fatalf("acknowledged=%v rest_gets=%d err=%v", acknowledged, github.restGets, err)
 	}
 	snapshot, err = loop.Store.Load()

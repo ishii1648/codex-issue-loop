@@ -141,7 +141,7 @@ func validate(cfg *Config) error {
 			repo.RunningLabel = "codex-loop:running"
 		}
 		if len(repo.TerminalLabels) == 0 {
-			repo.TerminalLabels = []string{"codex-loop:done", "codex-loop:needs-input", "codex-loop:failed", "blocked"}
+			repo.TerminalLabels = []string{"codex-loop:done", "needs-human", "codex-loop:failed", "blocked"}
 		}
 		if repo.AcceptanceTimeout.Duration == 0 {
 			repo.AcceptanceTimeout.Duration = 10 * time.Minute

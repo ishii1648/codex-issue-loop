@@ -12,6 +12,7 @@ import (
 )
 
 type statusResult struct {
+	HumanNeeds      []state.HumanNeed            `json:"human_needs"`
 	Launchd         launchd.Status               `json:"launchd"`
 	WorkerPool      workerPoolStatus             `json:"worker_pool"`
 	PendingRequests []*state.Request             `json:"pending_requests"`
@@ -58,7 +59,7 @@ func buildStatus(launchStatus launchd.Status, snapshot state.Snapshot, _ int) st
 	}
 	sort.Slice(issues, func(i, j int) bool { return issues[i].IssueNumber < issues[j].IssueNumber })
 	requests := make([]*state.Request, 0)
-	for _, request := range snapshot.PendingRequests {
+	for _, request := range snapshot.Requests() {
 		if request == nil || request.Status != issuedomain.RequestStatusPending {
 			continue
 		}

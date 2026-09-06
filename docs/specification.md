@@ -160,7 +160,7 @@ github:
   # webhook modeだけで必須
   repository_id: 123456789
   ready_labels: [codex-loop:ready]
-  exclude_labels: [blocked, do-not-automate]
+  exclude_labels: [blocked]
   trusted_issue_authors:
     minimum_permission: write
     allow_logins: []
@@ -359,13 +359,14 @@ agent-loop answer --request-id req_... --message-file -
 
 処理:
 
-1. request IDと未回答状態を検証する
-2. 通常worker requestでは保存run、generation、continuation provenance、PID/PGID不在を検証する
-3. 回答を原子的に保存し、repositoryの実行枠が空いていればgenerationを同じtransactionで1回だけ進める
-4. 他Issueが実行中ならその実行を変更せず、回答済みrequestを再開待ちにする
-5. `answer_recorded` イベントを追記する
+1. request ID を着手前・実行中・隔離中の永続 mailbox から検索する。
+2. 回答を `answer_recorded` transaction で保存する。同じ回答の再送は冪等とし、異なる回答による上書きと不明な ID は拒否する。
+3. supervisor が別 transaction で保存 run・generation・continuation・実行権を再検証し、再開可能な回答だけを `resume_pending` または conflict 継続へ渡す。再開できなくても回答は取り消さない。
+4. 着手前の回答では ready を自動付与しない。本文と受入条件の再評価後に受付し、初回 worker に記録済み回答を渡す。
 
-通常workerの`needs_input`は`input_requested` transactionでrequestとcontinuation provenanceを保存し、GitHub needs-inputを維持したままrepositoryの実行枠を解放する。回答済みrequestは実行枠が空くまでworker dispatch対象にせず、枠の解放後に同じrequest、run、generationを再検証して`resume_pending`へ進める。内部のsuspension、PR conflict、publication監査、active worker、複数request、未知のlegacy stateは対象Issueに対してfail closedとする。continuationは保存workspaceと新しいgenerationをspawn直前に再検証する。
+着手前の質問は `agent-loop issue ask --repo PATH --issue N --json` の標準入力へ `text`、`reason`、`recommended_option`、`options`、`allow_free_text` を持つ JSON を渡して保存する。worker・worktree は作成しない。実行途中の質問は worker の構造化 `needs_input` 結果で保存する。両方を同じ `answer`、status、watch で扱う。隔離中の質問も通常の `pending_requests` 表示に含める。
+
+通常 worker の質問待ちでは実行枠を解放し、session/workspace を保持する。回答の受領と worker への引き渡しは別の状態であり、worker 起動前の provenance 検証は維持する。新しい質問の checkpoint に前回の解決済み suspension を引き継がず、以前の質問・回答は履歴として保持する。
 
 ### 6.6 issue plan / issue resolve
 
@@ -377,13 +378,15 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action cancel --json
 ```
 
-`issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`またはIssue-local quarantine envelopeと、現在のprocess、managed worktree、content SHA-256、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。`resume`とpublicationの`retry-stage`は保存時と現在のworktree HEAD・content SHA-256・base ancestryが一致しなければ拒否し、checksの`retry-stage`はcleanかつfully pushedなlocal/remote/PR HEAD一致を要求する。conflict recovery中に`worktree_sha256`だけを欠くquarantineは、保存済みhead、remote branch、open PR、`MERGE_HEAD`、base ancestry、変更path scopeの一致時だけ`adopt-worktree`でdigestを採用できる。記録済みscope外の現在変更pathは、planとresolveへ同じ`--allow-path`を指定した場合だけ追加できる。指定pathが現在の未承認変更でない場合や、未指定のscope外変更が残る場合は拒否する。この操作は実行枠を取得せず、続く`retry-stage`を別transactionで要求する。それ以外のquarantineは`cancel`だけを許可する。
+`issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`またはIssue-local quarantine envelopeと、現在のprocess、managed worktree、content SHA-256、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。`resume`とpublicationの`retry-stage`は保存時と現在のworktree HEAD・content SHA-256・base ancestryが一致しなければ拒否し、checksの`retry-stage`はcleanかつfully pushedなlocal/remote/PR HEAD一致を要求する。conflict recovery中に`worktree_sha256`だけを欠くquarantineは、保存済みhead、remote branch、open PR、`MERGE_HEAD`、base ancestry、変更path scopeの一致時だけ`adopt-worktree`でdigestを採用できる。記録済みscope外の現在変更pathは、planとresolveへ同じ`--allow-path`を指定した場合だけ追加できる。指定pathが現在の未承認変更でない場合や、未指定のscope外変更が残る場合は拒否する。この操作は実行枠を取得せず、続く`retry-stage`を別transactionで要求する。それ以外の quarantine は、以下の `adopt-input` の限定ケースを除いて `cancel` だけを許可する。
 
 `adopt-head --expected-head SHA`はactiveなworker resume checkpointの`head_sha`だけが欠落し、保存済みcontent digest・workspace/session/run identity・base ancestryが一致する場合に限定する。実行中worker・execution・request・remote branch・PRがある場合は拒否する。指定HEADとplan観測値を再照合し、HEADと監査イベントだけを保存する。suspension・generation・実行枠は保持し、別途`resume`を要求する。停止時はIssueの未設定HEADをコピーせず、worktreeで観測したHEADをcheckpointへ保存する。
 
 `issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`はrepositoryの実行枠が空であることを再検査し、generationを一度だけ進めて現在の実行として記録する。`adopt-worktree`は再検証したcontent SHA-256と明示的な`--allow-path`をcheckpoint、conflict recovery scope、audit eventへ記録してsuspensionをoperator-recoverableへ戻すが、generationと実行枠を変更しない。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずIssueを`canceled`へ、pending requestをrequest-level `canceled`へ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
 
 ambiguousなIssueはその`suspension`またはIssue-local envelopeだけをquarantineする。schedulerはquarantine中のIssueを再admitせず、後続候補の選択を続ける。terminal `blocked` / `failed`はPID/PGIDとrepositoryの実行枠を保持せず、他Issueの選択を妨げない。durable state、label、checkpointを手編集して判定を通してはならない。
+
+`adopt-input --expected-head SHA` は、解決済み suspension を持つ実行からの再質問が不整合として隔離されたケースだけを復旧する。単一の request、run/generation、元の session/workspace、新旧 checkpoint の一致関係、終了済み process、未公開 branch と base ancestry を検証する。二度の plan と transaction の再検証後、同じ質問 ID・回答を持つ `needs_input` に戻す。worker はこの操作で起動せず、保存済み回答は supervisor が通常の再開経路で扱う。元の隔離記録と採用した HEAD・content digest は監査イベントへ保持する。
 
 ### 6.7 legacy v4 recovery（migration入力のみ）
 
@@ -925,13 +928,15 @@ supervisorは起動時に二重起動lockとsnapshot/event整合性を検証し�
 | claiming / claimed / launching / running | running | OPEN |
 | retry_wait / resume_pending / resolving_conflict | running | OPEN |
 | awaiting_checks / awaiting_merge | running | OPEN |
-| needs_input | needs-input | OPEN |
+| needs_input | 未回答なら needs-human | OPEN |
 | blocked / quarantine | blocked相当 | OPEN |
 | failed | failed | OPEN |
 | completed | done | `completion.close_issue=true`ならCLOSED/COMPLETED、それ以外はOPEN |
 | canceled | なし | CLOSED/NOT_PLANNED |
 
-label名はeffective configを使う。blocked相当は設定済み`blocked` exclusion label、なければfailed labelとする。全管理状態でready labelと他の管理status labelを除く。business、priority、`blocked`以外のexclusion labelは変更しない。管理対象Issueではそれらのexclusion labelを停止指示として解釈しない。
+人の判断・回答・操作が必要な表示は `needs-human` に統一する。未回答質問、operator による復旧、隔離、必須レビュー、手動マージを共通の `human_needs` で判定し、status・watch・GitHub 同期で同じ判定を使う。回答済みで機械処理だけを待つ場合は外す。人間待ちで自動処理が進まない間は running を外し、必要に応じて blocked/failed と併記する。完了・取消では人間待ちを残さない。
+
+`triage`、`do-not-automate`、`codex-loop:needs-input` は廃止する。未評価は状態ラベルなし、着手可能な Issue だけを ready へ入れる。既存の未管理 Issue から廃止ラベルを除く際は ready との併存を確認し、意図しない受付を防ぐ。自動化しない方針の理由は本文に保持する。管理済み Issue の廃止ラベルは同期で除く。business・area・priority などの分類ラベルは変更しない。
 
 同期は起動時、GitHub副作用の処理後、Webhookによるwake、定期的なmanaged Issue走査で行う。定期走査は既存schedulerを使い、一度に一件、Issueごとに最低5分の間隔を置く。前回確認の古いIssueから選び、completed/canceledとquarantineも対象にする。Webhook modeでもlocal reconciliation timerから実行し、ready collectionの取得には依存しない。maintenance fenceと共有rate-limit cooldownに従い、新しい永続状態・設定・background processは追加しない。
 

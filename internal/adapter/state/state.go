@@ -712,16 +712,19 @@ func unlock(f *os.File) {
 	_ = f.Close()
 }
 
-func (s Snapshot) Attention(untilIdle bool) (string, bool) {
+func (s Snapshot) Attention(untilIdle, autoMerge bool) (string, bool) {
 	requests := make([]string, 0)
-	for id, request := range s.PendingRequests {
+	for _, request := range s.Requests() {
 		if request.Status == issuedomain.RequestStatusPending {
-			requests = append(requests, id)
+			requests = append(requests, request.ID)
 		}
 	}
 	if len(requests) > 0 {
 		sort.Strings(requests)
 		return "needs_input", true
+	}
+	if len(s.HumanNeeds(autoMerge)) > 0 {
+		return "needs_human", true
 	}
 	for _, issue := range s.Issues {
 		if issue != nil && issue.Status == issuedomain.StatusBlocked {

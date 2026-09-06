@@ -36,7 +36,7 @@ func TestFaultDroppedEventReconcilesAttention(t *testing.T) {
 	resultCh := make(chan Result, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, err := wait(ctx, store, 25*time.Millisecond, 0, false, wake, eventErrors)
+		result, err := wait(ctx, store, 25*time.Millisecond, 0, false, true, wake, eventErrors)
 		resultCh <- result
 		errCh <- err
 	}()
@@ -67,7 +67,7 @@ func TestWatchReturnsEveryPendingRequestInRequestIDOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := Wait(context.Background(), store, time.Second, 0, false)
+	result, err := Wait(context.Background(), store, time.Second, 0, false, true)
 	if err != nil || len(result.PendingRequests) != 2 || result.PendingRequests[0].ID != "req_a" || result.PendingRequests[1].ID != "req_b" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -99,7 +99,7 @@ func TestWatchPreservesAnsweredGenericContinuation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := Wait(context.Background(), store, time.Second, 0, false)
+	result, err := Wait(context.Background(), store, time.Second, 0, false, true)
 	if err != nil || result.Reason != "stopped" || len(result.PendingRequests) != 0 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -113,7 +113,7 @@ func TestFaultReadSubscribeReadRace(t *testing.T) {
 	store := newWatchStore(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	result, err := waitWithSubscribeHook(ctx, store, time.Hour, 0, false, func() {
+	result, err := waitWithSubscribeHook(ctx, store, time.Hour, 0, false, true, func() {
 		_, updateErr := store.Update("input_requested", 4, "run", nil, func(snapshot *state.Snapshot) error {
 			addWatchRequest(snapshot, "req_race", 4, issuedomain.RequestStatusPending)
 			return nil
@@ -138,7 +138,7 @@ func TestFaultMultipleWatchConnectionsObserveSameRevision(t *testing.T) {
 	results := make(chan outcome, 2)
 	for index := 0; index < 2; index++ {
 		go func() {
-			result, err := Wait(ctx, store, 20*time.Millisecond, 0, false)
+			result, err := Wait(ctx, store, 20*time.Millisecond, 0, false, true)
 			results <- outcome{result: result, err: err}
 		}()
 	}
@@ -167,7 +167,7 @@ func TestFaultDisconnectedEventChannelsFallBackToTimer(t *testing.T) {
 	defer cancel()
 	resultCh := make(chan outcomeForTest, 1)
 	go func() {
-		result, err := wait(ctx, store, 20*time.Millisecond, 0, false, wake, eventErrors)
+		result, err := wait(ctx, store, 20*time.Millisecond, 0, false, true, wake, eventErrors)
 		resultCh <- outcomeForTest{result: result, err: err}
 	}()
 	_, err := store.Update("input_requested", 6, "run", nil, func(snapshot *state.Snapshot) error {
@@ -189,7 +189,7 @@ func TestFaultWatcherSubscriptionFailureFallsBackToReconciliation(t *testing.T) 
 	defer cancel()
 	resultCh := make(chan outcomeForTest, 1)
 	go func() {
-		result, err := waitWithSubscription(ctx, store, 20*time.Millisecond, 0, false, func(context.Context, string) (eventSubscription, error) {
+		result, err := waitWithSubscription(ctx, store, 20*time.Millisecond, 0, false, true, func(context.Context, string) (eventSubscription, error) {
 			return eventSubscription{}, errors.New("too many open files")
 		}, nil)
 		resultCh <- outcomeForTest{result: result, err: err}
@@ -221,7 +221,7 @@ func TestFSNotifyMultipleWatchersWakeAndCanReconnect(t *testing.T) {
 		subscribed := make(chan struct{}, watchers)
 		for index := 0; index < watchers; index++ {
 			go func() {
-				result, err := waitWithSubscribeHook(ctx, store, time.Hour, 0, false, func() { subscribed <- struct{}{} })
+				result, err := waitWithSubscribeHook(ctx, store, time.Hour, 0, false, true, func() { subscribed <- struct{}{} })
 				results <- outcome{result: result, err: err}
 			}()
 		}

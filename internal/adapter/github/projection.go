@@ -11,15 +11,17 @@ import (
 )
 
 type issueProjection struct {
-	label   string
-	state   string
-	reason  string
-	managed []string
+	label      string
+	state      string
+	reason     string
+	managed    []string
+	human      bool
+	humanLabel string
 }
 
 func desiredIssueProjection(cfg config.Config, status issuedomain.Status) (issueProjection, error) {
-	p := issueProjection{state: "OPEN", managed: append([]string{}, cfg.GitHub.ReadyLabels...)}
-	p.managed = append(p.managed, cfg.GitHub.RunningLabel, cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel)
+	p := issueProjection{state: "OPEN", human: status == issuedomain.StatusNeedsInput, humanLabel: cfg.GitHub.NeedsInputLabel, managed: append([]string{}, cfg.GitHub.ReadyLabels...)}
+	p.managed = append(p.managed, cfg.GitHub.RunningLabel, cfg.GitHub.NeedsInputLabel, cfg.GitHub.DoneLabel, cfg.GitHub.FailedLabel, "needs-human", "codex-loop:needs-input", "triage", "do-not-automate")
 	blocked := cfg.GitHub.FailedLabel
 	for _, label := range cfg.GitHub.ExcludeLabels {
 		if strings.EqualFold(label, "blocked") {
@@ -28,12 +30,15 @@ func desiredIssueProjection(cfg config.Config, status issuedomain.Status) (issue
 		}
 	}
 	switch status {
+	case issuedomain.StatusUnset:
+		p.state = ""
+		p.managed = []string{cfg.GitHub.NeedsInputLabel, "codex-loop:needs-input"}
 	case issuedomain.StatusClaiming, issuedomain.StatusClaimed, issuedomain.StatusLaunching, issuedomain.StatusRunning,
 		issuedomain.StatusRetryWait, issuedomain.StatusResumePending, issuedomain.StatusResolvingConflict,
 		issuedomain.StatusAwaitingChecks, issuedomain.StatusAwaitingMerge:
 		p.label = cfg.GitHub.RunningLabel
 	case issuedomain.StatusNeedsInput:
-		p.label = cfg.GitHub.NeedsInputLabel
+		p.label = ""
 	case issuedomain.StatusBlocked:
 		p.label = blocked
 	case issuedomain.StatusFailed:
@@ -56,13 +61,16 @@ func (p issueProjection) labelChanges(issue Issue) (add, remove []string) {
 	for _, label := range issue.Labels {
 		present[strings.ToLower(label)] = true
 	}
+	if p.human && !present[strings.ToLower(p.humanLabel)] {
+		add = append(add, p.humanLabel)
+	}
 	if p.label != "" && !present[strings.ToLower(p.label)] {
 		add = append(add, p.label)
 	}
 	seen := map[string]bool{}
 	for _, label := range p.managed {
 		key := strings.ToLower(label)
-		if label != "" && !strings.EqualFold(label, p.label) && present[key] && !seen[key] {
+		if label != "" && !(p.human && strings.EqualFold(label, p.humanLabel)) && !strings.EqualFold(label, p.label) && present[key] && !seen[key] {
 			remove = append(remove, label)
 			seen[key] = true
 		}
@@ -71,13 +79,20 @@ func (p issueProjection) labelChanges(issue Issue) (add, remove []string) {
 }
 
 func (p issueProjection) stateMatches(issue Issue) bool {
-	return strings.EqualFold(issue.State, p.state) && (p.reason == "" || strings.EqualFold(issue.StateReason, p.reason))
+	return p.state == "" || strings.EqualFold(issue.State, p.state) && (p.reason == "" || strings.EqualFold(issue.StateReason, p.reason))
 }
 
-func ValidateIssueProjection(cfg config.Config, issue Issue, status issuedomain.Status) error {
+func ValidateIssueProjection(cfg config.Config, issue Issue, status issuedomain.Status, human bool) error {
 	p, err := desiredIssueProjection(cfg, status)
 	if err != nil {
 		return err
+	}
+	p.human = human
+	if status == issuedomain.StatusUnset && human {
+		p.managed = append(p.managed, cfg.GitHub.ReadyLabels...)
+	}
+	if human && p.label == cfg.GitHub.RunningLabel {
+		p.label = ""
 	}
 	add, remove := p.labelChanges(issue)
 	if len(add) > 0 || len(remove) > 0 || !p.stateMatches(issue) {
@@ -89,10 +104,17 @@ func ValidateIssueProjection(cfg config.Config, issue Issue, status issuedomain.
 // ReconcileIssue projects only loop-owned labels and open/closed state. Success
 // requires readback; comments and successful partial writes are not evidence
 // that the complete projection reached GitHub.
-func (c CLI) ReconcileIssue(ctx context.Context, cfg config.Config, number int, status issuedomain.Status) error {
+func (c CLI) ReconcileIssue(ctx context.Context, cfg config.Config, number int, status issuedomain.Status, human bool) error {
 	p, err := desiredIssueProjection(cfg, status)
 	if err != nil {
 		return err
+	}
+	p.human = human
+	if status == issuedomain.StatusUnset && human {
+		p.managed = append(p.managed, cfg.GitHub.ReadyLabels...)
+	}
+	if human && p.label == cfg.GitHub.RunningLabel {
+		p.label = ""
 	}
 	remote, err := c.Get(ctx, cfg, number)
 	if err != nil {
@@ -126,5 +148,9 @@ func (c CLI) ReconcileIssue(ctx context.Context, cfg config.Config, number int, 
 	if err != nil {
 		return err
 	}
-	return ValidateIssueProjection(cfg, remote, status)
+	add, remove = p.labelChanges(remote)
+	if len(add) > 0 || len(remove) > 0 || !p.stateMatches(remote) {
+		return fmt.Errorf("Issue #%d GitHub projection did not converge", number)
+	}
+	return nil
 }
