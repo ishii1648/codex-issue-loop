@@ -1,8 +1,10 @@
-.PHONY: build test fault-test conformance-test incident-e2e test-race vet vuln-check fmt-check schema-check tidy-check release-check ci clean
+.PHONY: build test fault-test conformance-test incident-e2e test-race vet vuln-check install-shellcheck workflow-shell-check fmt-check schema-check tidy-check release-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
 GOVULNCHECK_VERSION ?= v1.6.0
+ACTIONLINT_VERSION := v1.7.12
+SHELLCHECK_VERSION := 0.11.0
 GO_TOOLCHAIN ?= go1.25.13
 export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 
@@ -35,6 +37,28 @@ vet:
 vuln-check:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
+install-shellcheck:
+	@set -eu; \
+	platform=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	arch=$$(uname -m); \
+	case "$$arch" in arm64) arch=aarch64 ;; esac; \
+	case "$$platform/$$arch" in darwin/aarch64|darwin/x86_64|linux/aarch64|linux/x86_64) ;; \
+		*) echo "Unsupported ShellCheck platform: $$platform/$$arch" >&2; exit 1 ;; esac; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+	curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v$(SHELLCHECK_VERSION)/shellcheck-v$(SHELLCHECK_VERSION).$$platform.$$arch.tar.gz" -o "$$tmp/shellcheck.tar.gz"; \
+	tar -xzf "$$tmp/shellcheck.tar.gz" -C "$$tmp"; \
+	mkdir -p bin; \
+	install -m 755 "$$tmp/shellcheck-v$(SHELLCHECK_VERSION)/shellcheck" bin/shellcheck
+
+workflow-shell-check:
+	@test -x bin/shellcheck || { echo 'ShellCheck is required; run make install-shellcheck' >&2; exit 1; }
+	@version=$$(bin/shellcheck --version) && \
+		printf '%s\n' "$$version" | grep -qx 'version: $(SHELLCHECK_VERSION)' || \
+		{ echo 'ShellCheck $(SHELLCHECK_VERSION) is required; run make install-shellcheck' >&2; exit 1; }
+	SHELLCHECK_OPTS= bin/shellcheck --norc scripts/*.sh
+	SHELLCHECK_OPTS= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) -shellcheck '$(CURDIR)/bin/shellcheck' -pyflakes ''
+
 fmt-check:
 	@files="$$($(GOFMT) -l .)"; \
 	if [ -n "$$files" ]; then \
@@ -52,8 +76,8 @@ tidy-check:
 release-check:
 	scripts/check-release.sh
 
-ci: fmt-check schema-check tidy-check test fault-test conformance-test test-race vet vuln-check build release-check
+ci: workflow-shell-check fmt-check schema-check tidy-check test fault-test conformance-test test-race vet vuln-check build release-check
 
 clean:
 	$(GO) clean
-	rm -f bin/agent-loop bin/agent-loop-monitor
+	rm -f bin/agent-loop bin/agent-loop-monitor bin/shellcheck

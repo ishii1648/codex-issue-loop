@@ -23,13 +23,13 @@ for name in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_D
   cmp "$temporary_root/first/$name" "$temporary_root/second/$name"
 done
 
-monitor_version_json=$($temporary_root/first/agent-loop-monitor_Darwin_arm64 version --json)
+monitor_version_json=$("$temporary_root/first/agent-loop-monitor_Darwin_arm64" version --json)
 printf '%s\n' "$monitor_version_json" | grep -Fq '"version":"v0.0.0-test"'
 printf '%s\n' "$monitor_version_json" | grep -Fq "\"commit\":\"$commit\""
 printf '%s\n' "$monitor_version_json" | grep -Fq '"target":"darwin/arm64"'
 printf '%s\n' "$monitor_version_json" | grep -Fq '"monitor_schema_version":1'
 
-version_json=$($temporary_root/first/agent-loop_Darwin_arm64 version --json)
+version_json=$("$temporary_root/first/agent-loop_Darwin_arm64" version --json)
 printf '%s\n' "$version_json" | grep -Fq '"version":"v0.0.0-test"'
 printf '%s\n' "$version_json" | grep -Fq "\"commit\":\"$commit\""
 printf '%s\n' "$version_json" | grep -Fq '"target":"darwin/arm64"'
@@ -61,7 +61,7 @@ run_host_go_test ./internal/application/migration \
   -count=1
 run_host_go_test ./internal/application/delivery -run '^Test(ProductionStateIsolationRunsCredentiallessContractBetweenSnapshots|ProductionReleaseHealthFailsClosed|ProductionAssignmentHealthRequiresExactStableAssignmentsAndRollbackDrill|ReleaseWorkflowPreservesRequiredGateChain|ContractWorkflowsRequireNoLongLivedSecrets|HighRiskReviewUsesMachineVerifiableEvidence)$' -count=1
 
-help_output=$($temporary_root/first/agent-loop_Darwin_arm64 help)
+help_output=$("$temporary_root/first/agent-loop_Darwin_arm64" help)
 printf '%s\n' "$help_output" | grep -Fq 'issue         Plan or resolve one typed Issue suspension'
 if printf '%s\n' "$help_output" | grep -Eq '^[[:space:]]+retry([[:space:]]|$)'; then
   printf '%s\n' "legacy recovery command remains in help: retry" >&2
