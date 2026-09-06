@@ -144,7 +144,8 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 				},
 				ReadOnly: readErr == nil && bytes.Equal(before, after),
 			}
-			return a.inspectInputAdoption(ctx, l, issuePlanningContext{ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, quarantine: quarantine, report: report}), nil
+			p := a.inspectInputAdoption(ctx, l, issuePlanningContext{ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, quarantine: quarantine, report: report})
+			return a.inspectChecksRecovery(ctx, l, p), nil
 		}
 		return issuePlanningContext{}, exitError{4, fmt.Errorf("Issue #%d is missing from canonical state", number)}
 	}
@@ -412,13 +413,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 		return err
 	}
 	if planned.quarantine != nil {
-		if action == issuedomain.ResolutionAdoptInput {
-			return a.resolveInputAdoption(ctx, l, opts, planned)
-		}
-		if action != issuedomain.ResolutionCancel {
-			return exitError{4, fmt.Errorf("Issue #%d is quarantined; only cancel is eligible", *number)}
-		}
-		return a.resolveQuarantinedIssue(ctx, l, *repo, *number, action, *jsonOut, planned)
+		return a.resolveIssueQuarantine(ctx, l, opts, planned)
 	}
 	if action == issuedomain.ResolutionCancel && planned.issue.Status == issuedomain.StatusCanceled {
 		if err := (gh.CLI{Path: planned.ghPath, Secrets: planned.cfg.RedactionValues()}).ReconcileIssue(ctx, planned.cfg, *number, planned.issue.Status, planned.snapshot.NeedsHuman(*number, planned.cfg.Completion.AutoMerge)); err != nil {

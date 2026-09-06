@@ -275,3 +275,7 @@ func ReconcileObservation(from, to Status) (Transition, error) {
 func RestoreRejectedInput(from Status) (Transition, error) {
 	return newAllowedTransition("restore_rejected_input", from, StatusNeedsInput, StatusRunning)
 }
+
+func RestoreRejectedChecks(from Status) (Transition, error) {
+	return newAllowedTransition("restore_rejected_checks", from, StatusAwaitingChecks, StatusRetryWait)
+}

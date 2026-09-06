@@ -184,3 +184,41 @@ func RestoreInput(snapshot *Snapshot, number int, head, digest string, now time.
 	delete(snapshot.QuarantinedIssues, strconv.Itoa(number))
 	return nil
 }
+
+func RestoreAnsweredChecks(snapshot *Snapshot, number int, head, digest string, now time.Time) error {
+	key := strconv.Itoa(number)
+	q := snapshot.QuarantinedIssues[key]
+	item, err := AnsweredChecksRecoveryCandidate(q)
+	if err != nil {
+		return err
+	}
+	if snapshot.Issues[key] != nil || snapshot.ActiveExecution != nil || head == "" || !validSHA256(digest) || now.IsZero() {
+		return fmt.Errorf("checks recovery boundary changed")
+	}
+	for _, r := range q.Requests {
+		if snapshot.PendingRequests[r.ID] != nil {
+			return fmt.Errorf("checks request ID already exists")
+		}
+	}
+	transition, err := issuedomain.RestoreRejectedChecks(item.Status)
+	if err != nil {
+		return err
+	}
+	base := item.Continuation.BaseSHA
+	item.Continuation = &ContinuationCheckpoint{
+		ID: NewID("checkpoint"), CreatedAt: now.UTC(), RunID: item.RunID, Generation: item.Generation,
+		BaseSHA: base, Workspace: cloneWorkspace(item.Workspace), Session: cloneSession(item.Session),
+		HeadSHA: head, WorktreeSHA256: digest, PullRequestURL: item.PullRequestURL, PullRequestNumber: item.PullRequestNumber,
+		Stage: issuedomain.ContinuationStageChecks,
+	}
+	if err := ApplyIssueTransition(item, transition); err != nil {
+		return err
+	}
+	item.RetryAfter, item.UpdatedAt = nil, now.UTC()
+	snapshot.Issues[key] = item
+	for _, r := range q.Requests {
+		snapshot.PendingRequests[r.ID] = r
+	}
+	delete(snapshot.QuarantinedIssues, key)
+	return nil
+}

@@ -13,7 +13,11 @@ func captureContinuation(issue *Issue, active ActiveExecution, now time.Time) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if issue.Continuation == nil {
+	if issue.Continuation == nil || (issue.Continuation.Kind == ContinuationKindNeedsInput &&
+		(issue.Continuation.RunID != active.RunID || issue.Continuation.Generation != active.Generation)) {
+		if issue.Suspension != nil && issue.Suspension.Status == issuedomain.SuspensionResolved {
+			issue.Suspension = nil
+		}
 		issue.Continuation = &ContinuationCheckpoint{ID: NewID("checkpoint")}
 	}
 	checkpoint := issue.Continuation
