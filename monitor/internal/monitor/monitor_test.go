@@ -201,3 +201,40 @@ func TestTerminalSnapshotRaceConvergesToIdle(t *testing.T) {
 		t.Fatalf("convergence = %+v err=%v", got, err)
 	}
 }
+
+func TestUnknownRecoveryWithOverdueQueueAndNewEvents(t *testing.T) {
+	base := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	repo := config.Repository{Name: "owner/repo"}
+	old := model.QueueItem{Number: 239, Phase: model.Running, PhaseSince: base.Add(-24 * time.Hour), Deadline: base.Add(-23 * time.Hour)}
+	previous, _, err := model.Apply(nil, model.Observation{Repository: repo.Name, ObservedAt: base, Cursor: 1, CursorInitialized: true, Items: []model.QueueItem{old}, Error: "unavailable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := store.Store{Root: t.TempDir()}
+	if err := disk.Commit(previous, nil); err != nil {
+		t.Fatal(err)
+	}
+	ready := model.QueueItem{Number: 311, Phase: model.Ready, PhaseSince: base.Add(time.Minute), Deadline: base.Add(61 * time.Minute)}
+	observer := fakeObserver{observations: map[string]model.Observation{repo.Name: {
+		Items: []model.QueueItem{old, ready}, Cursor: 2, CurrentVerified: true,
+		Events: []model.QueueEvent{{ID: 2, IssueNumber: ready.Number, Kind: model.ReadyLabeled, At: ready.PhaseSince}},
+	}}}
+	for poll := 0; poll < 4; poll++ {
+		at := base.Add(time.Duration(poll+2) * time.Minute)
+		runner := Runner{Observer: observer, Store: store.Store{Root: disk.Root}, Now: func() time.Time { return at }}
+		next, err := runner.Poll(context.Background(), repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next.Current.Status != model.Down || !next.Current.StartedAt.Equal(base.Add(2*time.Minute)) || !next.QueueDeadline.Equal(old.Deadline) || next.EventCursor != 2 {
+			t.Fatalf("next=%+v", next)
+		}
+	}
+	history, err := disk.AllIntervals(repo.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 || history[0].Status != model.Unknown || !history[0].StartedAt.Equal(base) || !history[0].EndedAt.Equal(base.Add(2*time.Minute)) {
+		t.Fatalf("history=%+v", history)
+	}
+}

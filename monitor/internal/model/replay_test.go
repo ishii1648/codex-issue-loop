@@ -195,3 +195,32 @@ func TestUnknownDemandRecoversWhenHistoryBecomesAvailable(t *testing.T) {
 		t.Fatalf("next=%+v closed=%+v err=%v", next, closed, err)
 	}
 }
+
+func TestUnknownReplayPreservesIntervalWithExpiredDemand(t *testing.T) {
+	base := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	for _, phase := range []Phase{Ready, Running} {
+		t.Run(string(phase), func(t *testing.T) {
+			old := QueueItem{Number: 239, Phase: phase, PhaseSince: base.Add(-24 * time.Hour), Deadline: base.Add(-23 * time.Hour)}
+			previous, _, err := Apply(nil, Observation{Repository: "owner/repo", ObservedAt: base, Cursor: 1, CursorInitialized: true, Items: []QueueItem{old}, Error: "unavailable"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := base.Add(-time.Minute)
+			added := QueueItem{Number: 311, Phase: Ready, PhaseSince: at, Deadline: at.Add(time.Hour)}
+			next, closed, err := Apply(&previous, Observation{
+				Repository: previous.Repository, ObservedAt: base.Add(time.Minute), Cursor: 2, CursorInitialized: true,
+				Items: []QueueItem{old, added}, AcceptanceTimeout: time.Hour, ProcessingTimeout: time.Hour,
+				Events: []QueueEvent{{ID: 2, IssueNumber: added.Number, At: at, Kind: ReadyLabeled}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if next.Current.Status != Down || !next.Current.StartedAt.Equal(base.Add(time.Minute)) || !next.QueueDeadline.Equal(old.Deadline) {
+				t.Fatalf("next=%+v", next)
+			}
+			if len(closed) != 1 || closed[0].ID != previous.Current.ID || !closed[0].EndedAt.Equal(next.Current.StartedAt) {
+				t.Fatalf("closed=%+v", closed)
+			}
+		})
+	}
+}
