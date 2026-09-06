@@ -129,6 +129,19 @@ func (a App) Run(ctx context.Context, args []string) int {
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
+	if args[0] == "answer" {
+		err := a.answer(ctx, layout.Layout{}, args[1:])
+		if err == nil {
+			return 0
+		}
+		var ee exitError
+		if errors.As(err, &ee) {
+			fmt.Fprintln(a.Err, ee.Err)
+			return ee.Code
+		}
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	l, err := layout.New()
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -246,7 +259,7 @@ Commands:
   restart       Restart the repository LaunchAgent
   status        Show durable and launchd state
   watch         Wait for needs_input, blocked, stopped, or optional idle
-  answer        Record an answer for a pending request
+  answer        Record locally, or submit/check with --via github
   issue         Plan or resolve one typed Issue suspension
   recover-quarantined-snapshot  Restore an exact quarantined snapshot after verifying legacy merged PR identities
   recover-semantic-quarantine   Restore one exact semantic mismatch quarantine backup

@@ -133,7 +133,7 @@ const ruleBody = "# codex-issue-loop Issue作成ルール\n\n" +
 	"- Issue起票時は、対象repositoryの `.agent-loop.yaml` の `github.ready_labels` に設定されたready labelだけを使用する。作成後のIssueを再取得してlabelを確認する。不明または不足があれば推測やlabel作成をせず、その状態を報告する。\n" +
 	"- agent-loop implementation workerは、割り当てられたIssueを実装し、同じ依頼のIssueを新たに起票しない。\n" +
 	"- 説明、レビュー、調査などの読み取り専用タスクではIssueを起票しない。ユーザーがagent-loopを使わないよう明示した場合は、変更依頼を直接実装してよい。\n" +
-	"- Issueへの回答・承認・返信依頼では、本文と質問コメントを読み、agent-loopの質問ならagent-loop skillを使う。対象repositoryのAGENTS.mdにskillの参照先があればそれを読む。対象requestをstatusで照合し、ユーザーの回答をCLIのanswerで保存して同じrequestのansweredを確認する。GitHubコメント投稿だけで回答完了にしない。回答先が曖昧な場合だけ確認し、既に与えられた回答を再質問しない。\n" +
+	"- Issueへの回答・承認・返信依頼では、本文と質問コメントを読み、agent-loopの質問ならagent-loop skillを使う。対象repositoryのAGENTS.mdにskillの参照先があればそれを読む。実行ホストでは対象requestをstatusで照合し、CLIのanswerで保存して同じrequestのansweredを確認する。遠隔では同一ユーザー対応の受信側配備を確認後、明示repository・Issue・requestへanswer --via githubで送信し、--checkで投稿者・request・送信コメントIDを照合したacceptedを確認する。submittedと正式受理・実行再開を混同せず、投稿結果不明時は照会して無条件に再送しない。GitHubコメント投稿だけで回答完了にしない。回答先が曖昧な場合だけ確認し、既に与えられた回答を再質問しない。\n" +
 	"- コメント投稿だけを明示された場合はその範囲を守り、loopへの回答保存とは区別して報告する。"
 
 func ManagedBlock() string {

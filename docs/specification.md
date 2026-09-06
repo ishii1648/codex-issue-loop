@@ -370,9 +370,13 @@ agent-loop answer --request-id req_... --message-file -
 
 GitHub コメント回答では、未回答 request ごとに質問・reason・推奨 option・全 option ID/label・free-text 可否・Issue 番号・request ID・作成時刻を表示し、versioned marker に同じ payload と SHA-256 を保存する。自分が投稿した質問コメントだけを冪等に修復する。質問の有無は現行の `needs-human` projection に従う。
 
-コメント本文全体が `/agent-loop answer <request-id> <answer>` に一致する場合だけ回答候補とする。前後空白、casual comment、bot/App、自分自身、別 Issue/request、古い run や質問作成前のコメントは受理しない。actor の現在の repository 権限を再取得し、write/maintain/admin を要求する。起票者 allowlist は回答権限を与えない。CLI と同じ検証で 16 KiB 上限、UTF-8、control character、credential・設定 secret を検査し、選択肢がある質問では option ID または許可された free text を要求する。
+コメント本文全体が `/agent-loop answer <request-id> <answer>` に一致する場合だけ回答候補とする。前後空白、casual comment、bot/App、別 Issue/request、古い run や質問作成前のコメントは受理しない。GitHub APIの `/user` とコメント投稿者の数値アカウントIDを照合し、supervisorと同一のUserだけを許可する。認証ユーザー不明、別ユーザーのwrite/maintain/admin、起票者allowlistは拒否する。管理コメントは回答として取り込まない。CLI と同じ検証で 16 KiB 上限、UTF-8、control character、credential・設定 secret を検査し、選択肢がある質問では option ID または許可された free text を要求する。
 
-回答と source・comment ID・actor・permission・request/Issue/run・body SHA-256・コメント作成/更新時刻を `RecordAnswer` で同時保存する。worker の再開は既存 supervisor に委ねる。`accepted` は受領を意味し、再開成功を意味しない。各 command 候補に `accepted/stale/unauthorized/malformed/conflict` の marker 付き ack を同期する。作成時刻・comment ID 順に処理し、採用後の編集は conflict、削除は保存済み回答を維持する。保存後 ack 前の中断は保存 provenance から回復する。`issue_comment` webhook と既存の managed Issue reconciliation の両方で回収し、隔離中・回答済み request も再照合する。
+回答と source・comment ID・actor・request/Issue/run・body SHA-256・コメント作成/更新時刻を `RecordAnswer` で同時保存する。worker の再開は既存 supervisor に委ねる。`accepted` は受領を意味し、再開成功を意味しない。各 command 候補に `accepted/stale/unauthorized/malformed/conflict` の marker 付き ack を同期する。作成時刻・comment ID 順に処理し、採用前の編集は一覧取得で観測した最新本文を検証し、採用後の編集は conflict、削除は保存済み回答を維持する。旧permission provenanceは読み取り互換で保持するが、回答認可の根拠にしない。保存後 ack 前の中断は保存 provenance から回復する。`issue_comment` webhook と既存の managed Issue reconciliation の両方で回収し、隔離中・回答済み request も再照合する。
+
+遠隔送信は `agent-loop answer --via github --repo owner/repo --issue N --request-id req_... --message-file - --json` とする。既存ローカルanswerは既定のまま、自動fallbackは行わない。遠隔経路はLayout初期化、checkout、登録、ホスト設定・状態を必要としない。明示Issue内の同一アカウントIDの質問について、version、digest、表示本文との一致、Issue/request/run形式を検証し、新しい質問で置き換わったrequestを拒否する。GitHubはprojectionであり、同期前のrun変更・ローカル回答との競合は受信側のcanonical検証で拒否する。新規投稿前にIssueがopenでPRではないこと、既存回答・受理通知、16 KiB入力上限、UTF-8・制御文字・検出可能credential・選択肢を検査する。実行ホスト固有のsecret値は遠隔へ取得・公開せず、その検出には限界がある。
+
+送信結果は `status=submitted` とコメントURL/ID、`recorded="unknown"`、`execution="unknown"` を返す。`answer --via github --repo owner/repo --issue N --request-id req_... --check --comment-id ID --json` は投稿せず、同一アカウントIDの受理通知についてversion・request・送信コメントIDを照合する。`accepted` だけを `recorded="true"` とし、実行再開はホストstatusで別途確認する。通知欠落、停止中、投稿結果不明は `unknown` であり、失敗・未保存と断定しない。POST結果不明時は既存コメントを一度照会し、再POSTしない。IDも不明なら `--check` で指定requestの単一回答を照会する。複数候補は明示IDを要求する。複数端末の同時投稿でコメント重複ゼロは保証せず、二重適用・二重workerは既存canonical transactionとsupervisorの実行権で防ぐ。
 
 ### 6.6 issue plan / issue resolve
 

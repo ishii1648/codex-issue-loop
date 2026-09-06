@@ -29,8 +29,8 @@
 | リソース枯渇 | 巨大本文、大量コメント、巨大回答 | 入力件数・bytes上限、回答16 KiB上限、worker timeout | `gh`がJSONを返すまでの一時メモリはCLI実装に依存する |
 | 引数・path injection | `../`、悪意あるref、symlinkによるroot逸脱 | shell不使用、argv分離、ref検証、canonical path、root内判定、symlink拒否 | 検査後のTOCTOU。0700と専用macOSユーザーで他プロセスを制限する |
 | 資格情報漏えい | tokenがログ、state、Issueコメントに混入 | 多層redaction、秘密を回答として拒否、0600/0700 | 未登録形式や4文字未満の値、redaction前に外部CLI自身が送るデータ |
-| Issue comment の権限迂回 | bot、自分自身、spoof marker、権限剥奪、別 Issue/run/request | 全文一致 command、現在の write/maintain/admin 権限再検証、管理コメント author 照合、canonical 保存時の request/observation 照合 | GitHub 権限自体を奪取された actor は正規 operator として扱われる |
-| comment replay/edit/delete | 重複・順序変更、ack 前 crash、編集・削除 | authoritative 一覧、comment ID/body digest/更新時刻の永続 provenance、回答との同時保存、冪等 ack、定期 reconciliation | 受領済み回答は削除でも撤回されない。観測後の権限変更・コメント変更は既に保存した回答を取り消さない |
+| Issue comment の権限迂回 | bot、別ユーザーのadmin、spoof marker、別 Issue/run/request | 全文一致 command、supervisorと投稿者の数値アカウントID照合（認証ユーザー不明は拒否）、管理コメント author 照合、canonical 保存時の request/observation 照合 | 同一本人アカウントの侵害や手動の正式入力はAI経由と区別しない。遠隔CLIは実行ホスト固有secretを取得せず、未知secretの検出は保証しない |
+| comment replay/edit/delete | 重複・順序変更、ack 前 crash、編集・削除 | authoritative 一覧、comment ID/body digest/更新時刻の永続 provenance、回答との同時保存、冪等 ack、定期 reconciliation | 受領済み回答は削除でも撤回されない。観測後のコメント変更は既に保存した回答を取り消さない |
 | 過大権限 | GitHub tokenやmacOSユーザーが管理者 | 最小権限runbook、sandbox固定 | Codexはworktree内のソースを変更・pushできる。branch protectionとレビューが必要 |
 | command network bypass | `network_access=true`だけを有効化、upstream proxy、Web Search/MCP/app経由で外部送信 | 固定localhost allowlist、Codex network proxy必須、strict config、user config無視、hosted tool既定無効、明示MCP例外、capability fail-closed | MCP例外の通信はcommand proxyの対象外。localhostは全port許可のため別loopback service探索が可能。専用標準ユーザー、firewall、brokerを下位境界にする |
 | 永続データ漏えい | Time Machineやサポートbundleがログを収集 | private mode、秘密を保存前にredact、backup手順 | 既存のM2以前のstate/logには遡及redactionしない |

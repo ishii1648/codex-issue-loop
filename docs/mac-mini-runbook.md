@@ -171,9 +171,11 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
 
 記録後、同じrequest IDがansweredになったことをstatusで確認する。別Issueがroot `active_execution`を保持していれば、回答済みIssueはcontinuationを保持して待機し、実行枠が空いた後にschedulerが再開する。ready/running label、state、execution identityを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
-GitHub から回答する場合は、`needs-human` Issue の質問コメントに表示された request ID と option ID を使い、新しいコメントの本文全体を `/agent-loop answer <request-id> <answer>` にする。free text は質問で許可されている場合に使う。repository の write/maintain/admin 権限が必要で、起票者 allowlist は代用にならない。
+別端末から回答する場合は、AIがIssue本文と質問コメントを読み、表示されたrequest・選択肢を照合して `agent-loop answer --via github --repo owner/repo --issue N --request-id <id> --message-file - --json` へ標準入力で渡す。checkout・ローカル登録は不要で、`gh` はsupervisorと同一の人間アカウントで認証する。別ユーザーはadminでも受理されない。ホスト固有のsecret設定は遠隔へ公開せず、検出不能なsecretを回答へ含めない。
 
-投稿後は marker 付き ack の `accepted` を確認する。これは回答保存の確認であり、隔離解除や worker 起動の確認ではない。他の outcome では status と現在の質問を確認し、回答や質問コメントを編集して再試行しない。回答コメントを削除しても受領済み回答は取り消されない。credential・secret は投稿しない。
+利用開始前に、既存delivery手順でIssue #331の同一ユーザー対応を含む受信側Releaseを対象repositoryへ配備し、delivery statusのassignmentと稼働バイナリ、doctorを確認する。mainへマージ済み・Release公開済みだけでは配備確認にならない。その後に別端末からテスト用の正式質問へ回答し、同一ユーザーの受理通知とホストstatusのcanonical保存を照合する。実機確認を行っていなければ未実施と記録する。
+
+`submitted` は投稿成功だけを示す。返ったコメントIDで `agent-loop answer --via github --repo owner/repo --issue N --request-id <id> --check --comment-id <id> --json` を実行し、`accepted` と `recorded="true"` を確認する。POST結果不明でIDがなければ `--check` から `--comment-id` を省略して既存投稿を照会し、無条件に再送しない。通知がなくても受信側停止や通知失敗があり得るため、回答失敗と断定しない。`execution="unknown"` はホストstatusで別途確認する。受理前は観測した最新本文を検証するが、保存後の編集・削除は回答の変更・撤回にならない。`conflict` は未保存を意味しない。
 
 ### 停止
 

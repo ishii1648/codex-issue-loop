@@ -155,7 +155,7 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 			return verifyErr
 		}
 		if !verification.Trusted {
-			ack.Outcome, ack.Detail = "unauthorized", "The comment author does not currently have write permission."
+			ack.Outcome, ack.Detail = "unauthorized", "The comment author is not the authenticated supervisor user."
 			if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, ack); err != nil {
 				return err
 			}

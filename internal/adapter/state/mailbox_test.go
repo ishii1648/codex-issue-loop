@@ -77,7 +77,15 @@ func TestIntakeQuestionBlocksAdmissionUntilAnsweredAndPreservesAnswer(t *testing
 }
 
 func TestMailboxAnswerValidationIsSharedAcrossSources(t *testing.T) {
-	for _, remote := range []bool{false, true} {
+	for _, source := range []struct {
+		name       string
+		remote     bool
+		permission string
+	}{
+		{name: "local"},
+		{name: "same account", remote: true},
+		{name: "legacy permission", remote: true, permission: "write"},
+	} {
 		for _, test := range []struct {
 			name, answer    string
 			freeText, valid bool
@@ -92,7 +100,7 @@ func TestMailboxAnswerValidationIsSharedAcrossSources(t *testing.T) {
 			{"oversize", strings.Repeat("a", MaxAnswerBytes+1), true, false},
 			{"secret", "private-fixture-secret", true, false},
 		} {
-			t.Run(fmt.Sprintf("%t/%s", remote, test.name), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s", source.name, test.name), func(t *testing.T) {
 				store := newStore(t)
 				store.Secrets = []string{"private-fixture-secret"}
 				now := time.Now().UTC()
@@ -101,8 +109,8 @@ func TestMailboxAnswerValidationIsSharedAcrossSources(t *testing.T) {
 					t.Fatal(err)
 				}
 				var provenance *AnswerProvenance
-				if remote {
-					provenance = &AnswerProvenance{Source: "github_issue_comment", CommentID: 42, Actor: "operator", Permission: "write",
+				if source.remote {
+					provenance = &AnswerProvenance{Source: "github_issue_comment", CommentID: 42, Actor: "operator", Permission: source.permission,
 						RequestID: request.ID, IssueNumber: 1, BodySHA256: BodyDigest(test.answer), CommentedAt: now, CommentEdited: now}
 				}
 				_, _, err = store.RecordAnswer(request.ID, test.answer, now, provenance)
@@ -115,6 +123,12 @@ func TestMailboxAnswerValidationIsSharedAcrossSources(t *testing.T) {
 				}
 				if !test.valid && after.StateRevision != before.StateRevision {
 					t.Fatal("invalid answer changed state")
+				}
+				if test.valid {
+					saved := after.PendingRequests[request.ID]
+					if saved.Status != issuedomain.RequestStatusAnswered || saved.Answer != test.answer || !reflect.DeepEqual(saved.AnswerProvenance, provenance) {
+						t.Fatal("receipt did not preserve the answer and its observation")
+					}
 				}
 				if after.ActiveExecution != nil || len(after.Issues["1"].Answers) != 0 {
 					t.Fatal("receipt delivered to worker")
@@ -136,7 +150,7 @@ func TestFaultConcurrentAnswerReceiptCommitsOneObservation(t *testing.T) {
 	for _, id := range []int64{1, 2} {
 		go func(id int64) {
 			<-start
-			provenance := &AnswerProvenance{Source: "github_issue_comment", CommentID: id, Actor: "operator", Permission: "write",
+			provenance := &AnswerProvenance{Source: "github_issue_comment", CommentID: id, Actor: "operator",
 				RequestID: request.ID, IssueNumber: 1, BodySHA256: BodyDigest("answer"), CommentedAt: now, CommentEdited: now}
 			_, _, err := store.RecordAnswer(request.ID, "answer", now, provenance)
 			results <- err
