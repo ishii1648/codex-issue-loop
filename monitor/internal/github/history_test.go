@@ -204,7 +204,7 @@ esac
 			if err := os.WriteFile(script, []byte(body), 0700); err != nil {
 				t.Fatal(err)
 			}
-			_, err := (CLI{Path: script}).observe(context.Background(), config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running"}, 1, true, time.Now())
+			_, err := (CLI{Path: script}).Observe(context.Background(), config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running"}, 1, true, time.Now())
 			if err == nil {
 				t.Fatal("invalid observation accepted")
 			}
@@ -260,7 +260,7 @@ esac
 					t.Fatal(err)
 				}
 				at := base.Add(time.Duration(poll+1) * time.Minute)
-				obs, err := (CLI{Path: script}).observe(context.Background(), repo, saved.EventCursor, true, at)
+				obs, err := (CLI{Path: script}).Observe(context.Background(), repo, saved.EventCursor, true, at)
 				switch mode {
 				case "http", "head", "snapshot", "other history http", "current conflict", "current history incomplete":
 					if err == nil {

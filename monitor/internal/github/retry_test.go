@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,18 +11,16 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/config"
-	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 )
 
-func TestTransientObservationRetry(t *testing.T) {
+func TestObservationFailureWaitsForNextPoll(t *testing.T) {
 	for _, tc := range []struct {
-		mode     string
-		calls    int
-		succeeds bool
+		mode  string
+		calls int
 	}{
-		{"closed", 3, true}, {"duplicate", 3, true}, {"snapshot", 4, true},
-		{"head", 4, true}, {"persistent-snapshot", 6, false}, {"persistent", 3, false}, {"http", 1, false},
-		{"malformed", 1, false}, {"invalid", 1, false},
+		{"closed", 1}, {"duplicate", 1}, {"snapshot", 2},
+		{"head", 2}, {"persistent-snapshot", 2}, {"persistent", 1}, {"http", 1},
+		{"malformed", 1}, {"invalid", 1},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			t.Parallel()
@@ -61,7 +58,7 @@ esac
 			repo := config.Repository{Name: "owner/repo"}
 			at := time.Date(2026, 9, 6, 15, 0, 0, 0, time.UTC)
 			obs, err := (CLI{Path: script}).Observe(context.Background(), repo, 1, true, at)
-			if (err == nil) != tc.succeeds {
+			if err == nil {
 				t.Fatalf("observation=%+v error=%v", obs, err)
 			}
 			data, readErr := os.ReadFile(filepath.Join(dir, "issues"))
@@ -72,19 +69,7 @@ esac
 			if count != tc.calls {
 				t.Fatalf("open issue reads=%d want=%d", count, tc.calls)
 			}
-			if tc.succeeds {
-				if !obs.CurrentVerified || obs.Cursor != 1 || !obs.ObservedAt.Equal(at) {
-					t.Fatalf("observation=%+v", obs)
-				}
-				previous, _, applyErr := model.Apply(nil, model.Observation{Repository: repo.Name, ObservedAt: at.Add(-time.Minute), Cursor: 1, CursorInitialized: true})
-				if applyErr != nil {
-					t.Fatal(applyErr)
-				}
-				next, closed, applyErr := model.Apply(&previous, obs)
-				if applyErr != nil || next.Current.Status != model.Idle || len(closed) != 0 {
-					t.Fatalf("state=%+v intervals=%+v error=%v", next, closed, applyErr)
-				}
-			} else if obs.CurrentVerified || obs.Cursor != 0 {
+			if obs.CurrentVerified || obs.Cursor != 0 {
 				t.Fatalf("failed attempt leaked observation: %+v", obs)
 			}
 			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
@@ -94,23 +79,5 @@ esac
 				}
 			}
 		})
-	}
-}
-
-func TestObservationRetryCancellation(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "gh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ncase \"$*\" in\n *issues/events*) printf '%s' '[{\"id\":1}]' ;;\n *) printf '%s' '[[{\"number\":1,\"state\":\"closed\"}]]' ;;\nesac\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_, err := (CLI{Path: script}).Observe(ctx, config.Repository{Name: "owner/repo"}, 1, true, start)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error=%v", err)
-	}
-	if time.Since(start) >= time.Second {
-		t.Fatal("retry ignored cancellation")
 	}
 }
