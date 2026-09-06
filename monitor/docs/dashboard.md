@@ -64,6 +64,8 @@ scrapeとdashboardは15秒更新です。monitor停止は既存の`observation_t
 
 通常は失効監視付きURLを開きます。ブラウザは15秒ごとにAPI経由でGrafanaのPrometheus datasourceへ基準時刻とupを照会します。通信エラー・欠損は照会時に、45秒以上古い基準時刻は1秒タイマーで検出し、Grafana全体を隠してUNKNOWN / 表示失効を明示します。タブ復帰時も期限を確認します。Grafana詳細を単独で開くとこの失効監視はありません。追加pluginは使いません。
 
+詳細表は`/api/details?repo=owner/name`から、既存status計算結果を平坦化した`rows`を読みます。queueが空でも状態・理由・観測エラーを1行返し、未設定のIssue番号と期限はnullです。理由と観測エラーは同じ列に表示します。
+
 Infinityは`/api/timeline`から区間を直接読み、backendの列順に関係なくGrafanaのorganize変換で開始・終了・状態の順へ並べます。選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。replay後は次回取得で反映し、近似や間引きをしません。ピクセルより短い区間は、tableの「正確な区間JSON」リンクで開始・終了・理由を確認できます。時刻範囲の選択はtimelineに適用し、現在状態・3期間集計は最新scrapeが基準です。
 
 ## CLIとの照合
