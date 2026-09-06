@@ -125,10 +125,10 @@ func ResolveConflict(from Status) (Transition, error) {
 }
 
 // StartClaim begins a new fenced run. StatusClaiming is accepted for an
-// idempotent repeated start; failed records may be explicitly queued again.
+// idempotent repeated start.
 func StartClaim(from Status) (Transition, error) {
 	return newAllowedTransition("start_claim", from, StatusClaiming,
-		StatusUnset, StatusClaiming, StatusFailed)
+		StatusUnset, StatusClaiming)
 }
 
 func ResumeAfterAnswer(from, target Status) (Transition, error) {

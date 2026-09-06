@@ -152,15 +152,11 @@ func (s Status) PreventsIdle() bool {
 }
 
 func (s Status) IneligibleForAdmission() bool {
-	if s.Terminal() {
-		return true
-	}
 	switch s {
-	case StatusRunning, StatusLaunching, StatusClaimed, StatusNeedsInput,
-		StatusResumePending, StatusResolvingConflict:
-		return true
-	default:
+	case StatusUnset, StatusClaiming:
 		return false
+	default:
+		return true
 	}
 }
 
