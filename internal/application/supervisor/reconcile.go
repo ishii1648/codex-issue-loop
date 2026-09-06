@@ -94,25 +94,8 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				l.Logger.Printf("Issue #%d startup GitHub reconciliation deferred without stopping the queue: %v", number, err)
 				break
 			}
-			considered, canceled, cancelErr := l.reconcileNotPlannedCancellation(latest, *current, remote, "startup_reconciliation", nil)
-			if cancelErr != nil {
-				var mutationErr state.IssueMutationError
-				if !errors.As(cancelErr, &mutationErr) {
-					return cancelErr
-				}
-				l.Logger.Printf("Issue #%d startup cancellation failed without stopping the queue: %v", number, cancelErr)
-				break
-			}
-			if canceled {
-				break
-			}
 			if terminalReconciliationCandidate(*current) && !terminalPullRequestCandidate(*current) {
 				reason := "terminal Issue remains sticky"
-				if considered {
-					currentState, observation := l.reconciliationInputs(latest, *current, remote, worktree.Inspection{})
-					decision, _ := issuedomain.DecideNotPlannedCancellation(currentState, observation)
-					reason = decision.Reason
-				}
 				_, err = l.Store.Update("startup_reconciled", number, current.RunID, map[string]any{
 					"previous_status": current.Status, "status": current.Status, "reason": reason,
 					"github_state_reason": remote.Issue.StateReason,
@@ -155,12 +138,6 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				break
 			}
 			predicateReport := startupReconciliationPredicateReport(number, decision)
-			if decision.markRunning {
-				if err := l.GitHub.MarkRunning(ctx, l.Config, number); err != nil {
-					l.Logger.Printf("Issue #%d startup running-label repair deferred without stopping the queue: %v", number, err)
-					break
-				}
-			}
 			request := singlePendingRequest(latest, number)
 			captureInputContinuation := current.Status == issuedomain.StatusNeedsInput && state.PendingEffect(&latest, current.Number) == nil && current.Continuation == nil &&
 				current.PullRequestURL == "" && current.WorkerPID == 0 && current.WorkerPGID == 0 && decision.status == issuedomain.StatusNeedsInput &&
@@ -240,6 +217,28 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 			break
 		}
 	}
+	latest, err := l.Store.Load()
+	if err != nil {
+		return err
+	}
+	managed := map[int]bool{}
+	for _, number := range numbers {
+		managed[number] = true
+	}
+	for key := range latest.QuarantinedIssues {
+		number, _ := strconv.Atoi(key)
+		if number > 0 {
+			managed[number] = true
+		}
+	}
+	for number := range managed {
+		if err := l.reconcileIssueProjection(ctx, number); err != nil {
+			if _, limited := cooldownFromError(err, l.now()); limited {
+				return err
+			}
+			l.Logger.Printf("Issue #%d startup projection deferred: %v", number, err)
+		}
+	}
 	return nil
 }
 
@@ -297,8 +296,8 @@ func startupRemoteInspectionRequired(snapshot state.Snapshot, item *state.Issue,
 // Unsupported/non-authoritative transitions are considered safely inspected
 // while preserving the local terminal state.
 func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
-	if current.Status == issuedomain.StatusCanceled {
-		return true, nil
+	if current.Status == issuedomain.StatusCanceled || current.Status == issuedomain.StatusCompleted {
+		return true, l.reconcileIssueProjection(ctx, current.Number)
 	}
 	remote, err := l.inspectReconciliationIssue(ctx, current)
 	if err != nil {
@@ -307,21 +306,8 @@ func (l *Loop) reconcileTerminalWebhook(ctx context.Context, current state.Issue
 	return l.applyWebhookReconciliation(ctx, current, delivery, remote, false)
 }
 
-// reconcileCollectionExit verifies a sweep-derived ready-collection departure
-// with an authoritative targeted read. A normal claim also removes the ready
-// label, so an aligned running/needs-input label is not treated as exclusion.
 func (l *Loop) reconcileCollectionExit(ctx context.Context, current state.Issue, delivery webhook.Delivery) (bool, error) {
-	if current.Status == issuedomain.StatusCanceled {
-		return true, nil
-	}
-	remote, err := l.inspectReconciliationIssue(ctx, current)
-	if err != nil {
-		return false, failure.Wrap(failure.Transient, fmt.Sprintf("inspect collection exit for Issue #%d from webhook %s", current.Number, delivery.DeliveryID), err)
-	}
-	if !current.Status.TerminalForWebhook() && expectedActiveCollectionExit(current, remote.Issue, l.Config.GitHub) {
-		return false, nil
-	}
-	return l.applyWebhookReconciliation(ctx, current, delivery, remote, !current.Status.TerminalForWebhook())
+	return false, l.reconcileIssueProjection(ctx, current.Number)
 }
 
 func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Issue, delivery webhook.Delivery, remote gh.RemoteState, forceTerminal bool) (bool, error) {
@@ -333,19 +319,6 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 	if latestItem == nil || !reflect.DeepEqual(latestItem, &current) {
 		return false, nil
 	}
-	source := "webhook_reconciliation"
-	if delivery.Event == "issues" && delivery.Action == "collection_exited" {
-		source = "safety_sweep_reconciliation"
-	}
-	_, canceled, cancelErr := l.reconcileNotPlannedCancellation(latest, current, remote, source, map[string]any{
-		"delivery_id": delivery.DeliveryID, "event": delivery.Event, "action": delivery.Action,
-	})
-	if cancelErr != nil {
-		return false, cancelErr
-	}
-	if canceled {
-		return true, nil
-	}
 	inspection := worktree.Inspection{}
 	if current.Worktree != "" {
 		inspection, err = l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
@@ -354,14 +327,8 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 		}
 	}
 	decision := l.decideReconciliation(latest, current, remote, inspection)
-	if forceTerminal && !decision.status.TerminalForWebhook() {
-		decision = blockDecision(decision, "GitHub Issue left the configured ready collection")
-	}
 	if !decision.status.TerminalForWebhook() {
-		// The event was read successfully, but the remote state does not carry
-		// terminal authority. Preserve manual exclusions and failed/completed
-		// states instead of turning a webhook into an implicit resume.
-		return true, nil
+		return true, l.reconcileIssueProjection(ctx, current.Number)
 	}
 	if decision.workerPID == 0 {
 		decision.workerPGID = 0
@@ -408,43 +375,10 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 	if errors.Is(err, errReconciliationStateChanged) {
 		return false, nil
 	}
-	return err == nil, err
-}
-
-func (l *Loop) reconcileNotPlannedCancellation(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, source string, extra map[string]any) (bool, bool, error) {
-	currentState, observation := l.reconciliationInputs(snapshot, current, remote, worktree.Inspection{})
-	decision, considered := issuedomain.DecideNotPlannedCancellation(currentState, observation)
-	if !considered || decision.Status != issuedomain.StatusCanceled {
-		return considered, false, nil
+	if err != nil {
+		return false, err
 	}
-	now := l.now()
-	payload := map[string]any{
-		"issue_number": current.Number, "run_id": current.RunID, "github_state_reason": remote.Issue.StateReason,
-		"previous_status": current.Status, "execution_release_result": "not_present", "canceled_at": now,
-		"source": source,
-		"pull_request": map[string]any{
-			"number": current.PullRequestNumber, "url": current.PullRequestURL, "head_sha": current.HeadSHA, "branch": current.Branch,
-		},
-	}
-	for key, value := range extra {
-		payload[key] = value
-	}
-	_, err := l.Store.Update("issue_canceled", current.Number, current.RunID, payload, func(latest *state.Snapshot) error {
-		item := latest.Issues[strconv.Itoa(current.Number)]
-		if item == nil || !reflect.DeepEqual(item, &current) {
-			return errReconciliationStateChanged
-		}
-		item.GitHubStateReason = remote.Issue.StateReason
-		releaseResult, applyErr := state.ApplyNotPlannedCancellation(latest, current.Number, &current, now)
-		if applyErr == nil {
-			payload["execution_release_result"] = releaseResult
-		}
-		return applyErr
-	})
-	if errors.Is(err, errReconciliationStateChanged) {
-		return true, false, nil
-	}
-	return true, err == nil, err
+	return true, l.reconcileIssueProjection(ctx, current.Number)
 }
 
 func expectedActiveCollectionExit(current state.Issue, issue gh.Issue, cfg config.GitHub) bool {
@@ -567,8 +501,7 @@ func (l *Loop) hasOnlyBlockedExclusion(labels map[string]bool) bool {
 // decideTerminalPullRequestReconciliation is shared by startup and periodic
 // reconciliation. A terminal Issue only converges from an authoritative merge
 // when the single Pull Request returned for the saved branch is exactly the
-// Pull Request recorded in durable state. An exclusion label remains sticky
-// unless it is the automation-owned blocked label evidenced by our comment.
+// Pull Request recorded in durable state.
 func (l *Loop) decideTerminalPullRequestReconciliation(current state.Issue, remote gh.RemoteState) (reconciliationDecision, bool) {
 	currentState, observation := l.reconciliationInputs(state.Snapshot{}, current, remote, worktree.Inspection{})
 	decision, ok := issuedomain.DecideTerminalPullRequestReconciliation(currentState, observation)

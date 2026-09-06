@@ -283,6 +283,11 @@ func (a App) answer(ctx context.Context, l layout.Layout, args []string) error {
 			return err
 		}
 		issue.RetryAfter, issue.UpdatedAt = nil, now
+		if effect := state.PendingEffect(s, issue.Number); effect != nil && effect.Kind == issuedomain.EffectMarkNeedsInput {
+			if err := state.ClearEffect(s, issue.Number, effect.ID); err != nil {
+				return err
+			}
+		}
 		if resumeStatus == issuedomain.StatusResolvingConflict {
 			if err := state.SetEffect(s, issue.Number, issue.RunID, issuedomain.EffectRetryConflict, now); err != nil {
 				return err

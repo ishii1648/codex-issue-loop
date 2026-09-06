@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
@@ -292,18 +291,8 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 }
 
 func (l *Loop) answeredResumeRemoteMismatch(issue gh.Issue, current state.Issue) string {
-	labels := labelSet(issue.Labels)
-	needsInput := labels[l.Config.GitHub.NeedsInputLabel]
-	running := labels[l.Config.GitHub.RunningLabel]
-	if !strings.EqualFold(issue.State, "open") {
-		return "GitHub Issue is no longer open"
-	}
-	if needsInput == running {
-		return "GitHub needs-input/running labels are ambiguous"
-	}
-	if labels[l.Config.GitHub.DoneLabel] || labels[l.Config.GitHub.FailedLabel] ||
-		hasAnyLabel(labels, append(append([]string{}, l.Config.GitHub.ReadyLabels...), l.Config.GitHub.ExcludeLabels...)) {
-		return "GitHub Issue has an incompatible manual, terminal, or ready label"
+	if err := gh.ValidateIssueProjection(l.Config, issue, current.Status); err != nil {
+		return err.Error()
 	}
 	if current.PullRequestURL != "" {
 		return "answered continuation unexpectedly has a saved Pull Request"
@@ -312,6 +301,9 @@ func (l *Loop) answeredResumeRemoteMismatch(issue gh.Issue, current state.Issue)
 }
 
 func (l *Loop) validateRemoteLaunch(ctx context.Context, current state.Issue, allowNeedsInput bool) (gh.RemoteState, error) {
+	if err := l.reconcileIssueProjection(ctx, current.Number); err != nil {
+		return gh.RemoteState{}, &launchValidationError{cause: fmt.Errorf("synchronize GitHub launch boundary: %w", err)}
+	}
 	remote, err := l.inspectIssue(ctx, current)
 	if err != nil {
 		return gh.RemoteState{}, &launchValidationError{cause: fmt.Errorf("inspect GitHub launch boundary: %w", err)}
@@ -319,18 +311,12 @@ func (l *Loop) validateRemoteLaunch(ctx context.Context, current state.Issue, al
 	if current.Status != issuedomain.StatusLaunching {
 		return gh.RemoteState{}, &launchValidationError{cause: fmt.Errorf("Issue #%d is not in launch state", current.Number), terminal: true}
 	}
+	if err := gh.ValidateIssueProjection(l.Config, remote.Issue, current.Status); err != nil {
+		return gh.RemoteState{}, &launchValidationError{cause: err}
+	}
 	if allowNeedsInput && current.LaunchSource == issuedomain.StatusResumePending && current.Continuation != nil && current.Continuation.Kind == state.ContinuationKindNeedsInput {
 		if reason := l.answeredResumeRemoteMismatch(remote.Issue, current); reason != "" {
 			return gh.RemoteState{}, &launchValidationError{cause: errors.New(reason), terminal: true}
-		}
-	} else {
-		labels := labelSet(remote.Issue.Labels)
-		if !strings.EqualFold(remote.Issue.State, "open") {
-			return gh.RemoteState{}, &launchValidationError{cause: errors.New("GitHub Issue is no longer open"), terminal: true}
-		}
-		if !labels[l.Config.GitHub.RunningLabel] || labels[l.Config.GitHub.NeedsInputLabel] || labels[l.Config.GitHub.DoneLabel] || labels[l.Config.GitHub.FailedLabel] ||
-			hasAnyLabel(labels, append(append([]string{}, l.Config.GitHub.ReadyLabels...), l.Config.GitHub.ExcludeLabels...)) {
-			return gh.RemoteState{}, &launchValidationError{cause: errors.New("GitHub labels no longer authorize worker launch"), terminal: true}
 		}
 	}
 	if current.PullRequestURL != "" {
@@ -339,6 +325,13 @@ func (l *Loop) validateRemoteLaunch(ctx context.Context, current state.Issue, al
 			(current.HeadSHA != "" && remote.PullRequests[0].HeadSHA != current.HeadSHA) {
 			return gh.RemoteState{}, &launchValidationError{cause: errors.New("saved Pull Request identity changed before worker launch"), terminal: true}
 		}
+	}
+	snapshot, loadErr := l.Store.Load()
+	latest := snapshot.Issues[strconv.Itoa(current.Number)]
+	identity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
+	if loadErr != nil || latest == nil || latest.Status != issuedomain.StatusLaunching || latest.LaunchSource != current.LaunchSource ||
+		latest.RunID != current.RunID || latest.Generation != current.Generation || !state.OwnsActiveExecution(&snapshot, current.Number, identity) {
+		return gh.RemoteState{}, &launchValidationError{cause: errors.New("execution authority changed during GitHub launch validation"), terminal: true}
 	}
 	return remote, nil
 }

@@ -86,6 +86,9 @@ func (resumedWorkspaceGitHub) MarkFailed(context.Context, config.Config, int, st
 	return nil
 }
 func (resumedWorkspaceGitHub) MarkRunning(context.Context, config.Config, int) error { return nil }
+func (resumedWorkspaceGitHub) ReconcileIssue(context.Context, config.Config, int, issuedomain.Status) error {
+	return nil
+}
 func (resumedWorkspaceGitHub) MarkConflictRetry(context.Context, config.Config, int, string) error {
 	return nil
 }

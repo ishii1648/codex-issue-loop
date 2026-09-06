@@ -189,6 +189,7 @@ type fakeGitHub struct {
 	failedErr                 error
 	listErr                   error
 	inspectHook               func()
+	projectionHook            func(int, issuedomain.Status) error
 	authorVerification        *gh.AuthorVerification
 	authorVerificationErr     error
 	authorVerificationHook    func(gh.Issue) (gh.AuthorVerification, error)
@@ -295,6 +296,48 @@ func (f *fakeGitHub) MarkRunning(_ context.Context, cfg config.Config, _ int) er
 		}
 	}
 	f.issue.Labels = append(labels, cfg.GitHub.RunningLabel)
+	return nil
+}
+
+func (f *fakeGitHub) ReconcileIssue(_ context.Context, cfg config.Config, number int, status issuedomain.Status) error {
+	if f.projectionHook != nil {
+		return f.projectionHook(number, status)
+	}
+	label := cfg.GitHub.RunningLabel
+	state, reason := "OPEN", ""
+	switch status {
+	case issuedomain.StatusNeedsInput:
+		label = cfg.GitHub.NeedsInputLabel
+	case issuedomain.StatusBlocked:
+		label = "blocked"
+	case issuedomain.StatusFailed:
+		label = cfg.GitHub.FailedLabel
+	case issuedomain.StatusCompleted:
+		label = cfg.GitHub.DoneLabel
+		if cfg.Completion.CloseIssue {
+			state, reason = "CLOSED", "COMPLETED"
+		}
+	case issuedomain.StatusCanceled:
+		label, state, reason = "", "CLOSED", "NOT_PLANNED"
+	}
+	project := func(issue *gh.Issue) {
+		labels := []string{}
+		for _, existing := range issue.Labels {
+			if existing != cfg.GitHub.RunningLabel && existing != cfg.GitHub.NeedsInputLabel && existing != cfg.GitHub.FailedLabel && existing != cfg.GitHub.DoneLabel && existing != "blocked" && !containsString(cfg.GitHub.ReadyLabels, existing) {
+				labels = append(labels, existing)
+			}
+		}
+		if label != "" {
+			labels = append(labels, label)
+		}
+		issue.Labels, issue.State, issue.StateReason = labels, state, reason
+	}
+	if f.issue.Number == number {
+		project(&f.issue)
+	}
+	if f.remote != nil && f.remote.Issue.Number == number {
+		project(&f.remote.Issue)
+	}
 	return nil
 }
 func (f *fakeGitHub) MarkConflictRetry(context.Context, config.Config, int, string) error {
@@ -2514,8 +2557,8 @@ func TestIssueResolutionSyncRevalidatesContinuationAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := loop.syncGitHub(context.Background(), current); err == nil || github.markedRunning {
-		t.Fatalf("changed authoritative labels were accepted: err=%v", err)
+	if err := loop.syncGitHub(context.Background(), current); err != nil || !github.markedRunning {
+		t.Fatalf("projection drift prevented resolution synchronization: err=%v", err)
 	}
 
 	answered := current

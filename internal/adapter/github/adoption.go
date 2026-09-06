@@ -24,10 +24,8 @@ type MergedPullRequestExpectation struct {
 	AllowDone         bool
 }
 
-// ValidateMergedPullRequest accepts only the single merged Pull
-// Request for the saved branch and only a supervisor-owned terminal label (or
-// the idempotent done state after a durable adoption). It never accepts an
-// open Pull Request or removes manual/security exclusions.
+// ValidateMergedPullRequest verifies publication identity independently of the
+// Issue's projected labels. It never accepts an open or ambiguous Pull Request.
 func ValidateMergedPullRequest(cfg config.Config, remote RemoteState, expected MergedPullRequestExpectation) (PullRequest, error) {
 	if expected.IssueNumber <= 0 || expected.Branch == "" || expected.BaseBranch == "" || expected.HeadSHA == "" {
 		return PullRequest{}, fmt.Errorf("merged Pull Request adoption expectation is incomplete")
@@ -37,54 +35,6 @@ func ValidateMergedPullRequest(cfg config.Config, remote RemoteState, expected M
 	}
 	if !strings.EqualFold(remote.Issue.State, "open") && !strings.EqualFold(remote.Issue.State, "closed") {
 		return PullRequest{}, fmt.Errorf("Issue #%d returned unknown GitHub state %q", expected.IssueNumber, remote.Issue.State)
-	}
-	labels := make(map[string]bool, len(remote.Issue.Labels))
-	for _, label := range remote.Issue.Labels {
-		labels[strings.ToLower(label)] = true
-	}
-	hasComment := func(marker string) bool {
-		for _, comment := range remote.Issue.Comments {
-			if strings.Contains(comment, marker) {
-				return true
-			}
-		}
-		return false
-	}
-	done := labels[strings.ToLower(cfg.GitHub.DoneLabel)]
-	if done && !expected.AllowDone {
-		return PullRequest{}, fmt.Errorf("Issue #%d is already marked done", expected.IssueNumber)
-	}
-	failed := labels[strings.ToLower(cfg.GitHub.FailedLabel)]
-	if (done || expected.PreviousStatus == issuedomain.StatusBlocked) && failed {
-		return PullRequest{}, fmt.Errorf("Issue #%d has conflicting supervisor terminal labels", expected.IssueNumber)
-	}
-	for _, label := range append(append([]string{cfg.GitHub.RunningLabel, cfg.GitHub.NeedsInputLabel}, cfg.GitHub.ReadyLabels...), cfg.GitHub.ExcludeLabels...) {
-		if !labels[strings.ToLower(label)] {
-			continue
-		}
-		if !done && strings.EqualFold(label, "blocked") && expected.PreviousStatus == issuedomain.StatusBlocked &&
-			hasComment(fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", expected.IssueNumber)) {
-			continue
-		}
-		return PullRequest{}, fmt.Errorf("GitHub label %q excludes merged Pull Request adoption", label)
-	}
-	if !done {
-		required := cfg.GitHub.FailedLabel
-		if expected.PreviousStatus == issuedomain.StatusBlocked {
-			required = ""
-			for _, label := range cfg.GitHub.ExcludeLabels {
-				if strings.EqualFold(label, "blocked") {
-					required = label
-					break
-				}
-			}
-		}
-		if required == "" || !labels[strings.ToLower(required)] {
-			return PullRequest{}, fmt.Errorf("Issue #%d does not retain its supervisor-owned %s label", expected.IssueNumber, expected.PreviousStatus)
-		}
-		if !hasComment(fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", expected.IssueNumber)) {
-			return PullRequest{}, fmt.Errorf("Issue #%d does not retain its supervisor failure marker", expected.IssueNumber)
-		}
 	}
 	if len(remote.PullRequests) != 1 {
 		return PullRequest{}, fmt.Errorf("Issue #%d saved branch must have exactly one Pull Request", expected.IssueNumber)

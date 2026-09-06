@@ -96,8 +96,8 @@ func TestIssuePlanIgnoresEventsAndCancelIsFencedAndIdempotent(t *testing.T) {
 	}
 	out.Reset()
 	stderr.Reset()
-	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", repo, "--issue", "1", "--action", "cancel", "--json"}); code != 0 {
-		t.Fatalf("resolve code=%d stderr=%s", code, stderr.String())
+	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", repo, "--issue", "1", "--action", "cancel", "--json"}); code == 0 {
+		t.Fatal("GitHub outage was not reported after durable cancel")
 	}
 	resolved, err := store.Load()
 	if err != nil {
@@ -108,8 +108,8 @@ func TestIssuePlanIgnoresEventsAndCancelIsFencedAndIdempotent(t *testing.T) {
 		t.Fatalf("resolved Issue=%+v", item)
 	}
 	revision := resolved.StateRevision
-	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", repo, "--issue", "1", "--action", "cancel", "--json"}); code != 0 {
-		t.Fatalf("idempotent resolve code=%d stderr=%s", code, stderr.String())
+	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", repo, "--issue", "1", "--action", "cancel", "--json"}); code == 0 {
+		t.Fatal("GitHub outage was not reported by idempotent cancel retry")
 	}
 	again, err := store.Load()
 	if err != nil || again.StateRevision != revision {
@@ -162,15 +162,36 @@ func TestIssuePlanAndResolveCancelQuarantineOnlyRecord(t *testing.T) {
 	}
 	out.Reset()
 	stderr.Reset()
-	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", repo, "--issue", "185", "--action", "cancel", "--json"}); code != 0 {
-		t.Fatalf("resolve code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", repo, "--issue", "185", "--action", "cancel", "--json"}); code == 0 {
+		t.Fatal("GitHub outage was not reported after durable quarantine cancel")
 	}
 	resolved, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.QuarantinedIssues["185"] != nil || resolved.Issues["185"] != nil || resolved.ActiveExecution != nil {
-		t.Fatalf("quarantine was not cleared: %+v", resolved)
+	if resolved.QuarantinedIssues["185"] != nil || resolved.Issues["185"] == nil || resolved.Issues["185"].Status != issuedomain.StatusCanceled || resolved.ActiveExecution != nil {
+		t.Fatalf("quarantine cancel lost canonical authority: %+v", resolved)
+	}
+}
+
+func TestIssueResolveCancelSupersedesPendingFailureProjection(t *testing.T) {
+	fixture := newIssueResolutionFixture(t, 449, "OPEN", nil)
+	fixture.block(t, issuedomain.StatusRunning, "network unavailable", true, "")
+	if _, err := fixture.store.Update("pending_failure", 449, "", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["449"]
+		return state.SetEffect(snapshot, 449, item.RunID, issuedomain.EffectMarkBlocked, time.Now().UTC())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	a := App{Out: &out, Err: &stderr}
+	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "449", "--action", "cancel", "--json"}); code != 0 {
+		t.Fatalf("cancel code=%d stderr=%s", code, stderr.String())
+	}
+	after, err := fixture.store.Load()
+	if err != nil || after.Issues["449"] == nil || after.Issues["449"].Status != issuedomain.StatusCanceled ||
+		state.PendingEffect(&after, 449) != nil || after.ActiveExecution != nil || after.QuarantinedIssues["449"] != nil {
+		t.Fatalf("canceled projection retained obsolete effect: %+v err=%v", after, err)
 	}
 }
 
@@ -801,21 +822,50 @@ func (f *issueResolutionFixture) writeGH(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := fmt.Sprintf(`#!/bin/sh
+projection_dir="$(dirname "$0")/projection"
+mkdir -p "$projection_dir"
 if [ "$1" = "--version" ]; then
   printf 'gh version 2.69.0\n'
   exit 0
 fi
 case "$1 $2" in
   "issue view")
-    case "$*" in *--jq*) exit 0 ;; *) printf '%%s\n' '%s' ;; esac ;;
+    case "$*" in *--jq*) exit 0 ;; esac
+    issue='%s'
+    if test -f "$projection_dir/label"; then
+      label=$(cat "$projection_dir/label")
+      if test -n "$label"; then labels="[{\"name\":\"$label\"}]"; else labels='[]'; fi
+      issue=$(printf '%%s' "$issue" | sed "s/\"labels\":\[[^]]*\]/\"labels\":$labels/")
+    fi
+    if test -f "$projection_dir/state"; then
+      state=$(cat "$projection_dir/state")
+      reason=$(cat "$projection_dir/reason")
+      issue=$(printf '%%s' "$issue" | sed "s/\"state\":\"[^\"]*\"/\"state\":\"$state\"/;s/^{/{\"stateReason\":\"$reason\",/")
+    fi
+    printf '%%s\n' "$issue" ;;
   "pr list") printf '%%s\n' '%s' ;;
   "issue edit")
     if test -n "$AGENT_LOOP_TEST_FAIL_EDIT_ONCE" && test -f "$AGENT_LOOP_TEST_FAIL_EDIT_ONCE"; then
       rm "$AGENT_LOOP_TEST_FAIL_EDIT_ONCE"
       exit 2
     fi
+    label=''
+    while test "$#" -gt 0; do
+      if test "$1" = --add-label; then shift; label=$1; fi
+      shift
+    done
+    printf '%%s' "$label" > "$projection_dir/label"
     exit 0 ;;
-  "issue comment"|"issue close") exit 0 ;;
+  "issue comment") exit 0 ;;
+  "issue close") printf CLOSED > "$projection_dir/state"; printf COMPLETED > "$projection_dir/reason" ;;
+  api*)
+    for argument in "$@"; do
+      case "$argument" in
+        state=*) printf '%%s' "${argument#state=}" | tr '[:lower:]' '[:upper:]' > "$projection_dir/state" ;;
+        state_reason=*) printf '%%s' "${argument#state_reason=}" | tr '[:lower:]' '[:upper:]' > "$projection_dir/reason" ;;
+      esac
+    done
+    test -f "$projection_dir/reason" || : > "$projection_dir/reason" ;;
   *) exit 2 ;;
 esac
 `, f.issueJSON, string(pullJSON))

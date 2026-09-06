@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -18,9 +19,14 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 	if loadErr != nil {
 		return loadErr
 	}
+	current := snapshot.Issues[strconv.Itoa(issue.Number)]
+	if current == nil {
+		return l.reconcileIssueProjection(ctx, issue.Number)
+	}
+	issue = *current
 	effect := state.PendingEffect(&snapshot, issue.Number)
 	if effect == nil {
-		return nil
+		return l.reconcileIssueProjection(ctx, issue.Number)
 	}
 	if effect.RunID != issue.RunID {
 		return fmt.Errorf("Issue #%d effect belongs to a different run", issue.Number)
@@ -107,6 +113,9 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 	if err != nil {
 		return failure.Wrap(failure.Transient, "sync GitHub Issue state", err)
 	}
+	if err := l.reconcileIssueProjection(ctx, issue.Number); err != nil {
+		return err
+	}
 	_, err = l.Store.Update("github_state_synced", issue.Number, issue.RunID, map[string]any{"effect_id": effect.ID, "kind": effect.Kind}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(issue.Number)]
 		if item == nil {
@@ -128,6 +137,33 @@ func (l *Loop) syncGitHub(ctx context.Context, issue state.Issue) error {
 	return failure.Wrap(failure.Supervisor, "persist GitHub synchronization", err)
 }
 
+func (l *Loop) reconcileIssueProjection(ctx context.Context, number int) error {
+	snapshot, err := l.Store.Load()
+	if err != nil {
+		return err
+	}
+	key := strconv.Itoa(number)
+	current := snapshot.Issues[key]
+	quarantine := snapshot.QuarantinedIssues[key]
+	status := issuedomain.StatusBlocked
+	if current != nil {
+		status = current.Status
+	} else if quarantine == nil {
+		return nil
+	}
+	if err := l.GitHub.ReconcileIssue(ctx, l.Config, number, status); err != nil {
+		return failure.Wrap(failure.Transient, "reconcile GitHub Issue projection", err)
+	}
+	latest, err := l.Store.Load()
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(current, latest.Issues[key]) || !reflect.DeepEqual(quarantine, latest.QuarantinedIssues[key]) {
+		return errReconciliationStateChanged
+	}
+	return nil
+}
+
 func pendingGenericAdoption(issue state.Issue) bool {
 	return issue.Status == issuedomain.StatusCompleted && issue.PullRequestMerged && issue.Continuation != nil && issue.Suspension != nil &&
 		issue.Suspension.Status == issuedomain.SuspensionResolved && issue.Suspension.Resolution == issuedomain.ResolutionAdoptPR &&
@@ -138,22 +174,8 @@ func (l *Loop) validateIssueResolutionSync(issue state.Issue, remote gh.RemoteSt
 	checkpoint := issue.Continuation
 	snapshot, err := l.Store.Load()
 	identity := state.ExecutionIdentity{RunID: issue.RunID, Generation: issue.Generation}
-	if err != nil || checkpoint == nil || !state.OwnsActiveExecution(&snapshot, issue.Number, identity) || !strings.EqualFold(remote.Issue.State, "open") {
+	if err != nil || checkpoint == nil || !state.OwnsActiveExecution(&snapshot, issue.Number, identity) {
 		return fmt.Errorf("refuse Issue resolution synchronization: continuation authority changed")
-	}
-	labels := labelSet(remote.Issue.Labels)
-	terminalLabels := 0
-	if labels[l.Config.GitHub.FailedLabel] {
-		terminalLabels++
-	}
-	for _, label := range l.Config.GitHub.ExcludeLabels {
-		if labels[label] {
-			terminalLabels++
-		}
-	}
-	if terminalLabels != 1 || labels[l.Config.GitHub.RunningLabel] || labels[l.Config.GitHub.NeedsInputLabel] ||
-		labels[l.Config.GitHub.DoneLabel] || hasAnyLabel(labels, l.Config.GitHub.ReadyLabels) {
-		return fmt.Errorf("refuse Issue resolution synchronization: authoritative Issue labels changed")
 	}
 	if checkpoint.Kind == state.ContinuationKindNeedsInput {
 		answerCount := 0

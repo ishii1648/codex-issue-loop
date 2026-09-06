@@ -365,7 +365,7 @@ agent-loop answer --request-id req_... --message-file -
 4. 他Issueが実行中ならその実行を変更せず、回答済みrequestを再開待ちにする
 5. `answer_recorded` イベントを追記する
 
-通常workerの`needs_input`は`input_requested` transactionでrequestとcontinuation provenanceを保存し、GitHub needs-inputを維持したままrepositoryの実行枠を解放する。回答済みrequestは実行枠が空くまでworker dispatch対象にせず、枠の解放後に同じrequest、run、generationを再検証して`resume_pending`へ進める。manual/security、PR conflict、publication監査、active worker、複数request、未知のlegacy stateは対象Issueに対してfail closedとする。continuationは保存workspaceと新しいgenerationをspawn直前に再検証する。
+通常workerの`needs_input`は`input_requested` transactionでrequestとcontinuation provenanceを保存し、GitHub needs-inputを維持したままrepositoryの実行枠を解放する。回答済みrequestは実行枠が空くまでworker dispatch対象にせず、枠の解放後に同じrequest、run、generationを再検証して`resume_pending`へ進める。内部のsuspension、PR conflict、publication監査、active worker、複数request、未知のlegacy stateは対象Issueに対してfail closedとする。continuationは保存workspaceと新しいgenerationをspawn直前に再検証する。
 
 ### 6.6 issue plan / issue resolve
 
@@ -456,7 +456,7 @@ LaunchAgentなので、ユーザーがログアウトしている間は動作保
 
 broker endpointは`POST /github/webhook`だけである。raw bodyの`X-Hub-Signature-256`をHMAC-SHA256でconstant-time検証し、`X-GitHub-Delivery`、event/action、repository ID/full name、installation IDのallowlist検証後、検証済みrouting metadataを0600のdurable inboxへO_EXCLで保存してから202を返す。raw payload、Authorization、署名、secretは保存・log出力しない。
 
-inboxはdelivery IDを正本とし、redeliveryを冪等にdedupeする。pending deliveryだけを`broker/inbox`へ置き、route後はretention付きの`broker/receipts` tombstoneへ移すため、通常replayの処理量は未route件数に比例する。mailbox write、receipt write、pending removeの途中でcrashしても同じdelivery IDの再生で収束し、deliveryを消失させない。schedulerは同一Issueへのbatchを最新intentへcoalesceし、remote readが一時失敗しても冗長な旧intentをACKする。canonical snapshotのIssue/PR/SHAへ対応しないintentはmanaged lifecycleへ作用できないためACKし、active lifecycleの`RetryAfter`だけをwakeする。stable terminal stateの最新intentはtargeted REST inspectionが成功してauthoritativeなmerged/closed/label stateへ収束するまでACKせず、manual exclusion解除やfailed stateからworkerを暗黙再開しない。未登録または設定不一致のrepositoryはfail closedとなり、GitHub read/mutationを開始しない。mutationとretryは既存のsupervisor lifecycleおよびcooldown gateを迂回しない。
+inboxはdelivery IDを正本とし、redeliveryを冪等にdedupeする。pending deliveryだけを`broker/inbox`へ置き、route後はretention付きの`broker/receipts` tombstoneへ移すため、通常replayの処理量は未route件数に比例する。mailbox write、receipt write、pending removeの途中でcrashしても同じdelivery IDの再生で収束し、deliveryを消失させない。schedulerは同一Issueへのbatchを最新intentへcoalesceし、remote readが一時失敗しても冗長な旧intentをACKする。canonical snapshotのIssue/PR/SHAへ対応しないintentはmanaged lifecycleへ作用できないためACKし、active lifecycleの`RetryAfter`だけをwakeする。stable terminal stateの最新intentはtargeted REST inspectionが成功して検証済みPR事実または内部状態から導出したGitHub表示へ収束するまでACKせず、手動label変更やIssue closeで内部状態を変更しない。未登録または設定不一致のrepositoryはfail closedとなり、GitHub read/mutationを開始しない。mutationとretryは既存のsupervisor lifecycleおよびcooldown gateを迂回しない。
 
 ## 8. supervisor状態機械
 
@@ -906,50 +906,36 @@ Issue retryのsnapshotには `failure_kind`、`last_error`、`retry_after` を�
 
 timeout理由には、設定timeout、grace period内に終了したか、強制終了まで進んだかを含める。supervisorはworker PIDを0へ戻し、`retry_wait`と一時障害理由を永続化する。Issue worktree、dirty file、commit、session IDは削除しない。次回試行またはLaunchAgent再起動時は通常のstartup reconciliationを実行し、既存branch、worktree、push済みbranch、open/merged/closed PRを調べてから継続する。
 
-## 15. 再起動時のreconciliation
+## 15. Reconciliation
 
-supervisor起動時に次を行う。
+管理対象Issueのlifecycleは内部状態を唯一の正とする。GitHubの管理label・開閉状態は内部状態の表示であり、手動close、reopen、ready/done/failed/exclusion labelの変更を内部status変更や実行権の根拠にしない。未管理Issueの受付条件と正式なrequestへの回答は入力として維持する。
 
-1. lockを獲得し、二重supervisorを拒否する
-2. state snapshotとevent logの整合性を検証する
-3. 保存された全Issueのworker PID/PGIDを確認し、残存process groupを安全に終了する
-4. GitHub Issue、branch、PRの現況を取得する
-5. worktreeとGit状態を検証する
-6. merge済みPRがあれば完了へ収束させ、旧versionでcompletedにされたopen PRはCI/merge監視へ戻す
-7. 実行途中でworkerが消えていればretryへ移す
-8. 未回答requestはneeds_inputのまま保持する
-9. terminal `blocked` / `failed`のGitHub state reasonを取得し、安全条件を満たす`NOT_PLANNED` closeを`canceled`へ収束させる
-10. reconciliationイベントを記録してpollingを開始する
+### 15.1 実行状態の復旧
 
-reconciliationでは、永続状態を処理履歴の正本、GitHubとGit worktreeを外部事実の正本として扱う。次の不一致は、重複実行や人手変更の上書きを生じない範囲で自動収束させる。
+supervisorは起動時に二重起動lockとsnapshot/event整合性を検証し、保存されたworker PID/PGIDの所有権を確認する。残存process groupは既存の安全なstop経路で回収する。worktree・branch・PRを検査し、消失したworkerは既存のretryへ、検証済みmergeはcompletedへ収束させる。write-ahead claimは冪等に再実行する。未回答request、completed、canceledは内部状態を保持する。
 
-| 検出した状態 | 起動時の処理 |
-|---|---|
-| 保存済みworker process groupが残存 | PID/PGID所有権を照合し、全groupをgraceful stop後にactive Issueを即時retryへ移す |
-| 保存済みworker PIDが存在するがprocessは消失 | PID/PGIDを破棄し、active Issueを即時retryへ移す |
-| write-ahead claim後に停止し、GitHubはrunningへ遷移済み | claim済みとして即時retryへ移す |
-| 保存前にpush・PR作成まで完了 | branchに紐づく単一のopen PRを保存して処理を継続する |
-| 旧versionでcompletedだがPRがopen | draftなら`awaiting_checks`、Readyなら`awaiting_merge`へ戻し、done labelを除いて監視を再開する |
-| PRがmerge済み | Issueをcompletedへ移し、未反映のdone label/commentを再同期する |
-| needs-input、done、failedのlabel/comment同期が途中 | marker付きcommentを照合し、不足しているGitHub更新だけを再実行する |
-| running labelだけが欠落し、worktreeが整合 | running labelを修復する |
-| terminal `blocked` / `failed`でGitHubが`NOT_PLANNED` close | PID/PGID、pending request、対象Issueのroot `active_execution` ownershipをtransaction内で再検証し、不在なら`not_present`、一致してprocess不在なら安全に`released`として`canceled`へ移す。別Issueの実行権は保持する |
+保存済みworktreeやbranchの消失、branch不一致、曖昧なPR identity、PRのclosed-without-mergeは自動的な削除・再作成の理由にはしない。domain decisionによって対象Issueをblockedにし、後続の表示同期がGitHubにも反映する。blocked/failedは検証済みの同一PR mergeを除いてstickyとし、GitHub上の手動変更だけでは再開しない。
 
-`NOT_PLANNED` cancellationはstartup、periodic、webhook、safety sweepで同じdomain decisionとstate mutationを使う。`issue_canceled` eventはIssue/run、GitHub state reason、旧status、対象Issueの`active_execution` release結果、保存済みPR identity、時刻を記録する。event・snapshot・pending terminal effectの解放は一つのtransactionであり、delivery再送、restart、prepared transaction replayで二重eventや二重releaseを行わない。対象Issueのactive processまたはownership不整合、PID/PGID、未回答request、未知または空のstate reason、複数/不一致PR、非terminal statusではfail closedとし、processをsignalせず成果物を削除しない。
+### 15.2 GitHub表示の同期
 
-次の不一致は自動で上書きせず、Issueを `blocked` にして理由を保存する。
+| 内部状態 | 唯一の管理status label | Issue開閉状態 |
+|---|---|---|
+| claiming / claimed / launching / running | running | OPEN |
+| retry_wait / resume_pending / resolving_conflict | running | OPEN |
+| awaiting_checks / awaiting_merge | running | OPEN |
+| needs_input | needs-input | OPEN |
+| blocked / quarantine | blocked相当 | OPEN |
+| failed | failed | OPEN |
+| completed | done | `completion.close_issue=true`ならCLOSED/COMPLETED、それ以外はOPEN |
+| canceled | なし | CLOSED/NOT_PLANNED |
 
-- 保存済みworker PID/PGIDの所有権を確認できない
-- readyとrunning/needs-inputが同時に付与されている
-- exclusion labelが人手で付与された
-- PRがmergeされずcloseされた、または同じbranchに複数のopen PRがある
-- Issueがdoneを伴わずcloseされた
-- Issueのclose reasonが空、未知、または`COMPLETED`で、他の完了根拠がない
-- 保存済みworktree、local branch、open PRのremote branchが消失した
-- worktreeのbranchが保存値から変更された
-- claim中のready/running labelが両方とも除去された
+label名はeffective configを使う。blocked相当は設定済み`blocked` exclusion label、なければfailed labelとする。全管理状態でready labelと他の管理status labelを除く。business、priority、`blocked`以外のexclusion labelは変更しない。管理対象Issueではそれらのexclusion labelを停止指示として解釈しない。
 
-完了・失敗・除外を示すGitHub labelとmerge済みPRは、古いactive snapshotより優先する。一方、branch名、worktree、open PR、Issue stateの競合は、どちらかを推測して削除・再作成しない。各照合結果は `startup_reconciled` eventへ、変更前後の状態、理由、worktree inspection、検出したPRとともに記録する。
+同期は起動時、GitHub副作用の処理後、Webhookによるwake、定期的なmanaged Issue走査で行う。定期走査は既存schedulerを使い、一度に一件、Issueごとに最低5分の間隔を置く。前回確認の古いIssueから選び、completed/canceledとquarantineも対象にする。Webhook modeでもlocal reconciliation timerから実行し、ready collectionの取得には依存しない。maintenance fenceと共有rate-limit cooldownに従い、新しい永続状態・設定・background processは追加しない。
+
+同期は現在の内部状態から期待値を導出し、GitHubを取得して差分のみ更新し、更新後に再取得して全管理labelと開閉状態の一致を検証する。変更のないIssueにはwriteしない。`pending_effects`が空でも検査する。marker commentはcommentの重複防止にのみ使い、labelやcloseの成功根拠にしない。部分成功や失敗は内部状態を変更せず次回同期で修復する。cancelは正式な`issue resolve --action cancel`で内部に記録し、手動NOT_PLANNED closeではcancelしない。
+
+同期中はネットワークを跨いでstate transaction lockを保持せず、同期後に内部状態を再取得して古い結果の確定を拒否する。同一process内では既存lifecycle gateで直列化する。実行中workerには追加jobを登録せず、同じgate内で表示同期だけを行う。worker起動は投影の同期・再取得確認後に内部実行権を再検証する。同期失敗は起動を延期し、GitHubの表示を根拠に内部をcancel/completeしない。worktree、checkpoint、PR identityの安全検査は維持する。
 
 ## 16. セキュリティ仕様
 
