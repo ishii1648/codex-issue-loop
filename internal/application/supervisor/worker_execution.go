@@ -247,7 +247,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 		}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(issue.Number)]
 			if item == nil || item.RunID != current.RunID ||
-				!state.OwnsActiveExecution(s, issue.Number, identity) || item.ConflictRecovery != nil {
+				!state.OwnsActiveExecution(s, issue.Number, identity) {
 				return fmt.Errorf("Issue #%d no longer has an active needs-input worker boundary", issue.Number)
 			}
 			if err := state.CaptureContinuation(s, issue.Number, identity, checkpointID, suspendedAt); err != nil {
@@ -274,7 +274,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			return nil
 		})
 		if err != nil {
-			return failure.Wrap(failure.Supervisor, "persist input request", err)
+			return l.scheduleRetry(ctx, current, fmt.Sprintf("persist input request: %v", err))
 		}
 		updated, stateErr := l.issueState(issue.Number)
 		if stateErr != nil {
@@ -348,7 +348,7 @@ func (l *Loop) handleLaunchValidationFailure(ctx context.Context, current state.
 		}
 		return l.failIssue(ctx, current.Number, failure.Wrap(failure.Issue, "reject worker launch", launchErr), true)
 	}
-	if current.ConflictRecovery != nil {
+	if current.LaunchSource == issuedomain.StatusResolvingConflict {
 		return l.scheduleConflictRetry(ctx, current, validationErr.Error())
 	}
 	return l.scheduleRetry(ctx, current, validationErr.Error())
