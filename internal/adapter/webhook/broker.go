@@ -82,6 +82,7 @@ type Status struct {
 	LastAcceptedDelivery      string    `json:"last_accepted_delivery,omitempty"`
 	LastAcceptedAt            time.Time `json:"last_accepted_at,omitempty"`
 	QueueDepth                int       `json:"queue_depth"`
+	Quarantined               int       `json:"quarantined"`
 	Accepted                  uint64    `json:"accepted"`
 	Duplicates                uint64    `json:"duplicates"`
 	Rejected                  uint64    `json:"rejected"`
@@ -216,7 +217,7 @@ func (b *Broker) initialize() error {
 		b.byName[name] = registration
 		b.byID[registration.Config.GitHub.RepositoryID] = registration
 	}
-	for _, dir := range []string{b.inboxDir(), b.receiptDir(), filepath.Join(b.Root, "broker")} {
+	for _, dir := range []string{b.inboxDir(), b.receiptDir(), b.quarantineDir(), filepath.Join(b.Root, "broker")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
@@ -654,34 +655,28 @@ func (b *Broker) appendInbox(delivery Delivery) (bool, error) {
 		return false, err
 	}
 	path := b.inboxPath(delivery.DeliveryID)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return false, nil
-	}
+	file, err := os.CreateTemp(b.inboxDir(), ".delivery-*")
 	if err != nil {
 		return false, err
 	}
+	defer os.Remove(file.Name())
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(delivery); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return false, err
+		return false, errors.Join(err, file.Close())
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return false, err
+		return false, errors.Join(err, file.Close())
 	}
 	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
 		return false, err
 	}
-	dir, err := os.Open(b.inboxDir())
-	if err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
+	if err := os.Link(file.Name(), path); errors.Is(err, os.ErrExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
 	}
+	syncDirectory(b.inboxDir())
 	return true, nil
 }
 
@@ -751,16 +746,19 @@ func (b *Broker) route(id string) error {
 		return err
 	}
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	var delivery Delivery
 	if err := json.Unmarshal(data, &delivery); err != nil {
-		return err
+		return b.quarantineInbox(id)
 	}
 	registration, ok := b.byName[strings.ToLower(delivery.Repository)]
 	if !ok || registration.Entry.RepoID != delivery.RepoID || registration.Config.GitHub.RepositoryID != delivery.RepositoryID {
-		return errors.New("delivery registration no longer matches")
+		return b.quarantineInbox(id)
 	}
 	mailbox := filepath.Join(b.Root, "repos", delivery.RepoID, "webhook-mailbox")
 	if err := os.MkdirAll(mailbox, 0o700); err != nil {
@@ -784,6 +782,30 @@ func (b *Broker) route(id string) error {
 	b.mu.Unlock()
 	return nil
 }
+
+func (b *Broker) quarantineInbox(id string) error {
+	file, err := os.CreateTemp(b.quarantineDir(), id+"-*.json")
+	if err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(file.Name())
+		return err
+	}
+	if err := os.Rename(b.inboxPath(id), file.Name()); err != nil {
+		_ = os.Remove(file.Name())
+		return err
+	}
+	syncDirectory(b.quarantineDir())
+	syncDirectory(b.inboxDir())
+	b.mu.Lock()
+	b.refreshDepthLocked()
+	b.persistStatusLocked()
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *Broker) quarantineDir() string { return filepath.Join(b.Root, "broker", "quarantine") }
 
 func (b *Broker) inboxDir() string             { return filepath.Join(b.Root, "broker", "inbox") }
 func (b *Broker) inboxPath(id string) string   { return filepath.Join(b.inboxDir(), id+".json") }
@@ -824,6 +846,13 @@ func (b *Broker) refreshDepthLocked() {
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
 			b.status.QueueDepth++
+		}
+	}
+	entries, _ = os.ReadDir(b.quarantineDir())
+	b.status.Quarantined = 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			b.status.Quarantined++
 		}
 	}
 	b.status.UpdatedAt = b.Now()
