@@ -28,4 +28,5 @@ agent-loop-monitor service status --config ~/.agent-loop-monitor.yaml --json
 - [architecture](docs/architecture.md)
 - [specification](docs/specification.md)
 - [runbook](docs/runbook.md)
+- [ローカルGrafana dashboard](docs/dashboard.md)
 - [ADR-0001: GitHub外形監視を独立processにする](docs/adr/0001-independent-github-black-box-monitor.md)

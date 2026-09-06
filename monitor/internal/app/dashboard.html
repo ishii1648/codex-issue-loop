@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Independent monitor</title>
+<style>
+html,body{margin:0;height:100%;background:#181b1f;color:#eee;font:14px system-ui}body{display:flex;flex-direction:column}header{padding:6px 12px;min-height:22px}a{color:#8ab8ff}iframe{border:0;width:100%;flex:1}#error{padding:24px;font-size:24px}body.expired iframe{visibility:hidden;position:absolute;height:0}body:not(.expired) #error{display:none}
+</style>
+<body class="expired">
+<header><span id="freshness">UNKNOWN / 接続確認中</span><br>稼働率 = HEALTHY / (HEALTHY + DOWN)、IDLE除外。coverageは観測割合。未観測はUNKNOWN。 · <a href="http://127.0.0.1:13000/d/independent-monitor" target="_blank" rel="noreferrer">Grafana 詳細</a></header>
+<div id="error" role="alert">UNKNOWN / 現在値は未確認です</div>
+<iframe title="監視 dashboard" src="http://127.0.0.1:13000/d/independent-monitor?refresh=15s&kiosk"></iframe>
+<script>
+let reference = 0;
+let received = -Infinity;
+let generation = 0;
+function expire(message) {
+  document.body.classList.add('expired');
+  document.getElementById('freshness').textContent = 'UNKNOWN / 表示失効';
+  document.getElementById('error').textContent = 'UNKNOWN / ' + message;
+}
+function checkExpiry() {
+  if (Date.now() - reference >= 45000 || Date.now() < reference || performance.now() - received >= 45000) {
+    expire('45秒以内の取得を確認できません。現在正常表示を解除しました。');
+    return false;
+  }
+  return true;
+}
+async function refresh() {
+  const current = ++generation;
+  try {
+    const response = await fetch('/api/freshness', {cache:'no-store', signal:AbortSignal.timeout(10000)});
+    if (!response.ok) throw new Error('Grafana / Prometheus / API 通信エラー');
+    const payload = await response.json();
+    if (current !== generation) return;
+    const results = payload.data?.result;
+    if (payload.status !== 'success' || results?.length !== 1) throw new Error('scrape停止またはデータ欠損');
+    const value = Number(results[0].value[1]) * 1000;
+    if (!Number.isFinite(value) || value <= 0) throw new Error('基準時刻が不正です');
+    reference = value;
+    received = performance.now();
+    if (checkExpiry()) {
+      document.body.classList.remove('expired');
+      document.getElementById('freshness').textContent = '取得基準 UTC: ' + new Date(reference).toISOString() + ' · 15秒更新';
+    }
+  } catch (error) {
+    if (current === generation) expire(error.message);
+  }
+}
+document.addEventListener('visibilitychange', () => { checkExpiry(); if (!document.hidden) refresh(); });
+window.addEventListener('pageshow', checkExpiry);
+setInterval(checkExpiry, 1000);
+setInterval(refresh, 15000);
+refresh();
+</script>
+</body>
+</html>
