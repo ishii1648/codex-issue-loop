@@ -19,8 +19,28 @@ import (
 const maxEventPages = 10
 
 var errCursorMissing = errors.New("event cursor was not found")
+var errSnapshotChanged = errors.New("GitHub snapshot changed during observation")
 
 func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, initialized bool, observedAt time.Time) (model.Observation, error) {
+	for attempt := 0; ; attempt++ {
+		observation, err := c.observe(ctx, repo, cursor, initialized, observedAt)
+		if ctx.Err() != nil {
+			return model.Observation{}, ctx.Err()
+		}
+		if !errors.Is(err, errSnapshotChanged) || attempt == 2 {
+			return observation, err
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return model.Observation{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (c CLI) observe(ctx context.Context, repo config.Repository, cursor int64, initialized bool, observedAt time.Time) (model.Observation, error) {
 	result := model.Observation{
 		Repository:        repo.Name,
 		ObservedAt:        observedAt.UTC(),
@@ -78,7 +98,7 @@ func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, 
 		return model.Observation{}, err
 	}
 	if head != result.Cursor || !reflect.DeepEqual(issues, check) {
-		return model.Observation{}, fmt.Errorf("GitHub snapshot changed during observation")
+		return model.Observation{}, errSnapshotChanged
 	}
 	result.CurrentVerified = true
 	return result, nil
@@ -180,8 +200,11 @@ func (c CLI) queueItems(ctx context.Context, repo config.Repository, issues []ra
 	var result []model.QueueItem
 	seen := map[int]bool{}
 	for _, issue := range issues {
-		if issue.Number <= 0 || seen[issue.Number] || issue.State == "closed" {
+		if issue.Number <= 0 {
 			return nil, fmt.Errorf("invalid open issue snapshot")
+		}
+		if seen[issue.Number] || issue.State == "closed" {
+			return nil, fmt.Errorf("%w: invalid open issue snapshot", errSnapshotChanged)
 		}
 		seen[issue.Number] = true
 		if issue.PullRequest != nil || hasAny(issue.Labels, repo.TerminalLabels) || hasAny(issue.Labels, repo.ExcludeLabels) {
