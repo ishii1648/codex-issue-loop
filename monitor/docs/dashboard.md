@@ -54,7 +54,7 @@ python3 monitor/dashboard/manage.py restart
 
 ## 表示と正確性
 
-失効監視付きURLはAPIから直接描画し、repositoryを左右に比較します。現在状態は正常 HEALTHY=緑、異常 DOWN=赤、待機 IDLE=青で大きく表示し、UNKNOWNは「状態を確認できません」と表示します。選択期間は需要時稼働率を数値で、正確なtimelineをバーで表示します。UNKNOWNと未観測の区間は斜線と「観測できない区間」の凡例で示し、hoverで時刻を確認できます。現在までの24h/7d/30d集計は補助表、状態開始・最終観測・理由・観測エラー・現在queueのIssue番号と期限は折り畳み詳細です。選択期間の観測率と未観測時間も詳細内で確認でき、開閉状態は自動更新後も保持します。Issue番号からGitHubへ進めます。queue-level期限と各Issue期限を区別します。履歴に当時のqueue一覧はないため、過去の対象Issueは復元しません。
+失効監視付きURLはAPIから直接描画し、repositoryを左右に比較します。現在状態は正常 HEALTHY=緑、異常 DOWN=赤、待機 IDLE=青で大きく表示し、UNKNOWNは「状態を確認できません」と表示します。選択期間は需要時稼働率を数値で、正確なtimelineをバーで表示します。UNKNOWNと未観測の区間は斜線と「観測できない区間」の凡例で示し、hoverで時刻を確認できます。現在までの1h/24h/7d/30d集計は補助表、状態開始・最終観測・理由・観測エラー・現在queueのIssue番号と期限は折り畳み詳細です。選択期間の観測率と未観測時間も詳細内で確認でき、開閉状態は自動更新後も保持します。Issue番号からGitHubへ進めます。queue-level期限と各Issue期限を区別します。履歴に当時のqueue一覧はないため、過去の対象Issueは復元しません。
 
 需要時稼働率は`HEALTHY秒 / (HEALTHY秒 + DOWN秒)`です。IDLEは分母に入らず、分母0は`N/A（需要なし）`です。画面では「観測できた需要時間に対する割合」と説明します。UNKNOWNだけでも既知の需要が0なのでN/Aですが、観測率は0であり、需要がなかったとは断定できません。観測率は`(HEALTHY + DOWN + IDLE)秒 / 全期間秒`です。選択期間にUNKNOWNや未観測時間がある場合のみ「この期間には未観測の時間があります」と添え、混在期間への単一の正常性判定は行いません。未観測は正常時間に加算しません。
 
@@ -66,7 +66,7 @@ scrapeとdashboardは15秒更新です。monitor停止は既存の`observation_t
 
 詳細表は`/api/details?repo=owner/name`から、既存status計算結果を平坦化した`rows`を読みます。queueが空でも状態・理由・観測エラーを1行返し、未設定のIssue番号と期限はnullです。理由と観測エラーは同じ列に表示します。
 
-Infinityは`/api/timeline`から区間を直接読み、backendの列順に関係なくGrafanaのorganize変換で開始・終了・状態の順へ並べます。選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。replay後は次回取得で反映し、近似や間引きをしません。ピクセルより短い区間は、tableの「正確な区間JSON」リンクで開始・終了・理由を確認できます。Grafana詳細の時刻範囲はtimelineに適用します。失効監視付きURLでは1h/24h/7d/30d（既定は24h）または日時指定（入力・表示は端末のtimezoneによらずJST、Asia/Tokyo・UTC+09:00）を選び、UTC/RFC3339に変換した同じfrom/toを`/api/report`と`/api/timeline`へ渡します。reportの未観測時間をUNKNOWNへ補完して全長100%のバーと秒数凡例を表示します。細い区間に文字は重ねずhoverで状態と開始・終了を確認でき、ピクセル未満の区間はJSONから確認できます。現在カードは`/api/status`の最新取得、補助3期間集計は各更新時刻を終端とするreportであり、過去の選択期間とは独立です。replayは選択期間・補助集計とも次回取得で反映します。
+Infinityは`/api/timeline`から区間を直接読み、backendの列順に関係なくGrafanaのorganize変換で開始・終了・状態の順へ並べます。選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。replay後は次回取得で反映し、近似や間引きをしません。ピクセルより短い区間は、tableの「正確な区間JSON」リンクで開始・終了・理由を確認できます。Grafana詳細の時刻範囲はtimelineに適用します。失効監視付きURLでは1h/24h/7d/30d（既定は24h）または日時指定（入力・表示は端末のtimezoneによらずJST、Asia/Tokyo・UTC+09:00）を選び、UTC/RFC3339に変換した同じfrom/toを`/api/report`と`/api/timeline`へ渡します。reportの未観測時間をUNKNOWNへ補完して全長100%のバーと秒数凡例を表示します。細い区間に文字は重ねずhoverで状態と開始・終了を確認でき、ピクセル未満の区間はJSONから確認できます。現在カードは`/api/status`の最新取得、補助4期間集計は各更新時刻を終端とするreportであり、過去の選択期間とは独立です。replayは選択期間・補助集計とも次回取得で反映します。
 
 ## CLIとの照合
 
@@ -101,7 +101,7 @@ fixtureは新規directoryだけに生成します。`mixed`は4状態timelineと
 
 本番dashboardの3サービスだけを停止し、fixture rootへ両pluginを導入して同じ`--root`で`start`します。観測monitorやsupervisorは停止しません。fixtureのplistをログイン自動起動へ登録しません。
 
-失効監視付きURLを1280x720と1760x761で開き、現在状態・選択期間の視覚要約がスクロールなしで見えること、timeline・補助3期間と折り畳み詳細を確認します。3状態の色と欠損区間の斜線・境界、queueのIssueリンクと期限、idleのN/A、missingの観測不能表示と詳細内の観測率0、staleの表示失効、corruptのエラーを確認します。
+失効監視付きURLを1280x720と1760x761で開き、現在状態・選択期間の視覚要約がスクロールなしで見えること、timeline・補助4期間と折り畳み詳細を確認します。3状態の色と欠損区間の斜線・境界、queueのIssueリンクと期限、idleのN/A、missingの観測不能表示と詳細内の観測率0、staleの表示失効、corruptのエラーを確認します。
 
 HEALTHY表示中にfixtureのAPI、Prometheus、Grafanaをそれぞれ`launchctl bootout gui/$(id -u)/com.codex-issue-loop.monitor-dashboard.<サービス名>`で停止し、表示が失効することを確認します。API停止は最大45秒、Grafana/Prometheus通信断は次回照会とtimeoutで失効します。観測を更新せず3分待ち、通信成功中でもUNKNOWNへ変わることも確認します。各試験の間に`start`で復旧します。終了後はfixture rootで`stop`、本番rootで`start`します。
 
