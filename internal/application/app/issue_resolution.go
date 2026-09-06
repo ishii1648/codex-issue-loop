@@ -375,6 +375,9 @@ func issueResolutionAudit(planned issuePlanningContext, action issuedomain.Resol
 	if action == issuedomain.ResolutionRetryStage && planned.issue.Continuation != nil && planned.issue.Continuation.Stage == issuedomain.ContinuationStagePublish {
 		payload["publication_result_sha256"] = planned.resultSHA256
 	}
+	if action == issuedomain.ResolutionRetryStage && planned.issue.ConflictRecovery != nil {
+		payload["conflict_attempts_reset"] = planned.issue.ConflictRecovery.Attempts
+	}
 	if action == issuedomain.ResolutionAdoptPR && hasMergedPR {
 		payload["adopted_pull_request"] = map[string]any{
 			"number": mergedPR.Number, "url": mergedPR.URL, "head_sha": mergedPR.HeadSHA,
@@ -498,6 +501,10 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 				item.Suspension.MissingEvidence = nil
 				item.Suspension.AllowedActions = []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionRetryStage}
 			} else if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
+				if action == issuedomain.ResolutionRetryStage && item.ConflictRecovery != nil {
+					item.ConflictRecovery.Attempts = 0
+					item.ConflictRecovery.UpdatedAt = now
+				}
 				if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStagePublish {
 					if planned.resultErr != nil || planned.resultSummary == "" || planned.resultSHA256 == "" {
 						return fmt.Errorf("Issue #%d saved completed worker result changed after planning", *number)

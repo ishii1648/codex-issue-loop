@@ -404,6 +404,20 @@ func TestIssueResolveAdoptWorktreeRecordsExactConflictEvidenceWithoutStartingExe
 	if plan := findActionPlan(t, report.Actions, issuedomain.ResolutionRetryStage); !plan.Eligible {
 		t.Fatalf("retry-stage plan=%+v observations=%+v", plan, report.Observations)
 	}
+
+	out.Reset()
+	stderr.Reset()
+	if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "285", "--action", "retry-stage", "--json"}); code != 0 {
+		t.Fatalf("retry-stage code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	snapshot, err = fixture.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item = snapshot.Issues["285"]
+	if item.Status != issuedomain.StatusResolvingConflict || item.ConflictRecovery.Attempts != 0 || state.PendingEffect(&snapshot, 285) != nil {
+		t.Fatalf("retry-stage did not renew conflict attempt budget: %+v", item)
+	}
 }
 
 func TestIssueResolveAdoptWorktreeRequiresExplicitExactScopeExtension(t *testing.T) {
@@ -767,7 +781,7 @@ func (f *issueResolutionFixture) prepareQuarantinedConflict(t *testing.T, number
 		item.ConflictRecovery = &state.ConflictRecovery{
 			PullRequestURL: item.PullRequestURL, PreviousBaseSHA: f.base, TargetBaseSHA: target,
 			OriginalHeadSHA: f.head, ConflictFiles: []string{"change.txt"}, AllowedPaths: []string{"change.txt"},
-			Attempts: 1, BaseUpdates: 1, LastReason: item.LastError, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+			Attempts: 3, BaseUpdates: 1, LastReason: item.LastError, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 		item.Suspension.Status = issuedomain.SuspensionQuarantined
 		item.Suspension.Recoverability = issuedomain.RecoverabilityAmbiguous
