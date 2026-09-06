@@ -82,7 +82,7 @@ func TestRunningTerminalStartsNextAdmissionWindowAtEvent(t *testing.T) {
 	}
 }
 
-func TestRecoveryAfterObservationFailureDoesNotMoveIntervalsBackwards(t *testing.T) {
+func TestRecoveryAfterObservationFailureBackfillsVerifiedHistory(t *testing.T) {
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	initial, _, err := Apply(nil, Observation{
 		Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Cursor: 10, CursorInitialized: true,
@@ -104,10 +104,10 @@ func TestRecoveryAfterObservationFailureDoesNotMoveIntervalsBackwards(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered.Current.Status != Healthy || !recovered.Current.StartedAt.Equal(base.Add(8*time.Minute)) {
+	if recovered.Current.Status != Healthy || !recovered.Current.StartedAt.Equal(initial.LastSuccessAt) {
 		t.Fatalf("recovered = %+v", recovered.Current)
 	}
-	if len(closed) != 1 || closed[0].Status != Unknown || !closed[0].EndedAt.Equal(base.Add(8*time.Minute)) {
+	if len(closed) != 0 {
 		t.Fatalf("closed = %+v", closed)
 	}
 }

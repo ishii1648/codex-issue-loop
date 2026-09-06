@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -55,31 +56,34 @@ func (s Store) Commit(snapshot model.Snapshot, closed []model.Interval) error {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	if len(closed) > 0 {
-		history, err := s.History(snapshot.Repository)
-		if err != nil {
+	history, err := s.History(snapshot.Repository)
+	if err != nil {
+		return err
+	}
+	from := snapshot.Current.StartedAt
+	for _, interval := range closed {
+		if interval.StartedAt.Before(from) {
+			from = interval.StartedAt
+		}
+	}
+	var retained []model.Interval
+	for _, interval := range history {
+		if !interval.StartedAt.Before(from) {
+			continue
+		}
+		if interval.EndedAt.After(from) {
+			interval.EndedAt = from
+		}
+		retained = append(retained, interval)
+	}
+	retained = append(retained, closed...)
+	sort.Slice(retained, func(i, j int) bool { return retained[i].StartedAt.Before(retained[j].StartedAt) })
+	if err := validateHistory(retained); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(history, retained) {
+		if err := writeJSONLines(s.historyPath(snapshot.Repository), retained); err != nil {
 			return err
-		}
-		existing := make(map[string]bool, len(history))
-		for _, interval := range history {
-			existing[interval.ID] = true
-		}
-		changed := false
-		for _, interval := range closed {
-			if !existing[interval.ID] {
-				history = append(history, interval)
-				existing[interval.ID] = true
-				changed = true
-			}
-		}
-		if changed {
-			sort.Slice(history, func(i, j int) bool { return history[i].StartedAt.Before(history[j].StartedAt) })
-			if err := validateHistory(history); err != nil {
-				return err
-			}
-			if err := writeJSONLines(s.historyPath(snapshot.Repository), history); err != nil {
-				return err
-			}
 		}
 	}
 	return writeJSON(s.currentPath(snapshot.Repository), snapshot)

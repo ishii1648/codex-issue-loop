@@ -74,3 +74,39 @@ func TestCommitDeduplicatesAReplayedIntervalBatch(t *testing.T) {
 		t.Fatalf("history = %+v, err = %v", history, err)
 	}
 }
+
+func TestBackfillReplacesOverlappingHistoryIdempotently(t *testing.T) {
+	disk := Store{Root: t.TempDir()}
+	base := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	previous, closed, err := model.Apply(nil, model.Observation{Repository: "owner/repo", ObservedAt: base, Cursor: 1, CursorInitialized: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := disk.Commit(previous, closed); err != nil {
+		t.Fatal(err)
+	}
+	previous, closed, err = model.Apply(&previous, model.Observation{Repository: "owner/repo", ObservedAt: base.Add(3 * time.Minute), Error: "unavailable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := disk.Commit(previous, closed); err != nil {
+		t.Fatal(err)
+	}
+	next, closed, err := model.Apply(&previous, model.Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(5 * time.Minute), Cursor: 2, CursorInitialized: true,
+		Items: []model.QueueItem{{Number: 1, Phase: model.Ready}}, AcceptanceTimeout: time.Hour,
+		Events: []model.QueueEvent{{ID: 2, IssueNumber: 1, Kind: model.ReadyLabeled, At: base.Add(time.Minute)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := disk.Commit(next, closed); err != nil {
+			t.Fatal(err)
+		}
+		history, err := disk.AllIntervals("owner/repo")
+		if err != nil || len(history) != 2 || history[0].Status != model.Idle || !history[0].EndedAt.Equal(base.Add(time.Minute)) || history[1].Status != model.Healthy || !history[1].StartedAt.Equal(history[0].EndedAt) {
+			t.Fatalf("history=%+v error=%v", history, err)
+		}
+	}
+}

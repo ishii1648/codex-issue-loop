@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -108,7 +109,7 @@ func TestSnapshotRaceRetriesVerifiedCursorWithoutDuplicateIntervals(t *testing.T
 			observer.observations[repo.Name] = model.Observation{Items: []model.QueueItem{running}, Events: events, Cursor: 3}
 			now = base.Add(4 * time.Minute)
 			got, err := runner.Poll(context.Background(), repo)
-			if err != nil || got.Current.Status != model.Healthy || got.EventCursor != 3 || !got.Current.StartedAt.Equal(now) {
+			if err != nil || got.Current.Status != model.Healthy || got.EventCursor != 3 || !got.Current.StartedAt.Equal(base) {
 				t.Fatalf("recovery = %+v err=%v", got, err)
 			}
 			observer.observations[repo.Name] = model.Observation{Items: []model.QueueItem{{Number: 1, Phase: model.Running}}, Events: []model.QueueEvent{}, Cursor: 3}
@@ -120,7 +121,7 @@ func TestSnapshotRaceRetriesVerifiedCursorWithoutDuplicateIntervals(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(history) != 3 || history[0].Status != model.Healthy || history[1].Status != model.Unknown || history[2].Status != model.Healthy {
+			if len(history) != 1 || history[0].Status != model.Healthy {
 				t.Fatalf("intervals = %+v", history)
 			}
 			open := 0
@@ -197,7 +198,7 @@ func TestTerminalSnapshotRaceConvergesToIdle(t *testing.T) {
 	observer.observations[repo.Name] = model.Observation{Events: events, Cursor: 2}
 	now = base.Add(3 * time.Minute)
 	got, err = runner.Poll(context.Background(), repo)
-	if err != nil || got.Current.Status != model.Idle || got.EventCursor != 2 || !got.Current.StartedAt.Equal(now) {
+	if err != nil || got.Current.Status != model.Idle || got.EventCursor != 2 || !got.Current.StartedAt.Equal(base.Add(time.Minute)) {
 		t.Fatalf("convergence = %+v err=%v", got, err)
 	}
 }
@@ -236,5 +237,84 @@ func TestUnknownRecoveryWithOverdueQueueAndNewEvents(t *testing.T) {
 	}
 	if len(history) != 2 || history[0].Status != model.Unknown || !history[0].StartedAt.Equal(base) || !history[0].EndedAt.Equal(base.Add(2*time.Minute)) {
 		t.Fatalf("history=%+v", history)
+	}
+}
+
+func TestFailedPollsBackfillAcrossRestart(t *testing.T) {
+	for _, mode := range []string{"events", "idle", "missing cursor", "incomplete events"} {
+		t.Run(mode, func(t *testing.T) {
+			base := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+			repo := config.Repository{Name: "owner/repo"}
+			observer := fakeObserver{observations: map[string]model.Observation{repo.Name: {Cursor: 1}}, errors: map[string]error{}}
+			disk := store.Store{Root: t.TempDir()}
+			now := base
+			runner := Runner{Observer: observer, Store: disk, Now: func() time.Time { return now }}
+			if _, err := runner.Poll(context.Background(), repo); err != nil {
+				t.Fatal(err)
+			}
+			now = base.Add(time.Minute)
+			if _, err := runner.Poll(context.Background(), repo); err != nil {
+				t.Fatal(err)
+			}
+			observer.errors[repo.Name] = errors.New("invalid history during observation")
+			for _, minute := range []int{3, 80} {
+				now = base.Add(time.Duration(minute) * time.Minute)
+				got, err := runner.Poll(context.Background(), repo)
+				if err == nil || got.Current.Status != model.Unknown || got.EventCursor != 1 || !got.LastSuccessAt.Equal(base.Add(time.Minute)) {
+					t.Fatalf("failed poll=%+v error=%v", got, err)
+				}
+			}
+			delete(observer.errors, repo.Name)
+			recovery := model.Observation{Cursor: 1, CurrentVerified: true}
+			if mode != "idle" {
+				recovery.Cursor = 4
+				recovery.Events = []model.QueueEvent{
+					{ID: 2, IssueNumber: 7, Kind: model.ReadyLabeled, At: base.Add(2 * time.Minute)},
+					{ID: 3, IssueNumber: 7, Kind: model.RunningLabeled, At: base.Add(70 * time.Minute)},
+					{ID: 4, IssueNumber: 7, Kind: model.QueueExited, At: base.Add(90 * time.Minute)},
+				}
+			}
+			if mode == "missing cursor" {
+				recovery.Resynchronized = true
+				recovery.Events = nil
+			}
+			if mode == "incomplete events" {
+				recovery.Events = recovery.Events[:2]
+			}
+			observer.observations[repo.Name] = recovery
+			now = base.Add(100 * time.Minute)
+			restarted := Runner{Observer: observer, Store: store.Store{Root: disk.Root}, Now: func() time.Time { return now }}
+			got, err := restarted.Poll(context.Background(), repo)
+			if err != nil || got.Current.Status != model.Idle || got.EventCursor != recovery.Cursor {
+				t.Fatalf("recovery=%+v error=%v", got, err)
+			}
+			history, err := disk.AllIntervals(repo.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := model.BuildReport(repo.Name, history, base, now)
+			switch mode {
+			case "events":
+				if report.DurationsSeconds[model.Healthy] != 80*60 || report.DurationsSeconds[model.Down] != 8*60 || report.DurationsSeconds[model.Idle] != 12*60 || report.DurationsSeconds[model.Unknown] != 0 {
+					t.Fatalf("backfilled durations=%+v intervals=%+v", report, history)
+				}
+			case "idle":
+				if report.DurationsSeconds[model.Idle] != 100*60 || report.ObservationCoverage != 1 {
+					t.Fatalf("idle recovery=%+v", report)
+				}
+			default:
+				if report.DurationsSeconds[model.Unknown] != 97*60 {
+					t.Fatalf("unproven gap changed=%+v", report)
+				}
+			}
+			observer.observations[repo.Name] = model.Observation{Cursor: got.EventCursor, CurrentVerified: true}
+			if _, err := restarted.Poll(context.Background(), repo); err != nil {
+				t.Fatal(err)
+			}
+			again, err := disk.AllIntervals(repo.Name)
+			if err != nil || !reflect.DeepEqual(history, again) {
+				t.Fatalf("repeated poll changed intervals=%+v error=%v", again, err)
+			}
+		})
 	}
 }

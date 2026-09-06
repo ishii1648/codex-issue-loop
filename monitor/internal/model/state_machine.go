@@ -81,7 +81,18 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 		replay.recoverAt(observation.ObservedAt)
 		return replay.snapshot, replay.closed, nil
 	}
-	events, err := replayEvents(*previous, observation)
+	verified := cloneSnapshot(*previous)
+	if previous.Current.Status == Unknown && previous.LastError != "" && !previous.LastSuccessAt.IsZero() {
+		anchor := replayState{snapshot: cloneSnapshot(*previous)}
+		anchor.ensureQueuePhase()
+		anchor.snapshot.Current = newInterval(previous.Repository, Unknown, previous.LastSuccessAt, "queue history is insufficient")
+		anchor.recoverAt(previous.LastSuccessAt)
+		if anchor.snapshot.Current.Status != Unknown {
+			verified.Current = anchor.snapshot.Current
+			verified.LastObservationAt = previous.LastSuccessAt
+		}
+	}
+	events, err := replayEvents(verified, observation)
 	if err != nil {
 		if observation.CurrentVerified {
 			observation.Resynchronized = true
@@ -89,6 +100,7 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 		}
 		return Snapshot{}, nil, err
 	}
+	replay.snapshot.Current = verified.Current
 	for _, event := range events {
 		if event.ID <= 0 || event.IssueNumber <= 0 || event.At.IsZero() {
 			return Snapshot{}, nil, fmt.Errorf("invalid queue event")
@@ -97,7 +109,7 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 			continue
 		}
 		event.At = event.At.UTC()
-		if previous.Current.Status == Unknown || event.At.Before(replay.snapshot.Current.StartedAt) {
+		if verified.Current.Status == Unknown || event.At.Before(replay.snapshot.Current.StartedAt) {
 			if replay.snapshot.Current.Status != Unknown {
 				return Snapshot{}, nil, fmt.Errorf("queue event time moved backwards")
 			}
