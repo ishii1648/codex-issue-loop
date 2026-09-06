@@ -170,7 +170,7 @@ Issue ごとの `codex exec` ワーカーを Codex アプリ上の個別 task �
 - **FR-039**: profile判定が曖昧な場合は、ユーザーへ質問せず `extended` を選択すること。`extended` は必要に応じてsupervisor管理のcontinuationを許可すること。
 - **FR-039-A**: worker timeout時はprocess groupへ穏当な終了要求を送り、設定可能なgrace periodを超えた場合だけ強制終了すること。子processを残さず、既存worktreeと有効な作業を保持すること。
 - **FR-039-B**: command networkは既定無効とし、Codex localhost-only opt-inではcommand/child processのnetworkを必須proxy経由のexact `localhost` / `127.0.0.1`へ限定し、capability・設定・proxy初期化失敗時はworker開始前にfail closedすること。
-- **FR-039-C**: command proxyが保護しないWeb Search、Browser/Computer Use、MCP、apps/plugins等をlocalhost-only workerで無効化し、proxyの保証範囲を越えて保護済みと扱わないこと。
+- **FR-039-C**: command proxyが保護しないWeb Search、Browser/Computer Use、MCP、apps/plugins等をlocalhost-only workerで既定無効化し、operatorが`worker.mcp_config`に明示したブラウザMCPは例外とする。例外の通信はcommand proxyの対象外と明示し、proxyの保証範囲を越えて保護済みと扱わないこと。
 
 ### 6.5 GitHubへの反映
 

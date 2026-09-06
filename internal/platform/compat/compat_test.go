@@ -26,7 +26,7 @@ func TestCapabilityProbes(t *testing.T) {
 	gh := filepath.Join(dir, "gh")
 	writeExecutable(t, codex, `#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.136.0'; exit 0; fi
-if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd'; exit 0; fi
+if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd --approve-for-me'; exit 0; fi
 if [ "$1 $2 $3 $4 $5" = "exec --cd . resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
 exit 2
 `)
@@ -52,7 +52,7 @@ func TestCodexProbeAllowsMissingResumeAsFallbackCapability(t *testing.T) {
 	codex := filepath.Join(dir, "codex")
 	writeExecutable(t, codex, `#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.136.0'; exit 0; fi
-if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd'; exit 0; fi
+if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd --approve-for-me'; exit 0; fi
 exit 2
 `)
 	report := ProbeCodex(context.Background(), codex)
@@ -66,7 +66,7 @@ func TestCodexProbeDetectsLocalhostNetworkProxyCapability(t *testing.T) {
 	codex := filepath.Join(dir, "codex")
 	writeExecutable(t, codex, `#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.147.0'; exit 0; fi
-if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd --ignore-user-config --strict-config --disable'; exit 0; fi
+if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd --approve-for-me --ignore-user-config --strict-config --disable'; exit 0; fi
 if [ "$1 $2 $3 $4 $5" = "exec --cd . resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
 if [ "$1 $2" = "features list" ]; then echo 'network_proxy apps browser_use computer_use plugins remote_plugin skill_search tool_suggest'; exit 0; fi
 exit 2
@@ -82,7 +82,7 @@ func TestCodexProbeRejectsResumeThatCannotAcceptPinnedWorkspace(t *testing.T) {
 	codex := filepath.Join(dir, "codex")
 	writeExecutable(t, codex, `#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'codex-cli 0.147.0'; exit 0; fi
-if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd'; exit 0; fi
+if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd --approve-for-me'; exit 0; fi
 if [ "$1 $2 $3" = "exec resume --help" ]; then echo '--json --output-schema --output-last-message'; exit 0; fi
 exit 2
 `)
@@ -139,5 +139,17 @@ func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 		t.Fatal(fmt.Errorf("write fake executable: %w", err))
+	}
+}
+
+func TestCodexProbeRequiresAutomaticApproval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "codex")
+	writeExecutable(t, path, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'codex-cli 0.153.4'; exit 0; fi
+if [ "$1 $2" = "exec --help" ]; then echo '--json --output-schema --output-last-message --sandbox --cd'; exit 0; fi
+exit 2
+`)
+	if report := ProbeCodex(context.Background(), path); report.OK() {
+		t.Fatal("accepted Codex without --approve-for-me")
 	}
 }

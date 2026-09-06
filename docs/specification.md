@@ -210,7 +210,7 @@ webhook:
 - `worker.app_server`は削除済みであり、`enabled: false`だけをinertなlegacy互換として受理する。`enabled: true`と未知fieldは拒否する。
 - `worker.command_network.policy`の既定は`disabled`であり、`proxy: false`、空の`allowed_hosts`だけを許可する。opt-inの`localhost-only`はCodex backendと`workspace-write`を必須とし、`proxy: true`と順序を含め完全一致する`allowed_hosts: [localhost, 127.0.0.1]`だけを許可する。空、wildcard、public/private/LAN/link-local host、Unix socket、`dangerously_*`相当の設定は指定できない。
 - workerの実行能力はこの起動設定とbuilt-in adapterでのみ決定する。Issue本文の旧`agent-loop:capabilities` metadataは解釈せず、`worker.profiles.<name>.capabilities`設定は受理しない。
-- `localhost-only`では`codex exec --ignore-user-config --strict-config`を使い、`sandbox_workspace_write.network_access=true`と`features.network_proxy.enabled=true`を同時に固定する。upstream proxy、UDP、任意Unix socketを無効化し、Web Search、Browser/Computer Use、apps/plugins、MCP、remote plugin、skill由来MCP/tool suggestionを無効化する。Codex capabilityを確認できない場合やstrict config/proxy初期化に失敗した場合はworker commandを開始せず、network無効へのfallbackも行わない。詳細は[localhost-only command network](localhost-network.md)を参照する。
+- `localhost-only`では`codex exec --ignore-user-config --strict-config`を使い、`sandbox_workspace_write.network_access=true`と`features.network_proxy.enabled=true`を同時に固定する。upstream proxy、UDP、任意Unix socketを無効化し、Web Search、apps/plugins、remote plugin、skill由来MCP/tool suggestionを無効化する。Browser/Computer UseとMCPも既定無効で、`worker.mcp_config`に明示したMCPだけを例外として渡す。Codex capabilityを確認できない場合やstrict config/proxy初期化に失敗した場合はworker commandを開始せず、network無効へのfallbackも行わない。詳細は[localhost-only command network](localhost-network.md)を参照する。
 - `worker.variant`はClaude Codeの`--effort`またはOpenCode messageのprovider variantとしてinitial runとresumeの両方へ渡す。
 - `worker.sandbox` の既定値は `workspace-write` とする。
 - worker session modeは実装が`resumable`に固定する。completedと通常のfailedではsession IDをactive stateから外すが、worker起因の環境`blocked`とtyped recoverableなpre-publication failedでは正式な再開・監査に備えて保持する。
@@ -960,7 +960,7 @@ reconciliationでは、永続状態を処理履歴の正本、GitHubとGit workt
 - 管理directoryは0700、plist、registry、状態、event、transaction、worker/supervisor logは0600で作成する
 - credentialをpromptへ明示的に埋め込まない
 - 既知credential形式と`security.redact_env`の値をstdout/stderr、worker result、state、event、GitHub通知の境界でmaskする
-- Codex sandboxは既定で `workspace-write`とし、worker起動時に`approval_policy="never"`を上書きする
+- Codex sandboxは既定で `workspace-write`とし、workerの新規起動・再開時に`--approve-for-me`を必ず付ける
 - dangerous bypassは設定schemaでもMVPでは許可しない
 - GitHub Issueは信頼済み入力とはみなさず、prompt injectionの可能性をworkerへ明示する
 - Issue作成者はworker開始直前にGitHub actor identityとrepository permission、またはexact allowlistで検証し、本文・コメント・ラベルによる自己申告を信頼しない

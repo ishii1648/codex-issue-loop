@@ -98,6 +98,7 @@ type Worker struct {
 	Model            string             `yaml:"model" json:"model,omitempty"`
 	Variant          string             `yaml:"variant" json:"variant,omitempty"`
 	LegacyAppServer  *LegacyAppServer   `yaml:"app_server" json:"-"`
+	MCPConfig        string             `yaml:"mcp_config" json:"mcp_config,omitempty"`
 	CommandNetwork   CommandNetwork     `yaml:"command_network" json:"command_network"`
 	Sandbox          string             `yaml:"sandbox" json:"sandbox"`
 	SessionMode      string             `yaml:"session_mode" json:"session_mode"`
@@ -446,6 +447,12 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Worker.Command) != c.Worker.Command || strings.ContainsRune(c.Worker.Command, '\x00') {
 		return fmt.Errorf("worker.command must be a command name or path without surrounding whitespace")
+	}
+	if c.Worker.Backend == "codex" && c.Worker.Sandbox != "workspace-write" {
+		return fmt.Errorf("codex workers require worker.sandbox=workspace-write for --approve-for-me")
+	}
+	if c.Worker.MCPConfig != "" && (c.Worker.Backend != "codex" || !filepath.IsAbs(c.Worker.MCPConfig)) {
+		return fmt.Errorf("worker.mcp_config requires the codex backend and an absolute JSON config path")
 	}
 	if c.Worker.LegacyAppServer != nil && c.Worker.LegacyAppServer.Enabled {
 		return fmt.Errorf("worker.app_server.enabled=true is unsupported")

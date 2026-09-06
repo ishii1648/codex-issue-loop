@@ -199,6 +199,13 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	// process cwd aligned with it below: cwd selects files for the CLI process,
 	// while --cd selects Codex's workspace and writable project root.
 	args := append(codexExecBaseArgs(cfg), "--cd", workspace)
+	if cfg.Worker.MCPConfig != "" {
+		mcp, err := readMCPConfig(cfg.Worker.MCPConfig)
+		if err != nil {
+			return Result{}, err
+		}
+		args = append(args, "--config", "mcp_servers="+mcp)
+	}
 	if sessionID != "" {
 		args = append(args, "resume", "--json", "--output-schema", schemaPath, "--output-last-message", resultPath)
 		if cfg.Worker.Model != "" {
@@ -282,12 +289,13 @@ func processStart(cmd *exec.Cmd, expectedCWD string) ProcessStart {
 }
 
 func codexExecBaseArgs(cfg config.Config) []string {
-	args := []string{"exec", "--sandbox", cfg.Worker.Sandbox, "--config", `approval_policy="never"`}
+	args := []string{"exec", "--approve-for-me", "--config", `sandbox_mode="workspace-write"`}
 	if !cfg.Worker.CommandNetwork.LocalhostOnly() {
 		return args
 	}
 	// This is a closed policy assembled by the adapter, not arbitrary config
-	// passthrough. --ignore-user-config removes user MCP/plugin expansion while
+	// passthrough. Only the explicitly configured MCP file may add hosted tools;
+	// --ignore-user-config removes user MCP/plugin expansion while
 	// auth remains available, and --strict-config makes an older Codex fail
 	// before a model turn or command can start.
 	args = append(args,
@@ -305,13 +313,74 @@ func codexExecBaseArgs(cfg config.Config) []string {
 		"--config", `mcp_servers={}`,
 	)
 	for _, feature := range []string{
-		"apps", "browser_use", "browser_use_external", "computer_use",
-		"in_app_browser", "image_generation", "multi_agent", "plugins",
+		"apps", "image_generation", "multi_agent", "plugins",
 		"remote_plugin", "skill_mcp_dependency_install", "skill_search", "tool_suggest",
 	} {
 		args = append(args, "--disable", feature)
 	}
+	for _, feature := range []string{"browser_use", "browser_use_external", "computer_use", "in_app_browser"} {
+		flag := "--disable"
+		if cfg.Worker.MCPConfig != "" {
+			flag = "--enable"
+		}
+		args = append(args, flag, feature)
+	}
 	return args
+}
+
+func readMCPConfig(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read worker.mcp_config: %w", err)
+	}
+	if !json.Valid(data) {
+		return "", fmt.Errorf("worker.mcp_config must be valid JSON")
+	}
+	var config struct {
+		Servers map[string]any `json:"mcpServers"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil || len(config.Servers) == 0 {
+		return "", fmt.Errorf("worker.mcp_config must contain a nonempty mcpServers object")
+	}
+	return mcpTOML(config.Servers)
+}
+
+func mcpTOML(value any) (string, error) {
+	switch value := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			encoded, err := mcpTOML(value[key])
+			if err != nil {
+				return "", err
+			}
+			name, _ := json.Marshal(key)
+			parts = append(parts, string(name)+"="+encoded)
+		}
+		return "{" + strings.Join(parts, ",") + "}", nil
+	case []any:
+		parts := make([]string, 0, len(value))
+		for _, item := range value {
+			encoded, err := mcpTOML(item)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, encoded)
+		}
+		return "[" + strings.Join(parts, ",") + "]", nil
+	case string, bool, float64:
+		encoded, err := json.Marshal(value)
+		return string(encoded), err
+	default:
+		return "", fmt.Errorf("worker.mcp_config contains an unsupported TOML value")
+	}
 }
 
 func waitForProcess(ctx context.Context, cmd *exec.Cmd, timeout, grace time.Duration) error {

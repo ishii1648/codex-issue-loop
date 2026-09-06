@@ -14,9 +14,22 @@ worker:
     allowed_hosts: [localhost, 127.0.0.1]
 ```
 
-`allowed_hosts`は設定可能な一般allowlistではなく、レビュー済みpolicyの完全一致確認である。空、順序違い、重複、`*`、public hostname、RFC1918/LAN、link-local、IPv6、Unix socket、`dangerously_*` optionは拒否する。`approval_policy="never"`、`workspace-write`、worktree外書込み禁止、決定論的publisherは変わらない。
+`allowed_hosts`は設定可能な一般allowlistではなく、レビュー済みpolicyの完全一致確認である。空、順序違い、重複、`*`、public hostname、RFC1918/LAN、link-local、IPv6、Unix socket、`dangerously_*` optionは拒否する。`--approve-for-me`で追加権限要求を自動レビューし、通常実行は`workspace-write`に保つ。決定論的publisherは変わらない。
 
-Codexの[Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)が明記するように、`sandbox_workspace_write.network_access`だけではdomain policyにならず、`features.network_proxy`が必要である。またproxyはWeb Search、apps、MCPなどhosted toolをfilterしない。このためadapterは`codex exec --ignore-user-config --strict-config`を使い、proxy設定とともにWeb Search、Browser/Computer Use、apps/plugins、MCP、remote plugin、skill由来MCP/tool suggestionを無効化する。
+Codexの[Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference)が明記するように、`sandbox_workspace_write.network_access`だけではdomain policyにならず、`features.network_proxy`が必要である。またproxyはWeb Search、apps、MCPなどhosted toolをfilterしない。このためadapterは`codex exec --ignore-user-config --strict-config`を使い、proxy設定とともにWeb Search、apps/plugins、remote plugin、skill由来MCP/tool suggestionを無効化する。Browser/Computer UseとMCPも既定無効で、`worker.mcp_config`に明示したMCPだけを例外として渡す。
+
+## ブラウザ用MCP
+
+Desktopのブラウザ接続をworkerにも渡す場合は、operatorが管理するMCP JSONを指定する。
+
+```yaml
+worker:
+  mcp_config: /absolute/path/to/browser.mcp.json
+```
+
+ファイルは`{"mcpServers":{"cua_repl":{...}}}`形式とし、DesktopがインストールしたブラウザMCPのcommand、args、env等を含める。既存のユーザー設定や他のpluginは読み込まず、このMCP定義だけを新規起動・再開へ渡す。読み込み不能・空・不正なJSONはworker起動前に失敗する。認証情報はIssueやリポジトリに置かない。
+
+MCPの通信はcommand用localhost proxyの制限対象外であり、指定MCPが提供するブラウザの権限で動作する。Desktopとの接続とMacのロック解除は別途必要になる。設定の反映にはsupervisorを再起動する。
 
 ## fail-closed確認
 
@@ -38,7 +51,7 @@ macOSの専用標準ユーザーで、workerがspawnする子processを含めて
 2. `localhost-only` repositoryでは`127.0.0.1`へbindしたHTTP serverへ`localhost`と`127.0.0.1`で接続できる。
 3. 同じworkerがspawnしたChromeのloopback CDP endpointへ接続し、実canvas screenshotを保存できる。
 4. 親commandとspawnした子processの両方から`example.com`、public IP、RFC1918/LAN、`169.254.0.0/16`、許可外hostname、任意Unix socketへ接続できない。
-5. Web Search、Browser/Computer Use、MCP/apps/pluginsがworker tool一覧に現れない。
+5. Web Searchとapps/pluginsがworker tool一覧に現れない。MCP未設定時はBrowser/Computer UseとMCPも現れず、設定時は指定MCPだけが追加される。
 
 通常unit/integration suiteはCodex認証やmodel利用を行わず、生成argv・capability・state machineをfake executableで検証する。実Codex/macOS sandbox/Chrome E2Eはrelease導入hostで明示的に行い、日時、Codex version、OS version、成功・拒否endpointを秘密値なしで記録する。
 

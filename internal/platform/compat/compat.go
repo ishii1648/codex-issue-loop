@@ -62,7 +62,7 @@ func ProbeCodex(ctx context.Context, path string) Report {
 	// to `exec`, not `exec resume`, and must be accepted before the subcommand.
 	resumeHelp, resumeErr := exec.CommandContext(ctx, path, "exec", "--cd", ".", "resume", "--help").CombinedOutput()
 	features, featuresErr := exec.CommandContext(ctx, path, "features", "list").CombinedOutput()
-	base := execErr == nil && containsAll(string(execHelp), "--json", "--output-schema", "--output-last-message", "--sandbox", "--cd")
+	base := execErr == nil && containsAll(string(execHelp), "--json", "--output-schema", "--output-last-message", "--sandbox", "--cd", "--approve-for-me")
 	resume := resumeErr == nil && containsAll(string(resumeHelp), "--json", "--output-schema", "--output-last-message")
 	report.Capabilities["exec_structured"] = base
 	report.Capabilities["session_resume"] = resume
