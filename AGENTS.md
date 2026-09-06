@@ -1,5 +1,10 @@
 # Repository instructions
 
+## Issueへの回答
+
+- 「Issue #N に ok と回答して」などの依頼では、本文と質問コメントを読み、agent-loopの質問への回答か確認する。該当する場合は [agent-loop skill](skill/agent-loop/SKILL.md) の「Answer an Issue request」を読み、CLIで回答を保存して同じrequestの `answered` を確認する。GitHubコメントの投稿成功だけで完了にしない。
+- ユーザーがコメント投稿だけを明示した場合はその意図を守り、loopへの回答保存とは区別して報告する。
+
 ## Durable Issue lifecycle
 
 - 状態語彙、遷移判定、不変条件は `internal/domain/issue` に置き、durable snapshotへのstatus commitは `internal/adapter/state/issue_transition.go` の境界を通す。`internal/application/app` と `internal/application/supervisor` に遷移の正当性判断や生のstatus代入を新設せず、domainからapplication、adapter、platformへの依存を導入しない。
