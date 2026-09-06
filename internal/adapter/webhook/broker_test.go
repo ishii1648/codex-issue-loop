@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
@@ -653,5 +655,162 @@ func TestReplayWorkIsProportionalToPendingWithOneHundredThousandLogicalReceipts(
 	queued := []string{<-b.work, <-b.work}
 	if strings.Join(queued, ",") != "pending-1,pending-2" {
 		t.Fatalf("queued=%v", queued)
+	}
+}
+
+func TestRouteQuarantinesUnroutableInboxAndAllowsRedelivery(t *testing.T) {
+	for _, data := range []string{
+		`{"delivery_id":`,
+		`{"repository":"removed/repo","repo_id":"repo-123","repository_id":1234}`,
+		`{"repository":"owner/repo","repo_id":"old-registration","repository_id":1234}`,
+		`{"repository":"owner/repo","repo_id":"repo-123","repository_id":5678}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			b, body := testBroker(t)
+			const id = "quarantined-delivery"
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := os.WriteFile(b.inboxPath(id), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				for i := 0; i < 2; i++ {
+					if err := b.replayOnce(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for len(b.work) > 0 {
+					if err := b.route(<-b.work); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := b.replayOnce(); err != nil || len(b.work) != 0 {
+					t.Fatalf("quarantined entry replayed: queued=%d err=%v", len(b.work), err)
+				}
+			}
+			entries, err := os.ReadDir(b.quarantineDir())
+			if err != nil || len(entries) != 2 {
+				t.Fatalf("quarantine entries=%v err=%v", entries, err)
+			}
+			for _, entry := range entries {
+				got, err := os.ReadFile(filepath.Join(b.quarantineDir(), entry.Name()))
+				if err != nil || string(got) != data {
+					t.Fatalf("quarantined content=%q err=%v", got, err)
+				}
+			}
+			if err := b.initialize(); err != nil {
+				t.Fatal(err)
+			}
+			statusData, err := os.ReadFile(b.statusPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var status Status
+			if err := json.Unmarshal(statusData, &status); err != nil || status.Quarantined != 2 || status.QueueDepth != 0 {
+				t.Fatalf("status=%+v err=%v", status, err)
+			}
+			recorder := httptest.NewRecorder()
+			b.ServeHTTP(recorder, signedRequest(body, id))
+			if recorder.Code != http.StatusAccepted || b.status.Accepted != 1 || b.status.Duplicates != 0 {
+				t.Fatalf("status=%d metrics=%+v", recorder.Code, b.status)
+			}
+			if err := b.route(<-b.work); err != nil {
+				t.Fatal(err)
+			}
+			mailbox := filepath.Join(b.Root, "repos", "repo-123", "webhook-mailbox", id+".json")
+			got, err := os.ReadFile(mailbox)
+			var delivery Delivery
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(got, &delivery); err != nil || delivery.IssueNumber != 109 {
+				t.Fatalf("delivery=%+v err=%v", delivery, err)
+			}
+		})
+	}
+}
+
+func TestAppendInboxPublishesTemporaryFileAtomically(t *testing.T) {
+	b, _ := testBroker(t)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	if err := watcher.Add(b.inboxDir()); err != nil {
+		t.Fatal(err)
+	}
+	delivery := Delivery{DeliveryID: "atomic", Repository: strings.Repeat("x", 1024*1024)}
+	done := make(chan error, 1)
+	go func() {
+		created, err := b.appendInbox(delivery)
+		if err == nil && !created {
+			err = errors.New("delivery was not created")
+		}
+		done <- err
+	}()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	temporaryCreated := false
+	for {
+		select {
+		case event := <-watcher.Events:
+			if event.Op&fsnotify.Create == 0 {
+				continue
+			}
+			if strings.HasPrefix(filepath.Base(event.Name), ".delivery-") {
+				temporaryCreated = true
+			}
+			if event.Name != b.inboxPath(delivery.DeliveryID) {
+				continue
+			}
+			data, err := os.ReadFile(event.Name)
+			var got Delivery
+			if err != nil || json.Unmarshal(data, &got) != nil || got != delivery {
+				t.Fatalf("final entry was published before complete: read err=%v", err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if !temporaryCreated {
+				t.Fatal("final entry was created without a temporary file")
+			}
+			entries, err := os.ReadDir(b.inboxDir())
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("temporary file remains: entries=%v err=%v", entries, err)
+			}
+			return
+		case err := <-watcher.Errors:
+			t.Fatal(err)
+		case <-timer.C:
+			t.Fatal("timed out waiting for inbox publication")
+		}
+	}
+}
+
+func TestAppendInboxFailureAndDuplicatePreservePendingEntry(t *testing.T) {
+	b, _ := testBroker(t)
+	delivery := Delivery{DeliveryID: "pending"}
+	if created, err := b.appendInbox(delivery); err != nil || !created {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	original, err := os.ReadFile(b.inboxPath(delivery.DeliveryID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery.IssueNumber = 42
+	if created, err := b.appendInbox(delivery); err != nil || created {
+		t.Fatalf("duplicate: created=%v err=%v", created, err)
+	}
+	delivery.DeliveryID = "failed"
+	delivery.AcceptedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if created, err := b.appendInbox(delivery); err == nil || created {
+		t.Fatalf("invalid timestamp: created=%v err=%v", created, err)
+	}
+	entries, err := os.ReadDir(b.inboxDir())
+	if err != nil || len(entries) != 1 || entries[0].Name() != "pending.json" {
+		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+	got, err := os.ReadFile(b.inboxPath("pending"))
+	if err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("pending entry changed: err=%v", err)
 	}
 }
