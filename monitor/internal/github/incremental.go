@@ -62,7 +62,11 @@ func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, 
 	if initialized && !result.Resynchronized {
 		result.Events, err = c.resolveEvents(ctx, repo, result.Events, issues, cursor, result.Cursor, observedAt)
 		if err != nil {
-			return model.Observation{}, err
+			if !errors.Is(err, errHistoryIncomplete) {
+				return model.Observation{}, err
+			}
+			result.Events = nil
+			result.Resynchronized = true
 		}
 	}
 	check, err := c.openIssues(ctx, repo)

@@ -211,3 +211,94 @@ esac
 		})
 	}
 }
+
+func TestIncompletePastHistoryResynchronization(t *testing.T) {
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	for _, mode := range []string{"closed twice", "missing label", "unproven current", "expired current", "current history incomplete", "current conflict", "http", "head", "snapshot", "other history http"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			script := filepath.Join(dir, "gh")
+			history := `[{"id":2,"event":"closed","created_at":"2026-08-19T17:10:38Z"},{"id":3,"event":"closed","created_at":"2026-09-06T09:00:00Z"}]`
+			if mode == "missing label" {
+				history = `[{"id":2,"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-08-19T17:10:38Z"},{"id":3,"event":"unlabeled","label":{"name":"ready"},"created_at":"2026-09-06T09:00:00Z"}]`
+			}
+			body := `#!/bin/sh
+case "$*" in
+ *issues/events*)
+ if [ -f '` + dir + `/head' ] && [ '` + mode + `' = head ]; then printf '%s' '[{"id":5}]'
+ else touch '` + dir + `/head'; printf '%s' '[{"id":4,"event":"closed","issue":{"number":456},"created_at":"2026-09-06T09:01:00Z"},{"id":3,"event":"closed","issue":{"number":455},"created_at":"2026-09-06T09:00:00Z"},{"id":1}]'; fi ;;
+ *issues/455/events*) if [ '` + mode + `' = http ]; then exit 7; fi; printf '%s' '[` + history + `]' ;;
+ *issues/456/events*) if [ '` + mode + `' = 'other history http' ]; then exit 8; fi; printf '%s' '[[]]' ;;
+ *issues/459/events*)
+ if [ '` + mode + `' = 'current history incomplete' ]; then printf '%s' '[` + history + `]'
+ elif [ '` + mode + `' = 'expired current' ]; then printf '%s' '[[{"id":2,"event":"labeled","label":{"name":"ready"},"created_at":"2026-09-06T09:00:00Z"}]]'
+ else printf '%s' '[[]]'; fi ;;
+ *issues/455*) printf '%s' '{"number":455,"state":"closed","labels":[]}' ;;
+ *issues/456*) printf '%s' '{"number":456,"state":"closed","labels":[]}' ;;
+ *issues\?*)
+ if [ '` + mode + `' = 'current conflict' ]; then printf '%s' '[[{"number":459,"state":"open","labels":[{"name":"ready"},{"name":"running"}]}]]'
+ elif [ '` + mode + `' = 'unproven current' ] || [ '` + mode + `' = 'expired current' ] || [ '` + mode + `' = 'current history incomplete' ] || { [ '` + mode + `' = snapshot ] && [ -f '` + dir + `/snapshot' ]; }; then printf '%s' '[[{"number":459,"state":"open","labels":[{"name":"ready"}]}]]'
+ else touch '` + dir + `/snapshot'; printf '%s' '[[]]'; fi ;;
+ *) exit 9 ;;
+esac
+`
+			if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+				t.Fatal(err)
+			}
+			repo := config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running", AcceptanceTimeout: config.Duration{Duration: 10 * time.Minute}}
+			disk := store.Store{Root: filepath.Join(dir, "state")}
+			previous, _, err := model.Apply(nil, model.Observation{Repository: repo.Name, ObservedAt: base, Cursor: 1, CursorInitialized: true, Error: "unavailable"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := disk.Commit(previous, nil); err != nil {
+				t.Fatal(err)
+			}
+			for poll := 0; poll < 4; poll++ {
+				saved, err := disk.Load(repo.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				at := base.Add(time.Duration(poll+1) * time.Minute)
+				obs, err := (CLI{Path: script}).Observe(context.Background(), repo, saved.EventCursor, true, at)
+				switch mode {
+				case "http", "head", "snapshot", "other history http", "current conflict", "current history incomplete":
+					if err == nil {
+						t.Fatal("invalid observation accepted")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !obs.CurrentVerified || (poll == 0 && !obs.Resynchronized) {
+					t.Fatalf("observation=%+v", obs)
+				}
+				next, closed, err := model.Apply(saved, obs)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := model.Idle
+				if mode == "unproven current" {
+					want = model.Unknown
+				}
+				if mode == "expired current" {
+					want = model.Down
+					if !next.QueueDeadline.Equal(base.Add(-50 * time.Minute)) {
+						t.Fatalf("deadline=%s", next.QueueDeadline)
+					}
+				}
+				if next.Current.Status != want || next.EventCursor != 4 {
+					t.Fatalf("next=%+v", next)
+				}
+				if poll == 0 && want != model.Unknown && (len(closed) != 1 || closed[0].Status != model.Unknown || !closed[0].StartedAt.Equal(base) || !closed[0].EndedAt.Equal(at)) {
+					t.Fatalf("closed=%+v", closed)
+				}
+				if err := disk.Commit(next, closed); err != nil {
+					t.Fatal(err)
+				}
+				disk = store.Store{Root: disk.Root}
+			}
+		})
+	}
+}

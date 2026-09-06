@@ -101,8 +101,7 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 			if replay.snapshot.Current.Status != Unknown {
 				return Snapshot{}, nil, fmt.Errorf("queue event time moved backwards")
 			}
-			shadow := replayState{snapshot: cloneSnapshot(replay.snapshot)}
-			shadow.snapshot.Current = newInterval(observation.Repository, Unknown, event.At, replay.snapshot.Current.Reason)
+			shadow := replayState{snapshot: cloneSnapshot(replay.snapshot), queueOnly: true}
 			if err := shadow.applyEvent(event, observation.AcceptanceTimeout, observation.ProcessingTimeout); err != nil {
 				return Snapshot{}, nil, err
 			}
@@ -136,8 +135,9 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 }
 
 type replayState struct {
-	snapshot Snapshot
-	closed   []Interval
+	snapshot  Snapshot
+	closed    []Interval
+	queueOnly bool
 }
 
 func bootstrap(observation Observation) (Snapshot, []Interval, error) {
@@ -278,6 +278,9 @@ func (r *replayState) applyEvent(event QueueEvent, acceptanceTimeout, processing
 }
 
 func (r *replayState) transition(status Status, at time.Time, reason string) error {
+	if r.queueOnly {
+		return nil
+	}
 	at = at.UTC()
 	if status == r.snapshot.Current.Status {
 		r.snapshot.Current.Reason = reason

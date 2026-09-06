@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/config"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 )
+
+var errHistoryIncomplete = errors.New("issue history is incomplete")
 
 // Reverse replay is anchored in the current snapshot; a retained label alone
 // does not prove that an issue was open or eligible before a reentry.
@@ -64,22 +67,22 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 		switch event.Event {
 		case "labeled":
 			if !labels[label] {
-				return nil, time.Time{}, fmt.Errorf("label history disagrees with issue %d", issue.Number)
+				return nil, time.Time{}, fmt.Errorf("%w: label history disagrees with issue %d", errHistoryIncomplete, issue.Number)
 			}
 			delete(labels, label)
 		case "unlabeled":
 			if labels[label] {
-				return nil, time.Time{}, fmt.Errorf("label history disagrees with issue %d", issue.Number)
+				return nil, time.Time{}, fmt.Errorf("%w: label history disagrees with issue %d", errHistoryIncomplete, issue.Number)
 			}
 			labels[label] = true
 		case "closed":
 			if open {
-				return nil, time.Time{}, fmt.Errorf("close history disagrees with issue %d", issue.Number)
+				return nil, time.Time{}, fmt.Errorf("%w: close history disagrees with issue %d", errHistoryIncomplete, issue.Number)
 			}
 			open = true
 		case "reopened":
 			if !open {
-				return nil, time.Time{}, fmt.Errorf("reopen history disagrees with issue %d", issue.Number)
+				return nil, time.Time{}, fmt.Errorf("%w: reopen history disagrees with issue %d", errHistoryIncomplete, issue.Number)
 			}
 			open = false
 		default:
@@ -116,6 +119,7 @@ func (c CLI) resolveEvents(ctx context.Context, repo config.Repository, batch []
 		touched[event.IssueNumber] = true
 	}
 	var result []model.QueueEvent
+	var historyErr error
 	for number := range touched {
 		var issue rawIssue
 		for _, candidate := range issues {
@@ -153,7 +157,11 @@ func (c CLI) resolveEvents(ctx context.Context, repo config.Repository, batch []
 		}
 		events, _, err := issueHistory(repo, issue, history, at)
 		if err != nil {
-			return nil, err
+			if !errors.Is(err, errHistoryIncomplete) {
+				return nil, err
+			}
+			historyErr = err
+			continue
 		}
 		for _, event := range events {
 			if event.ID > cursor {
@@ -161,5 +169,5 @@ func (c CLI) resolveEvents(ctx context.Context, repo config.Repository, batch []
 			}
 		}
 	}
-	return result, nil
+	return result, historyErr
 }
