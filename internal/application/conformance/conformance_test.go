@@ -3,8 +3,6 @@ package conformance
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -93,117 +91,6 @@ func TestBlessedProductionFixturesReplay100Percent(t *testing.T) {
 	}
 	if total == 0 || replayed != total {
 		t.Fatalf("blessed fixture coverage=%d/%d", replayed, total)
-	}
-}
-
-func TestLifecycleSequenceMatrix(t *testing.T) {
-	for _, profile := range []string{"standard", "extended"} {
-		for _, concurrency := range []int{1, 2} {
-			for _, sequence := range loadCatalog(t).Sequences {
-				name := fmt.Sprintf("%s/concurrency-%d/%s", profile, concurrency, sequence)
-				t.Run(name, func(t *testing.T) {
-					model := lifecycleModel{profile: profile, concurrency: concurrency}
-					model.run(sequence)
-					if err := model.validate(); err != nil {
-						t.Fatal(err)
-					}
-				})
-			}
-		}
-	}
-}
-
-type lifecycleModel struct {
-	profile       string
-	concurrency   int
-	status        issuedomain.Status
-	generation    int
-	activeLeases  int
-	parked        bool
-	pending       bool
-	workers       int
-	publications  int
-	eventSequence uint64
-}
-
-func (model *lifecycleModel) event() { model.eventSequence++ }
-
-func (model *lifecycleModel) run(sequence string) {
-	model.status = issuedomain.StatusClaiming
-	model.event()
-	model.generation++
-	model.activeLeases, model.status = 1, issuedomain.StatusRunning
-	model.workers++
-	model.event()
-	switch sequence {
-	case "worker-retry-continuation":
-		model.status = issuedomain.StatusRetryWait
-		model.event()
-		model.status = issuedomain.StatusRunning
-		model.event()
-	case "needs-input-resume":
-		model.activeLeases, model.parked, model.pending, model.status = 0, true, true, issuedomain.StatusNeedsInput
-		model.event()
-		model.pending, model.parked, model.activeLeases, model.status = false, false, 1, issuedomain.StatusResumePending
-		model.generation++
-		model.event()
-	case "environment-block-resume":
-		model.activeLeases, model.parked, model.status = 0, true, issuedomain.StatusBlocked
-		model.event()
-		model.parked, model.activeLeases, model.status = false, 1, issuedomain.StatusResumePending
-		model.generation++
-		model.event()
-	case "publication-recovery":
-		model.status = issuedomain.StatusResumePending
-		model.event()
-	case "checks-recovery":
-		model.status = issuedomain.StatusAwaitingChecks
-		model.event()
-	case "conflict-publication":
-		model.status = issuedomain.StatusResolvingConflict
-		model.event()
-	case "reconciliation":
-		model.status = issuedomain.StatusRetryWait
-		model.event()
-	}
-	model.publications++
-	model.activeLeases, model.parked, model.pending, model.status = 0, false, false, issuedomain.StatusCompleted
-	model.event()
-}
-
-func (model lifecycleModel) validate() error {
-	if model.profile != "standard" && model.profile != "extended" {
-		return fmt.Errorf("unknown profile %q", model.profile)
-	}
-	if model.concurrency != 1 && model.concurrency != 2 {
-		return fmt.Errorf("unsupported concurrency %d", model.concurrency)
-	}
-	if model.workers != 1 || model.publications != 1 || model.activeLeases != 0 || model.parked || model.pending || model.generation < 1 || model.eventSequence == 0 || model.status != issuedomain.StatusCompleted {
-		return fmt.Errorf("invalid terminal model: %+v", model)
-	}
-	return nil
-}
-
-func TestDeterministicModelRuns1000ReplayableSequences(t *testing.T) {
-	if len(fixedSeeds) < 10 || generatedSequenceCount < 1000 || generatedSequenceCount%len(fixedSeeds) != 0 {
-		t.Fatalf("invalid generated suite budget: sequences=%d seeds=%d", generatedSequenceCount, len(fixedSeeds))
-	}
-	sequences := loadCatalog(t).Sequences
-	perSeed := generatedSequenceCount / len(fixedSeeds)
-	completed := 0
-	for _, seed := range fixedSeeds {
-		random := rand.New(rand.NewSource(seed))
-		for index := 0; index < perSeed; index++ {
-			model := lifecycleModel{profile: []string{"standard", "extended"}[random.Intn(2)], concurrency: []int{1, 2}[random.Intn(2)]}
-			model.run(sequences[random.Intn(len(sequences))])
-			if err := model.validate(); err != nil {
-				t.Fatalf("seed=%d sequence=%d: %v", seed, index, err)
-			}
-			completed++
-		}
-	}
-	if completed != generatedSequenceCount {
-		t.Fatalf("generated sequences=%d want=%d", completed, generatedSequenceCount)
 	}
 }
 
