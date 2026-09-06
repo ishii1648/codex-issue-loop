@@ -588,12 +588,12 @@ func setupPublishRepo(t *testing.T) (root, remote, repo, baseSHA string) {
 }
 
 func TestPublishRetriesAfterRemotePullRequestHeadAdvances(t *testing.T) {
-	for _, overlap := range []bool{false, true} {
-		t.Run(fmt.Sprint("overlap=", overlap), func(t *testing.T) {
+	for _, scenario := range []string{"different-file", "same-file", "conflict"} {
+		t.Run(scenario, func(t *testing.T) {
 			root, remote, repo, base := setupPublishRepo(t)
 			branch := "codex/issue-459-retry"
 			runGit(t, repo, "switch", "-c", branch)
-			if err := os.WriteFile(filepath.Join(repo, "issue.txt"), []byte("published work\n"), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(repo, "issue.txt"), []byte("published work\n"+strings.Repeat("unchanged context\n", 10)+"old footer\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			runGit(t, repo, "add", "issue.txt")
@@ -605,17 +605,21 @@ func TestPublishRetriesAfterRemotePullRequestHeadAdvances(t *testing.T) {
 			runGit(t, other, "config", "user.name", "Remote Updater")
 			runGit(t, other, "config", "user.email", "updater@example.invalid")
 			path := "base-update.txt"
-			if overlap {
+			remoteContent := "remote change\n"
+			if scenario != "different-file" {
 				path = "issue.txt"
 			}
-			if err := os.WriteFile(filepath.Join(other, path), []byte("remote change\n"), 0600); err != nil {
+			if scenario == "same-file" {
+				remoteContent = "published work\n" + strings.Repeat("unchanged context\n", 10) + "remote footer\n"
+			}
+			if err := os.WriteFile(filepath.Join(other, path), []byte(remoteContent), 0600); err != nil {
 				t.Fatal(err)
 			}
 			runGit(t, other, "add", path)
 			runGit(t, other, "commit", "-m", "advance published head")
 			runGit(t, other, "push", "origin", branch)
 			remoteHead := runGit(t, other, "rev-parse", "HEAD")
-			repair := []byte("verified CI fix\n")
+			repair := []byte("verified CI fix\n" + strings.Repeat("unchanged context\n", 10) + "old footer\n")
 			if err := os.WriteFile(filepath.Join(repo, "issue.txt"), repair, 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -628,12 +632,19 @@ func TestPublishRetriesAfterRemotePullRequestHeadAdvances(t *testing.T) {
 			cfg.GitHub.Repo = "owner/repo"
 			result, _, err := (Manager{GitPath: "git", GHPath: fakeGH}).Publish(context.Background(), cfg, gh.Issue{Number: 459}, repo, branch, "https://github.example/owner/repo/pull/493", "repair CI", base)
 			content, readErr := os.ReadFile(filepath.Join(repo, "issue.txt"))
-			if readErr != nil || !bytes.Equal(content, repair) {
+			expected := repair
+			if scenario == "same-file" {
+				expected = []byte(strings.Replace(string(repair), "old footer", "remote footer", 1))
+			}
+			if readErr != nil || !bytes.Equal(content, expected) {
 				t.Fatalf("worker repair changed: %q %v", content, readErr)
 			}
-			if overlap {
-				if err == nil || runGit(t, repo, "rev-parse", "HEAD") != localHead || runGit(t, remote, "rev-parse", branch) != remoteHead {
+			if scenario == "conflict" {
+				if err == nil || runGit(t, repo, "rev-parse", "HEAD^") != localHead || runGit(t, remote, "rev-parse", branch) != remoteHead {
 					t.Fatalf("overlapping changes accepted: %v", err)
+				}
+				if runGit(t, repo, "status", "--porcelain") != "" {
+					t.Fatal("conflict left worker repair uncommitted or merge unresolved")
 				}
 				return
 			}
