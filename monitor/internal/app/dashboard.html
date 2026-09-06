@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Independent monitor</title>
 <style>
-:root{color-scheme:dark;--HEALTHY:#73BF69;--DOWN:#F2495C;--IDLE:#5794F2;--UNKNOWN:#9CA3AF}*{box-sizing:border-box}body{margin:0;background:#11151b;color:#eee;font:14px system-ui}header,main,footer{padding:12px 24px;max-width:1760px;margin:auto}header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:20px;margin:0}h2{font-size:18px;margin:0 0 12px}h3{font-size:16px;margin:16px 0 8px}p{margin:8px 0}a{color:#9ac3ff}small,.muted{color:#b1bccb;font-size:12px}button,input,select{font:inherit;padding:5px;background:#242d39;color:#eee;border:1px solid #566171;border-radius:4px}button,summary{cursor:pointer}form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}#custom{display:none}#custom.visible{display:flex;gap:8px;align-items:center}#range{margin:10px 0}.repos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}article{min-width:0;background:#1c232d;border:1px solid #343e4b;border-radius:10px;padding:16px}.current{border-left:8px solid var(--state);padding:6px 16px;background:#121920}.current strong{font-size:40px;color:var(--state);line-height:1.2}.current b{font-size:20px;color:var(--state);margin-left:12px}.bar{display:flex;height:40px;border-radius:5px;overflow:hidden;background:var(--UNKNOWN)}.segment{height:100%;flex-shrink:0;background:var(--state)}.legend{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:8px 0}.legend span{font-size:12px}.dot{display:inline-block;width:9px;height:9px;background:var(--state);margin-right:5px;border-radius:50%}.unobserved{background:repeating-linear-gradient(135deg,#333d49 0,#333d49 4px,#8993a1 4px,#8993a1 6px)}.current.unconfirmed strong{font-size:24px}.metrics{display:flex;gap:24px;margin:12px 0}.metrics strong{font-size:24px;margin-left:8px}.facts{min-height:18px;color:#e4bd7a;font-size:12px}.timeline{height:25px;border-radius:2px}.axis{display:flex;justify-content:space-between;font-size:11px;color:#b1bccb;margin-top:4px}.windows{width:100%;font-size:12px;border-collapse:collapse;margin:12px 0}.windows th,.windows td{text-align:right;padding:4px}.windows th:first-child{text-align:left}details{border-top:1px solid #343e4b;padding-top:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px system-ui}#error{padding:24px;font-size:24px}body.expired .repos{display:none}body:not(.expired) #error{display:none}footer{padding-top:0}footer details{border:0}@media(max-width:750px){header,main,footer{padding:12px}.repos{grid-template-columns:1fr}.current strong{font-size:32px}header{align-items:flex-start;flex-wrap:wrap}}
+:root{color-scheme:dark;--HEALTHY:#73BF69;--DOWN:#F2495C;--IDLE:#5794F2;--UNKNOWN:#9CA3AF}*{box-sizing:border-box}body{margin:0;background:#11151b;color:#eee;font:14px system-ui}header,main,footer{padding:12px 24px;max-width:1760px;margin:auto}header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:20px;margin:0}h2{font-size:18px;margin:0 0 12px}h3{font-size:16px;margin:16px 0 8px}p{margin:8px 0}a{color:#9ac3ff}small,.muted{color:#b1bccb;font-size:12px}button,input,select{font:inherit;padding:5px;background:#242d39;color:#eee;border:1px solid #566171;border-radius:4px}button,summary{cursor:pointer}form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}#custom{display:none}#custom.visible{display:flex;gap:8px;align-items:center}#range{margin:10px 0}.repos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}article{min-width:0;background:#1c232d;border:1px solid #343e4b;border-radius:10px;padding:16px}.current{border-left:8px solid var(--state);padding:6px 16px;background:#121920}.current strong{font-size:40px;color:var(--state);line-height:1.2}.current b{font-size:20px;color:var(--state);margin-left:12px}.bar{display:flex;height:40px;border-radius:5px;overflow:hidden;background:var(--UNKNOWN)}.segment{height:100%;flex-shrink:0;background:var(--state)}.legend{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:8px 0}.legend span{font-size:12px}.dot{display:inline-block;width:9px;height:9px;background:var(--state);margin-right:5px;border-radius:50%}.unobserved{background:repeating-linear-gradient(135deg,#333d49 0,#333d49 4px,#8993a1 4px,#8993a1 6px)}.current.unconfirmed strong{font-size:24px}.metrics{display:flex;flex-wrap:wrap;gap:24px;margin:12px 0}.metrics strong{font-size:24px;margin-left:8px}.facts{min-height:18px;color:#e4bd7a;font-size:12px}.timeline{height:25px;border-radius:2px}.axis{display:flex;justify-content:space-between;font-size:11px;color:#b1bccb;margin-top:4px}details{border-top:1px solid #343e4b;padding-top:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px system-ui}#error{padding:24px;font-size:24px}body.expired .repos{display:none}body:not(.expired) #error{display:none}footer{padding-top:0}footer details{border:0}@media(max-width:750px){header,main,footer{padding:12px}.repos{grid-template-columns:1fr}.current strong{font-size:32px}header{align-items:flex-start;flex-wrap:wrap}}
 </style>
 <body class="expired">
 <header><h1>Independent monitor</h1><small id="freshness">接続確認中</small><a href="http://127.0.0.1:13000/d/independent-monitor" target="_blank" rel="noreferrer">Grafana 詳細 ↗</a></header>
@@ -14,7 +14,7 @@
 <div id="error" role="alert">状態を確認できません</div>
 <div class="repos" id="repos"></div>
 </main>
-<footer><details><summary class="muted">状態と計算の定義</summary><p>正常 · 異常 · 待機と、斜線の観測できない区間を表示します。需要時稼働率 = 正常時間 / (正常時間 + 異常時間)、待機は除外。観測できた需要時間が0ならN/A。未観測の時間がある場合は需要なしとは断定できません。観測率 = (正常時間 + 異常時間 + 待機時間) / 全期間。期間全体への単一の正常性判定は行いません。</p></details></footer>
+<footer><details><summary class="muted">状態と計算の定義</summary><p>正常 · 異常 · 待機と、斜線の観測できない区間を表示します。稼働率（正常のみ） = 正常時間 / 選択期間全体の時間。正常動作率（正常+待機） = (正常時間 + 待機時間) / 選択期間全体の時間。観測できない区間・未観測時間は正常時間にも待機時間にも加算しません。観測率 = (正常時間 + 異常時間 + 待機時間) / 全期間。期間全体への単一の正常性判定は行いません。</p></details></footer>
 <script>
 const states = ['HEALTHY','DOWN','IDLE','UNKNOWN'];
 const labels = {HEALTHY:'正常',DOWN:'異常',IDLE:'待機',UNKNOWN:'観測できない区間'};
@@ -47,7 +47,7 @@ async function read(url) {
 }
 function reportDurations(report, from, to) {
   if (!report || Date.parse(report.from) !== from || Date.parse(report.to) !== to) throw new Error('期間集計が不一致です');
-  if (!Number.isFinite(report.observation_coverage) || report.observation_coverage < 0 || report.observation_coverage > 1 || (report.demand_availability !== null && (!Number.isFinite(report.demand_availability) || report.demand_availability < 0 || report.demand_availability > 1))) throw new Error('稼働率または観測データが欠損しています');
+  if (!Number.isFinite(report.observation_coverage) || report.observation_coverage < 0 || report.observation_coverage > 1) throw new Error('観測データが欠損しています');
   const total = (to-from)/1000;
   const values = {...report.durations_seconds};
   if (!states.every(s => Number.isFinite(values[s]) && values[s] >= 0)) throw new Error('期間集計が欠損しています');
@@ -56,10 +56,11 @@ function reportDurations(report, from, to) {
   values.UNKNOWN += Math.max(0,total-sum);
   return values;
 }
-function renderRepository(snapshot, report, rows, windows, from, to, now) {
+function renderRepository(snapshot, report, rows, from, to, now) {
   const state = snapshot.current.status;
   if (!states.includes(state) || !Array.isArray(rows)) throw new Error('状態データが欠損しています');
   const values = reportDurations(report,from,to);
+  const total = (to-from)/1000;
   const timelineValues = Object.fromEntries(states.map(s => [s,0]));
   let cursor = from;
   const timeline = rows.map(row => {
@@ -77,10 +78,9 @@ function renderRepository(snapshot, report, rows, windows, from, to, now) {
   const repo = escapeHTML(snapshot.repository);
   const query = new URLSearchParams({repo:snapshot.repository,from:new Date(from).toISOString(),to:new Date(to).toISOString()});
   return `<article><h2>${repo}</h2><div class="current${state === 'UNKNOWN' ? ' unconfirmed' : ''}" style="--state:var(--${state})"><small>現在 · 選択期間とは独立</small><div><strong>${state === 'UNKNOWN' ? '状態を確認できません' : labels[state]}</strong>${state === 'UNKNOWN' ? '' : `<b>${state}</b>`}</div><small>${since}</small></div>
-  <h3>選択期間の需要時稼働率</h3><div class="metrics"><strong>${percent(report.demand_availability)}</strong></div><p class="muted">観測できた需要時間に対する割合</p>
+  <h3>選択期間の指標</h3><div class="metrics"><div>稼働率（正常のみ）<strong>${percent(values.HEALTHY/total)}</strong></div><div>正常動作率（正常+待機）<strong>${percent((values.HEALTHY+values.IDLE)/total)}</strong></div></div><p class="muted">選択期間全体の時間に対する割合</p>
   <div class="facts">${values.UNKNOWN > 0 ? 'この期間には未観測の時間があります' : ''}</div>
   <h3>状態タイムライン <small>hoverで時刻</small></h3><div class="bar timeline" aria-label="選択期間の状態タイムライン">${timeline}</div><div class="axis"><span>${shortTime(from)} JST</span><span>${shortTime(to)} JST</span></div><div class="legend">${legend}</div>
-  <table class="windows"><caption class="muted">現在までの補助集計（選択期間とは独立）</caption><thead><tr><th>期間</th><th>需要時稼働率</th></tr></thead><tbody>${windows.map((r,i) => `<tr><th>${['1h','24h','7d','30d'][i]}</th><td>${percent(r.demand_availability)}</td></tr>`).join('')}</tbody></table>
   <details data-repository="${repo}"><summary>観測率・開始・最終観測 / エラー・Issue・期限</summary><p>選択期間の観測率: ${percent(report.observation_coverage)} · 未観測時間: ${values.UNKNOWN.toLocaleString('ja-JP',{maximumFractionDigits:3})}秒</p><pre>${escapeHTML('状態開始: '+(started > 0 ? stamp(started) : '未観測')+'\n最終観測: '+(snapshot.last_observation_at ? stamp(snapshot.last_observation_at) : '—')+'\n'+(snapshot.current.reason || '')+'\n'+(snapshot.last_error || '')+'\nqueue期限: '+(snapshot.queue_deadline ? stamp(snapshot.queue_deadline) : '—'))}</pre>${(snapshot.queue || []).map(item => `<p><a href="https://github.com/${repo}/issues/${Number(item.number)}" target="_blank" rel="noreferrer">#${Number(item.number)}</a> · ${escapeHTML(item.phase)} · 期限 ${escapeHTML(item.deadline ? stamp(item.deadline) : '—')}</p>`).join('')}<a href="/api/timeline?${escapeHTML(query)}" target="_blank">正確な区間JSON</a> · <a href="/api/report?${escapeHTML(query)}" target="_blank">選択期間report JSON</a></details></article>`;
 }
 async function refresh() {
@@ -90,9 +90,8 @@ async function refresh() {
   const to = selected.hours ? now : selected.to;
   try {
     const query = new URLSearchParams({from:new Date(from).toISOString(),to:new Date(to).toISOString()});
-    const [payload,status,report,timeline,...windows] = await Promise.all([
-      read('/api/freshness'),read('/api/status'),read('/api/report?'+query),read('/api/timeline?'+query),
-      ...[1,24,168,720].map(hours => read('/api/report?'+new URLSearchParams({from:new Date(now-hours*3600000).toISOString(),to:new Date(now).toISOString()})))
+    const [payload,status,report,timeline] = await Promise.all([
+      read('/api/freshness'),read('/api/status'),read('/api/report?'+query),read('/api/timeline?'+query)
     ]);
     if (current !== generation) return;
     const results = payload.data?.result;
@@ -100,11 +99,7 @@ async function refresh() {
     const value = Number(results[0].value[1]) * 1000;
     if (!Number.isFinite(value) || value <= 0) throw new Error('基準時刻が不正です');
     if (!status.repositories?.length || Date.parse(timeline.from) !== from || Date.parse(timeline.to) !== to) throw new Error('データ欠損または期間不一致');
-    const html = status.repositories.map(snapshot => renderRepository(snapshot,report.reports.find(r => r.repository === snapshot.repository),timeline.repositories[snapshot.repository],windows.map((w,i) => {
-      const r = w.reports.find(r => r.repository === snapshot.repository);
-      reportDurations(r,now-[1,24,168,720][i]*3600000,now);
-      return r;
-    }),from,to,now)).join('');
+    const html = status.repositories.map(snapshot => renderRepository(snapshot,report.reports.find(r => r.repository === snapshot.repository),timeline.repositories[snapshot.repository],from,to,now)).join('');
     reference = value;
     received = performance.now();
     if (checkExpiry()) {
@@ -114,7 +109,7 @@ async function refresh() {
       node('range').textContent = `対象期間: ${stamp(from)} → ${stamp(to)} · 現在カードは最新取得時点`;
       document.body.classList.remove('expired');
       node('freshness').textContent = '15秒更新 · 取得 ' + shortTime(now) + ' JST';
-      node('freshness').title = 'scrape基準: '+stamp(reference)+' / 補助集計終端: '+stamp(now);
+      node('freshness').title = 'scrape基準: '+stamp(reference);
     }
   } catch (error) {
     if (current === generation) expire(error.message);
