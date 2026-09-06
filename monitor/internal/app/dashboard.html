@@ -79,7 +79,7 @@ function renderRepository(snapshot, report, rows, windows, from, to, now) {
   <h3>選択期間の需要時稼働率</h3><div class="metrics"><strong>${percent(report.demand_availability)}</strong></div><p class="muted">観測できた需要時間に対する割合</p>
   <div class="facts">${values.UNKNOWN > 0 ? 'この期間には未観測の時間があります' : ''}</div>
   <h3>状態タイムライン <small>hoverで時刻</small></h3><div class="bar timeline" aria-label="選択期間の状態タイムライン">${timeline}</div><div class="axis"><span>${shortTime(from)} JST</span><span>${shortTime(to)} JST</span></div><div class="legend">${legend}</div>
-  <table class="windows"><caption class="muted">現在までの補助集計（選択期間とは独立）</caption><thead><tr><th>期間</th><th>需要時稼働率</th></tr></thead><tbody>${windows.map((r,i) => `<tr><th>${['24h','7d','30d'][i]}</th><td>${percent(r.demand_availability)}</td></tr>`).join('')}</tbody></table>
+  <table class="windows"><caption class="muted">現在までの補助集計（選択期間とは独立）</caption><thead><tr><th>期間</th><th>需要時稼働率</th></tr></thead><tbody>${windows.map((r,i) => `<tr><th>${['1h','24h','7d','30d'][i]}</th><td>${percent(r.demand_availability)}</td></tr>`).join('')}</tbody></table>
   <details data-repository="${repo}"><summary>観測率・開始・最終観測 / エラー・Issue・期限</summary><p>選択期間の観測率: ${percent(report.observation_coverage)} · 未観測時間: ${values.UNKNOWN.toLocaleString('ja-JP',{maximumFractionDigits:3})}秒</p><pre>${escapeHTML('状態開始: '+(started > 0 ? stamp(started) : '未観測')+'\n最終観測: '+(snapshot.last_observation_at ? stamp(snapshot.last_observation_at) : '—')+'\n'+(snapshot.current.reason || '')+'\n'+(snapshot.last_error || '')+'\nqueue期限: '+(snapshot.queue_deadline ? stamp(snapshot.queue_deadline) : '—'))}</pre>${(snapshot.queue || []).map(item => `<p><a href="https://github.com/${repo}/issues/${Number(item.number)}" target="_blank" rel="noreferrer">#${Number(item.number)}</a> · ${escapeHTML(item.phase)} · 期限 ${escapeHTML(item.deadline ? stamp(item.deadline) : '—')}</p>`).join('')}<a href="/api/timeline?${escapeHTML(query)}" target="_blank">正確な区間JSON</a> · <a href="/api/report?${escapeHTML(query)}" target="_blank">選択期間report JSON</a></details></article>`;
 }
 async function refresh() {
@@ -91,7 +91,7 @@ async function refresh() {
     const query = new URLSearchParams({from:new Date(from).toISOString(),to:new Date(to).toISOString()});
     const [payload,status,report,timeline,...windows] = await Promise.all([
       read('/api/freshness'),read('/api/status'),read('/api/report?'+query),read('/api/timeline?'+query),
-      ...[24,168,720].map(hours => read('/api/report?'+new URLSearchParams({from:new Date(now-hours*3600000).toISOString(),to:new Date(now).toISOString()})))
+      ...[1,24,168,720].map(hours => read('/api/report?'+new URLSearchParams({from:new Date(now-hours*3600000).toISOString(),to:new Date(now).toISOString()})))
     ]);
     if (current !== generation) return;
     const results = payload.data?.result;
@@ -101,7 +101,7 @@ async function refresh() {
     if (!status.repositories?.length || Date.parse(timeline.from) !== from || Date.parse(timeline.to) !== to) throw new Error('データ欠損または期間不一致');
     const html = status.repositories.map(snapshot => renderRepository(snapshot,report.reports.find(r => r.repository === snapshot.repository),timeline.repositories[snapshot.repository],windows.map((w,i) => {
       const r = w.reports.find(r => r.repository === snapshot.repository);
-      reportDurations(r,now-[24,168,720][i]*3600000,now);
+      reportDurations(r,now-[1,24,168,720][i]*3600000,now);
       return r;
     }),from,to,now)).join('');
     reference = value;

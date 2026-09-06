@@ -5,7 +5,7 @@ const {test} = require('node:test');
 const page = readFileSync(__dirname + '/../internal/app/dashboard.html', 'utf8');
 const code = page.split('<script>')[1].split('</script>')[0];
 function fixture() {
-  const f = {now:1800000000000, sample:1800000000000, failure:'', missing:false, state:'HEALTHY', fractions:[0.25,0.25,0.25,0.25], urls:[]};
+  const f = {now:1800000000000, sample:1800000000000, failure:'', missing:false, state:'HEALTHY', repositories:['owner/repo'], fractions:[0.25,0.25,0.25,0.25], urls:[]};
   const classes = new Set(['expired']);
   const nodes = Object.fromEntries(['freshness','error','repos','range','window','custom','selection','from','to'].map(id => [id,{addEventListener(name,fn){this[name]=fn;},classList:{toggle(){}}}]));
   let details = [];
@@ -29,8 +29,8 @@ function fixture() {
       const durations = Object.fromEntries(states.map((s,i) => [s,(to-from)/1000*f.fractions[i]]));
       let payload;
       if (u.pathname === '/api/freshness') payload = {status:'success',data:{result:f.missing?[]:[{value:[f.now/1000,String(f.sample/1000)]}]}};
-      if (u.pathname === '/api/status') payload = {repositories:[{repository:'owner/repo',current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue}]};
-      if (u.pathname === '/api/report') payload = {reports:[{repository:'owner/repo',from:new Date(from).toISOString(),to:new Date(to).toISOString(),durations_seconds:durations,demand_availability:durations.HEALTHY+durations.DOWN ? durations.HEALTHY/(durations.HEALTHY+durations.DOWN) : null,observation_coverage:f.fractions.slice(0,3).reduce((a,b)=>a+b,0)}]};
+      if (u.pathname === '/api/status') payload = {repositories:f.repositories.map(repository=>({repository,current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue}))};
+      if (u.pathname === '/api/report') payload = {reports:f.repositories.map((repository,index)=>({repository,from:new Date(from).toISOString(),to:new Date(to).toISOString(),durations_seconds:durations,demand_availability:durations.HEALTHY+durations.DOWN ? durations.HEALTHY/(durations.HEALTHY+durations.DOWN) : null,observation_coverage:f.fractions.slice(0,3).reduce((a,b)=>a+b,0),...(f.report ? f.report(from,to,index) : {})}))};
       if (u.pathname === '/api/timeline') {
         let cursor=from;
         const rows=[];
@@ -40,7 +40,7 @@ function fixture() {
           cursor=end;
         });
         if (f.mismatch && rows.length) rows[0].status='UNKNOWN';
-        payload={from:new Date(from).toISOString(),to:new Date(to).toISOString(),repositories:{'owner/repo':rows}};
+        payload={from:new Date(from).toISOString(),to:new Date(to).toISOString(),repositories:Object.fromEntries(f.repositories.map(repository=>[repository,rows]))};
       }
       return {ok:true,json:async()=>payload};
     },
@@ -197,7 +197,46 @@ test('one hour selection sends exactly 3600 seconds and retains default and auxi
     assert.equal(params.get('to'),query.get('to'));
     return (Date.parse(params.get('to'))-Date.parse(params.get('from')))/1000;
   });
-  assert.deepEqual(reports,[3600,86400,604800,2592000]);
+  assert.deepEqual(reports,[3600,3600,86400,604800,2592000]);
   assert.equal(classes.has('expired'),false);
   assert.match(nodes.repos.innerHTML,/api\/timeline\?repo=owner%2Frepo&amp;from=/);
+});
+
+
+test('auxiliary windows keep exact current bounds and ordered repository values for historical selection', async () => {
+  const {f,nodes,classes,refresh} = fixture();
+  await refresh();
+  f.repositories=['ishii1648/codex-issue-loop','ishii1648/zeitreise'];
+  const seconds=[3600,86400,604800,2592000];
+  const availability=[[null,0.24,0.7,0.3],[0.1,0.48,0.77,1]];
+  f.report=(from,to,index)=>to===f.now ? {demand_availability:availability[index][seconds.indexOf((to-from)/1000)]} : {};
+  nodes.from.value='2026-01-01T00:00'; nodes.to.value='2026-01-02T00:00';
+  nodes.selection.submit({preventDefault(){}});
+  for (let update=0;update<2;update++) {
+    f.now+=15000; f.sample=f.now; f.urls=[];
+    await refresh();
+    assert.equal(classes.has('expired'),false,nodes.error.textContent);
+    const reports=f.urls.filter(u=>u.startsWith('/api/report?')).map(url=>new URL(url,'http://localhost').searchParams);
+    assert.equal(reports.length,5);
+    assert.equal(reports[0].get('to'),'2026-01-01T15:00:00.000Z');
+    assert.deepEqual(reports.slice(1).map(params=>{
+      assert.equal(Date.parse(params.get('to')),f.now);
+      return (Date.parse(params.get('to'))-Date.parse(params.get('from')))/1000;
+    }),seconds);
+    const articles=nodes.repos.innerHTML.split('<article>').slice(1);
+    assert.equal(articles.length,2);
+    articles.forEach((html,index)=>{
+      assert.ok(html.startsWith(`<h2>${f.repositories[index]}</h2>`));
+      const rows=[...html.matchAll(/<tr><th>([^<]+)<\/th><td>([^<]+)<\/td><\/tr>/g)].map(match=>match.slice(1));
+      assert.deepEqual(rows,index===0 ? [['1h','N/A'],['24h','24%'],['7d','70%'],['30d','30%']] : [['1h','10%'],['24h','48%'],['7d','77%'],['30d','100%']]);
+    });
+  }
+  for (const duration of seconds) {
+    for (const boundary of ['from','to']) {
+      f.report=(from,to,index)=>index===1 && to===f.now && (to-from)/1000===duration ? {[boundary]:new Date((boundary==='from' ? from : to)+1000).toISOString()} : {};
+      await refresh();
+      assert.equal(classes.has('expired'),true);
+      assert.match(nodes.error.textContent,/期間集計が不一致/);
+    }
+  }
 });
