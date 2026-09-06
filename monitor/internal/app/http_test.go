@@ -469,3 +469,62 @@ func TestDashboardDetailTargets(t *testing.T) {
 		t.Fatalf("table count = %d", tables)
 	}
 }
+
+func TestSelectedPeriodTimelineMatchesCLIReport(t *testing.T) {
+	for _, scenario := range []string{"mixed", "HEALTHY", "DOWN", "IDLE", "UNKNOWN", "missing", "stale"} {
+		t.Run(scenario, func(t *testing.T) {
+			cfg, storage, at := dashboardFixture(t)
+			observed := at
+			if scenario == "stale" {
+				observed = at.Add(-10 * time.Minute)
+			}
+			states := []model.Status{model.Idle, model.Healthy, model.Down, model.Unknown}
+			if scenario != "mixed" {
+				state := model.Status(scenario)
+				if scenario == "stale" || scenario == "missing" {
+					state = model.Healthy
+				}
+				states = []model.Status{state, state, state, state}
+			}
+			var intervals []model.Interval
+			for i, state := range states {
+				start := observed.Add(time.Duration(i-4) * time.Hour)
+				intervals = append(intervals, model.Interval{ID: fmt.Sprint(i), Repository: "owner/repo", Status: state, StartedAt: start, EndedAt: start.Add(time.Hour)})
+			}
+			snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: states[3], StartedAt: observed}}
+			if scenario != "missing" {
+				if err := storage.Commit(snapshot, intervals); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, bounds := range [][2]time.Time{{at.Add(-24 * time.Hour), at}, {at.Add(-7 * 24 * time.Hour), at}, {at.Add(-30 * 24 * time.Hour), at}, {at.Add(-3 * time.Hour), at.Add(-2 * time.Hour)}} {
+				from, to := bounds[0], bounds[1]
+				var stdout, stderr bytes.Buffer
+				a := App{Out: &stdout, Err: &stderr, Now: func() time.Time { return at }}
+				if code := a.Run(context.Background(), []string{"report", "--config", cfg.Path, "--json", "--from", from.Format(time.RFC3339), "--to", to.Format(time.RFC3339)}); code != 0 {
+					t.Fatal(stderr.String())
+				}
+				var report struct{ Reports []model.Report }
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				query := "?from=" + from.Format(time.RFC3339) + "&to=" + to.Format(time.RFC3339)
+				response := request(t, a.monitorHandler(cfg), "/api/timeline"+query)
+				var timeline struct{ Repositories map[string][]model.Interval }
+				if response.Code != 200 {
+					t.Fatal(response.Body.String())
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &timeline); err != nil {
+					t.Fatal(err)
+				}
+				actual := model.BuildReport("owner/repo", timeline.Repositories["owner/repo"], from, to)
+				expected := report.Reports[0]
+				known := expected.DurationsSeconds[model.Healthy] + expected.DurationsSeconds[model.Down] + expected.DurationsSeconds[model.Idle]
+				expected.DurationsSeconds[model.Unknown] = to.Sub(from).Seconds() - known
+				if !reflect.DeepEqual(actual, expected) {
+					t.Fatalf("timeline %+v differs from CLI report %+v", actual, expected)
+				}
+			}
+		})
+	}
+}

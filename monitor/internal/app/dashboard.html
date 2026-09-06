@@ -4,20 +4,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Independent monitor</title>
 <style>
-html,body{margin:0;height:100%;background:#181b1f;color:#eee;font:14px system-ui}body{display:flex;flex-direction:column}header{padding:6px 12px;min-height:22px}a{color:#8ab8ff}iframe{border:0;width:100%;flex:1}#error{padding:24px;font-size:24px}body.expired iframe{visibility:hidden;position:absolute;height:0}body:not(.expired) #error{display:none}
+:root{color-scheme:dark;--HEALTHY:#73BF69;--DOWN:#F2495C;--IDLE:#5794F2;--UNKNOWN:#9CA3AF}*{box-sizing:border-box}body{margin:0;background:#11151b;color:#eee;font:14px system-ui}header,main,footer{padding:12px 24px;max-width:1760px;margin:auto}header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:20px;margin:0}h2{font-size:18px;margin:0 0 12px}h3{font-size:16px;margin:16px 0 8px}p{margin:8px 0}a{color:#9ac3ff}small,.muted{color:#b1bccb;font-size:12px}button,input,select{font:inherit;padding:5px;background:#242d39;color:#eee;border:1px solid #566171;border-radius:4px}button,summary{cursor:pointer}form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}#custom{display:none}#custom.visible{display:flex;gap:8px;align-items:center}#range{margin:10px 0}.repos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}article{min-width:0;background:#1c232d;border:1px solid #343e4b;border-radius:10px;padding:16px}.current{border-left:8px solid var(--state);padding:6px 16px;background:#121920}.current strong{font-size:40px;color:var(--state);line-height:1.2}.current b{font-size:20px;color:var(--state);margin-left:12px}.bar{display:flex;height:40px;border-radius:5px;overflow:hidden;background:var(--UNKNOWN)}.segment{height:100%;flex-shrink:0;background:var(--state)}.legend{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:8px 0}.legend span{font-size:12px}.dot{display:inline-block;width:9px;height:9px;background:var(--state);margin-right:5px;border-radius:50%}.legend strong{display:block;font-size:16px;margin-top:3px}.metrics{display:flex;gap:24px;margin:12px 0}.metrics strong{font-size:24px;margin-left:8px}.facts{min-height:18px;color:#e4bd7a;font-size:12px}.timeline{height:25px;border-radius:2px}.axis{display:flex;justify-content:space-between;font-size:11px;color:#b1bccb;margin-top:4px}.windows{width:100%;font-size:12px;border-collapse:collapse;margin:12px 0}.windows th,.windows td{text-align:right;padding:4px}.windows th:first-child{text-align:left}details{border-top:1px solid #343e4b;padding-top:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px system-ui}#error{padding:24px;font-size:24px}body.expired .repos{display:none}body:not(.expired) #error{display:none}footer{padding-top:0}footer details{border:0}@media(max-width:750px){header,main,footer{padding:12px}.repos{grid-template-columns:1fr}.current strong{font-size:32px}header{align-items:flex-start;flex-wrap:wrap}}
 </style>
 <body class="expired">
-<header><span id="freshness">UNKNOWN / 接続確認中</span><br>稼働率 = HEALTHY / (HEALTHY + DOWN)、IDLE除外。coverageは観測割合。未観測はUNKNOWN。 · <a href="http://127.0.0.1:13000/d/independent-monitor" target="_blank" rel="noreferrer">Grafana 詳細</a></header>
+<header><h1>Independent monitor</h1><small id="freshness">UNKNOWN / 接続確認中</small><a href="http://127.0.0.1:13000/d/independent-monitor" target="_blank" rel="noreferrer">Grafana 詳細 ↗</a></header>
+<main>
+<form id="selection"><label>選択期間 <select id="window"><option value="24">直近24h</option><option value="168">直近7d</option><option value="720">直近30d</option><option value="custom">日時指定</option></select></label><span id="custom"><label>開始 <input id="from" type="datetime-local" required></label><label>終了 <input id="to" type="datetime-local" required></label><button type="submit">適用</button></span></form>
+<p id="range" class="muted">期間を取得中</p>
 <div id="error" role="alert">UNKNOWN / 現在値は未確認です</div>
-<iframe title="監視 dashboard" src="http://127.0.0.1:13000/d/independent-monitor?refresh=15s&kiosk"></iframe>
+<div class="repos" id="repos"></div>
+</main>
+<footer><details><summary class="muted">状態と計算の定義</summary><p>正常 HEALTHY · 異常 DOWN · 待機 IDLE · 観測不能 UNKNOWN。期間内訳は時間の割合です。未観測はUNKNOWNに含めます。需要時稼働率 = HEALTHY / (HEALTHY + DOWN)、IDLE除外。既知の需要が0ならN/A。UNKNOWNがある場合は需要なしとは断定できません。coverage = (HEALTHY + DOWN + IDLE) / 全期間。期間全体への単一の正常性判定は行いません。</p></details></footer>
 <script>
+const states = ['HEALTHY','DOWN','IDLE','UNKNOWN'];
+const labels = {HEALTHY:'正常',DOWN:'異常',IDLE:'待機',UNKNOWN:'観測不能'};
 let reference = 0;
 let received = -Infinity;
 let generation = 0;
+let selected = {hours:24};
+const node = id => document.getElementById(id);
+const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const percent = value => value === null ? 'N/A' : (value * 100).toLocaleString('ja-JP',{maximumFractionDigits:2}) + '%';
+const stamp = value => new Date(value).toISOString().replace('T',' ').replace('.000Z',' UTC');
+const shortTime = value => stamp(value).slice(5,16);
+const duration = seconds => seconds < 60 ? `${Math.floor(seconds)}秒` : seconds < 3600 ? `${Math.floor(seconds/60)}分` : `${Math.floor(seconds/3600)}時間 ${Math.floor(seconds%3600/60)}分`;
 function expire(message) {
   document.body.classList.add('expired');
-  document.getElementById('freshness').textContent = 'UNKNOWN / 表示失効';
-  document.getElementById('error').textContent = 'UNKNOWN / ' + message;
+  node('freshness').textContent = 'UNKNOWN / 表示失効';
+  node('error').textContent = 'UNKNOWN / ' + message;
 }
 function checkExpiry() {
   if (Date.now() - reference >= 45000 || Date.now() < reference || performance.now() - received >= 45000) {
@@ -26,27 +40,97 @@ function checkExpiry() {
   }
   return true;
 }
+async function read(url) {
+  const response = await fetch(url, {cache:'no-store', signal:AbortSignal.timeout(10000)});
+  if (!response.ok) throw new Error('Grafana / Prometheus / API 通信エラー');
+  return response.json();
+}
+function reportDurations(report, from, to) {
+  if (!report || Date.parse(report.from) !== from || Date.parse(report.to) !== to) throw new Error('期間集計が不一致です');
+  if (!Number.isFinite(report.observation_coverage) || report.observation_coverage < 0 || report.observation_coverage > 1 || (report.demand_availability !== null && (!Number.isFinite(report.demand_availability) || report.demand_availability < 0 || report.demand_availability > 1))) throw new Error('稼働率またはcoverageが欠損しています');
+  const total = (to-from)/1000;
+  const values = {...report.durations_seconds};
+  if (!states.every(s => Number.isFinite(values[s]) && values[s] >= 0)) throw new Error('期間集計が欠損しています');
+  const sum = states.reduce((n,s) => n+values[s],0);
+  if (sum > total + 0.001) throw new Error('期間集計が重複しています');
+  values.UNKNOWN += Math.max(0,total-sum);
+  return values;
+}
+function renderRepository(snapshot, report, rows, windows, from, to, now) {
+  const state = snapshot.current.status;
+  if (!states.includes(state) || !Array.isArray(rows)) throw new Error('状態データが欠損しています');
+  const values = reportDurations(report,from,to);
+  const total = (to-from)/1000;
+  const timelineValues = Object.fromEntries(states.map(s => [s,0]));
+  let cursor = from;
+  const timeline = rows.map(row => {
+    const start = Date.parse(row.started_at), end = Date.parse(row.ended_at);
+    if (!states.includes(row.status) || start !== cursor || end <= start || end > to) throw new Error('区間データが不一致です');
+    cursor = end;
+    timelineValues[row.status] += (end-start)/1000;
+    return `<span class="segment" style="--state:var(--${row.status});width:${(end-start)/(to-from)*100}%" title="${row.status} · ${stamp(start)} → ${stamp(end)}"></span>`;
+  }).join('');
+  if (cursor !== to || states.some(s => Math.abs(timelineValues[s]-values[s]) > 0.001)) throw new Error('集計と区間が更新中です。次回取得で再確認します');
+  const bar = states.map(s => `<span class="segment" style="--state:var(--${s});width:${values[s]/total*100}%" title="${s}: ${values[s]}秒 (${percent(values[s]/total)})"></span>`).join('');
+  const legend = states.map(s => `<span title="${values[s]}秒"><i class="dot" style="--state:var(--${s})"></i>${s}<strong>${percent(values[s]/total)}</strong><small>${values[s].toLocaleString('ja-JP',{maximumFractionDigits:3})}秒</small></span>`).join('');
+  const started = Date.parse(snapshot.current.started_at);
+  const since = Number.isFinite(started) && started > 0 ? duration(Math.max(0,(now-started)/1000))+'継続' : '開始未観測';
+  const repo = escapeHTML(snapshot.repository);
+  const query = new URLSearchParams({repo:snapshot.repository,from:new Date(from).toISOString(),to:new Date(to).toISOString()});
+  return `<article><h2>${repo}</h2><div class="current" style="--state:var(--${state})"><small>現在 · 選択期間とは独立</small><div><strong>${labels[state]}</strong><b>${state}</b></div><small>${since}</small></div>
+  <h3>選択期間全体 <small>全長を100%として表示</small></h3><div class="bar" aria-label="選択期間の状態内訳">${bar}</div><div class="legend">${legend}</div>
+  <div class="metrics"><span>需要時稼働率<strong>${percent(report.demand_availability)}</strong></span><span>coverage<strong>${percent(report.observation_coverage)}</strong></span></div>
+  <div class="facts">${[values.DOWN > 0 ? '期間中DOWNあり' : '',values.UNKNOWN > 0 ? '観測不足（UNKNOWN / 未観測あり）' : ''].filter(Boolean).join(' · ')}</div>
+  <h3>状態タイムライン <small>色の凡例は上記と共通 · hoverで時刻</small></h3><div class="bar timeline">${timeline}</div><div class="axis"><span>${shortTime(from)}</span><span>${shortTime(to)} UTC</span></div>
+  <table class="windows"><caption class="muted">現在までの補助集計（選択期間とは独立）</caption><thead><tr><th>期間</th><th>需要時稼働率</th><th>coverage</th></tr></thead><tbody>${windows.map((r,i) => `<tr><th>${['24h','7d','30d'][i]}</th><td>${percent(r.demand_availability)}</td><td>${percent(r.observation_coverage)}</td></tr>`).join('')}</tbody></table>
+  <details><summary>開始・最終観測 / エラー・Issue・期限</summary><pre>${escapeHTML('状態開始: '+(started > 0 ? stamp(started) : '未観測')+'\n最終観測: '+snapshot.last_observation_at+'\n'+(snapshot.current.reason || '')+'\n'+(snapshot.last_error || '')+'\nqueue期限: '+(snapshot.queue_deadline || '—'))}</pre>${(snapshot.queue || []).map(item => `<p><a href="https://github.com/${repo}/issues/${Number(item.number)}" target="_blank" rel="noreferrer">#${Number(item.number)}</a> · ${escapeHTML(item.phase)} · 期限 ${escapeHTML(item.deadline)}</p>`).join('')}<a href="/api/timeline?${escapeHTML(query)}" target="_blank">正確な区間JSON</a> · <a href="/api/report?${escapeHTML(query)}" target="_blank">選択期間report JSON</a></details></article>`;
+}
 async function refresh() {
   const current = ++generation;
+  const now = Math.floor(Date.now()/1000)*1000;
+  const from = selected.hours ? now-selected.hours*3600000 : selected.from;
+  const to = selected.hours ? now : selected.to;
   try {
-    const response = await fetch('/api/freshness', {cache:'no-store', signal:AbortSignal.timeout(10000)});
-    if (!response.ok) throw new Error('Grafana / Prometheus / API 通信エラー');
-    const payload = await response.json();
+    const query = new URLSearchParams({from:new Date(from).toISOString(),to:new Date(to).toISOString()});
+    const [payload,status,report,timeline,...windows] = await Promise.all([
+      read('/api/freshness'),read('/api/status'),read('/api/report?'+query),read('/api/timeline?'+query),
+      ...[24,168,720].map(hours => read('/api/report?'+new URLSearchParams({from:new Date(now-hours*3600000).toISOString(),to:new Date(now).toISOString()})))
+    ]);
     if (current !== generation) return;
     const results = payload.data?.result;
     if (payload.status !== 'success' || results?.length !== 1) throw new Error('scrape停止またはデータ欠損');
     const value = Number(results[0].value[1]) * 1000;
     if (!Number.isFinite(value) || value <= 0) throw new Error('基準時刻が不正です');
+    if (!status.repositories?.length || Date.parse(timeline.from) !== from || Date.parse(timeline.to) !== to) throw new Error('データ欠損または期間不一致');
+    const html = status.repositories.map(snapshot => renderRepository(snapshot,report.reports.find(r => r.repository === snapshot.repository),timeline.repositories[snapshot.repository],windows.map((w,i) => {
+      const r = w.reports.find(r => r.repository === snapshot.repository);
+      reportDurations(r,now-[24,168,720][i]*3600000,now);
+      return r;
+    }),from,to,now)).join('');
     reference = value;
     received = performance.now();
     if (checkExpiry()) {
+      node('repos').innerHTML = html;
+      node('range').textContent = `対象期間: ${stamp(from)} → ${stamp(to)} · 現在カードは最新取得時点`;
       document.body.classList.remove('expired');
-      document.getElementById('freshness').textContent = '取得基準 UTC: ' + new Date(reference).toISOString() + ' · 15秒更新';
+      node('freshness').textContent = '15秒更新 · 取得 ' + shortTime(now) + ' UTC';
+      node('freshness').title = 'scrape基準: '+stamp(reference)+' / 補助集計終端: '+stamp(now);
     }
   } catch (error) {
     if (current === generation) expire(error.message);
   }
 }
+node('window').addEventListener('change', () => {
+  const custom = node('window').value === 'custom';
+  node('custom').classList.toggle('visible',custom);
+  if (!custom) { selected = {hours:Number(node('window').value)}; expire('期間を更新中'); refresh(); }
+});
+node('selection').addEventListener('submit', event => {
+  event.preventDefault();
+  const from = Date.parse(node('from').value), to = Date.parse(node('to').value);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || to > Date.now()) { ++generation; expire('開始・終了を過去の有効な期間に指定してください'); return; }
+  selected = {from,to}; expire('期間を更新中'); refresh();
+});
 document.addEventListener('visibilitychange', () => { checkExpiry(); if (!document.hidden) refresh(); });
 window.addEventListener('pageshow', checkExpiry);
 setInterval(checkExpiry, 1000);
