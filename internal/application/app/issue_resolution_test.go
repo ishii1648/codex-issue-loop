@@ -920,3 +920,88 @@ func containsReason(reasons []string, target string) bool {
 	}
 	return false
 }
+
+func TestAdoptHeadPreservesCheckpointAndRequiresExactEvidence(t *testing.T) {
+	for _, scenario := range []string{"valid", "wrong-head", "changed-content", "existing-head", "published", "missing-session", "worker-pid", "missing-expected-head"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newIssueResolutionFixture(t, 459, "OPEN", nil)
+			runIssueGit(t, f.worktree, "push", "origin", "--delete", f.branch)
+			if err := os.WriteFile(filepath.Join(f.worktree, "unfinished.txt"), []byte("saved work"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			f.block(t, issuedomain.StatusRunning, "environment", true, "")
+			_, err := f.store.Update("fixture_missing_head", 459, f.runID, nil, func(s *state.Snapshot) error {
+				i := s.Issues["459"]
+				i.HeadSHA = ""
+				i.Continuation.HeadSHA = ""
+				i.Continuation.Session = &state.WorkerSession{Backend: "codex", ID: "saved-session"}
+				if scenario == "existing-head" {
+					i.Continuation.HeadSHA = f.head
+				}
+				if scenario == "missing-session" {
+					i.Continuation.Session = nil
+				}
+				if scenario == "worker-pid" {
+					i.WorkerPID = 987654
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "changed-content" {
+				if err := os.WriteFile(filepath.Join(f.worktree, "unfinished.txt"), []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "published" {
+				runIssueGit(t, f.worktree, "push", "origin", f.branch)
+			}
+			before, err := f.store.ReadCanonicalSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := f.head
+			if scenario == "wrong-head" {
+				expected = f.base
+			}
+			if scenario == "missing-expected-head" {
+				expected = ""
+			}
+			var out, stderr bytes.Buffer
+			a := App{Out: &out, Err: &stderr}
+			code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "adopt-head", "--expected-head", expected, "--json"})
+			after, err := f.store.ReadCanonicalSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "valid" {
+				if code == 0 || !reflect.DeepEqual(before, after) {
+					t.Fatalf("refusal code=%d changed=%v stderr=%s", code, !reflect.DeepEqual(before, after), stderr.String())
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+			want := *before.Issues["459"].Continuation
+			want.HeadSHA = f.head
+			got := after.Issues["459"]
+			if !reflect.DeepEqual(&want, got.Continuation) || !reflect.DeepEqual(before.Issues["459"].Suspension, got.Suspension) || after.ActiveExecution != nil || got.Generation != before.Issues["459"].Generation {
+				t.Fatalf("unexpected adoption: %+v", got)
+			}
+			out.Reset()
+			stderr.Reset()
+			if code := a.Run(context.Background(), []string{"issue", "plan", "--repo", f.repo, "--issue", "459", "--json"}); code != 0 {
+				t.Fatal(stderr.String())
+			}
+			var plan issuePlanReport
+			if err := json.Unmarshal(out.Bytes(), &plan); err != nil {
+				t.Fatal(err)
+			}
+			if !actionEligibility(plan.Actions, issuedomain.ResolutionResume) {
+				t.Fatalf("resume not eligible: %+v", plan.Actions)
+			}
+		})
+	}
+}

@@ -9,13 +9,14 @@ const (
 	ResolutionResume        ResolutionAction = "resume"
 	ResolutionRetryStage    ResolutionAction = "retry-stage"
 	ResolutionAdoptWorktree ResolutionAction = "adopt-worktree"
+	ResolutionAdoptHead     ResolutionAction = "adopt-head"
 	ResolutionAdoptPR       ResolutionAction = "adopt-pr"
 	ResolutionCancel        ResolutionAction = "cancel"
 )
 
 func (a ResolutionAction) Validate() error {
 	switch a {
-	case ResolutionResume, ResolutionRetryStage, ResolutionAdoptWorktree, ResolutionAdoptPR, ResolutionCancel:
+	case ResolutionResume, ResolutionRetryStage, ResolutionAdoptHead, ResolutionAdoptWorktree, ResolutionAdoptPR, ResolutionCancel:
 		return nil
 	default:
 		return fmt.Errorf("unknown Issue resolution action %q", a)

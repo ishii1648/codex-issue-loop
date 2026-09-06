@@ -82,7 +82,7 @@ func (a App) issueCommand(ctx context.Context, l layout.Layout, args []string) e
 	case "resolve":
 		return a.issueResolve(ctx, l, args[1:])
 	case "help", "--help", "-h":
-		fmt.Fprintln(a.Out, "Usage: agent-loop issue plan --repo PATH --issue N [--allow-path PATH] --json\n       agent-loop issue resolve --repo PATH --issue N --action resume|retry-stage|adopt-worktree|adopt-pr|cancel [--allow-path PATH] --json")
+		fmt.Fprintln(a.Out, "Usage: agent-loop issue plan --repo PATH --issue N [--allow-path PATH] --json\n       agent-loop issue resolve --repo PATH --issue N --action resume|retry-stage|adopt-head|adopt-worktree|adopt-pr|cancel [--expected-head SHA] [--allow-path PATH] --json")
 		return nil
 	default:
 		return exitError{2, fmt.Errorf("unknown issue command %q", args[0])}
@@ -154,6 +154,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 				Actions: []issueActionPlan{
 					{Action: issuedomain.ResolutionResume, Eligible: false, Reasons: []string{"Issue is quarantined"}},
 					{Action: issuedomain.ResolutionRetryStage, Eligible: false, Reasons: []string{"Issue is quarantined"}},
+					{Action: issuedomain.ResolutionAdoptHead, Eligible: false, Reasons: []string{"Issue is quarantined"}},
 					{Action: issuedomain.ResolutionAdoptWorktree, Eligible: false, Reasons: []string{"Issue is quarantined"}},
 					{Action: issuedomain.ResolutionAdoptPR, Eligible: false, Reasons: []string{"Issue is quarantined"}},
 					{Action: issuedomain.ResolutionCancel, Eligible: true},
@@ -241,7 +242,7 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 	baseOK bool, baseErr error, pending []string, remote gh.RemoteState, remoteErr error,
 	resultErr error, adoption worktreeAdoptionObservation, adoptionErr error, adoptionAllowPaths []string,
 ) []issueActionPlan {
-	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionResume, issuedomain.ResolutionRetryStage, issuedomain.ResolutionAdoptWorktree, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel}
+	actions := []issuedomain.ResolutionAction{issuedomain.ResolutionResume, issuedomain.ResolutionRetryStage, issuedomain.ResolutionAdoptHead, issuedomain.ResolutionAdoptWorktree, issuedomain.ResolutionAdoptPR, issuedomain.ResolutionCancel}
 	result := make([]issueActionPlan, 0, len(actions))
 	for _, action := range actions {
 		reasons := []string{}
@@ -250,6 +251,9 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 				(item.Suspension.Status == issuedomain.SuspensionQuarantined && action == issuedomain.ResolutionCancel))
 		if action == issuedomain.ResolutionAdoptWorktree {
 			suspensionEligible = missingOnlyWorktreeDigest(item)
+		}
+		if action == issuedomain.ResolutionAdoptHead {
+			suspensionEligible = missingResumeHead(item)
 		}
 		if !suspensionEligible {
 			reasons = append(reasons, "action is not allowed by the active suspension")
@@ -260,7 +264,7 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 		if resolutionRequiresExecutionSlot(action) && activeExecution != nil {
 			reasons = append(reasons, fmt.Sprintf("repository active execution is occupied by Issue #%d", activeExecution.IssueNumber))
 		}
-		if action == issuedomain.ResolutionAdoptWorktree && activeExecution != nil {
+		if (action == issuedomain.ResolutionAdoptWorktree || action == issuedomain.ResolutionAdoptHead) && activeExecution != nil {
 			reasons = append(reasons, fmt.Sprintf("repository active execution is occupied by Issue #%d", activeExecution.IssueNumber))
 		}
 		if len(pending) > 0 && action != issuedomain.ResolutionCancel {
@@ -304,6 +308,22 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 			}
 			if action == issuedomain.ResolutionRetryStage && item.Continuation != nil && item.Continuation.Stage == issuedomain.ContinuationStagePublish && resultErr != nil {
 				reasons = append(reasons, "saved completed worker result is unavailable")
+			}
+		case issuedomain.ResolutionAdoptHead:
+			if !missingResumeHead(item) {
+				reasons = append(reasons, "only an active worker resume checkpoint missing head_sha can be adopted")
+			}
+			if launchErr != nil || !launch.Valid || inspectErr != nil || !inspection.Valid || inspection.Branch != item.Branch || inspection.Head == "" {
+				reasons = append(reasons, "workspace or git worktree identity differs from canonical state")
+			}
+			if baseErr != nil || !baseOK {
+				reasons = append(reasons, "checkpoint base is not an ancestor of the worktree head")
+			}
+			if worktreeDigestErr != nil || worktreeSHA256 == "" || worktreeSHA256 != checkpointWorktreeSHA256(item) {
+				reasons = append(reasons, "worktree content differs from the continuation checkpoint")
+			}
+			if remoteErr != nil || !strings.EqualFold(remote.Issue.State, "open") || len(remote.PullRequests) != 0 || inspection.RemoteHead != "" {
+				reasons = append(reasons, "head adoption requires an open Issue with no published branch or Pull Request")
 			}
 		case issuedomain.ResolutionAdoptWorktree:
 			reasons = append(reasons, worktreeAdoptionReasons(cfg, item, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, remote, remoteErr, adoption, adoptionErr, adoptionAllowPaths)...)
@@ -360,6 +380,11 @@ func issueResolutionAudit(planned issuePlanningContext, action issuedomain.Resol
 		"open_pull_requests":  countOpenPullRequests(planned.remote.PullRequests),
 		"pending_request_ids": append([]string(nil), planned.pending...),
 	}
+	if action == issuedomain.ResolutionAdoptHead {
+		payload["previous_head_sha"] = ""
+		payload["adopted_head_sha"] = planned.inspection.Head
+		return "issue_checkpoint_head_adopted", payload
+	}
 	if action == issuedomain.ResolutionAdoptWorktree {
 		payload["target_base_sha"] = planned.issue.ConflictRecovery.TargetBaseSHA
 		payload["changed_paths"] = append([]string(nil), planned.adoption.ChangedPaths...)
@@ -393,27 +418,12 @@ func issueResolutionAudit(planned issuePlanningContext, action issuedomain.Resol
 }
 
 func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) error {
-	fs := flag.NewFlagSet("issue resolve", flag.ContinueOnError)
-	repo := fs.String("repo", "", "repository path")
-	number := fs.Int("issue", 0, "Issue number")
-	actionText := fs.String("action", "", "resume, retry-stage, adopt-worktree, adopt-pr, or cancel")
-	var allowPaths pathListFlag
-	fs.Var(&allowPaths, "allow-path", "explicit changed path to add to conflict recovery scope; repeatable")
-	jsonOut := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
-		return exitError{2, err}
-	}
-	action := issuedomain.ResolutionAction(*actionText)
-	if *number <= 0 || action.Validate() != nil || fs.NArg() != 0 {
-		return exitError{2, fmt.Errorf("--issue and a valid --action are required")}
-	}
-	normalizedAllowPaths, err := normalizeAdoptionAllowPaths(allowPaths)
+	opts, err := parseIssueResolveArgs(args)
 	if err != nil {
-		return exitError{2, err}
+		return err
 	}
-	if len(normalizedAllowPaths) > 0 && action != issuedomain.ResolutionAdoptWorktree {
-		return exitError{2, fmt.Errorf("--allow-path is valid only with --action adopt-worktree")}
-	}
+	repo, number, expectedHead, jsonOut := &opts.repo, &opts.number, &opts.expectedHead, &opts.jsonOut
+	action, normalizedAllowPaths := opts.action, opts.allowPaths
 	planned, err := a.buildIssuePlan(ctx, l, *repo, *number, normalizedAllowPaths)
 	if err != nil {
 		return err
@@ -470,6 +480,9 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	if revalidated.snapshot.StateRevision != planned.snapshot.StateRevision || !revalidatedEligible {
 		return exitError{4, fmt.Errorf("Issue #%d observations changed after planning", *number)}
 	}
+	if action == issuedomain.ResolutionAdoptHead && (*expectedHead != planned.inspection.Head || *expectedHead != revalidated.inspection.Head || !reflect.DeepEqual(planned.report.Observations, revalidated.report.Observations)) {
+		return exitError{4, fmt.Errorf("Issue #%d adopted HEAD or evidence changed after planning", *number)}
+	}
 	planned = revalidated
 	if action == issuedomain.ResolutionRetryStage && planned.issue.Continuation != nil && planned.issue.Continuation.Stage == issuedomain.ContinuationStagePublish {
 		result, encoded, loadErr := worker.LoadLatestCompletedResult(filepath.Join(planned.store.Dir, "runs", planned.issue.RunID))
@@ -491,7 +504,15 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 		if resolutionRequiresExecutionSlot(action) && snapshot.ActiveExecution != nil {
 			return fmt.Errorf("Issue #%d execution slot changed after planning", *number)
 		}
-		if action == issuedomain.ResolutionAdoptWorktree {
+		if action == issuedomain.ResolutionAdoptHead {
+			if snapshot.ActiveExecution != nil || !reflect.DeepEqual(item, planned.issue) {
+				return fmt.Errorf("Issue #%d head adoption evidence changed", *number)
+			}
+			if err := verifyAdoptedHead(ctx, planned, *expectedHead, l.Root); err != nil {
+				return err
+			}
+			item.Continuation.HeadSHA = *expectedHead
+		} else if action == issuedomain.ResolutionAdoptWorktree {
 			item.Continuation.WorktreeSHA256 = planned.worktreeSHA256
 			item.Continuation.Stage = issuedomain.ContinuationStageConflict
 			item.ConflictRecovery.AllowedPaths = mergeAdoptionPaths(item.ConflictRecovery.AllowedPaths, planned.adoptionAllowPaths)
@@ -572,7 +593,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 			}
 			item.GitHubStateReason = planned.remote.Issue.StateReason
 		}
-		if item.Suspension != nil && action != issuedomain.ResolutionAdoptWorktree {
+		if item.Suspension != nil && action != issuedomain.ResolutionAdoptWorktree && action != issuedomain.ResolutionAdoptHead {
 			item.Suspension.Status = issuedomain.SuspensionResolved
 			item.Suspension.Resolution = action
 			item.Suspension.ResolvedAt = now
@@ -583,7 +604,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 	if err != nil {
 		return exitError{4, err}
 	}
-	if action != issuedomain.ResolutionAdoptWorktree {
+	if action != issuedomain.ResolutionAdoptWorktree && action != issuedomain.ResolutionAdoptHead {
 		planned.issue = result.Issues[strconv.Itoa(*number)]
 		if err := a.synchronizeIssueResolution(ctx, planned, action, *number); err != nil {
 			return err
