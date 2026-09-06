@@ -19,6 +19,8 @@ type CLI struct{ Path string }
 
 type rawIssue struct {
 	Number      int       `json:"number"`
+	State       string    `json:"state"`
+	UpdatedAt   time.Time `json:"updated_at"`
 	CreatedAt   time.Time `json:"created_at"`
 	PullRequest *struct{} `json:"pull_request"`
 	Labels      []struct {
@@ -49,17 +51,6 @@ func (c CLI) get(ctx context.Context, endpoint string) ([]byte, error) {
 		return nil, fmt.Errorf("gh api GET failed: %w", err)
 	}
 	return output, nil
-}
-
-func latestLabeled(events []rawEvent, labels []string) time.Time {
-	wanted := stringSet(labels)
-	var latest time.Time
-	for _, event := range events {
-		if event.Event == "labeled" && wanted[strings.ToLower(event.Label.Name)] && event.CreatedAt.After(latest) {
-			latest = event.CreatedAt.UTC()
-		}
-	}
-	return latest
 }
 
 func hasAny(labels []struct {

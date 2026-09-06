@@ -58,9 +58,24 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 	replay.snapshot.LastSuccessAt = observation.ObservedAt
 	replay.snapshot.LastError = ""
 	replay.ensureQueuePhase()
-	if !previous.EventCursorInitialized {
+	if !previous.EventCursorInitialized || observation.Resynchronized {
+		if observation.Resynchronized && !observation.CurrentVerified {
+			return Snapshot{}, nil, fmt.Errorf("unverified resynchronization")
+		}
+		if err := replay.transition(Unknown, previous.LastObservationAt, "queue history is insufficient"); err != nil {
+			return Snapshot{}, nil, err
+		}
 		replay.snapshot.Queue = append([]QueueItem(nil), observation.Items...)
 		replay.setAggregateFromQueue()
+		if previous.QueuePhase == Ready && replay.snapshot.QueuePhase == Ready && !previous.QueueDeadline.IsZero() && previous.QueueDeadline.Before(replay.snapshot.QueueDeadline) {
+			for _, item := range observation.Items {
+				index := queueIndex(previous.Queue, item.Number)
+				if index >= 0 && previous.Queue[index].Phase == Ready && !item.PhaseSince.IsZero() && item.PhaseSince.Equal(previous.Queue[index].PhaseSince) {
+					replay.snapshot.QueuePhaseSince, replay.snapshot.QueueDeadline = previous.QueuePhaseSince, previous.QueueDeadline
+					break
+				}
+			}
+		}
 		replay.snapshot.EventCursor = observation.Cursor
 		replay.snapshot.EventCursorInitialized = true
 		replay.recoverAt(observation.ObservedAt)
@@ -68,6 +83,10 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 	}
 	events, err := replayEvents(*previous, observation)
 	if err != nil {
+		if observation.CurrentVerified {
+			observation.Resynchronized = true
+			return Apply(previous, observation)
+		}
 		return Snapshot{}, nil, err
 	}
 	for _, event := range events {
@@ -107,6 +126,10 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 	replay.snapshot.EventCursorInitialized = true
 	sortQueue(replay.snapshot.Queue)
 	if replay.snapshot.Current.Status == Unknown {
+		if observation.CurrentVerified && replay.snapshot.QueuePhase == "" {
+			replay.snapshot.Queue = append([]QueueItem(nil), observation.Items...)
+			replay.setAggregateFromQueue()
+		}
 		replay.recoverAt(observation.ObservedAt)
 	}
 	return replay.snapshot, replay.closed, nil

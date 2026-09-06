@@ -7,7 +7,7 @@
 | `IDLE` | readyまたはrunningの処理対象がない。正常とは推測せず、需要時間へ含めない。 |
 | `HEALTHY` | 処理対象があり、repository queueの現在phaseが期限内である。 |
 | `DOWN` | repository queueの現在phaseが期限に達した。開始はqueue-level deadlineである。 |
-| `UNKNOWN` | GitHub観測失敗、cursor欠落、矛盾label、phase開始event欠落などにより履歴を証明できない。 |
+| `UNKNOWN` | GitHub観測失敗、矛盾label、phase開始event欠落などにより現在の状態を証明できない。cursor欠落などで再生できない過去区間もUNKNOWNとして保存する。 |
 
 open Issueにready labelが一つだけあればready phase、running labelが一つだけあればrunning phaseです。terminal labelまたはexclude labelを持つIssue、Pull Requestはqueueから除外します。readyとrunningを同時に持つIssueは`UNKNOWN`です。
 
@@ -21,11 +21,11 @@ GitHub API失敗または履歴検証失敗はpoll時刻から`UNKNOWN`です。
 
 ## event取得と検証
 
-repository issue eventsは1ページ100件、最大10ページのGETで取得し、自動paginationを使いません。通常pollは検証済みcursorを発見したページで停止します。10ページ以内または履歴終端までにcursorが見つからなければ、そのrepositoryを`UNKNOWN`にしてcursorを保持します。初回はrepository eventの先頭ページでcursorを取得し、現在actionableなIssueごとのevent履歴からphase開始を取得します。phase開始を証明できない場合は`UNKNOWN`です。
+repository issue eventsは1ページ100件、最大10ページのGETで取得し、自動paginationを使いません。通常pollは検証済みcursorを発見したページで停止します。10ページ以内または履歴終端までにcursorが見つからなければ、現在の全actionable Issueとその履歴を検証して再同期します。取得失敗やsnapshot不整合ではcursorを保持します。初回はrepository eventの先頭ページでcursorを取得し、現在actionableなIssueごとのevent履歴からphase開始を取得します。phase開始を証明できない場合は`UNKNOWN`です。
 
-取得順序はevent列、open Issue snapshotです。両者はtransactionではないため、検証済みqueueへevent ID順にreplayした結果とsnapshotのIssue番号・phase・取得できたphase開始時刻を照合します。不一致ならbatch全体を不採用にし、cursor・queueを保持します。次pollは同じcursorから再取得し、収束して初めてcommitします。eventを含まないsnapshot側の先行更新も同じ扱いです。検証済み観測より古いeventや時刻が逆行するeventも推測で丸めず`UNKNOWN`にします。
+取得順序はevent列、open Issue snapshot、Issue履歴、open Issue snapshotの再取得、event headの再取得です。snapshotまたはheadが取得中に変化した場合は採用しません。Issue履歴は現在の開閉・label状態から逆算し、除外中のlabel変更を除いてreopenや最後の除外label解除による再入場を判定します。両者はtransactionではないため、検証済みqueueへevent ID順にreplayした結果とsnapshotのIssue番号・phase・取得できたphase開始時刻を照合します。再生不能でも現在snapshotと履歴の取得境界が検証できた場合は、その観測時点で再同期します。再生不能な過去は最後の観測境界からUNKNOWNとし、既存のUNKNOWN区間をHEALTHYへ変更しません。開始時刻を証明できない需要はUNKNOWNを維持し、次pollでも履歴を再取得します。phase開始へ取得時刻を代入しません。完全に確認した空queueはIDLEへ復帰します。eventを含まないsnapshot側の先行更新も同じ扱いです。検証済み観測より古いeventや時刻が逆行するeventも推測で丸めず`UNKNOWN`にします。
 
-queue退出を証明するeventはterminal/excludeの`labeled`または`closed`です。ready/runningの単独`unlabeled`は退出を証明せず、同じbatchの次phase `labeled`または退出eventが必要です。旧phase解除が新phase付与や退出より後でも中間の`IDLE`を作りません。runningからterminal/closeへの境界はそのterminal/close event時刻です。exclude/terminalの`unlabeled`と`reopened`は、現在snapshotだけでは再入時のlabel履歴を証明できないため`UNKNOWN`にします。title/comment/renameとPull Requestのeventはqueue進捗から除外します。
+queue退出は開閉・label履歴と現在snapshotから判定します。ready/runningの`unlabeled`が次phaseへのlabel置換である場合は、その次phaseまで既存windowを維持します。旧phase解除が新phase付与や退出より後でも中間の`IDLE`を作りません。runningからterminal/closeへの境界はそのterminal/close event時刻です。exclude/terminalの`unlabeled`と`reopened`は、その時点でopenかつ除外labelがなくready/runningを持つ場合のみ再入場として扱います。title/comment/renameとPull Requestのeventはqueue進捗から除外します。
 
 batch全体の検証後にevent境界とdeadlineを順に反映します。失敗したbatchでは区間をreplayせずUNKNOWNへの遷移のみ記録し、同じbatchのretryによる確定intervalの二重計上を防ぎます。
 

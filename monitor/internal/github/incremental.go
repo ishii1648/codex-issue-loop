@@ -3,8 +3,10 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +17,8 @@ import (
 )
 
 const maxEventPages = 10
+
+var errCursorMissing = errors.New("event cursor was not found")
 
 func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, initialized bool, observedAt time.Time) (model.Observation, error) {
 	result := model.Observation{
@@ -28,7 +32,14 @@ func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, 
 	if initialized {
 		events, head, err := c.eventsSince(ctx, repo, cursor)
 		if err != nil {
-			return model.Observation{}, err
+			if !errors.Is(err, errCursorMissing) {
+				return model.Observation{}, err
+			}
+			result.Resynchronized = true
+			head, err = c.eventHead(ctx, repo)
+			if err != nil {
+				return model.Observation{}, err
+			}
 		}
 		result.Events = events
 		result.Cursor = head
@@ -43,10 +54,29 @@ func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, 
 	if err != nil {
 		return model.Observation{}, err
 	}
-	result.Items, err = c.queueItems(ctx, repo, issues, !initialized)
+	result.Items, err = c.queueItems(ctx, repo, issues, observedAt, result.Cursor)
 	if err != nil {
 		return model.Observation{}, err
 	}
+
+	if initialized && !result.Resynchronized {
+		result.Events, err = c.resolveEvents(ctx, repo, result.Events, issues, cursor, result.Cursor, observedAt)
+		if err != nil {
+			return model.Observation{}, err
+		}
+	}
+	check, err := c.openIssues(ctx, repo)
+	if err != nil {
+		return model.Observation{}, err
+	}
+	head, err := c.eventHead(ctx, repo)
+	if err != nil {
+		return model.Observation{}, err
+	}
+	if head != result.Cursor || !reflect.DeepEqual(issues, check) {
+		return model.Observation{}, fmt.Errorf("GitHub snapshot changed during observation")
+	}
+	result.CurrentVerified = true
 	return result, nil
 }
 
@@ -84,10 +114,10 @@ func (c CLI) eventsSince(ctx context.Context, repo config.Repository, cursor int
 			if cursor == 0 {
 				return result, head, nil
 			}
-			return nil, cursor, fmt.Errorf("event cursor %d was not found for %s", cursor, repo.Name)
+			return nil, cursor, fmt.Errorf("%w: %d for %s", errCursorMissing, cursor, repo.Name)
 		}
 	}
-	return nil, cursor, fmt.Errorf("event cursor %d was not found within %d pages for %s", cursor, maxEventPages, repo.Name)
+	return nil, cursor, fmt.Errorf("%w: %d within %d pages for %s", errCursorMissing, cursor, maxEventPages, repo.Name)
 }
 
 func (c CLI) eventHead(ctx context.Context, repo config.Repository) (int64, error) {
@@ -114,6 +144,9 @@ func (c CLI) eventPage(ctx context.Context, repo config.Repository, page int) ([
 	if err := json.Unmarshal(data, &events); err != nil {
 		return nil, fmt.Errorf("decode issue events for %s: %w", repo.Name, err)
 	}
+	if events == nil {
+		return nil, fmt.Errorf("invalid issue events for %s", repo.Name)
+	}
 	return events, nil
 }
 
@@ -126,16 +159,27 @@ func (c CLI) openIssues(ctx context.Context, repo config.Repository) ([]rawIssue
 	if err := json.Unmarshal(data, &pages); err != nil {
 		return nil, fmt.Errorf("decode open issues for %s: %w", repo.Name, err)
 	}
+	if len(pages) == 0 {
+		return nil, fmt.Errorf("missing open issue snapshot for %s", repo.Name)
+	}
 	var issues []rawIssue
 	for _, page := range pages {
+		if page == nil {
+			return nil, fmt.Errorf("invalid open issue page for %s", repo.Name)
+		}
 		issues = append(issues, page...)
 	}
 	return issues, nil
 }
 
-func (c CLI) queueItems(ctx context.Context, repo config.Repository, issues []rawIssue, bootstrap bool) ([]model.QueueItem, error) {
+func (c CLI) queueItems(ctx context.Context, repo config.Repository, issues []rawIssue, observedAt time.Time, head int64) ([]model.QueueItem, error) {
 	var result []model.QueueItem
+	seen := map[int]bool{}
 	for _, issue := range issues {
+		if issue.Number <= 0 || seen[issue.Number] || issue.State == "closed" {
+			return nil, fmt.Errorf("invalid open issue snapshot")
+		}
+		seen[issue.Number] = true
 		if issue.PullRequest != nil || hasAny(issue.Labels, repo.TerminalLabels) || hasAny(issue.Labels, repo.ExcludeLabels) {
 			continue
 		}
@@ -147,23 +191,33 @@ func (c CLI) queueItems(ctx context.Context, repo config.Repository, issues []ra
 		item := model.QueueItem{Number: issue.Number}
 		switch {
 		case ready && running:
-			item.Phase = model.Phase("conflicting-labels")
+			return nil, fmt.Errorf("conflicting labels for issue %d", issue.Number)
 		case running:
 			item.Phase = model.Running
 		case ready:
 			item.Phase = model.Ready
 		}
-		if bootstrap && (item.Phase == model.Ready || item.Phase == model.Running) {
+		if item.Phase == model.Ready || item.Phase == model.Running {
 			events, err := c.issueEvents(ctx, repo, issue.Number)
 			if err != nil {
 				return nil, err
 			}
-			if item.Phase == model.Running {
-				item.PhaseSince = latestLabeled(events, []string{repo.RunningLabel})
-				item.Deadline = item.PhaseSince.Add(repo.ProcessingTimeout.Duration)
-			} else {
-				item.PhaseSince = latestLabeled(events, repo.ReadyLabels)
-				item.Deadline = item.PhaseSince.Add(repo.AcceptanceTimeout.Duration)
+			for _, event := range events {
+				if event.ID > head {
+					return nil, fmt.Errorf("issue history changed during observation")
+				}
+			}
+			_, since, err := issueHistory(repo, issue, events, observedAt)
+			if err != nil {
+				return nil, err
+			}
+			item.PhaseSince = since
+			if !since.IsZero() {
+				timeout := repo.AcceptanceTimeout.Duration
+				if item.Phase == model.Running {
+					timeout = repo.ProcessingTimeout.Duration
+				}
+				item.Deadline = since.Add(timeout)
 			}
 		}
 		result = append(result, item)
@@ -182,8 +236,14 @@ func (c CLI) issueEvents(ctx context.Context, repo config.Repository, number int
 	if err := json.Unmarshal(data, &pages); err != nil {
 		return nil, fmt.Errorf("decode events for %s#%d: %w", repo.Name, number, err)
 	}
+	if len(pages) == 0 {
+		return nil, fmt.Errorf("missing issue history for %s#%d", repo.Name, number)
+	}
 	var events []rawEvent
 	for _, page := range pages {
+		if page == nil {
+			return nil, fmt.Errorf("invalid issue history page for %s#%d", repo.Name, number)
+		}
 		events = append(events, page...)
 	}
 	return events, nil
