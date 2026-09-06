@@ -121,6 +121,23 @@ func TestOpenCodeServerAdapterInitialResumeAndOpenCodeGoModel(t *testing.T) {
 	assertOpenCodeRequest(t, captured, "opencode-go", "kimi-k2.7-code", "high")
 }
 
+func TestOpenCodeMessageCompletesAfterThirtySeconds(t *testing.T) {
+	requireLoopbackListener(t)
+	dir := t.TempDir()
+	fake := openCodeHelperCommand(t, dir)
+	t.Setenv("AGENT_LOOP_OPENCODE_MODE", "delayed")
+	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/test", "")
+	cfg.Worker.Timeout.Duration = time.Minute
+	started := time.Now()
+	result, err := (OpenCode{StateDir: dir}).Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_delayed", Attempts: 1}, "", nil)
+	if err != nil || result.Status != "completed" || result.SessionID != "ses_fake" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed < 35*time.Second {
+		t.Fatalf("message response was not delayed for 35 seconds: %s", elapsed)
+	}
+}
+
 func TestOpenCodeTimeoutAbortsSessionAndStopsServerGroup(t *testing.T) {
 	requireLoopbackListener(t)
 	dir := t.TempDir()
@@ -331,6 +348,9 @@ func TestOpenCodeHelperProcess(t *testing.T) {
 		if os.Getenv("AGENT_LOOP_OPENCODE_MODE") == "timeout" {
 			<-r.Context().Done()
 			return
+		}
+		if os.Getenv("AGENT_LOOP_OPENCODE_MODE") == "delayed" {
+			time.Sleep(35 * time.Second)
 		}
 		if os.Getenv("AGENT_LOOP_OPENCODE_MODE") == "auth" {
 			http.Error(w, `{"name":"ProviderAuthError"}`, http.StatusUnauthorized)
