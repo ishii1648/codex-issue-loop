@@ -19,6 +19,11 @@ type Runner struct {
 }
 
 func (r Runner) Poll(ctx context.Context, repo config.Repository) (model.Snapshot, error) {
+	if r.ObservationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.ObservationTimeout)
+		defer cancel()
+	}
 	now := time.Now().UTC()
 	if r.Now != nil {
 		now = r.Now().UTC()
