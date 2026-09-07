@@ -37,6 +37,37 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 	cfg.RepoPath = repo
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Git.WorktreeRoot = filepath.Join(root, "worktrees")
+	t.Run("symbolic link root", func(t *testing.T) {
+		target := filepath.Join(root, "linked-worktrees-target")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		linkedConfig := cfg
+		linkedConfig.Git.WorktreeRoot = filepath.Join(root, "linked-worktrees")
+		if err := os.Symlink(target, linkedConfig.Git.WorktreeRoot); err != nil {
+			t.Fatal(err)
+		}
+		manager := Manager{StateRoot: root}
+		result, err := manager.Ensure(context.Background(), linkedConfig, "repo-id", 15, "Linked root", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		canonicalTarget, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(canonicalTarget, "repo-id", "issue-15"); result.Path != want {
+			t.Fatalf("path=%s want=%s", result.Path, want)
+		}
+		launch, err := manager.ValidateLaunch(context.Background(), linkedConfig, result.Path, result.Branch)
+		if err != nil || !launch.Valid || launch.CanonicalCWD != result.Path {
+			t.Fatalf("launch validation=%+v err=%v", launch, err)
+		}
+		reused, err := manager.Ensure(context.Background(), linkedConfig, "repo-id", 15, "Linked root", result.Branch)
+		if err != nil || reused != result {
+			t.Fatalf("reused=%+v want=%+v err=%v", reused, result, err)
+		}
+	})
 	result, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 12, "Add useful feature", "")
 	if err != nil {
 		t.Fatal(err)
