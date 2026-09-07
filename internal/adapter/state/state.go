@@ -455,6 +455,7 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
 	}
 	var lastValid *Issue
+	normalizeSnapshot(&snapshot)
 	if issueNumber > 0 {
 		lastValid = cloneIssue(snapshot.Issues[strconv.Itoa(issueNumber)])
 	}

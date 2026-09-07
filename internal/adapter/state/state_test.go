@@ -18,6 +18,44 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
 )
 
+func TestEmptySnapshotIsValid(t *testing.T) {
+	store := Store{Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo"}
+	if err := store.emptySnapshot().Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpdateSetsEffectWithoutInitialization(t *testing.T) {
+	store := Store{Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo"}
+	snapshot, err := store.Update("issue_blocked", 1, "run_1", nil, func(snapshot *Snapshot) error {
+		snapshot.Issues["1"] = &Issue{Number: 1, RunID: "run_1", Status: issuedomain.StatusBlocked}
+		return SetEffect(snapshot, 1, "run_1", issuedomain.EffectMarkBlocked, time.Now().UTC())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effect := PendingEffect(&snapshot, 1)
+	if effect == nil || effect.Kind != issuedomain.EffectMarkBlocked {
+		t.Fatalf("effect=%+v", effect)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted := PendingEffect(&loaded, 1); persisted == nil || *persisted != *effect {
+		t.Fatalf("persisted effect=%+v want=%+v", persisted, effect)
+	}
+}
+
+func TestInspectExclusiveWithoutInitialization(t *testing.T) {
+	store := Store{Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo"}
+	if err := store.InspectExclusive(func(snapshot Snapshot) error {
+		return snapshot.Validate()
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadDoesNotEmitPermissionWatchEventsWhenModesAreSecure(t *testing.T) {
 	store := newStore(t)
 	watcher, err := fsnotify.NewWatcher()

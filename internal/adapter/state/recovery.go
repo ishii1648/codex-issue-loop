@@ -153,6 +153,7 @@ func (s Store) emptySnapshot() Snapshot {
 		Version: CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion, IssueLifecycleAPIVersion: issuedomain.LifecycleAPICurrent, RepoID: s.RepoID, RepoPath: s.RepoPath,
 		Supervisor: Supervisor{State: "stopped", UpdatedAt: now},
 		Issues:     map[string]*Issue{}, QuarantinedIssues: map[string]*QuarantineRecord{},
+		PendingEffects:      map[string]*EffectIntent{},
 		IntakeVerifications: map[string]*queuedomain.AuthorVerification{}, PendingRequests: map[string]*Request{},
 	}
 }
