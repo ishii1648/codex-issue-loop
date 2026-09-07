@@ -12,7 +12,7 @@ contract v4はfieldを`optional`、`observational`、`execution_required_provena
 agent-loop migrate --json
 ```
 
-`report.semantic_findings`はIssueごとに`repo_id`、`issue_number`、`status`、`field`、stable `code`、`migratable`、`reason`、`migration_rule`を返す。`report.non_migratable`が空で、`loaded_repositories`も空の場合だけ`apply_allowed`がtrueになる。
+`report.semantic_findings`はIssueごとに`repo_id`、`issue_number`、`status`、`field`、stable `code`、`migratable`、`reason`、`migration_rule`を返す。`report.unsupported`と`report.non_migratable`と`loaded_repositories`が空で、`loaded_webhook_broker`がfalseの場合だけ`apply_allowed`がtrueになる。
 
 主なcode:
 
@@ -53,7 +53,9 @@ agent-loop doctor --json
 agent-loop start --repo /absolute/path/to/repository
 ```
 
-applyは全登録LaunchAgentの停止を確認し、対象config/registry/state/active eventをchecksum付きbackupへ保存してから`migration.json`を`prepared`にする。stateの`semantic_contract_version`と同じtransaction boundaryを表す`semantic_migration_applied` eventにはmigration ID、authority、source、before/after、`operator_confirmation.apply=true`、`provenance_synthesized=false`を記録する。GitHub labelとworktreeはmigration対象外である。
+schema変更を伴う`update`、`migrate --apply`、`migrate --rollback`、旧schemaへの`rollback`は、全登録LaunchAgentに加えて共有webhook brokerの停止も要求する。`update`出力の`webhook_broker_restarted`はbrokerを再起動したかを示し、schema変更時はfalseになる。
+
+applyは全登録LaunchAgentと共有webhook brokerの停止を確認し、対象config/registry/state/active eventをchecksum付きbackupへ保存してから`migration.json`を`prepared`にする。stateの`semantic_contract_version`と同じtransaction boundaryを表す`semantic_migration_applied` eventにはmigration ID、authority、source、before/after、`operator_confirmation.apply=true`、`provenance_synthesized=false`を記録する。GitHub labelとworktreeはmigration対象外である。
 
 fileごとの置換はatomicで、同じprepared journalを使う再実行は同じmigration ID/event IDへ収束する。completed後の再applyは`changed:false`である。process crash後は同じartifactでpreviewしてからapplyを再実行し、別backupや別identityを作らない。fault後に旧versionへ戻す場合は下記rollbackを使う。
 
