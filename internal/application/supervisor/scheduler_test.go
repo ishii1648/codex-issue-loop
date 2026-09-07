@@ -1778,6 +1778,73 @@ func (w *blockingPoolWorker) Resume(ctx context.Context, cfg config.Config, issu
 	return w.Run(ctx, cfg, issue, current, prompt, started)
 }
 
+func TestSchedulerMaintenanceCompletionPreservesPollInterval(t *testing.T) {
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)}
+	loop.Logger = log.New(io.Discard, "", 0)
+	client := &countingGitHub{fakeGitHub: fake, empty: true}
+	loop.GitHub = client
+	const maintenanceJobs = 5
+	_, err := loop.Store.Update("maintenance_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		for number := 1; number <= maintenanceJobs; number++ {
+			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
+				Number: number, Status: issuedomain.StatusCompleted, RunID: fmt.Sprintf("run_%d", number),
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, maintenanceJobs+1)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	waitForTimers(t, created, maintenanceJobs+1)
+	if calls := client.calls(); calls != 1 {
+		t.Fatalf("GitHub polls after %d maintenance completions = %d, want initial poll only", maintenanceJobs, calls)
+	}
+}
+
+func TestSchedulerWorkerCompletionPollsImmediately(t *testing.T) {
+	loop, fake := testLoop(t, worker.Result{})
+	loop.Clock = fixedClock{value: time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)}
+	loop.Logger = log.New(io.Discard, "", 0)
+	client := &countingGitHub{fakeGitHub: fake, called: make(chan struct{}, 4)}
+	loop.GitHub = client
+	pool := &blockingPoolWorker{started: make(chan int, 1), release: make(chan struct{}, 1)}
+	loop.Worker = pool
+	loop.SchedulerTimers = inertSchedulerTimers{created: make(chan struct{}, 8)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	select {
+	case <-pool.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	<-client.called
+	pool.release <- struct{}{}
+	select {
+	case <-client.called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker completion did not trigger an immediate GitHub poll")
+	}
+}
+
 func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Config.Queue.Concurrency = 1

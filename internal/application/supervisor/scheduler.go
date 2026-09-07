@@ -254,6 +254,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				return nil
 			case event := <-s.events:
 				stopSchedulerTimers(pollTimer, retryTimer, reconciliationTimer)
+				job, active := s.active[event.IssueNumber]
 				if eventErr := s.handleEvent(event); eventErr != nil {
 					if fatal := s.handleCycleError(eventErr); fatal != nil {
 						s.cancelAndDrain()
@@ -262,7 +263,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				}
 				// A freed slot immediately admits the next candidate instead of
 				// waiting for the regular GitHub poll interval.
-				if !l.Config.Webhook.Enabled() {
+				if !l.Config.Webhook.Enabled() && active && job.runID == event.RunID && job.slot >= 0 {
 					s.pollAt = l.now()
 					pollCandidates = true
 				}
