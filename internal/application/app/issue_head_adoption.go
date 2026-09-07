@@ -9,7 +9,9 @@ import (
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	"os/exec"
 	"reflect"
+	"strings"
 )
 
 func missingResumeHead(item *state.Issue) bool {
@@ -64,15 +66,13 @@ func publicationCheckpointHeadRepair(ctx context.Context, cfg config.Config, ghP
 	return err == nil && contained
 }
 
-func verifyPublicationCheckpointHeadRepair(ctx context.Context, planned issuePlanningContext, root string) error {
+func verifyRecoveryWorkspace(ctx context.Context, planned issuePlanningContext, root string) error {
 	item := planned.issue
+	head, headErr := exec.CommandContext(ctx, "git", "-C", item.Worktree, "rev-parse", "HEAD").Output()
 	manager := worktree.Manager{StateRoot: root}
-	inspection, inspectErr := manager.Inspect(ctx, planned.cfg, item.Worktree, item.Branch)
 	digest, digestErr := manager.ContentDigest(ctx, item.Worktree)
-	remote, remoteErr := (gh.CLI{Path: planned.ghPath, Secrets: planned.cfg.RedactionValues()}).Inspect(ctx, planned.cfg, item.Number, item.Branch)
-	if inspectErr != nil || digestErr != nil || remoteErr != nil || !reflect.DeepEqual(inspection, planned.inspection) || digest != planned.worktreeSHA256 ||
-		!publicationCheckpointHeadRepair(ctx, planned.cfg, planned.ghPath, item, inspection, remote) {
-		return fmt.Errorf("Issue #%d publication HEAD evidence changed before recovery", item.Number)
+	if headErr != nil || digestErr != nil || strings.TrimSpace(string(head)) != planned.inspection.Head || digest != planned.worktreeSHA256 {
+		return fmt.Errorf("Issue #%d workspace evidence changed before recovery", item.Number)
 	}
 	return nil
 }

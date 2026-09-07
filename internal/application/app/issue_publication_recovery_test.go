@@ -84,6 +84,7 @@ func TestRetryPublicationRepairsCheckpointWithRemoteHead(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			assertRecoveryGitHubOutsideStateLock(t, f)
 			var out, stderr bytes.Buffer
 			code := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "retry-stage", "--json"})
 			after, err := f.store.ReadCanonicalSnapshot()

@@ -520,7 +520,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 					return fmt.Errorf("Issue #%d saved completed worker result changed after planning", *number)
 				}
 				if planned.report.Observations["publication_head_repair"] == true {
-					if err := verifyPublicationCheckpointHeadRepair(ctx, planned, l.Root); err != nil {
+					if err := verifyRecoveryWorkspace(ctx, planned, l.Root); err != nil {
 						return err
 					}
 					item.Continuation.HeadSHA = planned.inspection.Head
