@@ -32,7 +32,7 @@ import (
 )
 
 type WorktreeManager interface {
-	Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error)
+	Ensure(context.Context, config.Config, string, int, string, string) (worktree.Result, error)
 	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
 	ValidateLaunch(context.Context, config.Config, string, string) (worktree.LaunchValidation, error)
 	ContentDigest(context.Context, string) (string, error)

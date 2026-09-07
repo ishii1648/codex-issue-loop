@@ -31,7 +31,11 @@ func (l *Loop) claimAndRun(ctx context.Context, issue gh.Issue, runID string) er
 	if err := l.GitHub.Claim(ctx, l.Config, issue, runID); err != nil {
 		return failure.Wrap(failure.Transient, "claim GitHub Issue", err)
 	}
-	wt, err := l.Worktrees.Ensure(ctx, l.Config, l.Store.RepoID, issue.Number, issue.Title)
+	current, err := l.issueState(issue.Number)
+	if err != nil {
+		return err
+	}
+	wt, err := l.Worktrees.Ensure(ctx, l.Config, l.Store.RepoID, issue.Number, issue.Title, current.Branch)
 	if err != nil {
 		return l.failIssue(ctx, issue.Number, failure.Wrap(failure.Issue, "prepare Issue worktree", err), false)
 	}
