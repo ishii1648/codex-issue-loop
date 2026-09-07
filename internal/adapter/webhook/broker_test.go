@@ -184,6 +184,43 @@ func TestSignedDeliveryIsDurableDeduplicatedAndRouted(t *testing.T) {
 	}
 }
 
+func TestCheckAndWorkflowDeliveryHeadSHA(t *testing.T) {
+	const headSHA = "0123456789abcdef0123456789abcdef01234567"
+	for _, event := range []string{"check_run", "workflow_run"} {
+		for _, prNumber := range []int{0, 42} {
+			t.Run(fmt.Sprintf("%s/pr-%d", event, prNumber), func(t *testing.T) {
+				b, _ := testBroker(t)
+				pullRequests := "[]"
+				if prNumber != 0 {
+					pullRequests = fmt.Sprintf(`[{"number":%d}]`, prNumber)
+				}
+				body := []byte(fmt.Sprintf(`{"action":"completed","repository":{"id":1234,"full_name":"owner/repo"},"installation":{"id":99},%q:{"head_sha":%q,"pull_requests":%s}}`, event, headSHA, pullRequests))
+				req := signedRequest(body, "ci-delivery")
+				req.Header.Set("X-GitHub-Event", event)
+				recorder := httptest.NewRecorder()
+				b.ServeHTTP(recorder, req)
+				if recorder.Code != http.StatusAccepted {
+					t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+				}
+				if err := b.route("ci-delivery"); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(filepath.Join(b.Root, "repos", "repo-123", "webhook-mailbox", "ci-delivery.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var delivery Delivery
+				if err := json.Unmarshal(data, &delivery); err != nil {
+					t.Fatal(err)
+				}
+				if delivery.HeadSHA != headSHA || delivery.PullRequestNumber != prNumber {
+					t.Fatalf("delivery=%+v, want HeadSHA=%s PullRequestNumber=%d", delivery, headSHA, prNumber)
+				}
+			})
+		}
+	}
+}
+
 func TestWebhookRejectsBeforeDurableStateChange(t *testing.T) {
 	tests := []struct {
 		name   string
