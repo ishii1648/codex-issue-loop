@@ -1012,6 +1012,78 @@ esac
 	}
 }
 
+func TestStartFailurePreservesSupervisorUnlessStartingWasRecorded(t *testing.T) {
+	for _, scenario := range []string{"status_error", "missing_broker_plist", "broker_start_error", "supervisor_start_error"} {
+		t.Run(scenario, func(t *testing.T) {
+			repo, l, entry, store, launchctl := operatorControlFixture(t)
+			secret := filepath.Join(t.TempDir(), "webhook-secret")
+			if err := os.WriteFile(secret, []byte("fixture-secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configuration := fmt.Sprintf("version: 5\ngithub:\n  repo: owner/repo\n  repository_id: 1234\nwebhook:\n  mode: webhook\n  listener_address: 127.0.0.1:8787\n  public_url_identifier: fixture.example/webhook\n  secret_source:\n    file: %q\n  installation_ids: [99]\n", secret)
+			if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(configuration), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Update("fixture_running", 0, "", nil, func(snapshot *state.Snapshot) error {
+				snapshot.Supervisor.State = "running"
+				snapshot.Supervisor.PID = 4242
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("START_FAILURE_SCENARIO", scenario)
+			script := `#!/bin/sh
+case "$1" in
+  print)
+    case "$2" in
+      *broker*) test "$START_FAILURE_SCENARIO" != broker_start_error ;;
+      *) test "$START_FAILURE_SCENARIO" != supervisor_start_error ;;
+    esac
+    ;;
+  bootstrap) echo 'fixture bootstrap failure' >&2; exit 1 ;;
+esac
+`
+			if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "status_error" {
+				if err := os.Remove(launchctl); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario != "missing_broker_plist" {
+				manager := launchd.Manager{Layout: l, Launchctl: launchctl}
+				if err := manager.WriteBrokerPlist(launchctl, entry.EnvironmentPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var output bytes.Buffer
+			err = (App{Out: &output, Err: &output}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"})
+			if err == nil {
+				t.Fatal("start unexpectedly succeeded")
+			}
+			if (scenario == "broker_start_error" || scenario == "supervisor_start_error") && !strings.Contains(err.Error(), "fixture bootstrap failure") {
+				t.Fatalf("start failed before bootstrap: %v", err)
+			}
+			after, loadErr := store.Load()
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if scenario == "supervisor_start_error" {
+				if after.StateRevision != before.StateRevision+2 {
+					t.Fatalf("expected starting and stopped records: before=%d after=%d", before.StateRevision, after.StateRevision)
+				}
+				if after.Supervisor.State != "stopped" || after.Supervisor.PID != 0 || after.Supervisor.Message != "start failed: "+err.Error() {
+					t.Fatalf("failed start was not rolled back: %+v", after.Supervisor)
+				}
+			} else if !reflect.DeepEqual(before, after) {
+				t.Fatalf("failed start changed durable state: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
 func TestStartRejectsLegacySemanticStateWithoutQuarantineOrLaunchdMutation(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
