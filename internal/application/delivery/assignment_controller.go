@@ -83,6 +83,9 @@ func (c AssignmentController) EnsureRepositoryAssignment(entry registry.Entry) (
 		return RepositoryAssignment{}, false, err
 	}
 	defer lock.Close()
+	if err := c.checkRepositoryAssignmentLifecycle(entry.RepoID); err != nil {
+		return RepositoryAssignment{}, false, err
+	}
 	cfg, err := LoadConfig(c.ConfigPath)
 	if err != nil {
 		return RepositoryAssignment{}, false, err
@@ -149,6 +152,9 @@ func (c AssignmentController) RemoveRepositoryAssignment(repoID string) (bool, e
 		return false, err
 	}
 	defer lock.Close()
+	if err := c.checkRepositoryAssignmentLifecycle(repoID); err != nil {
+		return false, err
+	}
 	cfg, err := LoadConfig(c.ConfigPath)
 	if err != nil {
 		return false, err
@@ -171,6 +177,22 @@ func (c AssignmentController) RemoveRepositoryAssignment(repoID string) (bool, e
 		return false, err
 	}
 	return true, nil
+}
+
+func (c AssignmentController) checkRepositoryAssignmentLifecycle(repoID string) error {
+	if _, err := os.Lstat(c.Layout.DeliveryAssignmentFencePath(repoID)); err == nil {
+		return fmt.Errorf("repository %s has an assignment maintenance fence; recover the assignment before registering or unregistering", repoID)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect repository assignment fence: %w", err)
+	}
+	tx, err := LoadAssignmentTransaction(c.Layout.DeliveryAssignmentTransactionPath(repoID))
+	if err != nil {
+		return fmt.Errorf("inspect repository assignment transaction: %w", err)
+	}
+	if tx.RepositoryID != "" && tx.Phase != AssignmentSucceeded && tx.Phase != AssignmentRolledBack {
+		return fmt.Errorf("repository %s has an unfinished assignment transaction (%s); recover the assignment before registering or unregistering", repoID, tx.Phase)
+	}
+	return nil
 }
 
 func (c AssignmentController) MigrateConfig(ctx context.Context, apply bool) (AssignmentMigrationReport, error) {
