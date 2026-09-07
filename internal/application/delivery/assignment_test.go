@@ -261,6 +261,103 @@ func TestRepositoryRegistrationAndUnregistrationMaintainAssignmentSet(t *testing
 	}
 }
 
+func TestRepositoryAssignmentLifecycleRejectsRetainedState(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		phase   AssignmentPhase
+		fence   bool
+		corrupt bool
+		want    string
+	}{
+		{name: "fence", fence: true, want: "maintenance fence"},
+		{name: "planned", phase: AssignmentPlanned, want: "unfinished assignment transaction"},
+		{name: "draining", phase: AssignmentDraining, want: "unfinished assignment transaction"},
+		{name: "applying", phase: AssignmentApplying, want: "unfinished assignment transaction"},
+		{name: "validating", phase: AssignmentValidating, want: "unfinished assignment transaction"},
+		{name: "rolling_back", phase: AssignmentRollingBack, want: "unfinished assignment transaction"},
+		{name: "rollback_failed", phase: AssignmentRollbackFailed, want: "unfinished assignment transaction"},
+		{name: "rollback_failed_with_fence", phase: AssignmentRollbackFailed, fence: true, want: "maintenance fence"},
+		{name: "corrupt", corrupt: true, want: "inspect repository assignment transaction"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			l, configPath, entries, _ := assignmentFixture(t)
+			controller := AssignmentController{Layout: l, ConfigPath: configPath}
+			if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+				t.Fatal(err)
+			}
+			entry := entries[0]
+			cfg, err := LoadConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := cfg.Assignments[entry.RepoID]
+			desired := current.AssignmentRef
+			desired.Version = "v1.2.3"
+			if test.phase != "" {
+				tx := AssignmentTransaction{RepositoryID: entry.RepoID, Operation: AssignmentOperationApply, Phase: test.phase, ExpectedGeneration: current.Generation, TargetGeneration: current.Generation + 1, Current: current.AssignmentRef, Desired: desired, StartedAt: time.Now().UTC()}
+				if err := SaveAssignmentTransaction(l.DeliveryAssignmentTransactionPath(entry.RepoID), tx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.corrupt {
+				if err := os.MkdirAll(l.DeliveryAssignmentDir(entry.RepoID), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(l.DeliveryAssignmentTransactionPath(entry.RepoID), []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.fence {
+				if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entry.RepoID), Maintenance{Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := controller.EnsureRepositoryAssignment(entry); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("existing registration error=%v", err)
+			}
+			if err := (registry.Store{Path: l.RegistryPath}).Remove(entry.RepoID); err != nil {
+				t.Fatal(err)
+			}
+			if removed, err := controller.RemoveRepositoryAssignment(entry.RepoID); removed || err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("removed=%v err=%v", removed, err)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatal("rejected lifecycle operations changed assignments")
+			}
+			registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			registered.Repos[entry.RepoID] = entry
+			if err := fsutil.WriteJSON(l.RegistryPath, registered, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			delete(cfg.Assignments, entry.RepoID)
+			if err := WriteConfig(configPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+			if _, managed, err := controller.EnsureRepositoryAssignment(entry); managed || err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("new registration managed=%v err=%v", managed, err)
+			}
+			cfg, err = LoadConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := cfg.Assignments[entry.RepoID]; ok {
+				t.Fatal("created assignment over retained state")
+			}
+		})
+	}
+}
+
 func TestRunningRepositorySwitchPreservesOtherPIDAndSnapshot(t *testing.T) {
 	l, configPath, entries, _ := assignmentFixture(t)
 	controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: &releaseRunner{}}
@@ -537,6 +634,22 @@ func TestAssignmentRetryRollbackValidatesRetainedTransactionAndClearsFence(t *te
 	if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entries[0].RepoID), Maintenance{Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
+	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (registry.Store{Path: l.RegistryPath}).Remove(entries[0].RepoID); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := controller.RemoveRepositoryAssignment(entries[0].RepoID); removed || err == nil {
+		t.Fatalf("rollback_failed unregister: removed=%v err=%v", removed, err)
+	}
+	if err := fsutil.WriteJSON(l.RegistryPath, registered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := controller.EnsureRepositoryAssignment(entries[0]); err == nil {
+		t.Fatal("registration accepted retained rollback_failed fence")
+	}
 	report, err := controller.RetryRollback(context.Background(), entries[0].RepoPath)
 	if err != nil {
 		t.Fatal(err)
@@ -550,6 +663,21 @@ func TestAssignmentRetryRollbackValidatesRetainedTransactionAndClearsFence(t *te
 	}
 	if _, err := os.Stat(l.DeliveryAssignmentFencePath(entries[0].RepoID)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("retained fence was not cleared: %v", err)
+	}
+	if err := (registry.Store{Path: l.RegistryPath}).Remove(entries[0].RepoID); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := controller.RemoveRepositoryAssignment(entries[0].RepoID); err != nil || !removed {
+		t.Fatalf("recovered unregister: removed=%v err=%v", removed, err)
+	}
+	if err := fsutil.WriteJSON(l.RegistryPath, registered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, managed, err := controller.EnsureRepositoryAssignment(entries[0]); err != nil || !managed {
+		t.Fatalf("recovered register: managed=%v err=%v", managed, err)
+	}
+	if _, err := os.Lstat(l.DeliveryAssignmentFencePath(entries[0].RepoID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("re-registration retained supervisor maintenance fence: %v", err)
 	}
 }
 
