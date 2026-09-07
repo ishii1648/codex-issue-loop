@@ -108,71 +108,94 @@ func normalizeV5SemanticStateObject(object map[string]json.RawMessage, migratedA
 	issueObjects := make(map[string]map[string]json.RawMessage, len(issues))
 	effects := make(map[string]json.RawMessage)
 	var active json.RawMessage
-	activeIssue := ""
+	activeClaims := 0
+	for _, raw := range issues {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return fmt.Errorf("decode semantic migration Issue: %w", err)
+		}
+		if legacyActiveExecutionStatus(rawString(item["status"])) {
+			activeClaims++
+		}
+	}
 	for key, raw := range issues {
 		var item map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("decode semantic migration Issue %s: %w", key, err)
 		}
-		status := rawString(item["status"])
-		if status == "answer_claim_waiting" {
-			status = "resume_pending"
-			item["status"] = mustRaw(status)
-		}
-		if kind, ok := legacyEffectKind(rawString(item["github_sync"])); ok {
-			runID := rawString(item["run_id"])
-			if runID == "" {
-				return fmt.Errorf("Issue %s pending effect has no run identity", key)
+		err := func() error {
+			status := rawString(item["status"])
+			if status == "answer_claim_waiting" {
+				status = "resume_pending"
+				item["status"] = mustRaw(status)
 			}
-			effects[key] = mustMarshal(map[string]any{
-				"id": "effect_migrated_" + key, "issue_number": json.Number(key), "run_id": runID,
-				"kind": kind, "created_at": migratedAt,
+			if kind, ok := legacyEffectKind(rawString(item["github_sync"])); ok {
+				runID := rawString(item["run_id"])
+				if runID == "" {
+					return fmt.Errorf("Issue %s pending effect has no run identity", key)
+				}
+				effects[key] = mustMarshal(map[string]any{
+					"id": "effect_migrated_" + key, "issue_number": json.Number(key), "run_id": runID,
+					"kind": kind, "created_at": migratedAt,
+				})
+			}
+			lease := item["execution_lease"]
+			leaseRunID, leaseGeneration, leaseBaseSHA, leaseStartedAt, leaseErr := legacyExecutionIdentity(lease)
+			if leaseErr != nil {
+				return fmt.Errorf("decode semantic migration Issue %s execution provenance: %w", key, leaseErr)
+			}
+			generation := rawUint64(item["lease_generation"])
+			if leaseGeneration > generation {
+				generation = leaseGeneration
+			}
+			checkpoint := item["continuation_checkpoint"]
+			if len(checkpoint) > 0 && string(checkpoint) != "null" {
+				converted, checkpointGeneration, err := normalizeLegacyContinuation(key, checkpoint, lease, migratedAt)
+				if err != nil {
+					return err
+				}
+				item["continuation"] = converted
+				if checkpointGeneration > generation {
+					generation = checkpointGeneration
+				}
+			} else if len(lease) > 0 && string(lease) != "null" && !legacyActiveExecutionStatus(status) {
+				stage, err := normalizeContinuationStage(legacyCheckpointStage(item, status))
+				if err != nil {
+					return fmt.Errorf("Issue %s: %w", key, err)
+				}
+				item["continuation"] = mustMarshal(map[string]any{
+					"id": "checkpoint_migrated_" + key, "created_at": leaseStartedAt, "run_id": leaseRunID,
+					"generation": leaseGeneration, "base_sha": leaseBaseSHA, "stage": stage,
+				})
+			}
+			if generation > 0 {
+				item["generation"] = json.RawMessage(fmt.Sprint(generation))
+			}
+			if legacyActiveExecutionStatus(status) {
+				if len(lease) == 0 || string(lease) == "null" {
+					return fmt.Errorf("Issue %s executing lifecycle has no execution provenance", key)
+				}
+				if activeClaims > 1 {
+					return fmt.Errorf("multiple Issues claim the single active execution")
+				}
+				active = mustMarshal(map[string]any{
+					"issue_number": json.Number(key), "run_id": leaseRunID, "generation": leaseGeneration,
+					"base_sha": leaseBaseSHA, "started_at": leaseStartedAt,
+				})
+			}
+			return nil
+		}()
+		if err != nil {
+			item["status"] = mustRaw("blocked")
+			item["suspension"] = mustMarshal(map[string]any{
+				"id": "suspension_migrated_" + key, "origin": "migration", "status": "quarantined",
+				"reason_code": "legacy_execution_ambiguous", "recoverability": "ambiguous",
+				"reason": err.Error(), "allowed_actions": []string{"cancel"}, "suspended_at": migratedAt,
 			})
-		}
-		lease := item["execution_lease"]
-		leaseRunID, leaseGeneration, leaseBaseSHA, leaseStartedAt, leaseErr := legacyExecutionIdentity(lease)
-		if leaseErr != nil {
-			return fmt.Errorf("decode semantic migration Issue %s execution provenance: %w", key, leaseErr)
-		}
-		generation := rawUint64(item["lease_generation"])
-		if leaseGeneration > generation {
-			generation = leaseGeneration
-		}
-		checkpoint := item["continuation_checkpoint"]
-		if len(checkpoint) > 0 && string(checkpoint) != "null" {
-			converted, checkpointGeneration, err := normalizeLegacyContinuation(key, checkpoint, lease, migratedAt)
-			if err != nil {
-				return err
+			for _, field := range []string{"continuation", "worker_pid", "worker_pgid", "launch_source"} {
+				delete(item, field)
 			}
-			item["continuation"] = converted
-			if checkpointGeneration > generation {
-				generation = checkpointGeneration
-			}
-		} else if len(lease) > 0 && string(lease) != "null" && !legacyActiveExecutionStatus(status) {
-			stage, err := normalizeContinuationStage(legacyCheckpointStage(item, status))
-			if err != nil {
-				return fmt.Errorf("Issue %s: %w", key, err)
-			}
-			item["continuation"] = mustMarshal(map[string]any{
-				"id": "checkpoint_migrated_" + key, "created_at": leaseStartedAt, "run_id": leaseRunID,
-				"generation": leaseGeneration, "base_sha": leaseBaseSHA, "stage": stage,
-			})
-		}
-		if generation > 0 {
-			item["generation"] = json.RawMessage(fmt.Sprint(generation))
-		}
-		if legacyActiveExecutionStatus(status) {
-			if len(lease) == 0 || string(lease) == "null" {
-				return fmt.Errorf("Issue %s executing lifecycle has no execution provenance", key)
-			}
-			if len(active) != 0 {
-				return fmt.Errorf("Issues %s and %s both claim the single active execution", activeIssue, key)
-			}
-			active = mustMarshal(map[string]any{
-				"issue_number": json.Number(key), "run_id": leaseRunID, "generation": leaseGeneration,
-				"base_sha": leaseBaseSHA, "started_at": leaseStartedAt,
-			})
-			activeIssue = key
+			delete(effects, key)
 		}
 		for _, field := range []string{"execution_lease", "lease_generation", "continuation_checkpoint", "declared_resources", "actual_resources", "github_sync"} {
 			delete(item, field)
