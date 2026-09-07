@@ -1919,58 +1919,57 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
 	loop.Random = fixedRandom(0.5)
 	loop.Logger = log.New(io.Discard, "", 0)
+	github.issue.Number = 2
 	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
 	pool := &blockingPoolWorker{started: make(chan int, 3), release: make(chan struct{}, 3)}
 	loop.Worker = pool
+
 	_, err := loop.Store.Update("scheduler_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
-		for number, resource := range map[int]string{1: "one", 2: "two", 3: "three"} {
-			runID := "run_" + resource
-			branch := "codex/issue-1-test"
-			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
-				Number: number, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: runID,
-				Generation: 1, Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_" + resource, CreatedAt: loop.now(), RunID: runID, Generation: 1, Stage: issuedomain.ContinuationStageResume},
-				Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
-				Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
-			}
+		branch := "codex/issue-1-test"
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: "run_one",
+			Generation: 1, Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_one", CreatedAt: loop.now(), RunID: "run_one", Generation: 1, Stage: issuedomain.ContinuationStageResume},
+			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &scheduler{
-		loop: loop, events: make(chan schedulerEvent, 3), active: map[int]activeJob{},
-		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
-	}
+
+	loop.SchedulerTimers = inertSchedulerTimers{created: make(chan struct{}, 16)}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	result, err := s.schedule(ctx, false)
-	if err != nil || !result.dispatched {
-		t.Fatalf("result=%+v err=%v", result, err)
-	}
-	first := <-pool.started
-	if first != 1 || len(s.active) != 1 {
-		t.Fatalf("started=%d active=%d", first, len(s.active))
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case first := <-pool.started:
+		if first != 1 {
+			t.Fatalf("started=%d, want 1", first)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first worker did not start")
 	}
 	select {
 	case second := <-pool.started:
 		t.Fatalf("worker %d exceeded single execution before release", second)
 	default:
 	}
-
 	pool.release <- struct{}{}
-	event := <-s.events
-	if err := s.handleEvent(event); err != nil {
-		t.Fatal(err)
+	select {
+	case second := <-pool.started:
+		if second != 2 {
+			t.Fatalf("next admitted Issue=%d, want 2", second)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker completion did not admit the next Issue")
 	}
-	if _, err := s.schedule(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	second := <-pool.started
-	if second != 2 {
-		t.Fatalf("next admitted Issue=%d, want 2", second)
-	}
-	s.cancelAndDrain()
 	pool.mu.Lock()
 	maximum := pool.maximum
 	pool.mu.Unlock()
@@ -2569,5 +2568,90 @@ func TestFaultGitHubRetryDeadlineGuardsRunningJobs(t *testing.T) {
 	}
 	if _, err := loop.GitHub.Inspect(context.Background(), loop.Config, 1, ""); err != nil || client.inspectCalls != 1 || loop.now().Before(deadline) {
 		t.Fatalf("request after wait: reads=%d now=%s deadline=%s err=%v", client.inspectCalls, loop.now(), deadline, err)
+	}
+}
+
+// RunOnce waits for one production scheduling cycle and its dispatched jobs.
+// Job errors are returned directly so lifecycle tests can assert their causes.
+func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
+	l.enableRateLimitGate()
+	s := &scheduler{
+		loop: l, events: make(chan schedulerEvent, l.Config.Queue.Concurrency+1),
+		active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+	}
+	defer s.cancelAndDrain()
+	result, err := s.schedule(ctx, true)
+	if err != nil {
+		return result.dispatched, err
+	}
+	var jobErr error
+	for len(s.active) > 0 {
+		event := <-s.events
+		if err := s.handleEvent(event); err != nil {
+			jobErr = errors.Join(jobErr, err)
+		} else {
+			jobErr = errors.Join(jobErr, event.Err)
+		}
+	}
+	return result.dispatched, jobErr
+}
+
+func TestSchedulerResumesRecordedAnswerOnStateWake(t *testing.T) {
+	question := worker.Result{
+		Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "decision", SessionID: "session",
+		Question: &worker.Question{Text: "Which source?", AllowFreeText: true},
+	}
+	loop, _ := testLoop(t, question)
+	scripted := &scriptedWorker{results: []worker.Result{question, question}}
+	loop.Worker = scripted
+	created := make(chan struct{}, 32)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	wakes := make(chan fsnotify.Event, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, wakes, nil) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+		if scripted.runs != 1 || scripted.resumes != 1 {
+			t.Errorf("runs=%d resumes=%d, want 1 each", scripted.runs, scripted.resumes)
+		}
+	}()
+	var requestID string
+	for requestID == "" {
+		waitForTimers(t, created, 1)
+		snapshot, err := loop.Store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current := snapshot.Issues["1"]; current != nil && current.Status == issuedomain.StatusNeedsInput {
+			for id := range snapshot.PendingRequests {
+				requestID = id
+			}
+			if snapshot.ActiveExecution != nil {
+				t.Fatal("needs_input retained execution ownership")
+			}
+		}
+	}
+	if _, _, err := loop.Store.RecordAnswer(requestID, "Use a dated source", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	wakes <- fsnotify.Event{Name: filepath.Join(loop.Store.Dir, "state.json"), Op: fsnotify.Write}
+	for {
+		waitForTimers(t, created, 1)
+		snapshot, err := loop.Store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		current := snapshot.Issues["1"]
+		if current.Status == issuedomain.StatusNeedsInput && len(current.Answers) == 1 {
+			for id := range snapshot.PendingRequests {
+				if id != requestID {
+					return
+				}
+			}
+		}
 	}
 }

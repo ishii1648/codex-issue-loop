@@ -61,19 +61,6 @@ func (l *Loop) inputControlClient() (gh.InputControlClient, bool) {
 	return control, ok
 }
 
-func needsInputIssues(snapshot state.Snapshot) []int {
-	seen := map[int]bool{}
-	for _, request := range snapshot.Requests() {
-		seen[request.IssueNumber] = true
-	}
-	numbers := make([]int, 0, len(seen))
-	for number := range seen {
-		numbers = append(numbers, number)
-	}
-	sort.Ints(numbers)
-	return numbers
-}
-
 func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 	control, ok := l.inputControlClient()
 	if !ok {
