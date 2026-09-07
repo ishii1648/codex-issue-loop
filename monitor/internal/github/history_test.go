@@ -3,8 +3,10 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,64 @@ import (
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/store"
 )
+
+func TestIssueHistoryIgnoresUnmonitoredLabelDisagreement(t *testing.T) {
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	repo := config.Repository{ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done"}, ExcludeLabels: []string{"blocked"}}
+	for _, tc := range []struct {
+		name, event, labels string
+	}{
+		{"deleted label", "labeled", `[{"name":"ready"}]`},
+		{"renamed label", "labeled", `[{"name":"ready"},{"name":"defect"}]`},
+		{"unlabeled but present", "unlabeled", `[{"name":"ready"},{"name":"bug"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := rawIssue{Number: 1, State: "open"}
+			if err := json.Unmarshal([]byte(tc.labels), &issue.Labels); err != nil {
+				t.Fatal(err)
+			}
+			history := []rawEvent{
+				{ID: 1, Event: tc.event, CreatedAt: base},
+				{ID: 2, Event: "labeled", CreatedAt: base.Add(time.Minute)},
+				{ID: 3, Event: tc.event, CreatedAt: base.Add(2 * time.Minute)},
+			}
+			history[0].Label.Name = "bug"
+			history[1].Label.Name = "ready"
+			history[2].Label.Name = "bug"
+			events, since, err := issueHistory(repo, issue, history, base.Add(time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []model.QueueEvent{{ID: 2, IssueNumber: 1, Kind: model.ReadyLabeled, At: base.Add(time.Minute)}}
+			if !reflect.DeepEqual(events, want) || !since.Equal(want[0].At) {
+				t.Fatalf("events=%+v, since=%s", events, since)
+			}
+		})
+	}
+}
+
+func TestIssueHistoryRejectsMonitoredLabelDisagreement(t *testing.T) {
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	repo := config.Repository{ReadyLabels: []string{"Ready", "Ready-Other"}, RunningLabel: "Running", TerminalLabels: []string{"Done"}, ExcludeLabels: []string{"Blocked"}}
+	for _, label := range []string{"ready", "ready-other", "running", "done", "blocked"} {
+		for _, kind := range []string{"labeled", "unlabeled"} {
+			t.Run(label+"/"+kind, func(t *testing.T) {
+				issue := rawIssue{Number: 1, State: "open"}
+				if kind == "unlabeled" {
+					issue.Labels = append(issue.Labels, struct {
+						Name string `json:"name"`
+					}{strings.ToUpper(label)})
+				}
+				event := rawEvent{ID: 1, Event: kind, CreatedAt: base}
+				event.Label.Name = label
+				_, _, err := issueHistory(repo, issue, []rawEvent{event}, base.Add(time.Hour))
+				if !errors.Is(err, errHistoryIncomplete) {
+					t.Fatalf("error=%v, want errHistoryIncomplete", err)
+				}
+			})
+		}
+	}
+}
 
 func TestReentryHistories(t *testing.T) {
 	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
