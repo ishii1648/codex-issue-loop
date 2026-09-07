@@ -214,16 +214,27 @@ func TestV5SemanticMigrationNormalizesOnlyGenericCheckpointStages(t *testing.T) 
 			t.Fatalf("semantic migration changed retained evidence: %+v", issues["1"])
 		}
 	}
-	object := map[string]json.RawMessage{"issues": mustMarshal(map[string]any{
-		"1": map[string]any{"continuation_checkpoint": map[string]any{"stage": "unknown"}},
-	})}
-	if err := normalizeV5SemanticStateObject(object, time.Unix(2, 0).UTC()); err == nil {
-		t.Fatal("unknown continuation stage was normalized")
-	}
-	object = map[string]json.RawMessage{"issues": mustMarshal(map[string]any{
-		"1": map[string]any{"continuation_checkpoint": map[string]any{"stage": "resume", "kind": "unknown"}},
-	})}
-	if err := normalizeV5SemanticStateObject(object, time.Unix(2, 0).UTC()); err == nil {
-		t.Fatal("unknown continuation kind was normalized")
+	for _, checkpoint := range []map[string]any{
+		{"stage": "unknown"},
+		{"stage": "resume", "kind": "unknown"},
+	} {
+		object := map[string]json.RawMessage{"issues": mustMarshal(map[string]any{
+			"1": map[string]any{"number": 1, "continuation_checkpoint": checkpoint},
+		})}
+		if err := normalizeV5SemanticStateObject(object, time.Unix(2, 0).UTC()); err != nil {
+			t.Fatal(err)
+		}
+		var issues map[string]struct {
+			Status       string
+			Continuation json.RawMessage
+			Suspension   struct{ Status string }
+		}
+		if err := json.Unmarshal(object["issues"], &issues); err != nil {
+			t.Fatal(err)
+		}
+		item := issues["1"]
+		if item.Status != "blocked" || item.Suspension.Status != "quarantined" || len(item.Continuation) != 0 {
+			t.Fatalf("unknown checkpoint was not isolated: %+v", item)
+		}
 	}
 }
