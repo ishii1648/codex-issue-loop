@@ -610,7 +610,11 @@ func (s SecretSource) Validate(repoPath, field string) error {
 		if !filepath.IsAbs(s.File) {
 			return fmt.Errorf("%s.file must be absolute", field)
 		}
-		if repoPath != "" && (s.File == repoPath || strings.HasPrefix(s.File, repoPath+string(filepath.Separator))) {
+		path := filepath.Clean(s.File)
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		if repoPath != "" && (path == repoPath || strings.HasPrefix(path, repoPath+string(filepath.Separator))) {
 			return fmt.Errorf("%s.file must be outside the repository", field)
 		}
 	}
