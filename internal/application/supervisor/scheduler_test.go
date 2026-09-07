@@ -920,12 +920,119 @@ func TestSchedulerTransientFailuresIncreaseWithoutNoOpRecovery(t *testing.T) {
 			t.Fatalf("attempt %d supervisor=%+v", attempt+1, snapshot.Supervisor)
 		}
 		result, err := s.schedule(context.Background(), false)
-		if err != nil || result.githubSucceeded {
+		if err != nil || result.githubSucceeded || result.githubAccessSucceeded {
 			t.Fatalf("no-op attempt %d result=%+v err=%v", attempt+1, result, err)
 		}
 		if s.consecutiveFailures != attempt+1 {
 			t.Fatalf("no-op reset in-memory failures: got=%d want=%d", s.consecutiveFailures, attempt+1)
 		}
+	}
+}
+
+func TestWebhookScheduleTracksManagedGitHubSuccess(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, RunID: "run_1", StartedAt: loop.now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.Store.Update("running_fixture", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].Status = issuedomain.StatusRunning
+		snapshot.Issues["1"].WorkerPID, snapshot.Issues["1"].WorkerPGID = 123, 123
+		setSupervisorTestWorkspace(snapshot, snapshot.Issues["1"])
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{loop: loop, active: map[int]activeJob{1: {runID: "run_1", slot: 0}}}
+	result, err := s.schedule(context.Background(), false)
+	if err != nil || !result.githubAccessSucceeded || result.githubAttempted || result.dispatched {
+		t.Fatalf("managed projection result=%+v err=%v", result, err)
+	}
+	result, err = s.schedule(context.Background(), false)
+	if err != nil || result.githubAccessSucceeded || result.githubAttempted || result.dispatched {
+		t.Fatalf("no-op result=%+v err=%v", result, err)
+	}
+}
+
+func TestWebhookSchedulerRecoversAfterTransientMailboxFailures(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.Logger = log.New(io.Discard, "", 0)
+	loop.Random = fixedRandom(0.5)
+	now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	loop.Clock = fixedClock{value: now}
+	base.issue.Labels = nil
+	github := &webhookFakeGitHub{fakeGitHub: base}
+	loop.GitHub = github
+	timers := make(chan manualSchedulerTimer)
+	loop.SchedulerTimers = manualSchedulerTimers{created: timers}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("scheduler did not stop")
+		}
+	}()
+	nextTimer := func() manualSchedulerTimer {
+		t.Helper()
+		select {
+		case timer := <-timers:
+			return timer
+		case err := <-done:
+			done <- err
+			t.Fatalf("scheduler exited: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("scheduler timer was not created")
+		}
+		return manualSchedulerTimer{}
+	}
+	timer := nextTimer()
+	for cycle, want := range []int{1, 2, 3, 4, 0, 1, 2, 3, 4, 0} {
+		now = now.Add(time.Hour)
+		loop.Clock = fixedClock{value: now}
+		github.restErr = nil
+		if want > 0 {
+			github.restErr = errors.New("temporary GitHub failure")
+		}
+		if err := webhook.EnqueueMailbox(loop.Store.Dir, webhook.Delivery{
+			Version: webhook.InboxVersion, DeliveryID: fmt.Sprintf("recovery-%d", cycle),
+			Event: "issues", Action: "edited", RepoID: loop.Store.RepoID, IssueNumber: 1, AcceptedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		timer.ch <- now
+		if want > 0 {
+			nextTimer()
+			nextTimer()
+		}
+		timer = nextTimer()
+		snapshot, err := loop.Store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Supervisor.ConsecutiveFailures != want || snapshot.Supervisor.State == state.SupervisorStateBlocked {
+			t.Fatalf("cycle %d supervisor=%+v, want failures=%d", cycle, snapshot.Supervisor, want)
+		}
+		if want == 0 && snapshot.Supervisor.RetryAfter != nil {
+			t.Fatalf("recovered cycle retains retry deadline: %+v", snapshot.Supervisor)
+		}
+	}
+	if github.restGets != 10 || github.listCalls != 0 {
+		t.Fatalf("REST reads=%d queue polls=%d", github.restGets, github.listCalls)
+	}
+	events, err := os.ReadFile(loop.Store.EventsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(events), `"type":"supervisor_recovered"`); count != 2 {
+		t.Fatalf("supervisor_recovered events=%d, want 2", count)
 	}
 }
 

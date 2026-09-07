@@ -99,6 +99,7 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 		return nil
 	}
 	comments, err := control.ListInputComments(ctx, l.Config, issueNumber)
+	recordScheduleGitHubSuccess(ctx, err)
 	if err != nil {
 		return err
 	}
