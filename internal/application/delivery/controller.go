@@ -224,9 +224,6 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 		}
 		tx.LastResult = verificationResult(err)
 		tx.Reason = err.Error()
-		if tx.Phase == PhaseIdle {
-			tx.Phase = PhaseIdle
-		}
 		_ = SaveTransaction(paths.Transaction, tx)
 		return c.reportFrom(paths, cfg, tx, DrainProgress{}), err
 	}
