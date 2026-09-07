@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
@@ -300,4 +301,108 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func TestConflictRecoveryCanceledContext(t *testing.T) {
+	for _, timeout := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		want := context.Canceled
+		if timeout {
+			cancel()
+			ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			want = context.DeadlineExceeded
+		}
+		cancel()
+		manager := Manager{}
+		_, prepareErr := manager.Prepare(ctx, config.Config{}, t.TempDir(), "branch", nil)
+		_, publishErr := manager.Publish(ctx, config.Config{}, gh.Issue{}, t.TempDir(), "branch", state.ConflictRecovery{TargetBaseSHA: "target", OriginalHeadSHA: "head"}, nil)
+		for operation, err := range map[string]error{"Prepare": prepareErr, "Publish": publishErr} {
+			var fatal NonRecoverableError
+			if !errors.Is(err, want) || errors.As(err, &fatal) {
+				t.Fatalf("%s timeout=%v: err=%v", operation, timeout, err)
+			}
+		}
+	}
+}
+
+func TestConflictRecoveryGitTimeout(t *testing.T) {
+	for _, test := range []struct {
+		operation string
+		command   string
+	}{
+		{"Prepare", "symbolic-ref --quiet --short HEAD"},
+		{"Prepare", "rev-parse --verify HEAD"},
+		{"Prepare", "rev-parse --verify MERGE_HEAD"},
+		{"Prepare", "merge-base head target"},
+		{"Prepare", "diff --name-only target...head --"},
+		{"Prepare", "diff --name-only --diff-filter=U --"},
+		{"Publish", "rev-parse --verify MERGE_HEAD"},
+		{"Publish", "rev-list --parents -n 1 head"},
+	} {
+		t.Run(test.operation+"/"+test.command, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "git")
+			script := `#!/bin/sh
+shift 2
+if [ "$*" = "` + test.command + `" ]; then
+  exec sleep 30
+fi
+case "$*" in
+  'symbolic-ref --quiet --short HEAD') echo branch ;;
+  'rev-parse --verify HEAD') echo head ;;
+  'rev-parse --verify MERGE_HEAD') exit 1 ;;
+  'rev-parse --verify refs/remotes/origin/main') echo target ;;
+  'merge-base head target') echo base ;;
+esac
+`
+			if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			manager := Manager{GitPath: path}
+			cfg := config.Defaults()
+			cfg.Git.BaseBranch = "main"
+			var err error
+			if test.operation == "Prepare" {
+				_, err = manager.Prepare(ctx, cfg, t.TempDir(), "branch", nil)
+			} else {
+				_, err = manager.Publish(ctx, cfg, gh.Issue{}, t.TempDir(), "branch", state.ConflictRecovery{TargetBaseSHA: "target", OriginalHeadSHA: "head"}, nil)
+			}
+			var fatal NonRecoverableError
+			if !errors.Is(err, context.DeadlineExceeded) || errors.As(err, &fatal) || !strings.Contains(err.Error(), test.command) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestConflictPublicationDistinguishesParentInspectionFailure(t *testing.T) {
+	for _, fail := range []bool{true, false} {
+		path := filepath.Join(t.TempDir(), "git")
+		parents := "echo head other-base other-parent"
+		if fail {
+			parents = "exit 23"
+		}
+		script := `#!/bin/sh
+shift 2
+case "$*" in
+  'rev-parse --verify MERGE_HEAD') exit 1 ;;
+  'rev-parse --verify HEAD') echo head ;;
+  'rev-list --parents -n 1 head') ` + parents + ` ;;
+esac
+`
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, err := (Manager{GitPath: path}).Publish(context.Background(), config.Config{}, gh.Issue{}, t.TempDir(), "branch", state.ConflictRecovery{TargetBaseSHA: "target", OriginalHeadSHA: "head"}, nil)
+		var fatal NonRecoverableError
+		if fail {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 || errors.As(err, &fatal) || !strings.Contains(err.Error(), "exit status 23") || strings.Contains(err.Error(), "does not retain target base SHA") {
+				t.Fatalf("err=%v", err)
+			}
+		} else if !errors.As(err, &fatal) || !strings.Contains(err.Error(), "does not retain target base SHA") {
+			t.Fatalf("err=%v", err)
+		}
+	}
 }
