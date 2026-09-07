@@ -307,6 +307,54 @@ func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 	}
 }
 
+func TestReconcileDisabledPreservesActiveTransaction(t *testing.T) {
+	for _, result := range []string{"rollback_failed", "rolling_back", "validating"} {
+		t.Run(result, func(t *testing.T) {
+			controller, paths, tx, runner := rollbackRetryFixture(t, txDesiredVersion())
+			cfg, err := LoadConfig(controller.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Enabled = false
+			if err := WriteConfig(controller.ConfigPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+			tx.LastResult = result
+			if err := SaveTransaction(paths.Transaction, tx); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(paths.Transaction)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := controller.Reconcile(context.Background(), false)
+			if err != nil || report.Enabled || report.Result != result || report.Reason != tx.Reason {
+				t.Fatalf("report=%+v err=%v", report, err)
+			}
+			after, err := os.ReadFile(paths.Transaction)
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("transaction changed while disabled: before=%s after=%s err=%v", before, after, err)
+			}
+			fence, err := LoadMaintenance(paths.Maintenance)
+			if err != nil || fence.Generation != tx.MaintenanceGeneration || fence.Desired != tx.Desired {
+				t.Fatalf("fence=%+v err=%v", fence, err)
+			}
+			if *runner != (releaseRunner{}) {
+				t.Fatalf("commands ran while disabled: %+v", runner)
+			}
+			if result == "rollback_failed" {
+				report, err = controller.RetryRollback(context.Background(), tx.BackupPath)
+				if err != nil || report.Result != "rolled_back" || report.Reason != tx.Reason || runner.rollbacks != 1 || runner.doctors != 1 {
+					t.Fatalf("retry report=%+v err=%v runner=%+v", report, err, runner)
+				}
+				if _, err := os.Stat(paths.Maintenance); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("successful retry retained fence: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestRetryRollbackFinalizesAlreadyRestoredPreviousVersion(t *testing.T) {
 	controller, paths, tx, runner := rollbackRetryFixture(t, VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)})
 	report, err := controller.RetryRollback(context.Background(), tx.BackupPath)

@@ -122,6 +122,9 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 		}
 	}
 	if !cfg.Enabled {
+		if transactionActive(tx) {
+			return c.reportFrom(paths, cfg, tx, DrainProgress{}), nil
+		}
 		if tx.Current.Version == "" {
 			tx.Current = current.ref()
 		}
