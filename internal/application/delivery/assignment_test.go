@@ -1024,7 +1024,7 @@ func TestLegacyRuntimeSwitchUsesTargetStateLockWithoutGlobalFence(t *testing.T) 
 state_dir=$FAKE_LAUNCHCTL_STATE
 case "$1" in
   print) label=${2##*/}; [ -f "$state_dir/$label" ] || exit 1; pid=$(cat "$state_dir/$label"); printf 'state = running\npid = %s\n' "$pid" ;;
-  bootout) label=${2##*/}; rm -f "$state_dir/$label" ;;
+  bootout) label=${2##*/}; touch "$state_dir/$label.stopping" ;;
   bootstrap) label=$(basename "$3" .plist); printf '%s\n' 9201 >"$state_dir/$label" ;;
   *) exit 2 ;;
 esac
@@ -1058,7 +1058,54 @@ esac
 		t.Fatal(err)
 	}
 	otherBefore, _ := os.ReadFile(filepath.Join(stateDir, l.Label(entries[1].RepoID)))
-	report, err := controller.Apply(context.Background(), entries[0].RepoPath, "v1.2.3", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	store := state.Store{Dir: l.RepoDir(entries[0].RepoID), RepoID: entries[0].RepoID, RepoPath: entries[0].RepoPath}
+	servicePath := filepath.Join(stateDir, l.Label(entries[0].RepoID))
+	stopped := make(chan error, 1)
+	go func() {
+		for {
+			if _, err := os.Stat(servicePath + ".stopping"); err == nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				stopped <- ctx.Err()
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		_, err := store.Update("supervisor_stopped", 0, "", nil, func(snapshot *state.Snapshot) error {
+			snapshot.Supervisor.State = state.SupervisorStateStopped
+			snapshot.Supervisor.PID = 0
+			return nil
+		})
+		if err == nil {
+			err = os.Remove(servicePath)
+		}
+		stopped <- err
+	}()
+	report, err := controller.Apply(ctx, entries[0].RepoPath, "v1.2.3", 1)
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("legacy shutdown exceeded deadline: %v", ctx.Err())
+	}
+	snapshot, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if snapshot.Supervisor.State != state.SupervisorStateStopped {
+		t.Fatalf("supervisor state=%s", snapshot.Supervisor.State)
+	}
+	events, readErr := os.ReadFile(store.EventsPath())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(events), `"type":"supervisor_stopped"`) {
+		t.Fatalf("missing supervisor_stopped event: %s", events)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
