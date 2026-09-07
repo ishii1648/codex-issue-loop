@@ -1661,6 +1661,83 @@ func TestRewritePlistsPreservesPerRepositoryAssignment(t *testing.T) {
 	}
 }
 
+func TestRollbackRestartsBrokerWhenRewritePlistsFails(t *testing.T) {
+	repo, l, entry, _, launchctl := operatorControlFixture(t)
+	serviceDir := t.TempDir()
+	t.Setenv("ROLLBACK_SERVICE_DIR", serviceDir)
+	for _, service := range []string{"broker", "repo"} {
+		if err := os.WriteFile(filepath.Join(serviceDir, service), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := `#!/bin/sh
+case "$2 $3" in *broker*) service=broker ;; *) service=repo ;; esac
+case "$1" in
+  print) test -f "$ROLLBACK_SERVICE_DIR/$service" && printf 'state = running\npid = 4242\n' ;;
+  bootout)
+    rm -f "$ROLLBACK_SERVICE_DIR/$service"
+    printf 'stop %s\n' "$service" >> "$ROLLBACK_SERVICE_DIR/log"
+    ;;
+  bootstrap)
+    touch "$ROLLBACK_SERVICE_DIR/$service"
+    printf 'start %s\n' "$service" >> "$ROLLBACK_SERVICE_DIR/log"
+    ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "webhook-secret")
+	if err := os.WriteFile(secret, []byte("fixture-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := fmt.Sprintf("version: 5\ngithub:\n  repo: owner/repo\n  repository_id: 1234\nwebhook:\n  mode: webhook\n  listener_address: 127.0.0.1:8787\n  public_url_identifier: fixture.example/webhook\n  secret_source:\n    file: %q\n  installation_ids: [99]\n", secret)
+	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "agent-loop")
+	if err := os.WriteFile(source, []byte("release-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := installArtifacts(l, source, "v1.2.3", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rewritePlists(l); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := backupInstallation(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryConfigPath, err := delivery.ResolveConfigPath("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.WriteConfig(deliveryConfigPath, delivery.DefaultConfig("owner/release")); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = (App{Out: &output, Err: &output}).rollback(context.Background(), l, []string{"--backup", backup})
+	wantErr := fmt.Sprintf("registered repository %s has no delivery assignment", entry.RepoID)
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("rollback error=%v, want %q", err, wantErr)
+	}
+	manager := launchd.Manager{Layout: l, Launchctl: launchctl}
+	if status, err := manager.BrokerStatus(context.Background()); err != nil || !status.Loaded {
+		t.Fatalf("broker status=%+v err=%v", status, err)
+	}
+	if status, err := manager.Status(context.Background(), entry); err != nil || !status.Loaded {
+		t.Fatalf("repository status=%+v err=%v", status, err)
+	}
+	logData, err := os.ReadFile(filepath.Join(serviceDir, "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(logData), "stop repo\nstop broker\nstart broker\nstart repo\n"; got != want {
+		t.Fatalf("service operations=%q, want %q", got, want)
+	}
+}
+
 func TestUninstallPreservesLegacyCredentialFile(t *testing.T) {
 	_, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
