@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -212,7 +213,7 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 				s.cancelAndDrain()
 				return fatal
 			}
-		} else if (result.githubSucceeded || result.githubAccessSucceeded) && (s.consecutiveFailures > 0 || s.rateLimitActive) {
+		} else if (result.githubSucceeded || result.githubAccessSucceeded) && !s.cooldownUntil.After(l.now()) && (s.consecutiveFailures > 0 || s.rateLimitActive) {
 			if resetErr := l.resetSupervisorFailures(s.consecutiveFailures); resetErr != nil {
 				s.cancelAndDrain()
 				return BlockedError{Err: failure.Wrap(failure.Supervisor, "reset supervisor failure counter", resetErr)}
@@ -562,12 +563,14 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 
 func (s *scheduler) handleCycleError(cause error) error {
 	now := s.loop.now()
+	if errors.Is(cause, errGitHubRetryWait) {
+		return nil
+	}
 	if observed, limited := cooldownFromError(cause, now); limited {
 		cooldown, err := s.loop.RateLimits.Observe(observed, now)
 		if err != nil {
 			return s.loop.blockSupervisor(failure.Wrap(failure.Supervisor, "persist shared GitHub rate-limit cooldown", err), failure.Supervisor, s.consecutiveFailures+1)
 		}
-		s.consecutiveFailures++
 		s.rateLimitActive = true
 		s.cooldownUntil = cooldown.ResetAt
 		s.pollAt = cooldown.ResetAt
@@ -600,13 +603,10 @@ func (s *scheduler) handleCycleError(cause error) error {
 	}
 	s.consecutiveFailures++
 	s.loop.Logger.Printf("scheduler cycle failed (%d, %s): %v", s.consecutiveFailures, kind, cause)
-	if s.consecutiveFailures >= 5 {
-		if err := s.loop.recordFailureSignal("scheduler", "poll", 0, s.runtimeRunID, s.retryEpisodeID(), "scheduler_retry_exhausted", cause, s.consecutiveFailures, nil, true); err != nil {
-			s.loop.Logger.Printf("record retry exhaustion signal: %v", err)
-		}
-		return s.loop.blockSupervisor(cause, kind, s.consecutiveFailures)
-	}
 	delay := s.loop.retryDelay(s.consecutiveFailures)
+	if s.consecutiveFailures >= 5 {
+		delay = backoffMaximum
+	}
 	retryAt := now.Add(delay)
 	if err := s.recordRetrySignals(cause, "scheduler_cycle_failed", s.consecutiveFailures, retryAt, false); err != nil {
 		s.loop.Logger.Printf("record scheduler retry signal: %v", err)
@@ -756,6 +756,9 @@ func (s *scheduler) processMailbox(ctx context.Context, snapshot state.Snapshot)
 		}
 		if delivery.Event != "issues" && delivery.Event != "issue_comment" {
 			acknowledged = append(acknowledged, delivery)
+			continue
+		}
+		if !s.hasFreeSlot() || snapshot.ActiveExecution != nil {
 			continue
 		}
 		candidate, getErr := s.loop.getIssue(ctx, number)
@@ -999,6 +1002,10 @@ func (s *scheduler) handleEvent(event schedulerEvent) error {
 	}
 	job.cancel()
 	delete(s.active, event.IssueNumber)
+	if errors.Is(event.Err, errGitHubRetryWait) {
+		s.issueRetry[event.IssueNumber] = s.pollAt
+		return nil
+	}
 	if event.Err == nil {
 		delete(s.issueFails, event.IssueNumber)
 		return nil

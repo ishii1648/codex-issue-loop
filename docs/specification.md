@@ -909,13 +909,13 @@ errorは影響範囲を`transient`、`issue`、`supervisor`として分類し、
 - jitter: ±20%
 
 - Issueワーカーの既定上限: 3回
-- polling失敗はsupervisorを終了させず、連続失敗閾値でblockedにする
+- supervisorの一時的なGitHub障害はprocessを終了させず、連続5回目以降は既存の `retry_after` で5分間API呼び出しを待機する。待機中のWebhook・state更新では期限を短縮せず、実行中workerをキャンセルしない。期限後に既存schedulerが再試行する。
 
 worker retry、GitHub queue polling、GitHub同期retryの待機時間に独立した乱数を適用する。exponential backoffはjitter適用後も5分を超えない。乱数源はprocessごとに初期化されたsystem sourceを使い、複数repositoryの再試行集中を避ける。clockとrandom sourceはテスト時に差し替え可能とする。
 
-Issue retryのsnapshotには `failure_kind`、`last_error`、`retry_after` を保存し、`retry_scheduled` eventにも分類、理由、予定時刻、delayを記録する。supervisorの一時障害も同じ情報と連続失敗数をsnapshotおよび `supervisor_retry_scheduled` eventへ保存する。連続失敗数と予定時刻はlaunchdによるprocess再起動後も引き継ぐ。連続失敗数は、GitHub取得から永続状態更新までを含む1回のsupervisor cycleが成功した場合にのみresetし、`supervisor_recovered` eventを記録する。event通知やretry状態自身の書き込みによる早期起床ではbackoffを解除せず、counterもresetしない。
+Issue retryのsnapshotには `failure_kind`、`last_error`、`retry_after` を保存し、`retry_scheduled` eventにも分類、理由、予定時刻、delayを記録する。supervisorの一時障害も同じ情報と連続失敗数をsnapshotおよび `supervisor_retry_scheduled` eventへ保存する。連続失敗数と予定時刻はlaunchdによるprocess再起動後も引き継ぐ。primary rate limitは共有cooldownで扱い、通常の一時障害の連続失敗数には加算しない。連続失敗数は、Webhook経由も含め実際のGitHub取得または投影照合の成功を観測し、そのsupervisor cycleが成功して待機期限も経過した場合にのみresetし、`supervisor_recovered` eventを記録する。event通知やretry状態自身の書き込みによる早期起床ではbackoffを解除せず、counterもresetしない。
 
-`supervisor`分類は継続によるrepository全体の状態破壊を避けるため`blocked`へ移す。`transient`分類は最大5回まで再試行し、Issue文脈の一時障害が上限に達した場合は対象Issueだけを`blocked`または`failed`へ移す。repository全体に共通する操作が上限に達しても、上記のsupervisor-wide条件を満たすことを確認してから`blocked`へ移す。`issue`分類とIssue文脈の未分類errorは、GitHub同期の成否にかかわらず対象Issueの実行枠を解放し、同期自体は冪等に再試行しながら別Issueを処理できる状態を維持する。
+`supervisor`分類は継続によるrepository全体の状態破壊を避けるため`blocked`へ移す。Issue文脈の`transient`分類は最大5回まで再試行し、上限に達した場合は対象Issueだけを`blocked`または`failed`へ移す。repository全体に共通するGitHub操作の一時障害は上記の期限付き待機で再試行を継続する。`issue`分類とIssue文脈の未分類errorは、GitHub同期の成否にかかわらず対象Issueの実行枠を解放し、同期自体は冪等に再試行しながら別Issueを処理できる状態を維持する。
 
 ### 14.3 worker timeoutとprocess終了
 
