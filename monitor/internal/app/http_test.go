@@ -230,6 +230,24 @@ func TestDashboardRejectsPartiallyCommittedIntervals(t *testing.T) {
 	}
 }
 
+func TestDashboardRejectsGapDuringReplayCommit(t *testing.T) {
+	cfg, storage, at := dashboardFixture(t)
+	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Unknown, StartedAt: at.Add(-time.Hour + 3*time.Minute)}}
+	closed := model.Interval{ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-2 * time.Hour), EndedAt: at.Add(-time.Hour)}
+	if err := storage.Commit(snapshot, []model.Interval{closed}); err != nil {
+		t.Fatal(err)
+	}
+	a := App{Now: func() time.Time { return at }}
+	for _, path := range []string{"/metrics", "/api/history", "/api/report?from=" + at.Add(-24*time.Hour).Format(time.RFC3339)} {
+		t.Run(path, func(t *testing.T) {
+			response := request(t, a.monitorHandler(cfg), path)
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "monitor interval commit is incomplete") {
+				t.Fatalf("%s = %d %s", path, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestMetricsUsesExactWholeSecondReference(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
 	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
