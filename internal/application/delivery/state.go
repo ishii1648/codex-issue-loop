@@ -94,24 +94,14 @@ type Maintenance struct {
 
 func LoadTransaction(path string) (Transaction, error) {
 	var tx Transaction
-	if info, statErr := os.Lstat(path); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return tx, fmt.Errorf("delivery transaction is not a regular file: %s", path)
-		}
-		if info.Mode().Perm()&0o077 != 0 {
-			return tx, fmt.Errorf("delivery transaction is not owner-only: %s", path)
-		}
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return tx, statErr
-	}
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadPrivateRegular(path, "delivery transaction")
 	if errors.Is(err, os.ErrNotExist) {
 		return Transaction{Version: 1, Phase: PhaseIdle}, nil
 	}
 	if err != nil {
 		return tx, err
 	}
-	if err := decodeStrictJSON(data, &tx); err != nil {
+	if err := fsutil.DecodeStrictJSON(data, &tx); err != nil {
 		return tx, fmt.Errorf("decode delivery transaction: %w", err)
 	}
 	if tx.Version != 1 {
@@ -139,21 +129,11 @@ func WriteMaintenance(path string, value Maintenance) error {
 
 func LoadMaintenance(path string) (Maintenance, error) {
 	var value Maintenance
-	info, err := os.Lstat(path)
+	data, err := fsutil.ReadPrivateRegular(path, "delivery maintenance fence")
 	if err != nil {
 		return value, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return value, fmt.Errorf("delivery maintenance fence is not a regular file: %s", path)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return value, fmt.Errorf("delivery maintenance fence is not owner-only: %s", path)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return value, err
-	}
-	if err := decodeStrictJSON(data, &value); err != nil {
+	if err := fsutil.DecodeStrictJSON(data, &value); err != nil {
 		return value, fmt.Errorf("decode delivery maintenance fence: %w", err)
 	}
 	if value.Version != 1 || value.Generation == "" || value.Desired.Version == "" || value.Desired.Commit == "" {

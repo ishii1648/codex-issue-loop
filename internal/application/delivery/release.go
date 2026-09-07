@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 )
 
 const (
@@ -177,7 +179,7 @@ func (v Verifier) Check(ctx context.Context, cfg Config) (Candidate, error) {
 		return Candidate{}, fmt.Errorf("inspect verified candidate binary: %w", err)
 	}
 	var binary BinaryInfo
-	if err := decodeStrictJSON(out, &binary); err != nil {
+	if err := fsutil.DecodeStrictJSON(out, &binary); err != nil {
 		return Candidate{}, fmt.Errorf("decode candidate binary metadata: %w", err)
 	}
 	if err := compareBinaryManifest(binary, manifest); err != nil {
@@ -285,7 +287,7 @@ func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error
 		return ReleaseManifest{}, "", fmt.Errorf("read release manifest: %w", err)
 	}
 	var manifest ReleaseManifest
-	if err := decodeStrictJSON(data, &manifest); err != nil {
+	if err := fsutil.DecodeStrictJSON(data, &manifest); err != nil {
 		return manifest, "", fmt.Errorf("decode release manifest: %w", err)
 	}
 	if manifest.ManifestVersion != 1 || manifest.DeliveryProtocol != ProtocolVersion || manifest.AssignmentProtocol != AssignmentProtocolVersion {
