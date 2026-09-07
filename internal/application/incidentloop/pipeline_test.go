@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -611,4 +612,57 @@ func signalAt(at time.Time, id, correlation, name, outcome string, configure fun
 	}
 	configure(&signal)
 	return signal
+}
+
+func TestNewSignalsDoNotRenewAnalysisRetryBudget(t *testing.T) {
+	now := time.Date(2026, 9, 2, 4, 0, 0, 0, time.UTC)
+	store := testStore(t)
+	analyzer := &fakeAnalyzer{err: errors.New("analyzer unavailable")}
+	pipeline := testPipeline(store, analyzer, nil, &now, true)
+	signal := signalAt(now, "retry-0", "retry", "failure_classified", "failed", func(s *Signal) {
+		s.EpisodeID, s.FailureKind, s.FailureCode = "retry-episode", "product", "test_failure"
+	})
+	fingerprint := signalFingerprint(signal)
+	for cycle := 0; cycle < 6; cycle++ {
+		signal.ID = fmt.Sprintf("retry-%d", cycle)
+		signal.Timestamp = now
+		recordSignals(t, store, signal)
+		if _, err := pipeline.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		state, err := store.LoadState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		episode := state.Episodes[fingerprint]
+		calls := 0
+		for _, bundle := range analyzer.bundles {
+			if bundle.Fingerprint == fingerprint {
+				calls++
+			}
+		}
+		want := min(cycle+1, pipeline.Config.MaxAttempts)
+		if calls != want || episode.Attempts != want {
+			t.Fatalf("cycle %d: calls=%d attempts=%d want=%d", cycle, calls, episode.Attempts, want)
+		}
+		if cycle+1 >= pipeline.Config.MaxAttempts && (!episode.CircuitOpen || episode.CircuitGeneration != 1) {
+			t.Fatalf("cycle %d: circuit changed: %+v", cycle, episode)
+		}
+		now = now.Add(2 * time.Minute)
+	}
+	if _, err := store.ResetCircuit(fingerprint, now); err != nil {
+		t.Fatal(err)
+	}
+	analyzer.err = nil
+	if _, err := pipeline.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	episode := state.Episodes[fingerprint]
+	if episode.CircuitOpen || episode.Attempts != 1 || episode.AI == nil || len(episode.AI.Evidence) != 6 {
+		t.Fatalf("explicit retry did not analyze accumulated evidence: %+v", episode)
+	}
 }

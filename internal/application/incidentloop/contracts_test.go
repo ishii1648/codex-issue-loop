@@ -249,3 +249,57 @@ func TestEpisodeCardinalityLimitIsConfigurableAndPreservesOccurrenceCount(t *tes
 		}
 	}
 }
+
+func TestBuildEpisodesPreservesAnalysisRetryStateOnNewSignal(t *testing.T) {
+	rules, err := incidentanalysis.LoadRules(rulesPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 2, 4, 0, 0, 0, time.UTC)
+	first := signalAt(now, "retry-first", "retry", "failure_classified", "failed", func(s *Signal) {
+		s.EpisodeID, s.FailureKind, s.FailureCode = "retry-episode", "product", "test_failure"
+	})
+	for _, test := range []struct {
+		name    string
+		open    bool
+		changed bool
+	}{
+		{name: "open", open: true},
+		{name: "backoff"},
+		{name: "classification-change", open: true, changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prior, err := BuildEpisodes([]Signal{first}, DurableState{}, rules)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fingerprint := signalFingerprint(first)
+			old := prior.Episodes[fingerprint]
+			next := now.Add(time.Hour)
+			old.AI = &AIAnalysis{}
+			old.Attempts, old.CircuitOpen, old.NextAttemptAt, old.CircuitGeneration = 2, test.open, &next, 1
+			prior.Episodes[fingerprint] = old
+			fresh := first
+			fresh.ID, fresh.Timestamp = "retry-new", now.Add(time.Minute)
+			fresh.HumanActionRequired = test.changed
+			updated, err := BuildEpisodes([]Signal{first, fresh}, prior, rules)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := updated.Episodes[fingerprint]
+			if got.AI != nil {
+				t.Fatal("new evidence did not invalidate analysis")
+			}
+			if test.changed {
+				if got.PrimaryClassification == old.PrimaryClassification || got.Attempts != 0 || got.CircuitOpen || got.NextAttemptAt != nil {
+					t.Fatalf("classification change did not reset retry state: %+v", got)
+				}
+			} else if got.Attempts != old.Attempts || got.CircuitOpen != old.CircuitOpen || got.NextAttemptAt == nil || !got.NextAttemptAt.Equal(next) {
+				t.Fatalf("new signal reset retry state: %+v", got)
+			}
+			if got.CircuitGeneration != old.CircuitGeneration || got.OccurrenceCount != 2 || len(got.SignalIDs) != 2 || len(got.Evidence) != 2 || got.LastSignalID != fresh.ID {
+				t.Fatalf("new evidence or circuit generation was lost: %+v", got)
+			}
+		})
+	}
+}
