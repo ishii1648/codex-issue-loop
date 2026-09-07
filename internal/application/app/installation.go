@@ -237,6 +237,9 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 	}
 	if !legacySchemaRollback {
 		if err := rewritePlists(l); err != nil {
+			if brokerLoaded {
+				_ = brokerManager.StartBroker(ctx)
+			}
 			_ = startEntries(ctx, l, loaded)
 			return err
 		}
