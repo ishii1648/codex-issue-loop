@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1192,6 +1193,7 @@ func TestTypedMissingBaseFailurePreservesRecoveryProvenanceAndSession(t *testing
 func TestPullRequestLifecycleAnomaliesBlockWithCheckpointAndNoExecutionLease(t *testing.T) {
 	tests := []struct {
 		name       string
+		unsaved    bool
 		pulls      []gh.PullRequest
 		inspection *worktree.Inspection
 		want       string
@@ -1200,6 +1202,12 @@ func TestPullRequestLifecycleAnomaliesBlockWithCheckpointAndNoExecutionLease(t *
 			name:  "closed without merge",
 			pulls: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "CLOSED", HeadRefName: "codex/issue-1-test"}},
 			want:  "closed without merge",
+		},
+		{
+			name:    "closed without saved identity",
+			unsaved: true,
+			pulls:   []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "CLOSED", HeadRefName: "codex/issue-1-test"}},
+			want:    "closed without merge",
 		},
 		{
 			name: "multiple Pull Requests",
@@ -1223,6 +1231,20 @@ func TestPullRequestLifecycleAnomaliesBlockWithCheckpointAndNoExecutionLease(t *
 			if _, err := loop.RunOnce(context.Background()); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := loop.Store.Update("test_identity", 1, "", nil, func(s *state.Snapshot) error {
+				item := s.Issues["1"]
+				item.PullRequestNumber = 1
+				item.HeadSHA = "saved-head"
+				item.Continuation.PullRequestNumber = 1
+				item.Continuation.HeadSHA = "saved-head"
+				if test.unsaved {
+					item.PullRequestURL = ""
+					item.PullRequestNumber = 0
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
 			github.remote = &gh.RemoteState{
 				Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
 				PullRequests: test.pulls,
@@ -1240,6 +1262,46 @@ func TestPullRequestLifecycleAnomaliesBlockWithCheckpointAndNoExecutionLease(t *
 			issue := snapshot.Issues["1"]
 			if issue.Status != issuedomain.StatusBlocked || snapshot.ActiveExecution != nil || issue.Continuation == nil || issue.Suspension == nil || !strings.Contains(issue.LastError, test.want) {
 				t.Fatalf("issue=%+v", issue)
+			}
+			if issue.PullRequestURL != "https://example.test/pr/1" || issue.PullRequestNumber != 1 || issue.HeadSHA != "saved-head" {
+				t.Fatalf("publication identity changed: %+v", issue)
+			}
+			if issue.Continuation.PullRequestURL != issue.PullRequestURL || issue.Continuation.PullRequestNumber != issue.PullRequestNumber || issue.Continuation.HeadSHA != issue.HeadSHA {
+				t.Fatalf("checkpoint identity mismatch: %+v", issue.Continuation)
+			}
+			events, err := os.ReadFile(loop.Store.EventsPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, line := range bytes.Split(bytes.TrimSpace(events), []byte("\n")) {
+				var event state.Event
+				if err := json.Unmarshal(line, &event); err != nil {
+					t.Fatal(err)
+				}
+				if event.Type != "pull_request_lifecycle_blocked" {
+					continue
+				}
+				found = true
+				var payload struct {
+					PullRequests []gh.PullRequest `json:"pull_requests"`
+				}
+				if err := json.Unmarshal(event.Payload, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(payload.PullRequests, test.pulls) {
+					t.Fatalf("detected PRs missing from event: %+v", payload)
+				}
+			}
+			if !found {
+				t.Fatal("missing Pull Request lifecycle block event")
+			}
+			if len(test.pulls) > 1 {
+				for _, pr := range test.pulls {
+					if !strings.Contains(issue.LastError, pr.URL) {
+						t.Fatalf("LastError missing detected PR %s: %s", pr.URL, issue.LastError)
+					}
+				}
 			}
 		})
 	}
