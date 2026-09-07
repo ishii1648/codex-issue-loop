@@ -42,6 +42,9 @@ func (a CommandAnalyzer) Analyze(parent context.Context, bundle EvidenceBundle) 
 	command.Stdout = stdout
 	command.Stderr = stderr
 	if err := command.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return AIAnalysis{}, analysisFailure("canceled", fmt.Errorf("AI analyzer canceled: %w", ctx.Err()))
+		}
 		if ctx.Err() != nil {
 			return AIAnalysis{}, fmt.Errorf("AI analyzer timeout: %w", ctx.Err())
 		}
