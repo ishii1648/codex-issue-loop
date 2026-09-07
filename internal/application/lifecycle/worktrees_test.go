@@ -29,13 +29,54 @@ func (f fakeRemote) Inspect(_ context.Context, _ config.Config, number int, _ st
 	return result, nil
 }
 
+func TestMaxAgeForStatusRetentionPolicy(t *testing.T) {
+	defaults := config.Defaults().Worktrees
+	overrides := defaults
+	overrides.CompletedMaxAge = config.Duration{Duration: 48 * time.Hour}
+	overrides.FailedMaxAge = config.Duration{Duration: 72 * time.Hour}
+	overrides.NeedsInputMaxAge = config.Duration{Duration: 24 * time.Hour}
+	overrides.BlockedMaxAge = config.Duration{Duration: 24 * time.Hour}
+	for _, policy := range []struct {
+		name      string
+		worktrees config.Worktrees
+		completed time.Duration
+		failed    time.Duration
+	}{
+		{"defaults", defaults, 7 * 24 * time.Hour, 30 * 24 * time.Hour},
+		{"overrides", overrides, 48 * time.Hour, 72 * time.Hour},
+	} {
+		t.Run(policy.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				status issuedomain.Status
+				age    time.Duration
+				reason string
+			}{
+				{issuedomain.StatusCompleted, policy.completed, ""},
+				{issuedomain.StatusFailed, policy.failed, ""},
+				{issuedomain.StatusNeedsInput, 0, "status_retained_indefinitely"},
+				{issuedomain.StatusResumePending, 0, "status_retained_indefinitely"},
+				{issuedomain.StatusBlocked, 0, "status_retained_indefinitely"},
+			} {
+				t.Run(tc.status.String(), func(t *testing.T) {
+					age, reason := maxAgeForStatus(policy.worktrees, tc.status)
+					if age != tc.age || reason != tc.reason {
+						t.Fatalf("got (%s, %q), want (%s, %q)", age, reason, tc.age, tc.reason)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	ctx := context.Background()
 	cfg, stateRoot := lifecycleRepository(t)
+	cfg.Worktrees.NeedsInputMaxAge = config.Duration{Duration: 24 * time.Hour}
+	cfg.Worktrees.BlockedMaxAge = config.Duration{Duration: 24 * time.Hour}
 	worktrees := worktree.Manager{StateRoot: stateRoot, GitPath: "git"}
 	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
 	issues := map[string]*state.Issue{}
-	for number, status := range map[int]string{1: "completed", 2: "completed", 3: "failed", 4: "completed", 5: "needs_input", 6: "resume_pending", 7: "canceled"} {
+	for number, status := range map[int]string{1: "completed", 2: "completed", 3: "failed", 4: "completed", 5: "needs_input", 6: "resume_pending", 7: "canceled", 8: "blocked", 9: "completed"} {
 		result, err := worktrees.Ensure(ctx, cfg, "repo-id", number, fmt.Sprintf("Issue %d", number), "")
 		if err != nil {
 			t.Fatalf("ensure #%d: %v", number, err)
@@ -70,7 +111,8 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	}
 	snapshot, err := store.Update("fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
 		snapshot.Issues = issues
-		snapshot.PendingRequests["req_5"] = &state.Request{ID: "req_5", IssueNumber: 5, Status: issuedomain.RequestStatusPending}
+		snapshot.PendingRequests["req_6"] = &state.Request{ID: "req_6", IssueNumber: 6, Status: issuedomain.RequestStatusAnswered, Answer: "continue"}
+		snapshot.PendingRequests["req_9"] = &state.Request{ID: "req_9", IssueNumber: 9, Status: issuedomain.RequestStatusPending}
 		return nil
 	})
 	if err != nil {
@@ -92,6 +134,8 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	assertPlan(t, preview, 5, false, "status_retained_indefinitely")
 	assertPlan(t, preview, 6, false, "status_retained_indefinitely")
 	assertPlan(t, preview, 7, false, "status_retained_indefinitely")
+	assertPlan(t, preview, 8, false, "status_retained_indefinitely")
+	assertPlan(t, preview, 9, false, "unanswered_request")
 	if preview.Applied {
 		t.Fatal("preview unexpectedly applied")
 	}
@@ -109,7 +153,7 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	if _, err := os.Stat(issues["1"].Worktree); !os.IsNotExist(err) {
 		t.Fatalf("eligible worktree remains: %v", err)
 	}
-	for _, number := range []string{"2", "3", "4", "5"} {
+	for _, number := range []string{"2", "3", "4", "5", "6", "7", "8", "9"} {
 		if _, err := os.Stat(issues[number].Worktree); err != nil {
 			t.Fatalf("unsafe worktree #%s removed: %v", number, err)
 		}
@@ -120,6 +164,12 @@ func TestCleanupRetainsUnsafeWorktreesAndAuditsSafeRemoval(t *testing.T) {
 	}
 	if updated.Issues["1"].Worktree != "" || updated.Issues["1"].Branch == "" {
 		t.Fatalf("cleanup did not preserve branch recovery: %+v", updated.Issues["1"])
+	}
+	for _, number := range []string{"5", "6", "8"} {
+		issue := updated.Issues[number]
+		if issue.Status != issues[number].Status || issue.Worktree != issues[number].Worktree || issue.Workspace == nil || issue.Workspace.Path != issue.Worktree {
+			t.Fatalf("retained Issue #%s changed after cleanup: %+v", number, issue)
+		}
 	}
 	events, err := os.ReadFile(store.EventsPath())
 	if err != nil {

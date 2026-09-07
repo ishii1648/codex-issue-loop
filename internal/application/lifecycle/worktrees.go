@@ -269,10 +269,8 @@ func maxAgeForStatus(policy config.Worktrees, status issuedomain.Status) (time.D
 		age = policy.CompletedMaxAge.Duration
 	case issuedomain.WorktreeRetainFailed:
 		age = policy.FailedMaxAge.Duration
-	case issuedomain.WorktreeRetainBlocked:
-		age = policy.BlockedMaxAge.Duration
-	case issuedomain.WorktreeRetainAttention:
-		age = policy.NeedsInputMaxAge.Duration
+	case issuedomain.WorktreeRetainBlocked, issuedomain.WorktreeRetainAttention:
+		return 0, "status_retained_indefinitely"
 	case issuedomain.WorktreeRetainIndefinitely:
 		if status.Terminal() {
 			return 0, "status_retained_indefinitely"
