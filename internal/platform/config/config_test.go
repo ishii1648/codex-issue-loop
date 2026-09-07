@@ -114,6 +114,79 @@ func TestLoadPercentJitterForExpandedConfigCompatibility(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsMultipleDocumentsAndInvalidJitter(t *testing.T) {
+	for _, test := range []struct{ name, fragment, want string }{
+		{"second document", "---\ngithub:\n  repo: other/repo\n", "must contain one YAML document"},
+		{"empty second document", "---\n", "must contain one YAML document"},
+		{"jitter without percent", "watch:\n  reconcile_jitter: '25'\n", "reconcile_jitter must be a percentage"},
+		{"jitter boolean", "watch:\n  reconcile_jitter: true\n", "invalid reconcile_jitter type"},
+		{"jitter sequence", "watch:\n  reconcile_jitter: [25]\n", "invalid reconcile_jitter type"},
+		{"jitter mapping", "watch:\n  reconcile_jitter: {percent: 25}\n", "invalid reconcile_jitter type"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\n"+test.fragment)
+			if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidRepositoryAndTrustedAuthors(t *testing.T) {
+	for _, test := range []struct{ name, fragment, want string }{
+		{"missing owner", "repo: /repo", "github.repo must use owner/name format"},
+		{"missing repository", "repo: owner/", "github.repo must use owner/name format"},
+		{"missing separator", "repo: owner", "github.repo must use owner/name format"},
+		{"extra separator", "repo: owner/repo/extra", "github.repo must use owner/name format"},
+		{"uppercase login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: [Alice]", "allow_logins must contain lowercase exact logins"},
+		{"leading whitespace login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: [' alice']", "allow_logins must contain lowercase exact logins"},
+		{"trailing whitespace login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: ['alice ']", "allow_logins must contain lowercase exact logins"},
+		{"empty login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: ['']", "allow_logins must contain lowercase exact logins"},
+		{"duplicate login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: [alice, alice]", "allow_logins must not contain duplicate login"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := writeConfig(t, "version: 4\ngithub:\n  "+test.fragment+"\n")
+			if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidWebhookSecretSources(t *testing.T) {
+	for _, field := range []string{"secret_source", "previous_secret_source"} {
+		t.Run(field, func(t *testing.T) {
+			dir := t.TempDir()
+			repoPath, err := CanonicalRepoPath(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, test := range []struct{ name, source, want string }{
+				{"repository directory", fmt.Sprintf("file: %q", repoPath), ".file must be outside the repository"},
+				{"repository file", fmt.Sprintf("file: %q", filepath.Join(repoPath, "webhook-secret")), ".file must be outside the repository"},
+				{"env and file", fmt.Sprintf("env: AGENT_LOOP_TEST_SECRET\n    file: %q", repoPath), " must set exactly one of env or file"},
+				{"relative file", "file: relative-secret", ".file must be absolute"},
+				{"invalid env", "env: BAD=NAME", ".env is not a valid environment variable name"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					body := fmt.Sprintf("version: %d\ngithub:\n  repo: owner/repo\n  repository_id: 123\nwebhook:\n  mode: webhook\n  public_url_identifier: hooks.example/agent-loop\n  installation_ids: [456]\n", CurrentVersion)
+					if field == "previous_secret_source" {
+						body += "  secret_source:\n    env: AGENT_LOOP_TEST_SECRET\n"
+					}
+					body += "  " + field + ":\n    " + test.source + "\n"
+					if err := os.WriteFile(filepath.Join(dir, FileName), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					want := "webhook." + field + test.want
+					if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("Load() error = %v, want substring %q", err, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestExampleConfigLoads(t *testing.T) {
 	repositoryRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	dir := t.TempDir()
