@@ -128,7 +128,7 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 
 	ctx, cancel := context.WithTimeout(parent, cfg.Worker.Timeout.Duration)
 	defer cancel()
-	client, transport := newOpenCodeClient(30*time.Second, serverUsername, serverPassword)
+	client, transport := newOpenCodeClient(0, serverUsername, serverPassword)
 	defer transport.CloseIdleConnections()
 	startupCtx, startupCancel := context.WithTimeout(ctx, 10*time.Second)
 	port, err := listening.Wait(startupCtx)
