@@ -331,7 +331,7 @@ func ValidateBundle(dataDir string, corpus Corpus) error {
 		"incident-decision.schema.json",
 	}
 	for _, name := range schemas {
-		path := filepath.Join("schemas", name)
+		path := filepath.Join(dataDir, "..", "..", "schemas", name)
 		var schema map[string]any
 		if err := decodeStrict(path, &schema); err != nil {
 			return err
