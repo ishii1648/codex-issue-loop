@@ -2454,3 +2454,131 @@ func TestSchedulerRetryTimerDispatchesAtRetryAfter(t *testing.T) {
 	}
 	t.Fatal("worker dispatch was not preceded by retry timer wake")
 }
+
+func TestFaultWebhookMailboxDefersUnadmittedReadsWhileWorkerSlotIsFull(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	client := &webhookFakeGitHub{fakeGitHub: base}
+	loop.GitHub = client
+	if err := webhook.EnqueueMailbox(loop.Store.Dir, webhook.Delivery{
+		Version: webhook.InboxVersion, DeliveryID: "waiting-candidate", Event: "issues", Action: "labeled",
+		RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: loop.now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &scheduler{loop: loop, active: map[int]activeJob{2: {slot: 0}}}
+	for range 3 {
+		candidates, ack, err := s.processMailbox(context.Background(), snapshot)
+		if err != nil || len(candidates) != 0 || len(ack) != 0 || client.restGets != 0 {
+			t.Fatalf("busy worker: candidates=%d ack=%d reads=%d err=%v", len(candidates), len(ack), client.restGets, err)
+		}
+	}
+	delete(s.active, 2)
+	candidates, ack, err := s.processMailbox(context.Background(), snapshot)
+	if err != nil || len(candidates) != 1 || len(ack) != 0 || client.restGets != 1 {
+		t.Fatalf("free worker: candidates=%d ack=%d reads=%d err=%v", len(candidates), len(ack), client.restGets, err)
+	}
+}
+
+func TestFaultRateLimitsDoNotConsumeTransientFailureBudget(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	s := &scheduler{loop: loop, consecutiveFailures: 2}
+	for range 7 {
+		if err := s.handleCycleError(&gh.RateLimitError{Resource: "graphql", ResetAt: loop.now().Add(time.Minute), Err: errors.New("rate limit")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil || s.consecutiveFailures != 2 || snapshot.Supervisor.ConsecutiveFailures != 2 {
+		t.Fatalf("memory=%d durable=%d err=%v", s.consecutiveFailures, snapshot.Supervisor.ConsecutiveFailures, err)
+	}
+}
+
+func TestFaultTransientFailureThresholdWaitsWithoutCancelingWorker(t *testing.T) {
+	loop, _ := testLoop(t, worker.Result{})
+	loop.Random = fixedRandom(0.5)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &scheduler{loop: loop, consecutiveFailures: 4, active: map[int]activeJob{1: {slot: 0, cancel: cancel}}}
+	for range 3 {
+		if err := s.handleCycleError(failure.Wrap(failure.Transient, "read webhook Issue", errors.New("503"))); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := loop.Store.Load()
+		if err != nil || snapshot.Supervisor.State != state.SupervisorStateRetryWait || snapshot.Supervisor.RetryAfter == nil {
+			t.Fatalf("supervisor=%+v err=%v", snapshot.Supervisor, err)
+		}
+		if delay := time.Until(*snapshot.Supervisor.RetryAfter); delay < 4*time.Minute || delay > 5*time.Minute {
+			t.Fatalf("threshold delay=%v", delay)
+		}
+		if ctx.Err() != nil || len(s.active) != 1 {
+			t.Fatal("transient failure canceled active worker")
+		}
+	}
+}
+
+func TestFaultWebhookSuccessResetsSupervisorFailuresWithProductionGate(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+	base.issue.Labels = nil
+	if _, err := loop.Store.Update("past_transient_failures", 0, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Supervisor.ConsecutiveFailures = 4
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := webhook.EnqueueMailbox(loop.Store.Dir, webhook.Delivery{
+		Version: webhook.InboxVersion, DeliveryID: "ineligible-candidate", Event: "issues", Action: "labeled",
+		RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: loop.now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan struct{}, 4)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	defer func() { cancel(); <-done }()
+	waitForTimers(t, created, 1)
+	snapshot, err := loop.Store.Load()
+	if err != nil || snapshot.Supervisor.ConsecutiveFailures != 0 {
+		t.Fatalf("supervisor=%+v err=%v", snapshot.Supervisor, err)
+	}
+}
+
+func TestFaultGitHubRetryDeadlineGuardsRunningJobs(t *testing.T) {
+	loop, client := testLoop(t, worker.Result{})
+	now := time.Date(2026, 9, 7, 14, 26, 0, 0, time.UTC)
+	loop.Clock = fixedClock{value: now}
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+	loop.enableRateLimitGate()
+	guarded := loop.GitHub.(*rateLimitedGitHub)
+	s := &scheduler{loop: loop, consecutiveFailures: 4}
+	if err := s.handleCycleError(failure.Wrap(failure.Transient, "GitHub", errors.New("503"))); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		_, err := loop.GitHub.Inspect(context.Background(), loop.Config, 1, "")
+		if !errors.Is(err, errGitHubRetryWait) {
+			t.Fatalf("request during wait: %v", err)
+		}
+		if err := s.handleCycleError(err); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if client.inspectCalls != 0 || s.consecutiveFailures != 5 {
+		t.Fatalf("reads=%d failures=%d", client.inspectCalls, s.consecutiveFailures)
+	}
+	if err := guarded.MarkRunning(context.Background(), loop.Config, 1); !errors.Is(err, errGitHubRetryWait) {
+		t.Fatalf("write during wait: %v", err)
+	}
+	loop.Clock = fixedClock{value: now.Add(5 * time.Minute)}
+	if _, err := loop.GitHub.Inspect(context.Background(), loop.Config, 1, ""); err != nil || client.inspectCalls != 1 {
+		t.Fatalf("request after wait: reads=%d err=%v", client.inspectCalls, err)
+	}
+}

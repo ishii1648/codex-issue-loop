@@ -237,7 +237,6 @@ func (l *Loop) reconcileStartupWithRateLimit(ctx context.Context, snapshot state
 		if err != nil {
 			return failure.Wrap(failure.Supervisor, "persist startup GitHub rate-limit cooldown", err)
 		}
-		consecutive++
 		if err := l.recordSupervisorRateLimit(reconcileErr, consecutive, cooldown); err != nil {
 			return failure.Wrap(failure.Supervisor, "persist startup supervisor rate-limit cooldown", err)
 		}
@@ -779,6 +778,7 @@ func (l *Loop) recordSupervisorRetry(cause error, kind failure.Kind, consecutive
 		s.Supervisor.Message = cause.Error()
 		s.Supervisor.FailureKind = string(kind)
 		s.Supervisor.ConsecutiveFailures = consecutive
+		s.Supervisor.RateLimit = nil
 		s.Supervisor.RetryAfter = &retryAt
 		return nil
 	})

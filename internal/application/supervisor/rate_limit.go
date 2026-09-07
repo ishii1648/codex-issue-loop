@@ -2,12 +2,14 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
 )
 
@@ -17,6 +19,8 @@ const recoveredRateLimitCooldown = 5 * time.Second
 type primaryRateLimitStatusObserver interface {
 	PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool)
 }
+
+var errGitHubRetryWait = errors.New("GitHub requests are paused until the supervisor retry deadline")
 
 type rateLimitedGitHub struct {
 	loop     *Loop
@@ -31,6 +35,14 @@ func (c *rateLimitedGitHub) ReconcileIssue(ctx context.Context, cfg config.Confi
 }
 
 func (c *rateLimitedGitHub) before() error {
+	snapshot, err := c.loop.Store.Load()
+	if err != nil {
+		return failure.Wrap(failure.Supervisor, "read GitHub retry deadline", err)
+	}
+	if snapshot.Supervisor.RateLimit == nil && snapshot.Supervisor.FailureKind == string(failure.Transient) && snapshot.Supervisor.RetryAfter != nil && snapshot.Supervisor.RetryAfter.After(c.loop.now()) {
+		return errGitHubRetryWait
+	}
+
 	cooldown, active, err := c.loop.RateLimits.Suppress(c.loop.now())
 	if err != nil {
 		return fmt.Errorf("read shared GitHub rate-limit cooldown: %w", err)
