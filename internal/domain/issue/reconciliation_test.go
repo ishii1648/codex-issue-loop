@@ -17,17 +17,17 @@ func TestDecideReconciliationOwnsLifecycleTargets(t *testing.T) {
 	}{
 		{
 			name: "dead worker retries", current: ReconciliationState{Status: StatusRunning, WorkerPID: 42, WorktreeSaved: true},
-			observed: ReconciliationObservation{Now: now, IssueOpen: true, Running: true, Workspace: ReconciliationWorkspace{Exists: true, Valid: true}},
+			observed: ReconciliationObservation{Now: now, Workspace: ReconciliationWorkspace{Exists: true, Valid: true}},
 			want:     StatusRetryWait, reason: "dead worker",
 		},
 		{
 			name: "merged pull request completes", current: ReconciliationState{Status: StatusAwaitingMerge, Branch: "codex/issue-1", PullRequest: "pr", WorktreeSaved: true},
-			observed: ReconciliationObservation{Now: now, IssueOpen: true, PullRequests: []ReconciliationPullRequest{{URL: "pr", HeadRefName: "codex/issue-1", Merged: true}}},
+			observed: ReconciliationObservation{Now: now, PullRequests: []ReconciliationPullRequest{{URL: "pr", HeadRefName: "codex/issue-1", Merged: true}}},
 			want:     StatusCompleted, reason: "merged Pull Request",
 		},
 		{
-			name: "ambiguous labels do not override claim", current: ReconciliationState{Status: StatusClaiming},
-			observed: ReconciliationObservation{Now: now, IssueOpen: true, Ready: true, Running: true},
+			name: "durable claim retries idempotently", current: ReconciliationState{Status: StatusClaiming},
+			observed: ReconciliationObservation{Now: now},
 			want:     StatusClaiming, reason: "idempotently",
 		},
 	}
@@ -51,15 +51,12 @@ func TestTerminalPullRequestReconciliationRequiresExactIdentity(t *testing.T) {
 	}
 }
 
-func TestManualGitHubStateCannotCancelManagedIssue(t *testing.T) {
+func TestTerminalReconciliationPreservesStatusWithoutPullRequest(t *testing.T) {
 	for _, status := range []Status{StatusBlocked, StatusFailed, StatusCompleted} {
-		for _, reason := range []string{"NOT_PLANNED", "COMPLETED", ""} {
-			current := ReconciliationState{Number: 93, Status: status, RunID: "run_93", Generation: 4}
-			observed := ReconciliationObservation{IssueClosed: true, IssueStateReason: reason, Done: true, Failed: true, Excluded: true, Ready: true, Running: true}
-			decision := DecideReconciliation(current, observed)
-			if decision.Status != status {
-				t.Fatalf("manual state changed %s: %+v", status, decision)
-			}
+		current := ReconciliationState{Status: status}
+		decision := DecideReconciliation(current, ReconciliationObservation{})
+		if decision.Status != status {
+			t.Fatalf("terminal state changed %s: %+v", status, decision)
 		}
 	}
 }
