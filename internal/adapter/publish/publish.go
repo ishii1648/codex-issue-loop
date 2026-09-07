@@ -1,6 +1,7 @@
 package publish
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -506,9 +507,12 @@ func (m Manager) openPullRequest(ctx context.Context, cfg config.Config, issue g
 }
 
 func (m Manager) run(ctx context.Context, path string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, path, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(redact.StringWithSecrets(string(out), m.Secrets)))
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(redact.StringWithSecrets(string(out)+stderr.String(), m.Secrets)))
 	}
 	return string(out), nil
 }

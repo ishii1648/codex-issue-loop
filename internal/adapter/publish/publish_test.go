@@ -50,6 +50,7 @@ func TestPublishCommitsPushesAndCreatesDraftPullRequestIdempotently(t *testing.T
 	marker := filepath.Join(root, "pr-created")
 	fakeGH := filepath.Join(root, "gh")
 	script := `#!/bin/sh
+printf '%s\n' '! Warning: test configuration' >&2
 case "$1 $2" in
   "pr list")
     if test -f "$PUBLISH_TEST_MARKER"; then
@@ -101,6 +102,38 @@ esac
 	}
 	if second != first {
 		t.Fatalf("idempotent publish result=%+v, want %+v", second, first)
+	}
+}
+
+func TestRunSeparatesStdoutAndStderr(t *testing.T) {
+	for _, exitCode := range []string{"0", "42"} {
+		t.Run(exitCode, func(t *testing.T) {
+			command := filepath.Join(t.TempDir(), "command")
+			script := "#!/bin/sh\nprintf 'path with space\\000stdout-test-secret\\n'\nprintf 'warning: stderr-test-secret\\n' >&2\nexit " + exitCode + "\n"
+			if err := os.WriteFile(command, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			manager := Manager{Secrets: []string{"stdout-test-secret", "stderr-test-secret"}}
+			out, err := manager.run(context.Background(), command)
+			if exitCode == "0" {
+				if err != nil || out != "path with space\x00stdout-test-secret\n" {
+					t.Fatalf("unexpected command output: %q, err=%v", out, err)
+				}
+				return
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 42 || out != "" {
+				t.Fatalf("unexpected command failure: output=%q, err=%v", out, err)
+			}
+			if !strings.Contains(err.Error(), "path with space") || !strings.Contains(err.Error(), "warning:") {
+				t.Fatalf("command diagnostics missing: %v", err)
+			}
+			for _, secret := range manager.Secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatal("command error contains an unredacted secret")
+				}
+			}
+		})
 	}
 }
 
