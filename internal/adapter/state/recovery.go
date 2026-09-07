@@ -176,6 +176,7 @@ func (s Store) loadSnapshotUnlocked() (Snapshot, bool, error) {
 		return Snapshot{}, false, fmt.Errorf("state repo_id %q does not match %q", snapshot.RepoID, s.RepoID)
 	}
 	normalizeSnapshot(&snapshot)
+	NormalizeLegacyWorkerLaunches(&snapshot)
 	return snapshot, true, nil
 }
 
@@ -207,7 +208,6 @@ func normalizeSnapshot(snapshot *Snapshot) {
 			issue.SessionID = issue.Session.ID
 		}
 	}
-	NormalizeLegacyWorkerLaunches(snapshot)
 }
 
 func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {
@@ -267,6 +267,7 @@ func (s Store) loadTransactionUnlocked() (transaction, bool, error) {
 		return transaction{}, false, fmt.Errorf("decode state transaction: %w", err)
 	}
 	normalizeSnapshot(&txn.Snapshot)
+	NormalizeLegacyWorkerLaunches(&txn.Snapshot)
 	return txn, true, nil
 }
 

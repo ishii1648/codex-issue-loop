@@ -2232,7 +2232,7 @@ func TestAnsweredNeedsInputClaimWaitsThenReacquiresOnce(t *testing.T) {
 			Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
 			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_1", CreatedAt: now, RunID: "run_1", Generation: 1, Stage: issuedomain.ContinuationStageResume},
 		}
-		snapshot.Issues["2"] = &state.Issue{Number: 2, Title: "active", Status: issuedomain.StatusRunning, RunID: "run_2", Generation: 1}
+		snapshot.Issues["2"] = &state.Issue{Number: 2, Title: "active", Status: issuedomain.StatusRunning, RunID: "run_2", Generation: 1, WorkerPID: 123, WorkerPGID: 123}
 		snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: 2, RunID: "run_2", Generation: 1, StartedAt: now}
 		return nil
 	})
@@ -2835,7 +2835,7 @@ func TestIssueResolutionSyncRevalidatesContinuationAuthority(t *testing.T) {
 	now := time.Now().UTC()
 	runID := "run_resolution_sync"
 	issue := state.Issue{
-		Number: 1, Title: "Test", Status: issuedomain.StatusRunning, RunID: runID, Generation: 2,
+		Number: 1, Title: "Test", Status: issuedomain.StatusLaunching, LaunchSource: issuedomain.StatusRetryWait, RunID: runID, Generation: 2,
 		Branch: "codex/issue-1-test", Worktree: loop.Config.RepoPath,
 		Continuation: &state.ContinuationCheckpoint{
 			ID: "checkpoint_resolution", CreatedAt: now.Add(-time.Minute), RunID: runID, Generation: 1, Stage: issuedomain.ContinuationStageResume,
@@ -2911,6 +2911,7 @@ func TestFailedCheckpointRetainsObservedLocalHead(t *testing.T) {
 	snapshot, err := loop.Store.Update("fixture", 1, "run_repair", nil, func(s *state.Snapshot) error {
 		i := s.Issues["1"]
 		i.Status = issuedomain.StatusRunning
+		i.WorkerPID, i.WorkerPGID = 123, 123
 		i.Branch = "codex/issue-1-repair"
 		i.Worktree = loop.Config.RepoPath
 		i.HeadSHA = "remote-head"

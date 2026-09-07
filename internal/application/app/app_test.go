@@ -1365,7 +1365,7 @@ func TestAnswerDurablyWaitsWithoutStealingActiveExecution(t *testing.T) {
 		}, 0)
 		competingOwner = state.ExecutionIdentity{RunID: "run_5", Generation: 1}
 		snapshot.Issues["5"] = &state.Issue{
-			Number: 5, RunID: "run_5", Status: issuedomain.StatusRunning, Generation: 1,
+			Number: 5, RunID: "run_5", Status: issuedomain.StatusRunning, Generation: 1, WorkerPID: 123, WorkerPGID: 123,
 			Worktree: "/tmp/issue-5", Branch: "codex/issue-5",
 			Workspace: &state.WorkerWorkspace{Path: "/tmp/issue-5", Branch: "codex/issue-5", RepoID: snapshot.RepoID,
 				Repository: "owner/repo", GitCommonDir: filepath.Join(snapshot.RepoPath, ".git"), MainCheckout: snapshot.RepoPath, CapturedAt: now},

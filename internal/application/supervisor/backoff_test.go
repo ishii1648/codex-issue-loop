@@ -62,6 +62,7 @@ func TestScheduleRetryPersistsClassificationReasonAndTime(t *testing.T) {
 	_, err := loop.Store.Update("running", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["1"]
 		item.Status = issuedomain.StatusRunning
+		item.WorkerPID, item.WorkerPGID = 123, 123
 		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
@@ -151,6 +152,7 @@ func TestRetryLimitBecomesIssueFailure(t *testing.T) {
 	_, err := loop.Store.Update("running", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["1"]
 		item.Status = issuedomain.StatusRunning
+		item.WorkerPID, item.WorkerPGID = 123, 123
 		item.Attempts = loop.Config.Queue.MaxAttempts
 		setSupervisorTestWorkspace(snapshot, item)
 		return nil

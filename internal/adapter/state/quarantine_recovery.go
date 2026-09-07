@@ -546,6 +546,7 @@ func (s Store) loadSnapshotForSemanticRecoveryUnlocked() (Snapshot, bool, error)
 		return Snapshot{}, false, errors.New("semantic recovery backup repository identity does not match")
 	}
 	normalizeSnapshot(&snapshot)
+	NormalizeLegacyWorkerLaunches(&snapshot)
 	return snapshot, true, nil
 }
 

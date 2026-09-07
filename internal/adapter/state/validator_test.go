@@ -2,6 +2,8 @@ package state
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -236,5 +238,48 @@ func TestStoreUpdateQuarantinesInvalidIssueAndAllowsFollowingIssue(t *testing.T)
 	}
 	if snapshot.Issues["2"] == nil || snapshot.QuarantinedIssues["1"] == nil || snapshot.Supervisor.State == SupervisorStateBlocked {
 		t.Fatalf("following Issue did not progress independently: %+v", snapshot)
+	}
+}
+
+func TestStoreUpdateRejectsRunningWithoutProcessIdentity(t *testing.T) {
+	for _, issueNumber := range []int{0, 1} {
+		t.Run(fmt.Sprint(issueNumber), func(t *testing.T) {
+			store := newStore(t)
+			before, identity, err := store.StartExecution(ExecutionStart{IssueNumber: 1, RunID: "run_1", StartedAt: time.Now().UTC()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = store.Update("invalid_running", issueNumber, identity.RunID, nil, func(snapshot *Snapshot) error {
+				snapshot.Issues["1"].Workspace = legacyAnsweredLaunchFixture().Issues["1"].Workspace
+				snapshot.Issues["1"].Worktree = snapshot.Issues["1"].Workspace.Path
+				snapshot.Issues["1"].Branch = snapshot.Issues["1"].Workspace.Branch
+				snapshot.Issues["1"].Status = issuedomain.StatusRunning
+				snapshot.Issues["1"].LaunchSource = issuedomain.StatusUnset
+				return nil
+			})
+			if issueNumber == 0 {
+				if err == nil || !strings.Contains(err.Error(), "running worker process identity is missing") {
+					t.Fatalf("update error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			after, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if issueNumber == 0 {
+				if !reflect.DeepEqual(before, after) {
+					t.Fatal("rejected update changed durable state")
+				}
+			} else {
+				record := after.QuarantinedIssues["1"]
+				if after.Issues["1"] != nil || after.ActiveExecution != nil || record == nil ||
+					record.RejectedStatus != issuedomain.StatusRunning || record.ReasonCode != "issue_invariant_violation" ||
+					!strings.Contains(record.Reason, "running worker process identity is missing") {
+					t.Fatalf("invalid running Issue was not quarantined: %+v", after)
+				}
+			}
+		})
 	}
 }

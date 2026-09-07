@@ -5,6 +5,7 @@ import (
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 )
 
 func legacyAnsweredLaunchFixture() Snapshot {
@@ -113,6 +114,47 @@ func TestValidatorRejectsInconsistentAnsweredLaunchEvidence(t *testing.T) {
 			test.mutate(&snapshot)
 			if err := snapshot.Validate(); err == nil {
 				t.Fatal("inconsistent answered continuation evidence was accepted")
+			}
+		})
+	}
+}
+
+func TestReadBoundariesNormalizeLegacyWorkerLaunches(t *testing.T) {
+	readers := map[string]func(Store) (Snapshot, error){
+		"Load":                  Store.Load,
+		"ReadCanonicalSnapshot": Store.ReadCanonicalSnapshot,
+		"ReadRecoveryInputs": func(store Store) (Snapshot, error) {
+			snapshot, _, err := store.ReadRecoveryInputs()
+			return snapshot, err
+		},
+		"loadSnapshotForSemanticRecoveryUnlocked": func(store Store) (Snapshot, error) {
+			snapshot, _, err := store.loadSnapshotForSemanticRecoveryUnlocked()
+			return snapshot, err
+		},
+		"loadTransactionUnlocked": func(store Store) (Snapshot, error) {
+			txn, _, err := store.loadTransactionUnlocked()
+			return txn.Snapshot, err
+		},
+	}
+	for name, read := range readers {
+		t.Run(name, func(t *testing.T) {
+			store := newStore(t)
+			legacy := legacyAnsweredLaunchFixture()
+			if err := fsutil.WriteJSON(store.StatePath(), legacy, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if name == "loadTransactionUnlocked" {
+				if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: legacy}, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshot, err := read(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := snapshot.Issues["1"]
+			if item == nil || item.Status != issuedomain.StatusLaunching || item.LaunchSource != issuedomain.StatusResumePending || snapshot.ActiveExecution == nil {
+				t.Fatalf("legacy launch was not restored: %+v", snapshot)
 			}
 		})
 	}

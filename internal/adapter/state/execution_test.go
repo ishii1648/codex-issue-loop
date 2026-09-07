@@ -78,6 +78,7 @@ func TestSingleExecutionStartCaptureResumeAndTransfer(t *testing.T) {
 			return resumeErr
 		}
 		snapshot.Issues["1"].Status = issuedomain.StatusRunning
+		snapshot.Issues["1"].WorkerPID, snapshot.Issues["1"].WorkerPGID = 123, 123
 		first = identity
 		return nil
 	})
