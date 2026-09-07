@@ -256,6 +256,45 @@ func TestCompatibilityBlocksMajorSchemaDowngradeAndRetag(t *testing.T) {
 	}
 }
 
+func TestReconcileVerificationFailurePreservesPhase(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		runner *releaseRunner
+	}{
+		{name: "checksum", runner: &releaseRunner{badChecksum: true}},
+		{name: "attestation", runner: &releaseRunner{attestationFailure: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := fsutil.WriteJSON(filepath.Join(root, "install.json"), map[string]any{"version": "v1.2.2", "commit": strings.Repeat("a", 40), "schema_version": 4, "semantic_contract_version": 1}, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(root, "delivery.yaml")
+			if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
+				t.Fatal(err)
+			}
+			controller := Controller{Layout: layout.Layout{Root: root}, ConfigPath: configPath, GH: "gh", Runner: test.runner}
+			report, err := controller.Reconcile(context.Background(), true)
+			if err == nil || !strings.Contains(err.Error(), test.name) {
+				t.Fatalf("report=%+v err=%v", report, err)
+			}
+			if report.Phase != PhaseDownloaded || report.Result != "blocked" || report.Reason != err.Error() {
+				t.Fatalf("unexpected verification failure report: %+v", report)
+			}
+			tx, loadErr := LoadTransaction(RuntimePaths(root).Transaction)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if tx.Phase != report.Phase || tx.LastResult != report.Result || tx.Reason != report.Reason {
+				t.Fatalf("persisted transaction=%+v report=%+v", tx, report)
+			}
+			if test.runner.binaryRuns != 0 || test.runner.updates != 0 {
+				t.Fatalf("unverified candidate executed: %+v", test.runner)
+			}
+		})
+	}
+}
+
 func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 	for _, test := range []struct {
 		name            string
