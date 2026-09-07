@@ -21,6 +21,24 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
 )
 
+func TestIssueArgumentErrorsUseAppErr(t *testing.T) {
+	for _, command := range []string{"ask", "plan", "resolve"} {
+		for _, args := range [][]string{{"--bogus"}, {"--issue", "invalid"}, {"--issue"}, {}, {"--issue", "0"}, {"--issue", "-1"}, {"--issue", "1", "extra"}} {
+			t.Run(command+"/"+strings.Join(args, " "), func(t *testing.T) {
+				testEnvironment(t)
+				var out, stderr bytes.Buffer
+				code := (App{Out: &out, Err: &stderr}).Run(context.Background(), append([]string{"issue", command}, args...))
+				if code != 2 || stderr.Len() == 0 || out.Len() != 0 {
+					t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), stderr.String())
+				}
+				if len(args) > 0 && (len(args) == 1 || args[1] == "invalid") && !strings.Contains(stderr.String(), "Usage of issue "+command+":") {
+					t.Fatalf("flag usage missing from App.Err: %q", stderr.String())
+				}
+			})
+		}
+	}
+}
+
 func TestIssuePlanIgnoresEventsAndCancelIsFencedAndIdempotent(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {

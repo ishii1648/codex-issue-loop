@@ -18,8 +18,9 @@ type issueResolveOptions struct {
 	jsonOut      bool
 }
 
-func parseIssueResolveArgs(args []string) (*issueResolveOptions, error) {
+func (a App) parseIssueResolveArgs(args []string) (*issueResolveOptions, error) {
 	fs := flag.NewFlagSet("issue resolve", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
 	repo := fs.String("repo", "", "repository path")
 	number := fs.Int("issue", 0, "Issue number")
 	actionText := fs.String("action", "", "resume, retry-stage, adopt-head, adopt-input, adopt-worktree, adopt-pr, or cancel")
