@@ -51,6 +51,11 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 	var later time.Time
 	laterEntry := false
 	exclusions := stringSet(append(append([]string{}, repo.TerminalLabels...), repo.ExcludeLabels...))
+	monitored := stringSet(repo.ReadyLabels)
+	monitored[strings.ToLower(repo.RunningLabel)] = true
+	for label := range exclusions {
+		monitored[label] = true
+	}
 	for i, event := range events {
 		if i > 0 && event.ID == events[i-1].ID {
 			continue
@@ -61,6 +66,9 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 		later = event.CreatedAt
 		after := phase()
 		label := eventLabel(event)
+		if (event.Event == "labeled" || event.Event == "unlabeled") && !monitored[label] {
+			continue
+		}
 		if event.Event == "closed" || event.Event == "reopened" || exclusions[label] {
 			laterEntry = false
 		}
