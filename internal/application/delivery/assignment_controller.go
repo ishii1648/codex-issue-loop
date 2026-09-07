@@ -908,6 +908,17 @@ func (c AssignmentController) waitForLegacyIdleAndStop(ctx context.Context, cfg 
 			if snapshotHasWorker(snapshot) {
 				return nil
 			}
+			for _, item := range snapshot.Issues {
+				if item == nil {
+					continue
+				}
+				// Legacy PID-free running snapshots are normalized to launching or
+				// quarantined; neither proves that a worker has stopped.
+				if item.Status == issuedomain.StatusRunning || item.Status == issuedomain.StatusLaunching ||
+					(item.Suspension != nil && item.Suspension.ReasonCode == "legacy_launch_authority") {
+					return nil
+				}
+			}
 			idle = true
 			requestCtx, cancelRequest := context.WithTimeout(ctx, 5*time.Second)
 			var err error
