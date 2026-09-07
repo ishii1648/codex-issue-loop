@@ -229,6 +229,61 @@ webhook:
 	}
 }
 
+func TestSecretSourceFileMustBeOutsideRepository(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(root, "repo")
+	outside := filepath.Join(root, "repo-other")
+	for _, dir := range []string{repo, outside} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "secret"), []byte("test-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insideLink := filepath.Join(root, "inside-link")
+	outsideLink := filepath.Join(root, "outside-link")
+	dirLink := filepath.Join(root, "dir-link")
+	for link, target := range map[string]string{
+		insideLink:  filepath.Join(repo, "secret"),
+		outsideLink: filepath.Join(outside, "secret"),
+		dirLink:     repo,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name             string
+		file             string
+		wantOutsideError bool
+	}{
+		{"repository itself", repo, true},
+		{"inside file", filepath.Join(repo, "secret"), true},
+		{"parent traversal", outside + string(filepath.Separator) + "../repo/secret", true},
+		{"missing inside file with traversal", outside + string(filepath.Separator) + "../repo/missing", true},
+		{"file symlink into repository", insideLink, true},
+		{"directory symlink into repository", filepath.Join(dirLink, "secret"), true},
+		{"outside file with shared prefix", filepath.Join(outside, "secret"), false},
+		{"outside symlink", outsideLink, false},
+		{"missing outside file", filepath.Join(outside, "missing"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (SecretSource{File: tc.file}).Validate(repo, "webhook.secret_source")
+			if tc.wantOutsideError {
+				if err == nil || err.Error() != "webhook.secret_source.file must be outside the repository" {
+					t.Fatalf("expected repository containment error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestLoadBuiltInGoFormatterOptIn(t *testing.T) {
 	dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\nformatters:\n  go:\n    enabled: true\n    timeout: 45s\n")
 	cfg, err := Load(dir)
