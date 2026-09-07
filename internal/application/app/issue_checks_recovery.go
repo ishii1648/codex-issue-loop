@@ -86,7 +86,7 @@ func (a App) resolveChecksRecovery(ctx context.Context, l layout.Layout, opts *i
 		return err
 	}
 	if !reflect.DeepEqual(p.quarantine, latest.quarantine) || !reflect.DeepEqual(p.report.Observations, latest.report.Observations) || !reflect.DeepEqual(p.report.Actions, latest.report.Actions) {
-		return fmt.Errorf("checks recovery evidence changed")
+		return exitError{4, fmt.Errorf("checks recovery evidence changed")}
 	}
 	updated, err := p.store.Update("issue_answered_checks_restored", opts.number, p.quarantine.RunID, map[string]any{"quarantine": p.quarantine, "observations": p.report.Observations}, func(s *state.Snapshot) error {
 		if s.StateRevision != latest.snapshot.StateRevision || !reflect.DeepEqual(s.QuarantinedIssues[strconv.Itoa(opts.number)], p.quarantine) {

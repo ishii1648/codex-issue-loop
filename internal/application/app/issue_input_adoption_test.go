@@ -3,8 +3,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -55,6 +57,35 @@ func TestAdoptInputVerifiesRealWorkspaceAndPreservesAnswer(t *testing.T) {
 			}
 			if scenario == "published" {
 				runIssueGit(t, f.worktree, "push", "origin", f.branch)
+			}
+			if scenario == "valid" {
+				a := App{}
+				planned, err := a.buildIssuePlan(context.Background(), f.l, f.repo, 459, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !actionEligibility(planned.report.Actions, issuedomain.ResolutionAdoptInput) {
+					t.Fatal("recovery must be eligible before workspace changes")
+				}
+				changedPath := filepath.Join(f.worktree, "changed-after-plan.txt")
+				if err := os.WriteFile(changedPath, []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				err = a.resolveInputAdoption(context.Background(), f.l, &issueResolveOptions{repo: f.repo, number: 459, action: issuedomain.ResolutionAdoptInput, expectedHead: f.head}, planned)
+				var ee exitError
+				if !errors.As(err, &ee) || ee.Code != 4 || ee.Error() != "input recovery evidence changed" {
+					t.Fatalf("changed evidence error=%v, want exit 4", err)
+				}
+				after, err := f.store.ReadCanonicalSnapshot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(planned.snapshot, after) {
+					t.Fatal("changed evidence mutated canonical state")
+				}
+				if err := os.Remove(changedPath); err != nil {
+					t.Fatal(err)
+				}
 			}
 			before, err := f.store.ReadCanonicalSnapshot()
 			if err != nil {

@@ -73,7 +73,7 @@ type issuePlanningContext struct {
 }
 
 func (a App) issuePlan(ctx context.Context, l layout.Layout, args []string) error {
-	repo, number, allowPaths, jsonOut, err := parseIssuePlanArgs(args)
+	repo, number, allowPaths, jsonOut, err := a.parseIssuePlanArgs(args)
 	if err != nil {
 		return err
 	}
@@ -84,8 +84,9 @@ func (a App) issuePlan(ctx context.Context, l layout.Layout, args []string) erro
 	return a.output(jsonOut, planned.report)
 }
 
-func parseIssuePlanArgs(args []string) (string, int, []string, bool, error) {
+func (a App) parseIssuePlanArgs(args []string) (string, int, []string, bool, error) {
 	fs := flag.NewFlagSet("issue plan", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
 	repo := fs.String("repo", "", "repository path")
 	number := fs.Int("issue", 0, "Issue number")
 	var allowPaths pathListFlag
@@ -410,7 +411,7 @@ func issueResolutionAudit(planned issuePlanningContext, action issuedomain.Resol
 }
 
 func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) error {
-	opts, err := parseIssueResolveArgs(args)
+	opts, err := a.parseIssueResolveArgs(args)
 	if err != nil {
 		return err
 	}

@@ -19,14 +19,15 @@ import (
 
 func (a App) issueAsk(ctx context.Context, l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("issue ask", flag.ContinueOnError)
+	fs.SetOutput(a.Err)
 	repo := fs.String("repo", "", "repository path")
 	number := fs.Int("issue", 0, "existing Issue number")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return exitError{2, err}
 	}
 	if *number < 1 || fs.NArg() != 0 {
-		return fmt.Errorf("--issue is required; provide question JSON on stdin")
+		return exitError{2, fmt.Errorf("--issue is required; provide question JSON on stdin")}
 	}
 	entry, err := a.resolvePath(l, *repo)
 	if err != nil {
