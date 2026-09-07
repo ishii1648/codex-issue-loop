@@ -116,7 +116,11 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 	}
 	sort.Strings(fingerprints)
 	var circuitSignals []Signal
+	var runErr error
 	for _, fingerprint := range fingerprints {
+		if runErr = ctx.Err(); runErr != nil {
+			break
+		}
 		episode := state.Episodes[fingerprint]
 		if episode.PrimaryClassification == "expected_transient" {
 			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "skipped", "expected_transient", nil))
@@ -130,6 +134,13 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 		}
 		if episode.AI == nil && !episode.CircuitOpen && (episode.NextAttemptAt == nil || !episode.NextAttemptAt.After(now)) {
 			analysis, analyzeErr := p.analyze(ctx, episode, signalsForEpisode(episode, analysisSignals))
+			if runErr = ctx.Err(); runErr != nil {
+				break
+			}
+			if errors.Is(analyzeErr, context.Canceled) {
+				runErr = analyzeErr
+				break
+			}
 			metrics.AnalysisAttempts[outcomeKey(analyzeErr)]++
 			if analyzeErr != nil {
 				code := analysisFailureCode(analyzeErr)
@@ -156,6 +167,7 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 			episode.Attempts++
 			episode.NextAttemptAt = nil
 			report.Analyzed++
+			state.Episodes[fingerprint] = episode
 		}
 		if episode.AI == nil {
 			reason := "analysis_missing"
@@ -199,6 +211,13 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "dry_run", "eligible_dry_run", nil))
 		} else {
 			ref, reused, createErr := p.ensureIssue(ctx, draft)
+			if runErr = ctx.Err(); runErr != nil {
+				break
+			}
+			if errors.Is(createErr, context.Canceled) {
+				runErr = createErr
+				break
+			}
 			if createErr != nil {
 				episode.IssueAttempts++
 				metrics.Issues["failed"]++
@@ -258,7 +277,7 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 	if _, err := p.Store.RecordBatch(circuitSignals); err != nil {
 		return report, err
 	}
-	return report, nil
+	return report, runErr
 }
 
 func (p Pipeline) circuitSignal(episode Episode, at time.Time, code string) Signal {
