@@ -87,10 +87,16 @@ func TestOperatorAdoptionCommit(t *testing.T) {
 				case "resolved-suspension":
 					item.Suspension.Status = issuedomain.SuspensionResolved
 				}
-				before, _ := json.Marshal(snapshot)
+				before, marshalErr := json.Marshal(snapshot)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
 				err := ResolveOperatorSuspension(&snapshot, 1, action, observed, now)
 				if invalid {
-					after, _ := json.Marshal(snapshot)
+					after, marshalErr := json.Marshal(snapshot)
+					if marshalErr != nil {
+						t.Fatal(marshalErr)
+					}
 					if err == nil || string(before) != string(after) {
 						t.Fatalf("invalid %s mutated state or succeeded: %v", action, err)
 					}
