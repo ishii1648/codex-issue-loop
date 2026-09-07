@@ -398,6 +398,104 @@ func TestDegradationThresholdGateResolveAndReopen(t *testing.T) {
 	}
 }
 
+func TestAnalysisFailureDoesNotChainCircuitEpisodes(t *testing.T) {
+	now := time.Date(2026, 9, 2, 4, 0, 0, 0, time.UTC)
+	store := testStore(t)
+	recordSignals(t, store, signalAt(now, "failure", "original", "failure_classified", "failed", func(s *Signal) {
+		s.EpisodeID, s.FailureKind, s.FailureCode, s.InvariantViolation = "original", "product", "invariant", true
+	}))
+	analyzer := &fakeAnalyzer{err: context.DeadlineExceeded}
+	pipeline := testPipeline(store, analyzer, nil, &now, true)
+	pipeline.Config.MaxAttempts = 3
+	for cycle := 0; cycle < 12; cycle++ {
+		report, err := pipeline.RunOnce(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cycle == 9 {
+			if err := os.Remove(store.SignalsPath()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if report.EpisodeCount > 2 {
+			t.Fatalf("cycle %d: episodes=%d", cycle, report.EpisodeCount)
+		}
+		now = now.Add(time.Hour)
+	}
+	if analyzer.calls != 3 {
+		t.Fatalf("analysis calls=%d, want 3", analyzer.calls)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Episodes) != 2 {
+		t.Fatalf("episodes=%d, want 2", len(state.Episodes))
+	}
+	for _, episode := range state.Episodes {
+		if episode.PrimaryClassification == "operator_attention" && (episode.Attempts != 0 || episode.CircuitOpen || episode.AI != nil) {
+			t.Fatalf("attention episode was analyzed: %+v", episode)
+		}
+	}
+	decisions, err := store.ReadDecisions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	skipped := 0
+	for _, decision := range decisions {
+		if decision.ReasonCode == "automation_circuit_episode" {
+			if decision.Outcome != "skipped" || decision.Eligible {
+				t.Fatalf("decision=%+v", decision)
+			}
+			skipped++
+		}
+	}
+	if skipped != 9 {
+		t.Fatalf("circuit skip decisions=%d, want 9", skipped)
+	}
+}
+
+func TestCircuitEpisodeIdentification(t *testing.T) {
+	for _, test := range []struct {
+		name, episodeID, component, failureCode string
+		skip                                    bool
+	}{
+		{"prefix", "automation-circuit-original", "scheduler", "other", true},
+		{"analysis-exhausted", "other", "analysis", "ai_analysis_retry_exhausted", true},
+		{"issue-exhausted", "other", "analysis", "github_issue_retry_exhausted", true},
+		{"other-component", "other", "scheduler", "ai_analysis_retry_exhausted", false},
+		{"other-failure", "other", "analysis", "other", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 9, 2, 4, 0, 0, 0, time.UTC)
+			store := testStore(t)
+			recordSignals(t, store, signalAt(now, "failure", "original", "failure_classified", "blocked", func(s *Signal) {
+				s.EpisodeID, s.Component, s.FailureCode = test.episodeID, test.component, test.failureCode
+				s.FailureKind, s.HumanActionRequired = "operator", true
+			}))
+			analyzer := &fakeAnalyzer{issue: true}
+			issues := &fakeIssues{byFingerprint: map[string]IssueRef{}}
+			report, err := testPipeline(store, analyzer, issues, &now, false).RunOnce(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := 1
+			if test.skip {
+				wantCalls = 0
+			}
+			if analyzer.calls != wantCalls {
+				t.Fatalf("analysis calls=%d, want %d", analyzer.calls, wantCalls)
+			}
+			if len(report.Decisions) != 1 {
+				t.Fatalf("decisions=%+v", report.Decisions)
+			}
+			if test.skip && (report.Decisions[0].Outcome != "skipped" || report.Decisions[0].ReasonCode != "automation_circuit_episode" || report.Decisions[0].Eligible || len(report.IssueDrafts) != 0) {
+				t.Fatalf("report=%+v", report)
+			}
+		})
+	}
+}
+
 func TestInvalidAIOutputRetriesThenOpensCircuitWithoutIssue(t *testing.T) {
 	now := time.Date(2026, 9, 2, 4, 0, 0, 0, time.UTC)
 	store := testStore(t)

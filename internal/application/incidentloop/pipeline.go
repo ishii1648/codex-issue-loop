@@ -106,6 +106,12 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 		return report, err
 	}
 	analysisSignals := append(append([]Signal(nil), signals...), deriveInvariantSignals(signals)...)
+	circuitEpisodes := make(map[string]bool)
+	for _, signal := range signals {
+		if strings.HasPrefix(signal.EpisodeID, "automation-circuit-") || (signal.Component == "analysis" && strings.HasSuffix(signal.FailureCode, "_retry_exhausted")) {
+			circuitEpisodes[signalFingerprint(signal)] = true
+		}
+	}
 	metrics, err := p.Store.LoadMetrics()
 	if err != nil {
 		return report, err
@@ -118,6 +124,10 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 	var circuitSignals []Signal
 	for _, fingerprint := range fingerprints {
 		episode := state.Episodes[fingerprint]
+		if circuitEpisodes[fingerprint] || fingerprint == digest("episode", episode.Repository, "automation-circuit-"+episode.CorrelationID) {
+			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "skipped", "automation_circuit_episode", episode.Issue))
+			continue
+		}
 		if episode.PrimaryClassification == "expected_transient" {
 			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, false, "skipped", "expected_transient", nil))
 			state.Episodes[fingerprint] = episode

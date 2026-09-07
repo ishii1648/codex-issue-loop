@@ -26,7 +26,7 @@
     "reason_code": {
       "enum": [
         "episode_resolved", "expected_transient", "analysis_retry_scheduled",
-        "analysis_circuit_open", "analysis_backoff", "analysis_missing",
+        "automation_circuit_episode", "analysis_circuit_open", "analysis_backoff", "analysis_missing",
         "ai_did_not_recommend", "deterministic_confidence_low", "ai_confidence_low",
         "classification_not_issue_eligible", "documented_invariant_missing",
         "corroborated_product_fix_missing", "independent_reproduction_missing",

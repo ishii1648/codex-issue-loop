@@ -17,6 +17,7 @@ var (
 	allowedDecisionReasons  = stringSet(
 		"episode_resolved",
 		"expected_transient",
+		"automation_circuit_episode",
 		"analysis_retry_scheduled",
 		"analysis_circuit_open",
 		"analysis_backoff",
