@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -563,9 +562,6 @@ func (s *scheduler) schedule(ctx context.Context, pollCandidates bool) (schedule
 
 func (s *scheduler) handleCycleError(cause error) error {
 	now := s.loop.now()
-	if errors.Is(cause, errGitHubRetryWait) {
-		return nil
-	}
 	if observed, limited := cooldownFromError(cause, now); limited {
 		cooldown, err := s.loop.RateLimits.Observe(observed, now)
 		if err != nil {
@@ -1002,10 +998,6 @@ func (s *scheduler) handleEvent(event schedulerEvent) error {
 	}
 	job.cancel()
 	delete(s.active, event.IssueNumber)
-	if errors.Is(event.Err, errGitHubRetryWait) {
-		s.issueRetry[event.IssueNumber] = s.pollAt
-		return nil
-	}
 	if event.Err == nil {
 		delete(s.issueFails, event.IssueNumber)
 		return nil

@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -20,27 +19,37 @@ type primaryRateLimitStatusObserver interface {
 	PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool)
 }
 
-var errGitHubRetryWait = errors.New("GitHub requests are paused until the supervisor retry deadline")
-
 type rateLimitedGitHub struct {
 	loop     *Loop
 	delegate gh.Client
 }
 
 func (c *rateLimitedGitHub) ReconcileIssue(ctx context.Context, cfg config.Config, number int, status issuedomain.Status, human bool) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.ReconcileIssue(ctx, cfg, number, status, human)
 }
 
-func (c *rateLimitedGitHub) before() error {
-	snapshot, err := c.loop.Store.Load()
-	if err != nil {
-		return failure.Wrap(failure.Supervisor, "read GitHub retry deadline", err)
-	}
-	if snapshot.Supervisor.RateLimit == nil && snapshot.Supervisor.FailureKind == string(failure.Transient) && snapshot.Supervisor.RetryAfter != nil && snapshot.Supervisor.RetryAfter.After(c.loop.now()) {
-		return errGitHubRetryWait
+func (c *rateLimitedGitHub) before(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		snapshot, err := c.loop.Store.Load()
+		if err != nil {
+			return failure.Wrap(failure.Supervisor, "read GitHub retry deadline", err)
+		}
+		if snapshot.Supervisor.RateLimit != nil || snapshot.Supervisor.FailureKind != string(failure.Transient) || snapshot.Supervisor.RetryAfter == nil || !snapshot.Supervisor.RetryAfter.After(c.loop.now()) {
+			break
+		}
+		timer := time.NewTimer(snapshot.Supervisor.RetryAfter.Sub(c.loop.now()))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 
 	cooldown, active, err := c.loop.RateLimits.Suppress(c.loop.now())
@@ -57,91 +66,91 @@ func (c *rateLimitedGitHub) before() error {
 }
 
 func (c *rateLimitedGitHub) ListReady(ctx context.Context, cfg config.Config) ([]gh.Issue, error) {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return nil, err
 	}
 	return c.delegate.ListReady(ctx, cfg)
 }
 
 func (c *rateLimitedGitHub) Get(ctx context.Context, cfg config.Config, number int) (gh.Issue, error) {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return gh.Issue{}, err
 	}
 	return c.delegate.Get(ctx, cfg, number)
 }
 
 func (c *rateLimitedGitHub) VerifyIssueAuthor(ctx context.Context, cfg config.Config, issue gh.Issue) (gh.AuthorVerification, error) {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return gh.AuthorVerification{}, err
 	}
 	return c.delegate.VerifyIssueAuthor(ctx, cfg, issue)
 }
 
 func (c *rateLimitedGitHub) Inspect(ctx context.Context, cfg config.Config, number int, branch string) (gh.RemoteState, error) {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return gh.RemoteState{}, err
 	}
 	return c.delegate.Inspect(ctx, cfg, number, branch)
 }
 
 func (c *rateLimitedGitHub) Claim(ctx context.Context, cfg config.Config, issue gh.Issue, runID string) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.Claim(ctx, cfg, issue, runID)
 }
 
 func (c *rateLimitedGitHub) MarkNeedsInput(ctx context.Context, cfg config.Config, number int, requestID, question string) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.MarkNeedsInput(ctx, cfg, number, requestID, question)
 }
 
 func (c *rateLimitedGitHub) MarkDone(ctx context.Context, cfg config.Config, number int, prURL string) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.MarkDone(ctx, cfg, number, prURL)
 }
 
 func (c *rateLimitedGitHub) MarkFailed(ctx context.Context, cfg config.Config, number int, reason string, blocked bool) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.MarkFailed(ctx, cfg, number, reason, blocked)
 }
 
 func (c *rateLimitedGitHub) MarkRunning(ctx context.Context, cfg config.Config, number int) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.MarkRunning(ctx, cfg, number)
 }
 
 func (c *rateLimitedGitHub) MarkConflictRetry(ctx context.Context, cfg config.Config, number int, recoveryID string) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.MarkConflictRetry(ctx, cfg, number, recoveryID)
 }
 
 func (c *rateLimitedGitHub) ReadyPullRequest(ctx context.Context, cfg config.Config, url string) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.ReadyPullRequest(ctx, cfg, url)
 }
 
 func (c *rateLimitedGitHub) UpdatePullRequest(ctx context.Context, cfg config.Config, url string) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.UpdatePullRequest(ctx, cfg, url)
 }
 
 func (c *rateLimitedGitHub) MergePullRequest(ctx context.Context, cfg config.Config, url string) error {
-	if err := c.before(); err != nil {
+	if err := c.before(ctx); err != nil {
 		return err
 	}
 	return c.delegate.MergePullRequest(ctx, cfg, url)
@@ -156,7 +165,7 @@ func (l *Loop) enableRateLimitGate() {
 	}
 }
 
-func (l *Loop) targetedRESTClient() (gh.TargetedRESTClient, error) {
+func (l *Loop) targetedRESTClient(ctx context.Context) (gh.TargetedRESTClient, error) {
 	delegate := l.GitHub
 	guarded, wrapped := delegate.(*rateLimitedGitHub)
 	if wrapped {
@@ -167,7 +176,7 @@ func (l *Loop) targetedRESTClient() (gh.TargetedRESTClient, error) {
 		return nil, nil
 	}
 	if wrapped {
-		if err := guarded.before(); err != nil {
+		if err := guarded.before(ctx); err != nil {
 			return nil, err
 		}
 	}

@@ -419,7 +419,7 @@ func (l *Loop) startIssue(ctx context.Context, issue gh.Issue, runID string) err
 func (l *Loop) getIssue(ctx context.Context, number int) (issue gh.Issue, err error) {
 	defer func() { recordScheduleGitHubSuccess(ctx, err) }()
 	if l.Config.Webhook.Enabled() {
-		targeted, err := l.targetedRESTClient()
+		targeted, err := l.targetedRESTClient(ctx)
 		if err != nil {
 			return gh.Issue{}, err
 		}
@@ -433,7 +433,7 @@ func (l *Loop) getIssue(ctx context.Context, number int) (issue gh.Issue, err er
 func (l *Loop) inspectIssue(ctx context.Context, current state.Issue) (remote gh.RemoteState, err error) {
 	defer func() { recordScheduleGitHubSuccess(ctx, err) }()
 	if l.Config.Webhook.Enabled() {
-		targeted, err := l.targetedRESTClient()
+		targeted, err := l.targetedRESTClient(ctx)
 		if err != nil {
 			return gh.RemoteState{}, err
 		}
