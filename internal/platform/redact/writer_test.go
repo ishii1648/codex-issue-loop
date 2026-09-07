@@ -34,20 +34,62 @@ func TestConfiguredSecretIsRedactedFromTextAndJSON(t *testing.T) {
 	}
 }
 
-func TestLineWriterRedactsPrivateKeyBlock(t *testing.T) {
-	var output bytes.Buffer
-	w := NewLineWriter(&output)
-	_, _ = w.Write([]byte("before\n-----BEGIN PRIVATE KEY-----\nsecret-key-material\n-----END PRIVATE KEY-----\nafter\n"))
-	if err := w.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(output.String(), "secret-key-material") || !strings.Contains(output.String(), "[REDACTED PRIVATE KEY]") || !strings.Contains(output.String(), "after") {
-		t.Fatalf("output=%q", output.String())
+func TestPrivateKeyFormats(t *testing.T) {
+	for _, format := range []string{"PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "DSA PRIVATE KEY", "PGP PRIVATE KEY BLOCK"} {
+		t.Run(format, func(t *testing.T) {
+			header := "-----BEGIN " + format + "-----"
+			block := header + "\nsynthetic-key-material\n-----END " + format + "-----"
+			t.Run("String", func(t *testing.T) {
+				if got := String("before\n" + block + "\nafter\n"); got != "before\n[REDACTED]\nafter\n" {
+					t.Fatal("private key block was not fully redacted or surrounding text changed")
+				}
+				if got := String(header); got != "[REDACTED]" {
+					t.Fatal("private key header was not redacted")
+				}
+			})
+			t.Run("Marshal", func(t *testing.T) {
+				data, err := Marshal(map[string]string{"key": block}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(data) != `{"key":"[REDACTED]"}` {
+					t.Fatal("private key block was not fully redacted in JSON")
+				}
+			})
+			t.Run("LineWriter", func(t *testing.T) {
+				var output bytes.Buffer
+				w := NewLineWriter(&output)
+				for _, b := range []byte("before\n" + block + "\nafter\n") {
+					if _, err := w.Write([]byte{b}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := w.Flush(); err != nil {
+					t.Fatal(err)
+				}
+				if output.String() != "before\n[REDACTED PRIVATE KEY]\nafter\n" {
+					t.Fatal("private key block was not fully redacted or surrounding text changed")
+				}
+			})
+			t.Run("Flush", func(t *testing.T) {
+				var output bytes.Buffer
+				w := NewLineWriter(&output)
+				if _, err := w.Write([]byte(header + " synthetic-key-material")); err != nil {
+					t.Fatal(err)
+				}
+				if err := w.Flush(); err != nil {
+					t.Fatal(err)
+				}
+				if output.String() != "[REDACTED PRIVATE KEY]" {
+					t.Fatal("buffered private key was not fully redacted")
+				}
+			})
+		})
 	}
 }
 
 func TestLineWriterRedactsPrivateKeyOnSingleLine(t *testing.T) {
-	for _, keyType := range []string{"PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY"} {
+	for _, keyType := range []string{"PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "DSA PRIVATE KEY", "PGP PRIVATE KEY BLOCK"} {
 		t.Run(keyType, func(t *testing.T) {
 			var output bytes.Buffer
 			w := NewLineWriter(&output)

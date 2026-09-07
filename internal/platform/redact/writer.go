@@ -10,14 +10,17 @@ import (
 	"sync"
 )
 
+var privateKeyBegin = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----`)
+var privateKeyEnd = regexp.MustCompile(`-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----`)
+
 var patterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?s)-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`),
+	regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----`),
 	regexp.MustCompile(`\bgh[opusr]_[A-Za-z0-9_]{20,}\b`),
 	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`),
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`),
 	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*`),
 	regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`),
-	regexp.MustCompile(`(?i)-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`),
+	regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----`),
 }
 
 func String(value string) string {
@@ -96,8 +99,7 @@ func (w *LineWriter) Write(p []byte) (int, error) {
 			break
 		}
 		line := string(w.buf[:index+1])
-		if (strings.Contains(line, "-----BEGIN PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN RSA PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN EC PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN OPENSSH PRIVATE KEY-----")) &&
-			!(strings.Contains(line, "-----END ") && strings.Contains(line, "PRIVATE KEY-----")) {
+		if privateKeyBegin.MatchString(line) && !privateKeyEnd.MatchString(line) {
 			w.pem = true
 			if _, err := io.WriteString(w.dst, "[REDACTED PRIVATE KEY]\n"); err != nil {
 				return 0, err
@@ -106,7 +108,7 @@ func (w *LineWriter) Write(p []byte) (int, error) {
 			continue
 		}
 		if w.pem {
-			if strings.Contains(line, "-----END ") && strings.Contains(line, "PRIVATE KEY-----") {
+			if privateKeyEnd.MatchString(line) {
 				w.pem = false
 			}
 			w.buf = w.buf[index+1:]
@@ -132,7 +134,7 @@ func (w *LineWriter) Flush() error {
 		w.pem = false
 		return nil
 	}
-	if strings.Contains(buffered, "-----BEGIN PRIVATE KEY-----") || strings.Contains(buffered, "-----BEGIN RSA PRIVATE KEY-----") || strings.Contains(buffered, "-----BEGIN EC PRIVATE KEY-----") || strings.Contains(buffered, "-----BEGIN OPENSSH PRIVATE KEY-----") {
+	if privateKeyBegin.MatchString(buffered) {
 		w.buf = nil
 		_, err := io.WriteString(w.dst, "[REDACTED PRIVATE KEY]")
 		return err
