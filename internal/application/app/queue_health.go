@@ -60,7 +60,7 @@ func assessQueueHealth(now time.Time, interval time.Duration, snapshot state.Sna
 	for number := range readySet {
 		result.ReadyIssues = append(result.ReadyIssues, number)
 		local := snapshot.Issues[intKey(number)]
-		if local != nil || oldest[number].IsZero() || now.Sub(oldest[number]) <= threshold {
+		if snapshot.ActiveExecution != nil || local != nil || oldest[number].IsZero() || now.Sub(oldest[number]) <= threshold {
 			continue
 		}
 		result.StalledIssues = append(result.StalledIssues, number)
