@@ -35,3 +35,28 @@ func TestQueueHealthRejectsUnboundedDuplicateMailbox(t *testing.T) {
 		t.Fatalf("health=%+v", health)
 	}
 }
+
+func TestQueueHealthDefersUnclaimedIssuesWhileExecutionOwnsSlot(t *testing.T) {
+	now := time.Now().UTC()
+	sweep := webhook.SweepState{Pages: map[int]webhook.SweepPageState{1: {Issues: []gh.Issue{{Number: 206}}}}}
+	delivery := webhook.Delivery{Event: "issues", Action: "reconciled", IssueNumber: 206, AcceptedAt: now.Add(-time.Hour)}
+	snapshot := state.Snapshot{ActiveExecution: &state.ActiveExecution{IssueNumber: 205}}
+	health := assessQueueHealth(now, time.Minute, snapshot, sweep, []webhook.Delivery{delivery})
+	if !health.OK || len(health.StalledIssues) != 0 || len(health.ReadyIssues) != 1 || health.MailboxDepth != 1 {
+		t.Fatalf("occupied slot reported stalled: %+v", health)
+	}
+	snapshot.ActiveExecution = nil
+	health = assessQueueHealth(now, time.Minute, snapshot, sweep, []webhook.Delivery{delivery})
+	if health.OK || health.Code != "ready_issue_stalled" {
+		t.Fatalf("free slot hid stalled admission: %+v", health)
+	}
+	snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: 205}
+	deliveries := make([]webhook.Delivery, 17)
+	for index := range deliveries {
+		deliveries[index] = delivery
+	}
+	health = assessQueueHealth(now, time.Minute, snapshot, sweep, deliveries)
+	if health.OK || health.Code != "mailbox_unbounded" {
+		t.Fatalf("occupied slot hid unbounded mailbox: %+v", health)
+	}
+}
