@@ -420,7 +420,11 @@ func (l *Loop) startIssue(ctx context.Context, issue gh.Issue, runID string) err
 func (l *Loop) getIssue(ctx context.Context, number int) (issue gh.Issue, err error) {
 	defer func() { recordScheduleGitHubSuccess(ctx, err) }()
 	if l.Config.Webhook.Enabled() {
-		if targeted, ok := l.GitHub.(gh.TargetedRESTClient); ok {
+		targeted, err := l.targetedRESTClient()
+		if err != nil {
+			return gh.Issue{}, err
+		}
+		if targeted != nil {
 			return targeted.GetREST(ctx, l.Config, number)
 		}
 	}
@@ -430,7 +434,11 @@ func (l *Loop) getIssue(ctx context.Context, number int) (issue gh.Issue, err er
 func (l *Loop) inspectIssue(ctx context.Context, current state.Issue) (remote gh.RemoteState, err error) {
 	defer func() { recordScheduleGitHubSuccess(ctx, err) }()
 	if l.Config.Webhook.Enabled() {
-		if targeted, ok := l.GitHub.(gh.TargetedRESTClient); ok {
+		targeted, err := l.targetedRESTClient()
+		if err != nil {
+			return gh.RemoteState{}, err
+		}
+		if targeted != nil {
 			prNumber := current.PullRequestNumber
 			if prNumber == 0 {
 				prNumber = pullRequestNumber(current.PullRequestURL)
