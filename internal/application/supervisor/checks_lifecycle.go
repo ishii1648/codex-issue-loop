@@ -26,7 +26,11 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 		}
 	}
 	if len(remote.PullRequests) > 1 {
-		return l.blockPullRequestLifecycle(ctx, current, remote.PullRequests[0].URL, "multiple Pull Requests exist for the saved branch")
+		urls := make([]string, 0, len(remote.PullRequests))
+		for _, pr := range remote.PullRequests {
+			urls = append(urls, pr.URL)
+		}
+		return l.blockPullRequestLifecycle(ctx, current, remote.PullRequests[0], remote.PullRequests, "multiple Pull Requests exist for the saved branch: "+strings.Join(urls, ", "))
 	}
 	for index := range remote.PullRequests {
 		candidate := &remote.PullRequests[index]
@@ -41,7 +45,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 			return failure.Wrap(failure.Transient, "inspect Pull Request worktree", inspectErr)
 		}
 		if !inspection.Exists || !inspection.Valid || !inspection.LocalBranchExists || !inspection.RemoteBranchExists {
-			return l.blockPullRequestLifecycle(ctx, current, current.PullRequestURL, "saved Pull Request branch or worktree disappeared")
+			return l.blockPullRequestLifecycle(ctx, current, gh.PullRequest{URL: current.PullRequestURL, Number: current.PullRequestNumber}, remote.PullRequests, "saved Pull Request branch or worktree disappeared")
 		}
 		return l.schedulePullRequestPoll(current, "Pull Request is not visible yet")
 	}
@@ -73,7 +77,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 		current.ReviewDecision = selected.ReviewDecision
 	}
 	if !strings.EqualFold(selected.State, "open") {
-		return l.blockPullRequestLifecycle(ctx, current, selected.URL, "Pull Request was closed without merge")
+		return l.blockPullRequestLifecycle(ctx, current, *selected, remote.PullRequests, "Pull Request was closed without merge")
 	}
 	if current.ReviewDecision == "CHANGES_REQUESTED" || current.ReviewDecision == "REVIEW_REQUIRED" {
 		return l.schedulePullRequestPoll(current, "waiting for required review to pass")
@@ -83,7 +87,7 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 		return failure.Wrap(failure.Transient, "inspect Pull Request worktree", inspectErr)
 	}
 	if !inspection.Exists || !inspection.Valid || !inspection.LocalBranchExists || !inspection.RemoteBranchExists {
-		return l.blockPullRequestLifecycle(ctx, current, selected.URL, "open Pull Request branch or worktree disappeared")
+		return l.blockPullRequestLifecycle(ctx, current, *selected, remote.PullRequests, "open Pull Request branch or worktree disappeared")
 	}
 	if current.Status == issuedomain.StatusAwaitingMerge && !l.Config.Completion.AutoMerge {
 		return l.schedulePullRequestPoll(current, "waiting for Pull Request merge")
@@ -219,17 +223,20 @@ func (l *Loop) failPullRequestChecks(ctx context.Context, current state.Issue, p
 	return l.syncGitHub(ctx, updated)
 }
 
-func (l *Loop) blockPullRequestLifecycle(ctx context.Context, current state.Issue, prURL, reason string) error {
+func (l *Loop) blockPullRequestLifecycle(ctx context.Context, current state.Issue, pr gh.PullRequest, pullRequests []gh.PullRequest, reason string) error {
 	cause := "Pull Request lifecycle: " + reason
 	decision, decisionErr := issuedomain.BlockPullRequestLifecycle(current.Status, cause, string(failure.Issue))
 	if decisionErr != nil {
 		return failure.Wrap(failure.Issue, "decide Pull Request lifecycle block", decisionErr)
 	}
 	_, err := l.Store.Update("pull_request_lifecycle_blocked", current.Number, current.RunID, map[string]any{
-		"reason": reason, "pull_request_url": prURL,
+		"reason": reason, "pull_request_url": pr.URL, "pull_requests": pullRequests,
 	}, func(s *state.Snapshot) error {
 		item := s.Issues[strconv.Itoa(current.Number)]
-		item.PullRequestURL = prURL
+		if item.PullRequestURL == "" {
+			item.PullRequestURL = pr.URL
+			item.PullRequestNumber = pr.Number
+		}
 		if err := state.ApplyIssueTransition(item, decision.Transition); err != nil {
 			return err
 		}
