@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
@@ -36,6 +38,15 @@ func (a CommandAnalyzer) Analyze(parent context.Context, bundle EvidenceBundle) 
 	ctx, cancel := context.WithTimeout(parent, a.Timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, a.Path, a.Args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	command.WaitDelay = time.Second
 	command.Stdin = bytes.NewReader(append(input, '\n'))
 	stdout := &boundedBuffer{limit: maxAnalyzerOutput}
 	stderr := &boundedBuffer{limit: 32 * 1024}

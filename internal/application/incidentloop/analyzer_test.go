@@ -6,11 +6,87 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestAnalyzersBoundInheritedPipes(t *testing.T) {
+	for _, kind := range []string{"command", "codex"} {
+		for _, mode := range []string{"timeout", "parent-exit"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				dir := t.TempDir()
+				pidPath := filepath.Join(dir, "pids")
+				path := filepath.Join(dir, "analyzer")
+				ending := "wait"
+				if mode == "parent-exit" {
+					ending = "exit 0"
+				}
+				script := fmt.Sprintf("#!/bin/sh\nsleep 10 >&2 &\nprintf '%%s %%s' $$ $! > %q\n%s\n", pidPath, ending)
+				if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				cleanup := func() {
+					data, _ := os.ReadFile(pidPath)
+					var parent, child int
+					if _, err := fmt.Sscanf(string(data), "%d %d", &parent, &child); err == nil {
+						_ = syscall.Kill(child, syscall.SIGKILL)
+						_ = syscall.Kill(parent, syscall.SIGKILL)
+					}
+				}
+				watchdog := time.AfterFunc(8*time.Second, cleanup)
+				t.Cleanup(func() {
+					watchdog.Stop()
+					cleanup()
+				})
+				timeout := 3 * time.Second
+				if mode == "parent-exit" {
+					timeout = 10 * time.Second
+				}
+				var analyzer Analyzer = CommandAnalyzer{Path: path, Timeout: timeout}
+				if kind == "codex" {
+					analyzer = CodexAnalyzer{Path: path, RepoPath: dir, StateDir: dir, Timeout: timeout}
+				}
+				start := time.Now()
+				_, err := analyzer.Analyze(context.Background(), EvidenceBundle{Version: SchemaVersion})
+				elapsed := time.Since(start)
+				want := error(context.DeadlineExceeded)
+				if mode == "parent-exit" {
+					want = exec.ErrWaitDelay
+				}
+				if !errors.Is(err, want) {
+					t.Errorf("Analyze error = %v, want %v", err, want)
+				}
+				if elapsed > 5*time.Second {
+					t.Errorf("Analyze took %s, want at most 5s", elapsed)
+				}
+				data, err := os.ReadFile(pidPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var parent, child int
+				if _, err := fmt.Sscanf(string(data), "%d %d", &parent, &child); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "timeout" {
+					deadline := time.Now().Add(time.Second)
+					for syscall.Kill(child, 0) == nil && time.Now().Before(deadline) {
+						time.Sleep(10 * time.Millisecond)
+					}
+					if err := syscall.Kill(child, 0); !errors.Is(err, syscall.ESRCH) {
+						t.Errorf("descendant %d remains: %v", child, err)
+					}
+					if err := syscall.Kill(-parent, 0); !errors.Is(err, syscall.ESRCH) {
+						t.Errorf("process group %d remains: %v", parent, err)
+					}
+				}
+			})
+		}
+	}
+}
 
 func TestCodexAnalysisSchemaDeclaresTypeForConstProperties(t *testing.T) {
 	var schema struct {

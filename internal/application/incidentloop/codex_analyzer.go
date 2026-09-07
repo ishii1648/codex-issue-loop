@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
@@ -90,6 +91,15 @@ func (a CodexAnalyzer) Analyze(parent context.Context, bundle EvidenceBundle) (A
 	args = append(args, a.ExtraArgs...)
 	args = append(args, "-")
 	command := exec.CommandContext(ctx, a.Path, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	command.WaitDelay = time.Second
 	command.Dir = runDir
 	command.Stdin = strings.NewReader(prompt)
 	command.Stdout = io.Discard

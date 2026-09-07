@@ -18,7 +18,6 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
-	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 )
 
 const testProcessReadyTimeout = 5 * time.Second
@@ -391,7 +390,11 @@ func TestWorkerProcessHelper(t *testing.T) {
 		if err := waitForTestFile(os.Getenv("AGENT_LOOP_TEST_CHILD_READY"), testProcessReadyTimeout); err != nil {
 			os.Exit(2)
 		}
-		if err := fsutil.WriteFile(os.Getenv("AGENT_LOOP_TEST_CHILD_PID"), []byte(fmt.Sprint(child.Process.Pid)), 0o600); err != nil {
+		pidPath := os.Getenv("AGENT_LOOP_TEST_CHILD_PID")
+		if err := os.WriteFile(pidPath+".tmp", []byte(fmt.Sprint(child.Process.Pid)), 0o600); err != nil {
+			os.Exit(2)
+		}
+		if err := os.Rename(pidPath+".tmp", pidPath); err != nil {
 			os.Exit(2)
 		}
 		for {
