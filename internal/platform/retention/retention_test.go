@@ -58,6 +58,44 @@ func TestArchiveAndReplaceIsRecoverableHistory(t *testing.T) {
 	}
 }
 
+func TestRotateExistingPreservesOpenAppendFile(t *testing.T) {
+	for _, trigger := range []string{"size", "age"} {
+		t.Run(trigger, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "launchd.stderr.log")
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			if _, err := f.WriteString("before\n"); err != nil {
+				t.Fatal(err)
+			}
+			policy := Policy{MaxBytes: 1, MaxAge: time.Hour, Keep: 2}
+			if trigger == "age" {
+				policy.MaxBytes = 1024
+				stamp := time.Now().Add(-2 * time.Hour)
+				if err := os.Chtimes(path, stamp, stamp); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := RotateExisting(path, policy); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString("after\n"); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != "after\n" {
+				t.Fatalf("active=%q err=%v", data, err)
+			}
+			var history bytes.Buffer
+			if err := WriteHistory(&history, path); err != nil || history.String() != "before\nafter\n" {
+				t.Fatalf("history=%q err=%v", history.String(), err)
+			}
+		})
+	}
+}
+
 func TestPruneRunDirsHonorsAgeCountAndExclusion(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now()

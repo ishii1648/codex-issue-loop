@@ -1895,3 +1895,64 @@ func writeJSONFixture(t *testing.T, path string, value any) {
 		t.Fatal(err)
 	}
 }
+
+func TestSuperviseRotationKeepsStderrVisibleInLogs(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	commands := map[string]string{}
+	for name, output := range map[string]string{
+		"codex": "0.136.0 --json --output-schema --output-last-message --sandbox --cd --approve-for-me",
+		"gh":    "2.69.0 --json --limit --label --assignee --milestone --add-label --remove-label --body",
+	} {
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\necho '"+output+"'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		commands[name] = path
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := mustConfig(t, repo)
+	entry := registry.Entry{RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, Commands: commands}
+	data, err := json.Marshal(registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.RegistryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logDir := l.RepoDir(entry.RepoID)
+	if err := os.MkdirAll(filepath.Join(logDir, "supervisor.log"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stderrPath := filepath.Join(logDir, "launchd.stderr.log")
+	stderr, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	if _, err := stderr.WriteString("previous run\n"); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().Add(-2 * cfg.Logs.RotateInterval.Duration)
+	if err := os.Chtimes(stderrPath, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a := App{Out: &out, Err: stderr}
+	if code := a.Run(context.Background(), []string{"run", "--repo", repo}); code != 1 {
+		t.Fatalf("run code=%d", code)
+	}
+	active, err := os.ReadFile(stderrPath)
+	if err != nil || !strings.Contains(string(active), "open supervisor log:") || strings.Contains(string(active), "previous run") {
+		t.Fatalf("active=%q err=%v", active, err)
+	}
+	if code := a.Run(context.Background(), []string{"logs", "--repo", repo, "--stderr"}); code != 0 {
+		t.Fatalf("logs code=%d", code)
+	}
+	if out.String() != "previous run\n"+string(active) {
+		t.Fatalf("logs=%q active=%q", out.String(), active)
+	}
+}

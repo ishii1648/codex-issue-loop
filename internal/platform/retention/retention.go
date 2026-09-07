@@ -44,7 +44,7 @@ func OpenWriter(path string, policy Policy) (*Writer, error) {
 		return nil, err
 	}
 	w := &Writer{path: path, policy: policy}
-	if err := w.rotateIfNeeded(0); err != nil {
+	if err := w.rotateIfNeeded(0, false); err != nil {
 		return nil, err
 	}
 	if err := w.open(); err != nil {
@@ -56,7 +56,7 @@ func OpenWriter(path string, policy Policy) (*Writer, error) {
 func (w *Writer) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.rotateIfNeeded(int64(len(data))); err != nil {
+	if err := w.rotateIfNeeded(int64(len(data)), false); err != nil {
 		return 0, err
 	}
 	if w.file == nil {
@@ -78,12 +78,14 @@ func (w *Writer) Close() error {
 	return err
 }
 
+// RotateExisting preserves the inode for writers holding O_APPEND descriptors.
+// Concurrent writes between the archive copy and truncation may be lost.
 func RotateExisting(path string, policy Policy) error {
 	if err := validate(policy); err != nil {
 		return err
 	}
 	w := &Writer{path: path, policy: policy}
-	return w.rotateIfNeeded(0)
+	return w.rotateIfNeeded(0, true)
 }
 
 func ArchiveAndReplace(path string, replacement []byte, policy Policy) error {
@@ -192,7 +194,7 @@ func (w *Writer) open() error {
 	return nil
 }
 
-func (w *Writer) rotateIfNeeded(incoming int64) error {
+func (w *Writer) rotateIfNeeded(incoming int64, preserveInode bool) error {
 	info, err := os.Stat(w.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -212,7 +214,12 @@ func (w *Writer) rotateIfNeeded(incoming int64) error {
 	if err := archive(w.path); err != nil {
 		return err
 	}
-	if err := fsutil.WriteFile(w.path, nil, 0o600); err != nil {
+	if preserveInode {
+		err = os.Truncate(w.path, 0)
+	} else {
+		err = fsutil.WriteFile(w.path, nil, 0o600)
+	}
+	if err != nil {
 		return err
 	}
 	return pruneArchives(w.path, w.policy.Keep)
