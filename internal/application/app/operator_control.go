@@ -109,8 +109,24 @@ func (a App) unregister(ctx context.Context, l layout.Layout, args []string) err
 	if err := lm.Stop(ctx, entry); err != nil {
 		return err
 	}
-	if _, err := stopEntryWorkers(ctx, l, entry, "worker canceled by unregister", a.ProcessController); err != nil {
-		return err
+	cfg, configErr := config.Load(entry.RepoPath)
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	if configErr != nil {
+		snapshot, err := store.Load()
+		if err != nil {
+			return fmt.Errorf("cannot verify absence of workers before unregister: %w", err)
+		}
+		if snapshot.Recovery != nil && snapshot.Recovery.Status == state.RecoveryStateBlocked {
+			return fmt.Errorf("cannot verify absence of workers before unregister: durable state is recovery-blocked")
+		}
+		if drain.HasWorker(snapshot) {
+			return fmt.Errorf("cannot unregister while worker identity remains in state and repository config cannot be loaded: %w", configErr)
+		}
+	} else {
+		store.Secrets = cfg.RedactionValues()
+		if _, err := supervisor.StopWorkers(ctx, store, cfg.Worker.TimeoutGrace.Duration, "worker canceled by unregister", a.ProcessController); err != nil {
+			return err
+		}
 	}
 	if err := registryStore.Remove(entry.RepoID); err != nil {
 		return err
