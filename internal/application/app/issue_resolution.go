@@ -670,10 +670,31 @@ func (a App) synchronizeIssueResolution(ctx context.Context, planned issuePlanni
 	if loadErr != nil {
 		return loadErr
 	}
-	if !reflect.DeepEqual(before.Issues[strconv.Itoa(number)], planned.issue) {
+	executable := action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage
+	matchesResolution := func(item *state.Issue, effectAbsent bool) bool {
+		if item == nil || item.RunID != planned.issue.RunID || item.Generation != planned.issue.Generation {
+			return false
+		}
+		if item.Suspension == nil && effectAbsent {
+			return true
+		}
+		return item.Suspension != nil && planned.issue.Suspension != nil &&
+			item.Suspension.ID == planned.issue.Suspension.ID &&
+			item.Suspension.Status == planned.issue.Suspension.Status &&
+			item.Suspension.Resolution == planned.issue.Suspension.Resolution &&
+			item.Suspension.ResolvedAt.Equal(planned.issue.Suspension.ResolvedAt)
+	}
+	item := before.Issues[strconv.Itoa(number)]
+	if (executable && !matchesResolution(item, state.PendingEffect(&before, number) == nil)) || (!executable && !reflect.DeepEqual(item, planned.issue)) {
 		return fmt.Errorf("Issue #%d changed before resolution synchronization", number)
 	}
 	expectedEffect := state.PendingEffect(&before, number)
+	if executable && expectedEffect == nil {
+		return nil
+	}
+	if executable && expectedEffect.Kind != issuedomain.EffectApplyResolution {
+		return fmt.Errorf("Issue #%d resolution synchronization changed", number)
+	}
 	client := gh.CLI{Path: planned.ghPath, Secrets: planned.cfg.RedactionValues()}
 	var err error
 	if action == issuedomain.ResolutionAdoptPR {
@@ -692,7 +713,8 @@ func (a App) synchronizeIssueResolution(ctx context.Context, planned issuePlanni
 		if item == nil {
 			return fmt.Errorf("Issue #%d disappeared during GitHub synchronization", number)
 		}
-		if item.Status != planned.issue.Status || item.RunID != planned.issue.RunID || item.Generation != planned.issue.Generation {
+		if (executable && !matchesResolution(item, state.PendingEffect(snapshot, number) == nil)) || (!executable &&
+			(item.Status != planned.issue.Status || item.RunID != planned.issue.RunID || item.Generation != planned.issue.Generation)) {
 			return fmt.Errorf("Issue #%d changed during resolution synchronization", number)
 		}
 		expected := issuedomain.EffectApplyResolution
