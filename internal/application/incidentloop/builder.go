@@ -216,11 +216,11 @@ func mergeEpisode(old, delta Episode, added int, rules incidentanalysis.Rules, m
 	classificationChanged := old.PrimaryClassification != merged.PrimaryClassification
 	if classificationChanged || (added > 0 && old.Issue == nil) {
 		merged.AI = nil
+	}
+	if classificationChanged {
 		merged.Attempts = 0
 		merged.NextAttemptAt = nil
 		merged.CircuitOpen = false
-	}
-	if classificationChanged {
 		merged.IssueAttempts = 0
 		merged.IssueNextAttemptAt = nil
 		merged.IssueCircuitOpen = false

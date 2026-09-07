@@ -372,7 +372,7 @@ type fakeWorktree struct {
 	digest     string
 }
 
-func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error) {
+func (f fakeWorktree) Ensure(context.Context, config.Config, string, int, string, string) (worktree.Result, error) {
 	return worktree.Result{Path: f.path, Branch: "codex/issue-1-test"}, nil
 }
 func (f fakeWorktree) Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error) {
@@ -2603,6 +2603,69 @@ func TestWorkerRunLogPruningPreservesActiveAndAuditsDeletion(t *testing.T) {
 	data, err := os.ReadFile(loop.Store.EventsPath())
 	if err != nil || !strings.Contains(string(data), "worker_logs_pruned") {
 		t.Fatalf("missing audit event: %s err=%v", data, err)
+	}
+}
+
+func TestWorkerRunLogPruningPreservesUnresolvedPublication(t *testing.T) {
+	for _, policy := range []string{"age", "count"} {
+		for _, test := range []struct {
+			name       string
+			status     issuedomain.Status
+			stage      issuedomain.ContinuationStage
+			suspension issuedomain.SuspensionStatus
+			wantRetain bool
+		}{
+			{"failed_publish", issuedomain.StatusFailed, issuedomain.ContinuationStagePublish, issuedomain.SuspensionActive, true},
+			{"blocked_publish", issuedomain.StatusBlocked, issuedomain.ContinuationStagePublish, issuedomain.SuspensionActive, true},
+			{"quarantined_publish", issuedomain.StatusFailed, issuedomain.ContinuationStagePublish, issuedomain.SuspensionQuarantined, true},
+			{"resolved_publish", issuedomain.StatusFailed, issuedomain.ContinuationStagePublish, issuedomain.SuspensionResolved, false},
+			{"failed_checks", issuedomain.StatusFailed, issuedomain.ContinuationStageChecks, issuedomain.SuspensionActive, false},
+		} {
+			t.Run(policy+"/"+test.name, func(t *testing.T) {
+				loop, _ := testLoop(t, worker.Result{})
+				now := time.Now().UTC()
+				loop.Clock = fixedClock{value: now}
+				loop.Config.Logs.WorkerRunMaxAge = config.Duration{}
+				loop.Config.Logs.WorkerRunMaxCount = 0
+				if policy == "age" {
+					loop.Config.Logs.WorkerRunMaxAge = config.Duration{Duration: 24 * time.Hour}
+				} else {
+					loop.Config.Logs.WorkerRunMaxCount = 1
+				}
+				runs := filepath.Join(loop.Store.Dir, "runs")
+				for _, name := range []string{"run_checkpoint", "run_recent"} {
+					if err := os.MkdirAll(filepath.Join(runs, name), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				resultPath := filepath.Join(runs, "run_checkpoint", "result-1.json")
+				result := []byte("{\"status\":\"completed\",\"summary\":\"verified implementation\"}")
+				if err := os.WriteFile(resultPath, result, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				old := now.Add(-48 * time.Hour)
+				if err := os.Chtimes(filepath.Dir(resultPath), old, old); err != nil {
+					t.Fatal(err)
+				}
+				item := &state.Issue{
+					Number: 1, RunID: "run_checkpoint", Status: test.status,
+					Continuation: &state.ContinuationCheckpoint{Stage: test.stage, ResultSHA256: fmt.Sprintf("%x", sha256.Sum256(result))},
+				}
+				item.Suspension = &state.Suspension{Status: test.suspension}
+				snapshot := state.Snapshot{Issues: map[string]*state.Issue{"1": item}}
+				if err := loop.pruneRunLogs(snapshot); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(resultPath)
+				if test.wantRetain {
+					if err != nil || string(data) != string(result) {
+						t.Fatalf("publication result not preserved: data=%q err=%v", data, err)
+					}
+				} else if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("run was not removed: %v", err)
+				}
+			})
+		}
 	}
 }
 

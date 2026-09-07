@@ -34,6 +34,9 @@ func analysisFailure(code string, err error) error {
 }
 
 func analysisFailureCode(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
 	var failure *analysisFailureError
 	if errors.As(err, &failure) {
 		return failure.code
@@ -93,6 +96,9 @@ func (a CodexAnalyzer) Analyze(parent context.Context, bundle EvidenceBundle) (A
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return AIAnalysis{}, analysisFailure("canceled", fmt.Errorf("Codex incident analysis canceled: %w", ctx.Err()))
+		}
 		if ctx.Err() != nil {
 			return AIAnalysis{}, analysisFailure("timeout", fmt.Errorf("Codex incident analysis timeout: %w", ctx.Err()))
 		}

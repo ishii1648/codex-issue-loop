@@ -32,7 +32,7 @@ import (
 )
 
 type WorktreeManager interface {
-	Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error)
+	Ensure(context.Context, config.Config, string, int, string, string) (worktree.Result, error)
 	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
 	ValidateLaunch(context.Context, config.Config, string, string) (worktree.LaunchValidation, error)
 	ContentDigest(context.Context, string) (string, error)
@@ -341,7 +341,10 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
-		if issue.Status.RetainsRunLogs() {
+		unresolvedPublication := issue.Status.Terminal() &&
+			issue.Continuation != nil && issue.Continuation.Stage == issuedomain.ContinuationStagePublish &&
+			issue.Suspension != nil && issue.Suspension.Status != issuedomain.SuspensionResolved
+		if issue.Status.RetainsRunLogs() || unresolvedPublication {
 			if issue.RunID != "" {
 				exclude[issue.RunID] = true
 			}

@@ -87,3 +87,26 @@ func TestPrivateKeyFormats(t *testing.T) {
 		})
 	}
 }
+
+func TestLineWriterRedactsPrivateKeyOnSingleLine(t *testing.T) {
+	for _, keyType := range []string{"PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "DSA PRIVATE KEY", "PGP PRIVATE KEY BLOCK"} {
+		t.Run(keyType, func(t *testing.T) {
+			var output bytes.Buffer
+			w := NewLineWriter(&output)
+			for _, part := range []string{
+				"before\n{\"key\":\"-----BEGIN " + keyType + "-----\\nsecret-key-material\\n",
+				"-----END " + keyType + "-----\"}\nafter\nnext\n",
+			} {
+				if _, err := w.Write([]byte(part)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := output.String(), "before\n{\"key\":\"[REDACTED]\"}\nafter\nnext\n"; got != want {
+				t.Fatalf("output=%q, want %q", got, want)
+			}
+		})
+	}
+}

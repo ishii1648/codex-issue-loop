@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
@@ -267,6 +268,10 @@ func inspectSemanticState(path string) ([]SemanticFinding, error) {
 		return nil, err
 	}
 	if snapshot.Version == schemaversion.Previous {
+		migrated, err := DecodePreviousSnapshot(data, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
 		keys := make([]string, 0, len(snapshot.Issues))
 		for key := range snapshot.Issues {
 			keys = append(keys, key)
@@ -278,14 +283,18 @@ func inspectSemanticState(path string) ([]SemanticFinding, error) {
 			if item == nil {
 				continue
 			}
-			findings = append(findings, SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: item.Number, Status: item.Status.String(),
+			finding := SemanticFinding{RepoID: snapshot.RepoID, IssueNumber: item.Number, Status: item.Status.String(),
 				Field: "issues[].suspension", Code: "V4_RECOVERY_CONTRACT_MIGRATABLE", Migratable: true,
-				Reason: "v4 execution lease and recovery fields have a deterministic v5 checkpoint migration", MigrationRule: "FOLD_LEGACY_RECOVERY_TO_CHECKPOINT"})
+				Reason: "v4 execution lease and recovery fields have a deterministic v5 checkpoint migration", MigrationRule: "FOLD_LEGACY_RECOVERY_TO_CHECKPOINT"}
+			if suspension := migrated.Issues[key].Suspension; suspension != nil && suspension.Status == issuedomain.SuspensionQuarantined {
+				finding.Code = "V4_RECOVERY_CONTRACT_QUARANTINED"
+				finding.Reason = suspension.Reason
+				finding.MigrationRule = "QUARANTINE_AMBIGUOUS_ISSUE"
+			}
+			findings = append(findings, finding)
 		}
 		return findings, nil
 	}
-	// Legacy v4 has no explicit contract marker. Preview applies the current validator in
-	// memory and never writes the source file.
 	if snapshot.SemanticContractVersion >= statecontract.MinimumVersion && snapshot.SemanticContractVersion < statecontract.CurrentVersion {
 		snapshot.SemanticContractVersion = statecontract.CurrentVersion
 	}
@@ -399,6 +408,9 @@ func (m Migrator) Apply() (Result, error) {
 		}
 	}
 
+	sort.SliceStable(report.Artifacts, func(i, j int) bool {
+		return report.Artifacts[i].Kind != "events" && report.Artifacts[j].Kind == "events"
+	})
 	changed := 0
 	for _, artifact := range report.Artifacts {
 		if artifact.Version != schemaversion.Previous && !artifact.SemanticMigration {

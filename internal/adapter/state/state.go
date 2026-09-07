@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -506,6 +507,9 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	}
 	if err := s.removeTransactionUnlocked(); err != nil {
 		return Snapshot{}, err
+	}
+	if err := s.rotateEventsUnlocked(snapshot); err != nil {
+		log.Printf("rotate event log: %s", redact.StringWithSecrets(err.Error(), s.Secrets))
 	}
 	return snapshot, nil
 }

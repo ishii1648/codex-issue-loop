@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1621,9 +1622,6 @@ func TestFaultEventRotationKeepsCheckpointAndRecoverySequence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.rotateEventsUnlocked(snapshotForRotation(t, store)); err != nil {
-		t.Fatal(err)
-	}
 	snapshot, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -1635,17 +1633,61 @@ func TestFaultEventRotationKeepsCheckpointAndRecoverySequence(t *testing.T) {
 	if err != nil || partial || len(events) == 0 || events[0].Type != "event_log_checkpoint" {
 		t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
 	}
+	store.EventRetention.MaxBytes = 1 << 20
+	if _, err := store.Update("after_rotation", 0, "", nil, func(*Snapshot) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.Load()
+	if err != nil || snapshot.StateRevision != 5 || snapshot.Recovery != nil {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	events, _, partial, err = store.readEventsUnlocked()
+	if err != nil || partial || len(events) != 2 || events[0].Sequence != 4 || events[1].Sequence != 5 || events[1].Type != "after_rotation" {
+		t.Fatalf("events=%+v partial=%v err=%v", events, partial, err)
+	}
 	archives, err := filepath.Glob(store.EventsPath() + ".*.gz")
 	if err != nil || len(archives) == 0 || len(archives) > 2 {
 		t.Fatalf("archives=%v err=%v", archives, err)
 	}
 }
 
-func snapshotForRotation(t *testing.T, store Store) Snapshot {
-	t.Helper()
-	snapshot, err := store.Load()
+func TestFaultEventRotationFailurePreservesCommittedUpdate(t *testing.T) {
+	store := Store{
+		Dir: t.TempDir(), RepoID: "repo-deadbeef", RepoPath: "/tmp/repo",
+		EventRetention: retention.Policy{MaxBytes: 1, MaxAge: time.Hour, Keep: 1},
+	}
+	archive := store.EventsPath() + ".000.gz"
+	if err := os.Mkdir(archive, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(archive, "block-pruning"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	snapshot, err := store.Update("tick", 0, "", nil, func(snapshot *Snapshot) error {
+		snapshot.Supervisor.Message = "committed"
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return snapshot
+	if snapshot.StateRevision != 1 || snapshot.Supervisor.Message != "committed" {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	if !strings.Contains(logs.String(), "rotate event log") {
+		t.Fatalf("rotation failure was not logged: %s", logs.String())
+	}
+	if _, err := os.Stat(store.TransactionPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("transaction remains: %v", err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.StateRevision != snapshot.StateRevision || loaded.Supervisor.Message != "committed" || loaded.Recovery != nil {
+		t.Fatalf("loaded=%+v", loaded)
+	}
 }

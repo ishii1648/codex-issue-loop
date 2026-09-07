@@ -879,23 +879,28 @@ func (c AssignmentController) waitForLegacyIdleAndStop(ctx context.Context, cfg 
 	store := state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
 	for {
 		idle := false
+		requested := false
 		stopErr := store.InspectExclusive(func(snapshot state.Snapshot) error {
 			if snapshotHasWorker(snapshot) {
 				return nil
 			}
 			idle = true
 			requestCtx, cancelRequest := context.WithTimeout(ctx, 5*time.Second)
-			requested, err := manager.RequestStop(requestCtx, entry)
+			var err error
+			requested, err = manager.RequestStop(requestCtx, entry)
 			cancelRequest()
-			if err != nil || !requested {
-				return err
-			}
-			waitCtx, cancelWait := context.WithTimeout(ctx, 30*time.Second)
-			defer cancelWait()
-			return manager.WaitStopped(waitCtx, entry, 30*time.Second)
+			return err
 		})
 		if stopErr != nil {
 			return fmt.Errorf("stop legacy repository runtime under admission lock: %w", stopErr)
+		}
+		if requested {
+			waitCtx, cancelWait := context.WithTimeout(ctx, 30*time.Second)
+			stopErr = manager.WaitStopped(waitCtx, entry, 30*time.Second)
+			cancelWait()
+			if stopErr != nil {
+				return fmt.Errorf("wait for legacy repository runtime to stop: %w", stopErr)
+			}
 		}
 		if idle {
 			return nil

@@ -3,8 +3,10 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,64 @@ import (
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/store"
 )
+
+func TestIssueHistoryIgnoresUnmonitoredLabelDisagreement(t *testing.T) {
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	repo := config.Repository{ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done"}, ExcludeLabels: []string{"blocked"}}
+	for _, tc := range []struct {
+		name, event, labels string
+	}{
+		{"deleted label", "labeled", `[{"name":"ready"}]`},
+		{"renamed label", "labeled", `[{"name":"ready"},{"name":"defect"}]`},
+		{"unlabeled but present", "unlabeled", `[{"name":"ready"},{"name":"bug"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := rawIssue{Number: 1, State: "open"}
+			if err := json.Unmarshal([]byte(tc.labels), &issue.Labels); err != nil {
+				t.Fatal(err)
+			}
+			history := []rawEvent{
+				{ID: 1, Event: tc.event, CreatedAt: base},
+				{ID: 2, Event: "labeled", CreatedAt: base.Add(time.Minute)},
+				{ID: 3, Event: tc.event, CreatedAt: base.Add(2 * time.Minute)},
+			}
+			history[0].Label.Name = "bug"
+			history[1].Label.Name = "ready"
+			history[2].Label.Name = "bug"
+			events, since, err := issueHistory(repo, issue, history, base.Add(time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []model.QueueEvent{{ID: 2, IssueNumber: 1, Kind: model.ReadyLabeled, At: base.Add(time.Minute)}}
+			if !reflect.DeepEqual(events, want) || !since.Equal(want[0].At) {
+				t.Fatalf("events=%+v, since=%s", events, since)
+			}
+		})
+	}
+}
+
+func TestIssueHistoryRejectsMonitoredLabelDisagreement(t *testing.T) {
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	repo := config.Repository{ReadyLabels: []string{"Ready", "Ready-Other"}, RunningLabel: "Running", TerminalLabels: []string{"Done"}, ExcludeLabels: []string{"Blocked"}}
+	for _, label := range []string{"ready", "ready-other", "running", "done", "blocked"} {
+		for _, kind := range []string{"labeled", "unlabeled"} {
+			t.Run(label+"/"+kind, func(t *testing.T) {
+				issue := rawIssue{Number: 1, State: "open"}
+				if kind == "unlabeled" {
+					issue.Labels = append(issue.Labels, struct {
+						Name string `json:"name"`
+					}{strings.ToUpper(label)})
+				}
+				event := rawEvent{ID: 1, Event: kind, CreatedAt: base}
+				event.Label.Name = label
+				_, _, err := issueHistory(repo, issue, []rawEvent{event}, base.Add(time.Hour))
+				if !errors.Is(err, errHistoryIncomplete) {
+					t.Fatalf("error=%v, want errHistoryIncomplete", err)
+				}
+			})
+		}
+	}
+}
 
 func TestReentryHistories(t *testing.T) {
 	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
@@ -24,6 +84,8 @@ func TestReentryHistories(t *testing.T) {
 		since               int
 		pr                  bool
 	}{
+		{name: "ready to running replacement", labels: `["running"]`, history: [][2]string{{"labeled", "ready"}, {"unlabeled", "ready"}, {"labeled", "running"}}, want: []model.EventKind{model.RunningLabeled, model.ReadyLabeled}, since: 3},
+		{name: "running to ready replacement", labels: `["ready"]`, history: [][2]string{{"labeled", "running"}, {"unlabeled", "running"}, {"labeled", "ready"}}, want: []model.EventKind{model.ReadyLabeled, model.RunningLabeled}, since: 3},
 		{name: "280 reopened with ready", labels: `["ready"]`, history: [][2]string{{"labeled", "ready"}, {"closed", ""}, {"reopened", ""}}, want: []model.EventKind{model.ReadyLabeled, model.QueueExited, model.ReadyLabeled}, since: 3},
 		{name: "reopened with running", labels: `["running"]`, history: [][2]string{{"labeled", "running"}, {"closed", ""}, {"reopened", ""}}, want: []model.EventKind{model.RunningLabeled, model.QueueExited, model.RunningLabeled}, since: 3},
 		{name: "459 blocked removed", labels: `["ready"]`, history: [][2]string{{"labeled", "ready"}, {"labeled", "blocked"}, {"unlabeled", "blocked"}}, want: []model.EventKind{model.ReadyLabeled, model.QueueExited, model.ReadyLabeled}, since: 3},
@@ -298,6 +360,60 @@ esac
 					t.Fatal(err)
 				}
 				disk = store.Store{Root: disk.Root}
+			}
+		})
+	}
+}
+
+func TestSamePhaseRelabelStartsNewWindow(t *testing.T) {
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	for _, phase := range []model.Phase{model.Ready, model.Running} {
+		t.Run(string(phase), func(t *testing.T) {
+			label, kind := "ready", model.ReadyLabeled
+			if phase == model.Running {
+				label, kind = "running", model.RunningLabeled
+			}
+			repo := config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running"}
+			var issue rawIssue
+			if err := json.Unmarshal([]byte(`{"number":1,"state":"open","labels":[{"name":"`+label+`"}]}`), &issue); err != nil {
+				t.Fatal(err)
+			}
+			times := []time.Time{base, base.Add(time.Minute), base.Add(2 * time.Hour)}
+			history := make([]rawEvent, 3)
+			for i, name := range []string{"labeled", "unlabeled", "labeled"} {
+				history[i] = rawEvent{ID: int64(i + 1), Event: name, CreatedAt: times[i]}
+				history[i].Label.Name = label
+			}
+			events, since, err := issueHistory(repo, issue, history, times[2])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 3 {
+				t.Fatalf("events=%+v", events)
+			}
+			for i, want := range []model.EventKind{kind, model.QueueExited, kind} {
+				if events[i].Kind != want || !events[i].At.Equal(times[2-i]) {
+					t.Fatalf("events=%+v", events)
+				}
+			}
+			if !since.Equal(times[2]) {
+				t.Fatalf("since=%s", since)
+			}
+			previous, _, err := model.Apply(nil, model.Observation{Repository: repo.Name, ObservedAt: base, Cursor: 1, CursorInitialized: true,
+				Items: []model.QueueItem{{Number: 1, Phase: phase, PhaseSince: base, Deadline: base.Add(10 * time.Minute)}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, closed, err := model.Apply(&previous, model.Observation{Repository: repo.Name, ObservedAt: times[2], Cursor: 3, CursorInitialized: true,
+				Events: events, Items: []model.QueueItem{{Number: 1, Phase: phase, PhaseSince: since}}, AcceptanceTimeout: 10 * time.Minute, ProcessingTimeout: 10 * time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(closed) != 2 || closed[0].Status != model.Healthy || !closed[0].StartedAt.Equal(base) || !closed[0].EndedAt.Equal(times[1]) || closed[1].Status != model.Idle || !closed[1].StartedAt.Equal(times[1]) || !closed[1].EndedAt.Equal(times[2]) {
+				t.Fatalf("closed=%+v", closed)
+			}
+			if next.Current.Status != model.Healthy || !next.Current.StartedAt.Equal(times[2]) || !next.QueueDeadline.Equal(times[2].Add(10*time.Minute)) {
+				t.Fatalf("next=%+v", next)
 			}
 		})
 	}

@@ -12,7 +12,7 @@ func replayEvents(previous Snapshot, observation Observation) ([]QueueEvent, err
 	events := append([]QueueEvent(nil), observation.Events...)
 	sort.Slice(events, func(i, j int) bool { return events[i].ID < events[j].ID })
 	queue := append([]QueueItem(nil), previous.Queue...)
-	pending := map[int]bool{}
+	pending := map[int]QueueEvent{}
 	exited := map[int]bool{}
 	var result []QueueEvent
 	var lastAt time.Time
@@ -39,7 +39,7 @@ func replayEvents(previous Snapshot, observation Observation) ([]QueueEvent, err
 				phase = Running
 			}
 			if (index < 0 && !exited[event.IssueNumber]) || (index >= 0 && queue[index].Phase == phase) {
-				pending[event.IssueNumber] = true
+				pending[event.IssueNumber] = event
 			}
 			continue
 		case QueueUnproven:
@@ -51,6 +51,10 @@ func replayEvents(previous Snapshot, observation Observation) ([]QueueEvent, err
 				queue = append(queue[:index], queue[index+1:]...)
 			}
 		case ReadyLabeled, RunningLabeled:
+			if removed, ok := pending[event.IssueNumber]; ok && ((removed.Kind == ReadyUnlabeled && event.Kind == ReadyLabeled) || (removed.Kind == RunningUnlabeled && event.Kind == RunningLabeled)) {
+				removed.Kind = QueueExited
+				result = append(result, removed)
+			}
 			delete(exited, event.IssueNumber)
 			delete(pending, event.IssueNumber)
 			item := QueueItem{Number: event.IssueNumber, Phase: Ready, PhaseSince: event.At, Deadline: event.At.Add(observation.AcceptanceTimeout)}
@@ -75,5 +79,6 @@ func replayEvents(previous Snapshot, observation Observation) ([]QueueEvent, err
 			return nil, fmt.Errorf("issue event replay disagrees with open issue snapshot")
 		}
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
 }

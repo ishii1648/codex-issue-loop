@@ -99,7 +99,7 @@ func (w *LineWriter) Write(p []byte) (int, error) {
 			break
 		}
 		line := string(w.buf[:index+1])
-		if privateKeyBegin.MatchString(line) {
+		if privateKeyBegin.MatchString(line) && !privateKeyEnd.MatchString(line) {
 			w.pem = true
 			if _, err := io.WriteString(w.dst, "[REDACTED PRIVATE KEY]\n"); err != nil {
 				return 0, err

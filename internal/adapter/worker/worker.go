@@ -221,6 +221,7 @@ func (c Codex) execute(parent context.Context, cfg config.Config, issueNumber in
 	}
 	command := cfg.Worker.EffectiveCommand()
 	cmd := exec.Command(command, args...)
+	cmd.WaitDelay = cfg.Worker.TimeoutGrace.Duration
 	cmd.Dir = workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(prompt)
@@ -402,10 +403,7 @@ func waitForProcess(ctx context.Context, cmd *exec.Cmd, timeout, grace time.Dura
 	defer ticker.Stop()
 	parentExited := false
 	for {
-		if !processGroupAlive(pid) && (parentExited || !processAlive(pid)) {
-			if !parentExited {
-				<-done
-			}
+		if !processGroupAlive(pid) && parentExited {
 			return &TerminationError{Timeout: timeout, GracePeriod: grace, Cause: ctx.Err()}
 		}
 		select {
@@ -417,7 +415,13 @@ func waitForProcess(ctx context.Context, cmd *exec.Cmd, timeout, grace time.Dura
 				_ = cmd.Process.Kill()
 			}
 			if !parentExited {
-				<-done
+				killDeadline := time.NewTimer(grace)
+				defer killDeadline.Stop()
+				select {
+				case <-done:
+				case <-killDeadline.C:
+					return &TerminationError{Timeout: timeout, GracePeriod: grace, Forced: true, Cause: ctx.Err(), CleanupError: fmt.Errorf("worker Wait did not complete within %s after SIGKILL", grace)}
+				}
 			}
 			return &TerminationError{Timeout: timeout, GracePeriod: grace, Forced: true, Cause: ctx.Err()}
 		}
