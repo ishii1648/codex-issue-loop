@@ -1082,13 +1082,17 @@ func (s *scheduler) nextRetryDelay() (time.Duration, bool) {
 	}
 	deadline := time.Time{}
 	for number, value := range s.issueRetry {
+		if !value.After(now) {
+			delete(s.issueRetry, number)
+			continue
+		}
 		if _, active := s.active[number]; !active && (deadline.IsZero() || value.Before(deadline)) {
 			deadline = value
 		}
 	}
 	if snapshot, err := s.loop.Store.Load(); err == nil {
 		for _, issue := range snapshot.Issues {
-			if issue != nil && issue.RetryAfter != nil {
+			if issue != nil && issue.RetryAfter != nil && issue.RetryAfter.After(now) {
 				if _, active := s.active[issue.Number]; !active && (deadline.IsZero() || issue.RetryAfter.Before(deadline)) {
 					deadline = *issue.RetryAfter
 				}

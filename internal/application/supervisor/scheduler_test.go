@@ -2129,3 +2129,193 @@ func TestSchedulerSkipsReadyIssueWithRetainedLifecycle(t *testing.T) {
 		})
 	}
 }
+
+func TestSchedulerNextRetryDelayIgnoresExpiredDeadlines(t *testing.T) {
+	for _, offset := range []time.Duration{-time.Minute, 0} {
+		for _, future := range []string{"none", "issueRetry", "RetryAfter"} {
+			t.Run(fmt.Sprintf("%s/%s", offset, future), func(t *testing.T) {
+				loop, _ := testLoop(t, worker.Result{})
+				now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+				loop.Clock = fixedClock{value: now}
+				expired, next := now.Add(offset), now.Add(time.Minute)
+				_, err := loop.Store.Update("retry_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+					snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusRetryWait, RetryAfter: &expired}
+					if future == "RetryAfter" {
+						snapshot.Issues["2"] = &state.Issue{Number: 2, Status: issuedomain.StatusRetryWait, RetryAfter: &next}
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				s := &scheduler{loop: loop, issueRetry: map[int]time.Time{1: expired}, terminalPoll: map[int]time.Time{1: now.Add(5 * time.Minute)}}
+				if future == "issueRetry" {
+					s.issueRetry[2] = next
+				}
+				delay, ok := s.nextRetryDelay()
+				if future == "none" {
+					if ok || delay != 0 {
+						t.Fatalf("nextRetryDelay() = (%s, %v), want (0, false)", delay, ok)
+					}
+				} else if !ok || delay != time.Minute {
+					t.Fatalf("nextRetryDelay() = (%s, %v), want (1m, true)", delay, ok)
+				}
+				if _, exists := s.issueRetry[1]; exists {
+					t.Fatal("expired backoff retained while terminal polling is deferred")
+				}
+			})
+		}
+	}
+}
+
+type recordingSchedulerTimers struct{ delays chan time.Duration }
+
+func (t recordingSchedulerTimers) NewTimer(delay time.Duration) SchedulerTimer {
+	select {
+	case t.delays <- delay:
+	default:
+	}
+	return systemSchedulerTimers{}.NewTimer(delay)
+}
+
+func TestSchedulerRetryTimerWithOccupiedSlot(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Queue.Concurrency = 1
+	loop.Config.Webhook.Mode = "webhook"
+	loop.Config.Watch.ReconcileInterval.Duration = time.Hour
+	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
+	pool := &blockingPoolWorker{started: make(chan int, 2), release: make(chan struct{}, 2)}
+	loop.Worker = pool
+	now := time.Now().UTC()
+	expired := now.Add(-time.Minute)
+	_, err := loop.Store.Update("retry_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		for number := 1; number <= 2; number++ {
+			runID := fmt.Sprintf("run_%d", number)
+			branch := "codex/issue-1-test"
+			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
+				Number: number, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: runID,
+				Generation: 1, Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_" + runID, CreatedAt: now, RunID: runID, Generation: 1, Stage: issuedomain.ContinuationStageResume},
+				Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+				Attempts: 1, ExecutionProfile: "standard", UpdatedAt: now, RetryAfter: &expired,
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delays := make(chan time.Duration, 128)
+	loop.SchedulerTimers = recordingSchedulerTimers{delays: delays}
+	recorder := &recordingIncidentSignals{}
+	loop.IncidentSignals = recorder
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("scheduler did not stop")
+		}
+	}()
+	select {
+	case number := <-pool.started:
+		if number != 1 {
+			t.Fatalf("started Issue %d, want 1", number)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	observation := time.NewTimer(100 * time.Millisecond)
+	defer observation.Stop()
+	observing := true
+	for observing {
+		select {
+		case delay := <-delays:
+			if delay <= 0 {
+				t.Fatalf("scheduler armed immediate timer: %s", delay)
+			}
+		case number := <-pool.started:
+			t.Fatalf("Issue %d started while slot occupied", number)
+		case <-observation.C:
+			observing = false
+		}
+	}
+	cycles := 0
+	for _, signal := range recorder.snapshot() {
+		if signal.Name == "scheduler_cycle" {
+			cycles++
+		}
+	}
+	if cycles != 1 {
+		t.Fatalf("schedule cycles = %d, want 1 while worker occupies slot", cycles)
+	}
+	pool.release <- struct{}{}
+	select {
+	case number := <-pool.started:
+		if number != 2 {
+			t.Fatalf("started Issue %d after slot release, want 2", number)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expired retry was not dispatched after slot release")
+	}
+}
+
+func TestSchedulerRetryTimerDispatchesAtRetryAfter(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.Config.Watch.ReconcileInterval.Duration = time.Hour
+	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
+	pool := &blockingPoolWorker{started: make(chan int, 1), release: make(chan struct{}, 1)}
+	loop.Worker = pool
+	now := time.Now().UTC()
+	retryAt := now.Add(time.Second)
+	_, err := loop.Store.Update("retry_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
+		branch := "codex/issue-1-test"
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: "run_retry",
+			Generation: 1, Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_retry", CreatedAt: now, RunID: "run_retry", Generation: 1, Stage: issuedomain.ContinuationStageResume},
+			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			Attempts: 1, ExecutionProfile: "standard", UpdatedAt: now, RetryAfter: &retryAt,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.SchedulerTimers = recordingSchedulerTimers{delays: make(chan time.Duration, 16)}
+	recorder := &recordingIncidentSignals{}
+	loop.IncidentSignals = recorder
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("scheduler did not stop")
+		}
+	}()
+	select {
+	case <-pool.started:
+		if time.Now().Before(retryAt) {
+			t.Fatal("worker started before RetryAfter")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry timer did not dispatch worker")
+	}
+	for _, signal := range recorder.snapshot() {
+		if signal.Name == "scheduler_cycle" && signal.Trigger == "retry_timer" {
+			return
+		}
+	}
+	t.Fatal("worker dispatch was not preceded by retry timer wake")
+}
