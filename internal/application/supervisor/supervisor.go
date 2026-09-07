@@ -341,7 +341,10 @@ func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
 func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
-		if issue.Status.RetainsRunLogs() {
+		unresolvedPublication := issue.Status.Terminal() &&
+			issue.Continuation != nil && issue.Continuation.Stage == issuedomain.ContinuationStagePublish &&
+			issue.Suspension != nil && issue.Suspension.Status != issuedomain.SuspensionResolved
+		if issue.Status.RetainsRunLogs() || unresolvedPublication {
 			if issue.RunID != "" {
 				exclude[issue.RunID] = true
 			}
