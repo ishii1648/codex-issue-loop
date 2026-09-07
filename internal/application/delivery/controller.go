@@ -175,17 +175,6 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 	tx.LastCheckAt = now
 	tx.NextCheckAt = now.Add(cfg.PollDuration())
 	verifier := Verifier{GH: c.GH, Runner: c.runner(), CacheDir: paths.Cache}
-	if holdRolledBack {
-		discovered, discoverErr := verifier.Discover(ctx, cfg)
-		if discoverErr != nil {
-			_ = SaveTransaction(paths.Transaction, tx)
-			return c.reportFrom(paths, cfg, tx, DrainProgress{}), discoverErr
-		}
-		if discovered == tx.Desired {
-			_ = SaveTransaction(paths.Transaction, tx)
-			return c.reportFrom(paths, cfg, tx, DrainProgress{}), nil
-		}
-	}
 	wasActive := transactionActive(tx)
 	initialDesired := tx.Desired
 	if !wasActive {
@@ -214,6 +203,33 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 				tx.ArtifactDigest = progress.Digest
 			}
 			return SaveTransaction(paths.Transaction, tx)
+		}
+	}
+	deferAutoApply := !wasActive && cfg.AutoApply == "never" && !force
+	if holdRolledBack || deferAutoApply {
+		discovered, discoverErr := verifier.Discover(ctx, cfg)
+		if discoverErr != nil {
+			if !holdRolledBack {
+				tx.LastResult = verificationResult(discoverErr)
+				tx.Reason = discoverErr.Error()
+			}
+			_ = SaveTransaction(paths.Transaction, tx)
+			return c.reportFrom(paths, cfg, tx, DrainProgress{}), discoverErr
+		}
+		if holdRolledBack && discovered == tx.Desired {
+			_ = SaveTransaction(paths.Transaction, tx)
+			return c.reportFrom(paths, cfg, tx, DrainProgress{}), nil
+		}
+		if deferAutoApply {
+			if err := verifier.reportProgress(VerificationProgress{Phase: PhaseDiscovered, Desired: discovered}); err != nil {
+				return Report{}, err
+			}
+			tx.LastResult = "deferred"
+			tx.Reason = "auto_apply is never"
+			if err := SaveTransaction(paths.Transaction, tx); err != nil {
+				return Report{}, err
+			}
+			return c.reportFrom(paths, cfg, tx, DrainProgress{}), nil
 		}
 	}
 	candidate, err := verifier.Check(ctx, cfg)
