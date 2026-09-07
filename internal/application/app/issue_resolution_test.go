@@ -44,6 +44,7 @@ func TestIssuePlanIgnoresEventsAndCancelIsFencedAndIdempotent(t *testing.T) {
 	if _, err := store.Update("worker_started", 1, "run_1", nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["1"]
 		item.Status, item.Worktree, item.Branch = issuedomain.StatusRunning, repo, "main"
+		item.WorkerPID, item.WorkerPGID = 123, 123
 		item.Workspace = testWorkerWorkspace(snapshot, repo, "main")
 		return nil
 	}); err != nil {

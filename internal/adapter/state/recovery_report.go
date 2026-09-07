@@ -160,6 +160,7 @@ func (s Store) ReadRecoveryInputs() (Snapshot, []Event, error) {
 			return Snapshot{}, nil, fmt.Errorf("durable state schema or repository identity differs")
 		}
 		normalizeSnapshot(&snapshot)
+		NormalizeLegacyWorkerLaunches(&snapshot)
 		events, err := decodeRecoveryEvents(eventsBefore, s.RepoID)
 		if err != nil {
 			return Snapshot{}, nil, err
@@ -187,6 +188,7 @@ func (s Store) ReadCanonicalSnapshot() (Snapshot, error) {
 			return Snapshot{}, fmt.Errorf("decode canonical state: %w", err)
 		}
 		normalizeSnapshot(&snapshot)
+		NormalizeLegacyWorkerLaunches(&snapshot)
 		if snapshot.Version != CurrentVersion || snapshot.RepoID != s.RepoID {
 			return Snapshot{}, fmt.Errorf("canonical state schema or repository identity differs")
 		}

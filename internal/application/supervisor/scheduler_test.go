@@ -705,7 +705,7 @@ func TestStartupReconciliationObservesRateLimitWithoutExiting(t *testing.T) {
 	}
 	_, err := loop.Store.Update("startup_fixture", 7, "run_7", nil, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["7"]
-		item.Status = issuedomain.StatusRunning
+		item.Status, item.LaunchSource = issuedomain.StatusLaunching, issuedomain.StatusRetryWait
 		setSupervisorTestWorkspace(snapshot, item)
 		return nil
 	})
