@@ -817,7 +817,6 @@ func (b *Broker) reject(w http.ResponseWriter, code int) {
 	b.mu.Lock()
 	b.status.Rejected++
 	b.status.UpdatedAt = b.Now()
-	b.persistStatusLocked()
 	b.mu.Unlock()
 	http.Error(w, http.StatusText(code), code)
 }
