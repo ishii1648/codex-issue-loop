@@ -46,14 +46,20 @@ func (m Manager) Prepare(ctx context.Context, cfg config.Config, worktreePath, b
 		return Preparation{}, NonRecoverableError{fmt.Errorf("conflict recovery requires the saved worktree and branch")}
 	}
 	actualBranch, err := m.run(ctx, worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil || strings.TrimSpace(actualBranch) != branch {
+	if err != nil {
+		return Preparation{}, nonRecoverableGitError(ctx, err)
+	}
+	if strings.TrimSpace(actualBranch) != branch {
 		return Preparation{}, NonRecoverableError{fmt.Errorf("conflict recovery worktree branch mismatch: saved=%s actual=%s", branch, strings.TrimSpace(actualBranch))}
 	}
 	head, err := m.revParse(ctx, worktreePath, "HEAD")
 	if err != nil {
-		return Preparation{}, NonRecoverableError{fmt.Errorf("resolve conflict recovery HEAD: %w", err)}
+		return Preparation{}, nonRecoverableGitError(ctx, fmt.Errorf("resolve conflict recovery HEAD: %w", err))
 	}
-	mergeHead, _ := m.revParse(ctx, worktreePath, "MERGE_HEAD")
+	mergeHead, err := m.revParse(ctx, worktreePath, "MERGE_HEAD")
+	if err != nil && ctx.Err() != nil {
+		return Preparation{}, err
+	}
 	if mergeHead != "" {
 		if previous == nil || previous.TargetBaseSHA == "" || mergeHead != previous.TargetBaseSHA {
 			return Preparation{}, NonRecoverableError{fmt.Errorf("worktree has an unrecorded merge target %s", mergeHead)}
@@ -91,12 +97,12 @@ func (m Manager) Prepare(ctx context.Context, cfg config.Config, worktreePath, b
 	}
 	base, err := m.run(ctx, worktreePath, "merge-base", head, target)
 	if err != nil {
-		return Preparation{}, NonRecoverableError{fmt.Errorf("resolve previous base SHA: %w", err)}
+		return Preparation{}, nonRecoverableGitError(ctx, fmt.Errorf("resolve previous base SHA: %w", err))
 	}
 	base = strings.TrimSpace(base)
 	allowed, err := m.lines(ctx, worktreePath, "diff", "--name-only", target+"..."+head, "--")
 	if err != nil {
-		return Preparation{}, NonRecoverableError{fmt.Errorf("resolve Pull Request path scope: %w", err)}
+		return Preparation{}, nonRecoverableGitError(ctx, fmt.Errorf("resolve Pull Request path scope: %w", err))
 	}
 	if base == target {
 		remoteHead, remoteErr := m.remoteHead(ctx, worktreePath, branch)
@@ -114,12 +120,15 @@ func (m Manager) Prepare(ctx context.Context, cfg config.Config, worktreePath, b
 	mergeOutput, mergeErr := m.run(ctx, worktreePath, "merge", "--no-ff", "--no-commit", target)
 	conflicts, listErr := m.unmerged(ctx, worktreePath)
 	if listErr != nil {
-		return Preparation{}, NonRecoverableError{listErr}
+		return Preparation{}, nonRecoverableGitError(ctx, listErr)
 	}
 	if mergeErr != nil && len(conflicts) == 0 {
 		return Preparation{}, fmt.Errorf("prepare base merge: %w: %s", mergeErr, strings.TrimSpace(mergeOutput))
 	}
-	actualMergeHead, _ := m.revParse(ctx, worktreePath, "MERGE_HEAD")
+	actualMergeHead, err := m.revParse(ctx, worktreePath, "MERGE_HEAD")
+	if err != nil && ctx.Err() != nil {
+		return Preparation{}, err
+	}
 	if actualMergeHead != target {
 		return Preparation{}, NonRecoverableError{fmt.Errorf("prepared merge target mismatch: expected=%s actual=%s", target, actualMergeHead)}
 	}
@@ -201,7 +210,10 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 		return worker.GitResult{}, fmt.Errorf("resolved merge contains whitespace errors or conflict markers: %w: %s", checkErr, strings.TrimSpace(output))
 	}
 
-	mergeHead, _ := m.revParse(ctx, worktreePath, "MERGE_HEAD")
+	mergeHead, err := m.revParse(ctx, worktreePath, "MERGE_HEAD")
+	if err != nil && ctx.Err() != nil {
+		return worker.GitResult{}, err
+	}
 	if mergeHead != "" {
 		if mergeHead != recovery.TargetBaseSHA {
 			return worker.GitResult{}, NonRecoverableError{fmt.Errorf("merge target changed before publication: expected=%s actual=%s", recovery.TargetBaseSHA, mergeHead)}
@@ -231,7 +243,10 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 		return worker.GitResult{}, err
 	}
 	merged, err := m.mergeCommitContains(ctx, worktreePath, commit, recovery.TargetBaseSHA)
-	if err != nil || !merged {
+	if err != nil {
+		return worker.GitResult{}, err
+	}
+	if !merged {
 		return worker.GitResult{}, NonRecoverableError{fmt.Errorf("recovery commit does not retain target base SHA %s as a parent", recovery.TargetBaseSHA)}
 	}
 	remoteHead, err := m.remoteHead(ctx, worktreePath, branch)
@@ -305,9 +320,19 @@ func (m Manager) run(ctx context.Context, path string, args ...string) (string, 
 	cmdArgs := append([]string{"-C", path}, args...)
 	out, err := exec.CommandContext(ctx, m.gitPath(), cmdArgs...).CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		return string(out), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return string(out), nil
+}
+
+func nonRecoverableGitError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return err
+	}
+	return NonRecoverableError{err}
 }
 
 func (m Manager) gitPath() string {
