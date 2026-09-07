@@ -37,7 +37,7 @@ func TestWriteDeliveryPlistUsesHostLevelIntervalAndDefaultConfig(t *testing.T) {
 }
 
 func TestWritePlistUsesAbsoluteCommandsAndEscapesPaths(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "managed & root")
 	l := layout.Layout{Root: root, ReposRoot: filepath.Join(root, "repos"), LaunchAgents: filepath.Join(root, "launch")}
 	entry := registry.Entry{RepoID: "repo-id", RepoPath: filepath.Join(root, "repo & work"), EnvironmentPath: "/custom/bin:/usr/bin"}
 	if err := (Manager{Layout: l}).WritePlist(entry, "/absolute/agent-loop"); err != nil {
@@ -48,7 +48,7 @@ func TestWritePlistUsesAbsoluteCommandsAndEscapesPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, expected := range []string{"/absolute/agent-loop", "repo &amp; work", "/custom/bin:/usr/bin", "SuccessfulExit"} {
+	for _, expected := range []string{"/absolute/agent-loop", "repo &amp; work", "/custom/bin:/usr/bin", "SuccessfulExit", "<key>AGENT_LOOP_HOME</key><string>" + strings.ReplaceAll(l.Root, "&", "&amp;") + "</string>"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("plist missing %q:\n%s", expected, text)
 		}

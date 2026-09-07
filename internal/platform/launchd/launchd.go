@@ -59,7 +59,7 @@ func (m Manager) WritePlist(entry registry.Entry, binary string) error {
 	values := map[string]string{
 		"label": m.Layout.Label(entry.RepoID), "binary": binary, "repo": entry.RepoPath,
 		"stdout": filepath.Join(stateDir, "launchd.stdout.log"), "stderr": filepath.Join(stateDir, "launchd.stderr.log"),
-		"home": home, "path": pathEnv,
+		"home": home, "path": pathEnv, "root": m.Layout.Root,
 	}
 	for _, logPath := range []string{values["stdout"], values["stderr"]} {
 		if info, statErr := os.Lstat(logPath); statErr == nil && !info.Mode().IsRegular() {
@@ -93,7 +93,7 @@ func (m Manager) WritePlist(entry registry.Entry, binary string) error {
   <key>StandardOutPath</key><string>{{stdout}}</string>
   <key>StandardErrorPath</key><string>{{stderr}}</string>
   <key>EnvironmentVariables</key>
-  <dict><key>HOME</key><string>{{home}}</string><key>PATH</key><string>{{path}}</string></dict>
+  <dict><key>HOME</key><string>{{home}}</string><key>PATH</key><string>{{path}}</string><key>AGENT_LOOP_HOME</key><string>{{root}}</string></dict>
 </dict>
 </plist>
 `
