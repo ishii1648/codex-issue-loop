@@ -2553,32 +2553,21 @@ func TestFaultWebhookSuccessResetsSupervisorFailuresWithProductionGate(t *testin
 
 func TestFaultGitHubRetryDeadlineGuardsRunningJobs(t *testing.T) {
 	loop, client := testLoop(t, worker.Result{})
-	now := time.Date(2026, 9, 7, 14, 26, 0, 0, time.UTC)
-	loop.Clock = fixedClock{value: now}
 	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
 	loop.enableRateLimitGate()
-	guarded := loop.GitHub.(*rateLimitedGitHub)
-	s := &scheduler{loop: loop, consecutiveFailures: 4}
-	if err := s.handleCycleError(failure.Wrap(failure.Transient, "GitHub", errors.New("503"))); err != nil {
+	if err := loop.recordSupervisorRetry(errors.New("503"), failure.Transient, 5, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	for range 3 {
-		_, err := loop.GitHub.Inspect(context.Background(), loop.Config, 1, "")
-		if !errors.Is(err, errGitHubRetryWait) {
-			t.Fatalf("request during wait: %v", err)
-		}
-		if err := s.handleCycleError(err); err != nil {
-			t.Fatal(err)
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := loop.GitHub.Inspect(ctx, loop.Config, 1, ""); !errors.Is(err, context.DeadlineExceeded) || client.inspectCalls != 0 {
+		t.Fatalf("canceled wait: reads=%d err=%v", client.inspectCalls, err)
 	}
-	if client.inspectCalls != 0 || s.consecutiveFailures != 5 {
-		t.Fatalf("reads=%d failures=%d", client.inspectCalls, s.consecutiveFailures)
+	deadline := loop.now().Add(100 * time.Millisecond)
+	if err := loop.recordSupervisorRetry(errors.New("503"), failure.Transient, 5, 100*time.Millisecond); err != nil {
+		t.Fatal(err)
 	}
-	if err := guarded.MarkRunning(context.Background(), loop.Config, 1); !errors.Is(err, errGitHubRetryWait) {
-		t.Fatalf("write during wait: %v", err)
-	}
-	loop.Clock = fixedClock{value: now.Add(5 * time.Minute)}
-	if _, err := loop.GitHub.Inspect(context.Background(), loop.Config, 1, ""); err != nil || client.inspectCalls != 1 {
-		t.Fatalf("request after wait: reads=%d err=%v", client.inspectCalls, err)
+	if _, err := loop.GitHub.Inspect(context.Background(), loop.Config, 1, ""); err != nil || client.inspectCalls != 1 || loop.now().Before(deadline) {
+		t.Fatalf("request after wait: reads=%d now=%s deadline=%s err=%v", client.inspectCalls, loop.now(), deadline, err)
 	}
 }

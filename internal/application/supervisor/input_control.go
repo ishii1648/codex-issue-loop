@@ -22,28 +22,28 @@ type guardedInputControl struct {
 }
 
 func (c guardedInputControl) SyncInputRequest(ctx context.Context, cfg config.Config, request state.Request) error {
-	if err := c.guard.before(); err != nil {
+	if err := c.guard.before(ctx); err != nil {
 		return err
 	}
 	return c.control.SyncInputRequest(ctx, cfg, request)
 }
 
 func (c guardedInputControl) ListInputComments(ctx context.Context, cfg config.Config, number int) ([]gh.InputComment, error) {
-	if err := c.guard.before(); err != nil {
+	if err := c.guard.before(ctx); err != nil {
 		return nil, err
 	}
 	return c.control.ListInputComments(ctx, cfg, number)
 }
 
 func (c guardedInputControl) VerifyInputActor(ctx context.Context, cfg config.Config, comment gh.InputComment) (gh.AuthorVerification, error) {
-	if err := c.guard.before(); err != nil {
+	if err := c.guard.before(ctx); err != nil {
 		return gh.AuthorVerification{}, err
 	}
 	return c.control.VerifyInputActor(ctx, cfg, comment)
 }
 
 func (c guardedInputControl) SyncInputAcknowledgement(ctx context.Context, cfg config.Config, number int, acknowledgement gh.InputAcknowledgement) error {
-	if err := c.guard.before(); err != nil {
+	if err := c.guard.before(ctx); err != nil {
 		return err
 	}
 	return c.control.SyncInputAcknowledgement(ctx, cfg, number, acknowledgement)
