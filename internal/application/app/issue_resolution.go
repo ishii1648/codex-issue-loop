@@ -184,7 +184,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 		}
 	}
 	adoption, adoptionErr := worktreeAdoptionObservation{}, error(nil)
-	if missingOnlyWorktreeDigest(item) && launchErr == nil && launch.Valid && inspectErr == nil && inspection.Valid {
+	if state.CanAdoptWorktree(item) && launchErr == nil && launch.Valid && inspectErr == nil && inspection.Valid {
 		adoption, adoptionErr = inspectWorktreeAdoption(ctx, entry.Commands["git"], item)
 	}
 	publicationHeadRepair := remoteErr == nil && resultErr == nil && item.Continuation != nil &&
@@ -239,10 +239,10 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 			(item.Suspension.Status == issuedomain.SuspensionActive ||
 				(item.Suspension.Status == issuedomain.SuspensionQuarantined && action == issuedomain.ResolutionCancel))
 		if action == issuedomain.ResolutionAdoptWorktree {
-			suspensionEligible = missingOnlyWorktreeDigest(item)
+			suspensionEligible = state.CanAdoptWorktree(item)
 		}
 		if action == issuedomain.ResolutionAdoptHead {
-			suspensionEligible = missingResumeHead(item)
+			suspensionEligible = state.CanAdoptHead(item)
 		}
 		if !suspensionEligible {
 			reasons = append(reasons, "action is not allowed by the active suspension")
@@ -299,7 +299,7 @@ func plannedIssueActions(cfg config.Config, item *state.Issue, activeExecution *
 				reasons = append(reasons, "saved completed worker result is unavailable")
 			}
 		case issuedomain.ResolutionAdoptHead:
-			if !missingResumeHead(item) {
+			if !state.CanAdoptHead(item) {
 				reasons = append(reasons, "only an active worker resume checkpoint missing head_sha can be adopted")
 			}
 			if launchErr != nil || !launch.Valid || inspectErr != nil || !inspection.Valid || inspection.Branch != item.Branch || inspection.Head == "" {
@@ -494,6 +494,13 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 		if resolutionRequiresExecutionSlot(action) && snapshot.ActiveExecution != nil {
 			return fmt.Errorf("Issue #%d execution slot changed after planning", *number)
 		}
+
+		observed := state.OperatorResolutionObservation{
+			HeadSHA: planned.inspection.Head, WorktreeSHA256: planned.worktreeSHA256,
+			ResultSummary: planned.resultSummary, ResultSHA256: planned.resultSHA256,
+			RepairPublicationHead: planned.report.Observations["publication_head_repair"] == true,
+			GitHubStateReason:     planned.remote.Issue.StateReason,
+		}
 		if action == issuedomain.ResolutionAdoptHead {
 			if snapshot.ActiveExecution != nil || !reflect.DeepEqual(item, planned.issue) {
 				return fmt.Errorf("Issue #%d head adoption evidence changed", *number)
@@ -501,101 +508,35 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 			if err := verifyAdoptedHead(ctx, planned, *expectedHead, l.Root); err != nil {
 				return err
 			}
-			item.Continuation.HeadSHA = *expectedHead
-		} else if action == issuedomain.ResolutionAdoptWorktree {
-			item.Continuation.WorktreeSHA256 = planned.worktreeSHA256
-			item.Continuation.Stage = issuedomain.ContinuationStageConflict
-			item.ConflictRecovery.AllowedPaths = mergeAdoptionPaths(item.ConflictRecovery.AllowedPaths, planned.adoptionAllowPaths)
-			item.Suspension.Status = issuedomain.SuspensionActive
-			item.Suspension.Recoverability = issuedomain.RecoverabilityOperator
-			item.Suspension.MissingEvidence = nil
-			item.Suspension.AllowedActions = []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionRetryStage}
-		} else if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
-			if action == issuedomain.ResolutionRetryStage && item.ConflictRecovery != nil {
-				item.ConflictRecovery.Attempts = 0
-				item.ConflictRecovery.UpdatedAt = now
+			observed.HeadSHA = *expectedHead
+		}
+		if action == issuedomain.ResolutionAdoptWorktree {
+			observed.AllowedPaths = planned.adoptionAllowPaths
+		}
+		if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStagePublish {
+			if planned.resultErr != nil || planned.resultSummary == "" || planned.resultSHA256 == "" {
+				return fmt.Errorf("Issue #%d saved completed worker result changed after planning", *number)
 			}
-			if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStagePublish {
-				if planned.resultErr != nil || planned.resultSummary == "" || planned.resultSHA256 == "" {
-					return fmt.Errorf("Issue #%d saved completed worker result changed after planning", *number)
+			if observed.RepairPublicationHead {
+				if err := verifyRecoveryWorkspace(ctx, planned, l.Root); err != nil {
+					return err
 				}
-				if planned.report.Observations["publication_head_repair"] == true {
-					if err := verifyRecoveryWorkspace(ctx, planned, l.Root); err != nil {
-						return err
-					}
-					item.Continuation.HeadSHA = planned.inspection.Head
-				}
-				item.Continuation.Summary = planned.resultSummary
-				item.Continuation.ResultSHA256 = planned.resultSHA256
 			}
-			if _, err := state.ResumeContinuation(snapshot, item.Number, item.Continuation.ID, now); err != nil {
-				return err
+		}
+		if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStageChecks {
+			pullRequest, ok := matchingOpenPullRequest(item, planned.remote.PullRequests)
+			if !ok || pullRequest.HeadSHA != planned.inspection.Head {
+				return fmt.Errorf("Issue #%d repaired Pull Request changed after planning", *number)
 			}
-			transition, err := issuedomain.ResolveSuspension(item.Status, action, item.Continuation.Stage)
-			if err != nil {
-				return err
-			}
-			if err := state.ApplyIssueTransition(item, transition); err != nil {
-				return err
-			}
-			if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStageChecks {
-				pullRequest, ok := matchingOpenPullRequest(item, planned.remote.PullRequests)
-				if !ok || pullRequest.HeadSHA != planned.inspection.Head {
-					return fmt.Errorf("Issue #%d repaired Pull Request changed after planning", *number)
-				}
-				item.HeadSHA = pullRequest.HeadSHA
-				item.PullRequestNumber = pullRequest.Number
-			}
-			if err := state.SetEffect(snapshot, item.Number, item.RunID, issuedomain.EffectApplyResolution, now); err != nil {
-				return err
-			}
-		} else if action == issuedomain.ResolutionAdoptPR {
+			observed.PullRequestNumber = pullRequest.Number
+		}
+		if action == issuedomain.ResolutionAdoptPR {
 			if !hasMergedPR {
 				return fmt.Errorf("Issue #%d matching merged Pull Request changed after planning", *number)
 			}
-			transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.ContinuationStageNone)
-			if transitionErr != nil {
-				return transitionErr
-			}
-			item.PullRequestURL = mergedPR.URL
-			item.PullRequestNumber = mergedPR.Number
-			item.HeadSHA = mergedPR.HeadSHA
-			item.PullRequestMerged = true
-			item.Suspension.Status = issuedomain.SuspensionResolved
-			item.Suspension.Resolution = action
-			item.Suspension.ResolvedAt = now
-			if err := state.SetEffect(snapshot, item.Number, item.RunID, issuedomain.EffectMarkDone, now); err != nil {
-				return err
-			}
-			if err := state.ApplyIssueTransition(item, transition); err != nil {
-				return err
-			}
-		} else {
-			previous := item.Status
-			transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.ContinuationStageNone)
-			if transitionErr != nil {
-				return transitionErr
-			}
-			if err := state.ApplyIssueTransition(item, transition); err != nil {
-				return err
-			}
-			state.CancelPendingRequests(snapshot, item.Number)
-			if err := state.SetEffect(snapshot, item.Number, item.RunID, issuedomain.EffectNone, now); err != nil {
-				return err
-			}
-			item.Cancellation = &state.Cancellation{
-				Source: "operator_resolution", GitHubStateReason: planned.remote.Issue.StateReason,
-				PreviousStatus: previous, ExecutionReleaseResult: "not_present", CanceledAt: now,
-			}
-			item.GitHubStateReason = planned.remote.Issue.StateReason
+			observed.PullRequestURL, observed.PullRequestNumber, observed.HeadSHA = mergedPR.URL, mergedPR.Number, mergedPR.HeadSHA
 		}
-		if item.Suspension != nil && action != issuedomain.ResolutionAdoptWorktree && action != issuedomain.ResolutionAdoptHead {
-			item.Suspension.Status = issuedomain.SuspensionResolved
-			item.Suspension.Resolution = action
-			item.Suspension.ResolvedAt = now
-		}
-		item.UpdatedAt = now
-		return nil
+		return state.ResolveOperatorSuspension(snapshot, *number, action, observed, now)
 	})
 	if err != nil {
 		return exitError{4, err}
