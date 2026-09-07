@@ -49,7 +49,7 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 	var since time.Time
 	current := phase()
 	var later time.Time
-	laterEntry := false
+	var laterEntry model.Phase
 	exclusions := stringSet(append(append([]string{}, repo.TerminalLabels...), repo.ExcludeLabels...))
 	monitored := stringSet(repo.ReadyLabels)
 	monitored[strings.ToLower(repo.RunningLabel)] = true
@@ -70,7 +70,7 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 			continue
 		}
 		if event.Event == "closed" || event.Event == "reopened" || exclusions[label] {
-			laterEntry = false
+			laterEntry = ""
 		}
 		switch event.Event {
 		case "labeled":
@@ -104,11 +104,11 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 			since = event.CreatedAt.UTC()
 		}
 		// A label replacement keeps the admission window until the next phase.
-		if after == "" && event.Event == "unlabeled" && laterEntry {
-			laterEntry = false
+		if after == "" && event.Event == "unlabeled" && laterEntry != "" && before != laterEntry {
+			laterEntry = ""
 			continue
 		}
-		laterEntry = after != ""
+		laterEntry = after
 		kind := model.QueueExited
 		if after == model.Ready {
 			kind = model.ReadyLabeled
