@@ -179,6 +179,7 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 			return exitError{4, fmt.Errorf("refuse %s before launchd mutation: %w; run agent-loop migrate --json", command, semanticErr)}
 		}
 	}
+	startingRecorded := false
 	switch command {
 	case "start":
 		tx, loadErr := operatorcontrol.Load(l.OperatorControlPath(entry.RepoID))
@@ -192,6 +193,7 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		launchStatus, err = lm.Status(ctx, entry)
 		if err == nil && !launchStatus.Loaded {
 			err = recordSupervisorControl(store, "starting", "start requested")
+			startingRecorded = err == nil
 		}
 		if err == nil && cfg.Webhook.Enabled() {
 			if _, statErr := os.Stat(l.BrokerPlistPath()); statErr != nil {
@@ -210,7 +212,7 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 		return a.drainControl(ctx, l, entry, cfg, lm, store, command, options)
 	}
 	if err != nil {
-		if command == "start" {
+		if startingRecorded {
 			_ = recordSupervisorControl(store, "stopped", "start failed: "+err.Error())
 		}
 		return err
