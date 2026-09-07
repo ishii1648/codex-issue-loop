@@ -1303,3 +1303,123 @@ func assignmentFixture(t *testing.T) (layout.Layout, string, []registry.Entry, s
 	}
 	return l, configPath, entries, binary
 }
+
+func TestLegacyDrainBeforeWorkerPIDIsSaved(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		originalSchema    bool
+		persistNormalized bool
+		idle              bool
+	}{
+		{name: "original legacy schema rejects inspection", originalSchema: true},
+		{name: "running without execution authority"},
+		{name: "persisted launch quarantine", persistNormalized: true},
+		{name: "idle", idle: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, configPath, entries, binary := assignmentFixture(t)
+			entry := entries[0]
+			controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: &legacyAssignmentRunner{legacyPath: binary}}
+			if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+				t.Fatal(err)
+			}
+			store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+			if err := os.MkdirAll(store.Dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// Protocol-0 snapshots used schema 4 and had no active_execution.
+			raw := []byte(`{"version":4,"repo_id":"repo-a","supervisor":{"state":"polling","updated_at":"2026-09-07T00:00:00Z"},"issues":{"1":{"number":1,"status":"running","run_id":"run-legacy","generation":1,"updated_at":"2026-09-07T00:00:00Z"}},"pending_requests":{},"state_revision":0}`)
+			var fixture map[string]any
+			if err := json.Unmarshal(raw, &fixture); err != nil {
+				t.Fatal(err)
+			}
+			fixture["repo_path"] = entry.RepoPath
+			if !tc.originalSchema {
+				// Use the current envelope to exercise normalization beyond schema rejection.
+				empty, err := store.Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixture["version"] = empty.Version
+				fixture["semantic_contract_version"] = empty.SemanticContractVersion
+				fixture["issue_lifecycle_api_version"] = empty.IssueLifecycleAPIVersion
+			}
+			if tc.idle {
+				fixture["issues"].(map[string]any)["1"].(map[string]any)["status"] = "completed"
+			}
+			if err := fsutil.WriteJSON(store.StatePath(), fixture, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.originalSchema && !tc.idle {
+				if err := store.InspectExclusive(func(snapshot state.Snapshot) error {
+					item := snapshot.Issues["1"]
+					if snapshot.ActiveExecution != nil || item.Status != issuedomain.StatusBlocked ||
+						item.Suspension == nil || item.Suspension.ReasonCode != "legacy_launch_authority" {
+						t.Fatalf("unexpected normalization: %+v", snapshot)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if tc.persistNormalized {
+					snapshot, err := store.Load()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := fsutil.WriteJSON(store.StatePath(), snapshot, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			logPath := filepath.Join(t.TempDir(), "launchctl.log")
+			t.Setenv("FAKE_LAUNCHCTL_LOG", logPath)
+			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$FAKE_LAUNCHCTL_LOG\"\ncase \"$1\" in\nprint) printf 'state = running\\npid = 8101\\n' ;;\n*) exit 91 ;;\nesac\n"
+			if tc.idle {
+				script = `#!/bin/sh
+printf '%s\n' "$*" >>"$FAKE_LAUNCHCTL_LOG"
+case "$1" in
+  print) [ ! -f "$FAKE_LAUNCHCTL_LOG.stopped" ] || exit 1; printf 'state = running\npid = 8101\n' ;;
+  bootout) touch "$FAKE_LAUNCHCTL_LOG.stopped" ;;
+  *) exit 91 ;;
+esac
+`
+			}
+			if err := os.WriteFile(entry.Commands["launchctl"], []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			sleeps := 0
+			controller.Now = func() time.Time { return now }
+			controller.Sleep = func(context.Context, time.Duration) error {
+				sleeps++
+				now = now.Add(3 * time.Hour)
+				return nil
+			}
+			if tc.idle {
+				cfg, err := LoadConfig(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = controller.waitForLegacyIdleAndStop(context.Background(), cfg, entry, launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]})
+				if err != nil || sleeps != 0 {
+					t.Fatalf("idle drain: sleeps=%d err=%v", sleeps, err)
+				}
+			} else {
+				report, err := controller.Apply(context.Background(), entry.RepoPath, "v1.2.3", 1)
+				if err == nil || report.Transaction == nil || report.Transaction.Result != "deferred" {
+					t.Fatalf("report=%+v err=%v", report, err)
+				}
+				if tc.originalSchema && (!strings.Contains(err.Error(), "schema migration required") || sleeps != 0) {
+					t.Fatalf("sleeps=%d err=%v", sleeps, err)
+				}
+				if !tc.originalSchema && (!strings.Contains(err.Error(), "drain deadline") || sleeps != 1) {
+					t.Fatalf("sleeps=%d err=%v", sleeps, err)
+				}
+			}
+			commands, _ := os.ReadFile(logPath)
+			if strings.Contains(string(commands), "bootout") != tc.idle || strings.Contains(string(commands), "bootstrap") {
+				t.Fatalf("unexpected runtime mutation:\n%s", commands)
+			}
+		})
+	}
+}
