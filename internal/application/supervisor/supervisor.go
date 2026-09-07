@@ -32,7 +32,7 @@ import (
 )
 
 type WorktreeManager interface {
-	Ensure(context.Context, config.Config, string, int, string) (worktree.Result, error)
+	Ensure(context.Context, config.Config, string, int, string, string) (worktree.Result, error)
 	Inspect(context.Context, config.Config, string, string) (worktree.Inspection, error)
 	ValidateLaunch(context.Context, config.Config, string, string) (worktree.LaunchValidation, error)
 	ContentDigest(context.Context, string) (string, error)
@@ -414,7 +414,8 @@ func (l *Loop) startIssue(ctx context.Context, issue gh.Issue, runID string) err
 	return l.claimAndRun(ctx, issue, runID)
 }
 
-func (l *Loop) getIssue(ctx context.Context, number int) (gh.Issue, error) {
+func (l *Loop) getIssue(ctx context.Context, number int) (issue gh.Issue, err error) {
+	defer func() { recordScheduleGitHubSuccess(ctx, err) }()
 	if l.Config.Webhook.Enabled() {
 		if targeted, ok := l.GitHub.(gh.TargetedRESTClient); ok {
 			return targeted.GetREST(ctx, l.Config, number)
@@ -423,7 +424,8 @@ func (l *Loop) getIssue(ctx context.Context, number int) (gh.Issue, error) {
 	return l.GitHub.Get(ctx, l.Config, number)
 }
 
-func (l *Loop) inspectIssue(ctx context.Context, current state.Issue) (gh.RemoteState, error) {
+func (l *Loop) inspectIssue(ctx context.Context, current state.Issue) (remote gh.RemoteState, err error) {
+	defer func() { recordScheduleGitHubSuccess(ctx, err) }()
 	if l.Config.Webhook.Enabled() {
 		if targeted, ok := l.GitHub.(gh.TargetedRESTClient); ok {
 			prNumber := current.PullRequestNumber
@@ -445,7 +447,9 @@ func (l *Loop) inspectReconciliationIssue(ctx context.Context, current state.Iss
 		// Cancellation must observe the complete zero/one/multiple PR set for
 		// the saved branch. The webhook-optimized targeted read proves only one
 		// PR identity and therefore cannot authorize this terminal transition.
-		return l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+		remote, err := l.GitHub.Inspect(ctx, l.Config, current.Number, current.Branch)
+		recordScheduleGitHubSuccess(ctx, err)
+		return remote, err
 	}
 	return l.inspectIssue(ctx, current)
 }

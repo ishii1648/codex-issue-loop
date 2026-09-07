@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -260,16 +261,129 @@ func TestFaultWorkerTimeoutForceKillsEntireProcessGroupAfterGrace(t *testing.T) 
 	t.Fatalf("child process %d survived process-group SIGKILL", childPID)
 }
 
+func TestFaultWorkerTimeoutWithDetachedStderrDescendant(t *testing.T) {
+	for _, mode := range []string{"detached", "detached-graceful"} {
+		for _, backend := range []string{"codex", "claude-code", "opencode"} {
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				dir := t.TempDir()
+				fake := filepath.Join(dir, "fake-worker")
+				if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec \"$AGENT_LOOP_TEST_HELPER\" -test.run=TestWorkerProcessHelper --\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				helper, err := os.Executable()
+				if err != nil {
+					t.Fatal(err)
+				}
+				childPath := filepath.Join(dir, "child.pid")
+				t.Setenv("AGENT_LOOP_TEST_HELPER", helper)
+				t.Setenv("AGENT_LOOP_TEST_HELPER_MODE", mode)
+				t.Setenv("AGENT_LOOP_TEST_CHILD_PID", childPath)
+				t.Setenv("AGENT_LOOP_TEST_CHILD_READY", filepath.Join(dir, "child.ready"))
+				var runner Runner
+				switch backend {
+				case "codex":
+					runner = Codex{StateDir: dir}
+				case "claude-code":
+					runner = ClaudeCode{StateDir: dir}
+				case "opencode":
+					runner = OpenCode{StateDir: dir}
+				}
+				cfg := backendTestConfig(dir, backend, fake, "test/model", "")
+				cfg.Worker.Timeout.Duration = 100 * time.Millisecond
+				cfg.Worker.TimeoutGrace.Duration = 100 * time.Millisecond
+				var childPID int
+				t.Cleanup(func() {
+					if childPID > 0 {
+						_ = syscall.Kill(childPID, syscall.SIGKILL)
+					}
+				})
+				started := time.Now()
+				done := make(chan error, 1)
+				go func() {
+					_, err := runner.Run(context.Background(), cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_detached", Attempts: 1}, "", func(ProcessStart) error {
+						return waitForTestFile(childPath, testProcessReadyTimeout)
+					})
+					done <- err
+				}()
+				if err := waitForTestFile(childPath, testProcessReadyTimeout); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(childPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := fmt.Sscan(string(data), &childPID); err != nil {
+					t.Fatal(err)
+				}
+				limit := cfg.Worker.Timeout.Duration + 2*cfg.Worker.TimeoutGrace.Duration + time.Second
+				select {
+				case err := <-done:
+					var termination *TerminationError
+					if !errors.As(err, &termination) || !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("unexpected termination: %#v err=%v", termination, err)
+					}
+					if elapsed := time.Since(started); elapsed > limit {
+						t.Fatalf("Run took %s, limit %s", elapsed, limit)
+					}
+					if !processAlive(childPID) {
+						t.Fatal("detached descendant did not retain stderr through Run")
+					}
+				case <-time.After(limit):
+					_ = syscall.Kill(childPID, syscall.SIGKILL)
+					<-done
+					t.Fatal("Run blocked on detached descendant holding stderr")
+				}
+			})
+		}
+	}
+}
+
+func TestWaitForProcessReportsCleanupTimeout(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; printf ready; while :; do :; done")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = writer
+	grace := 50 * time.Millisecond
+	cmd.WaitDelay = grace
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	ready := make([]byte, 1)
+	if _, err := io.ReadFull(reader, ready); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	err := waitForProcess(ctx, cmd, time.Second, grace)
+	var termination *TerminationError
+	if !errors.As(err, &termination) || !termination.Forced || termination.CleanupError == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected termination: %#v err=%v", termination, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*grace+time.Second {
+		t.Fatalf("termination took %s", elapsed)
+	}
+}
+
 func TestWorkerProcessHelper(t *testing.T) {
 	mode := os.Getenv("AGENT_LOOP_TEST_HELPER_MODE")
 	if os.Getenv("AGENT_LOOP_TEST_HELPER") == "" || mode == "" {
 		return
 	}
 	switch mode {
-	case "forced":
-		signal.Ignore(syscall.SIGTERM)
+	case "forced", "detached", "detached-graceful":
+		if mode != "detached-graceful" {
+			signal.Ignore(syscall.SIGTERM)
+		}
 		child := exec.Command(os.Args[0], "-test.run=TestWorkerProcessHelper", "--")
 		child.Env = testEnvironmentWith("AGENT_LOOP_TEST_HELPER_MODE", "child")
+		if mode != "forced" {
+			child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			child.Stderr = os.Stderr
+		}
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}

@@ -37,7 +37,7 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 	cfg.RepoPath = repo
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Git.WorktreeRoot = filepath.Join(root, "worktrees")
-	result, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 12, "Add useful feature")
+	result, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 12, "Add useful feature", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,9 +47,24 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(result.Path, ".git")); err != nil {
 		t.Fatal(err)
 	}
-	second, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 12, "Add useful feature")
+	second, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 12, "Add useful feature", "")
 	if err != nil || second != result {
 		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	for _, savedBranch := range []string{"", result.Branch} {
+		t.Run("renamed title with saved branch="+savedBranch, func(t *testing.T) {
+			reused, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 12, "Add useful feature (v2)", savedBranch)
+			if err != nil || reused != result {
+				t.Fatalf("reused=%+v want=%+v err=%v", reused, result, err)
+			}
+		})
+	}
+	if _, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 12, "Add useful feature (v2)", "codex/issue-12-other"); err == nil {
+		t.Fatal("worktree with a mismatched saved branch was reused")
+	}
+	created, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 14, "New title", "codex/issue-14-old-title")
+	if err != nil || created.Branch != "codex/issue-14-new-title" {
+		t.Fatalf("new worktree=%+v err=%v", created, err)
 	}
 	inspection, err := (Manager{StateRoot: root}).Inspect(context.Background(), cfg, result.Path, result.Branch)
 	if err != nil {
@@ -92,11 +107,16 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 		t.Fatalf("remote branch relationship was not verified: inspection=%+v err=%v", inspection, err)
 	}
 
+	gitRun(t, "-C", result.Path, "checkout", "--detach")
+	if _, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 12, "Add useful feature (v2)", ""); err == nil {
+		t.Fatal("detached worktree was reused")
+	}
+
 	partialPath := filepath.Join(cfg.Git.WorktreeRoot, "repo-id", "issue-13")
 	if err := os.MkdirAll(partialPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 13, "Interrupted creation"); err == nil {
+	if _, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 13, "Interrupted creation", ""); err == nil {
 		t.Fatal("partially created directory was treated as a reusable worktree")
 	}
 }
@@ -107,7 +127,7 @@ func TestWorktreeRejectsTraversalAndSymbolicLink(t *testing.T) {
 	cfg.Git.WorktreeRoot = filepath.Join(root, "worktrees")
 	cfg.RepoPath = root
 	manager := Manager{StateRoot: root}
-	if _, err := manager.Ensure(context.Background(), cfg, "../outside", 1, "test"); err == nil {
+	if _, err := manager.Ensure(context.Background(), cfg, "../outside", 1, "test", ""); err == nil {
 		t.Fatal("repository ID traversal was accepted")
 	}
 	repoRoot := filepath.Join(cfg.Git.WorktreeRoot, "repo-id")
@@ -118,7 +138,7 @@ func TestWorktreeRejectsTraversalAndSymbolicLink(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(repoRoot, "issue-1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Ensure(context.Background(), cfg, "repo-id", 1, "test"); err == nil {
+	if _, err := manager.Ensure(context.Background(), cfg, "repo-id", 1, "test", ""); err == nil {
 		t.Fatal("symbolic-link worktree was accepted")
 	}
 }

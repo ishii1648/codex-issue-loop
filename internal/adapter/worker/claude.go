@@ -92,6 +92,7 @@ func (c ClaudeCode) execute(parent context.Context, cfg config.Config, runID, se
 	ctx, cancel := context.WithTimeout(parent, cfg.Worker.Timeout.Duration)
 	defer cancel()
 	cmd := exec.Command(cfg.Worker.EffectiveCommand(), args...)
+	cmd.WaitDelay = cfg.Worker.TimeoutGrace.Duration
 	cmd.Dir = workspace
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = strings.NewReader(prompt)

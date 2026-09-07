@@ -73,3 +73,33 @@ func TestAnalyzerHelperProcess(t *testing.T) {
 		t.Fatal(errors.New("unknown helper mode"))
 	}
 }
+
+func TestAnalyzersDistinguishCancellationFromTimeout(t *testing.T) {
+	dir := t.TempDir()
+	analyzers := map[string]Analyzer{
+		"command": CommandAnalyzer{Path: os.Args[0], Timeout: time.Minute},
+		"codex":   CodexAnalyzer{Path: os.Args[0], RepoPath: dir, StateDir: dir, Timeout: time.Minute},
+	}
+	for name, analyzer := range analyzers {
+		t.Run(name, func(t *testing.T) {
+			for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+				ctx, cancel := context.WithCancel(context.Background())
+				if cause == context.DeadlineExceeded {
+					cancel()
+					ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				} else {
+					cancel()
+				}
+				_, err := analyzer.Analyze(ctx, EvidenceBundle{Version: SchemaVersion})
+				cancel()
+				wantCode := "canceled"
+				if cause == context.DeadlineExceeded {
+					wantCode = "timeout"
+				}
+				if !errors.Is(err, cause) || analysisFailureCode(err) != wantCode {
+					t.Fatalf("err=%v code=%s want=%s", err, analysisFailureCode(err), wantCode)
+				}
+			}
+		})
+	}
+}

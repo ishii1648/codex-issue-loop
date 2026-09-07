@@ -16,6 +16,7 @@ import (
 )
 
 type fakeAnalyzer struct {
+	before     func(int)
 	calls      int
 	bundles    []EvidenceBundle
 	err        error
@@ -26,6 +27,9 @@ type fakeAnalyzer struct {
 
 func (a *fakeAnalyzer) Analyze(_ context.Context, bundle EvidenceBundle) (AIAnalysis, error) {
 	a.calls++
+	if a.before != nil {
+		a.before(a.calls)
+	}
 	a.bundles = append(a.bundles, bundle)
 	if a.err != nil {
 		return AIAnalysis{}, a.err
@@ -173,12 +177,16 @@ func TestExistingIssueReuseIsRecordedAsDecision(t *testing.T) {
 }
 
 type fakeIssues struct {
+	beforeFind    func()
 	byFingerprint map[string]IssueRef
 	drafts        []IssueDraft
 	createErr     error
 }
 
 func (f *fakeIssues) FindByFingerprint(_ context.Context, fingerprint string) (*IssueRef, error) {
+	if f.beforeFind != nil {
+		f.beforeFind()
+	}
 	if issue, ok := f.byFingerprint[fingerprint]; ok {
 		copy := issue
 		return &copy, nil
@@ -664,5 +672,104 @@ func TestNewSignalsDoNotRenewAnalysisRetryBudget(t *testing.T) {
 	episode := state.Episodes[fingerprint]
 	if episode.CircuitOpen || episode.Attempts != 1 || episode.AI == nil || len(episode.AI.Evidence) != 6 {
 		t.Fatalf("explicit retry did not analyze accumulated evidence: %+v", episode)
+	}
+}
+
+func TestPipelineCancellationPreservesCompletedWork(t *testing.T) {
+	for _, stage := range []string{"before", "analysis", "issue"} {
+		t.Run(stage, func(t *testing.T) {
+			now := time.Date(2026, 9, 2, 4, 0, 0, 0, time.UTC)
+			store := testStore(t)
+			for _, id := range []string{"a", "b", "c"} {
+				for _, run := range []string{"1", "2"} {
+					recordSignals(t, store, signalAt(now, id+run, id, "failure_classified", "failed", func(s *Signal) {
+						s.EpisodeID, s.RunID, s.FailureKind, s.FailureCode, s.InvariantViolation = "episode-"+id, "run-"+run, "product", "invariant", true
+					}))
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			analyzer := &fakeAnalyzer{issue: true}
+			issues := &fakeIssues{byFingerprint: map[string]IssueRef{}}
+			wantAnalyzed, wantCompleted, wantCalls := 0, 0, 0
+			switch stage {
+			case "before":
+				cancel()
+			case "analysis":
+				wantAnalyzed, wantCompleted, wantCalls = 1, 1, 2
+				analyzer.before = func(call int) {
+					if call == 2 {
+						cancel()
+						analyzer.err = context.Canceled
+					}
+				}
+			case "issue":
+				wantAnalyzed, wantCompleted, wantCalls = 2, 1, 2
+				finds := 0
+				issues.beforeFind = func() {
+					finds++
+					if finds == 2 {
+						cancel()
+						issues.createErr = context.Canceled
+					}
+				}
+			}
+			pipeline := testPipeline(store, analyzer, issues, &now, false)
+			report, err := pipeline.RunOnce(ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err=%v", err)
+			}
+			if analyzer.calls != wantCalls || report.Analyzed != wantAnalyzed || len(report.Decisions) != wantCompleted || report.AnalysisRetry != 0 || report.IssueRetry != 0 || report.CircuitOpened != 0 || len(report.AnalysisFailures) != 0 {
+				t.Fatalf("calls=%d report=%+v", analyzer.calls, report)
+			}
+			state, err := store.LoadState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Episodes) != 3 {
+				t.Fatalf("episodes=%+v", state.Episodes)
+			}
+			analyses, linked := 0, 0
+			for _, episode := range state.Episodes {
+				if episode.AI != nil {
+					analyses++
+				}
+				if episode.Issue != nil {
+					linked++
+				}
+				if episode.CircuitOpen || episode.IssueCircuitOpen || episode.NextAttemptAt != nil || episode.IssueNextAttemptAt != nil || (episode.AI == nil && episode.Attempts != 0) || (episode.AI != nil && episode.Attempts != 1) || (episode.Issue == nil && episode.IssueAttempts != 0) {
+					t.Fatalf("episode=%+v", episode)
+				}
+			}
+			if analyses != wantAnalyzed || linked != wantCompleted {
+				t.Fatalf("analyses=%d linked=%d", analyses, linked)
+			}
+			decisions, err := store.ReadDecisions()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(decisions) != wantCompleted {
+				t.Fatalf("decisions=%+v", decisions)
+			}
+			for _, decision := range decisions {
+				if decision.Outcome == "failed" {
+					t.Fatalf("decision=%+v", decision)
+				}
+			}
+			metrics, err := store.LoadMetrics()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(metrics.AnalysisFailures) != 0 || metrics.AnalysisAttempts["failed"] != 0 || metrics.AnalysisAttempts["succeeded"] != uint64(wantAnalyzed) || metrics.Issues["failed"] != 0 {
+				t.Fatalf("metrics=%+v", metrics)
+			}
+			for attempt := 0; attempt < pipeline.Config.MaxAttempts; attempt++ {
+				now = now.Add(time.Hour)
+				report, err = pipeline.RunOnce(ctx)
+				if !errors.Is(err, context.Canceled) || report.CircuitOpened != 0 || analyzer.calls != wantCalls || len(report.Decisions) != 0 {
+					t.Fatalf("canceled restart report=%+v err=%v", report, err)
+				}
+			}
+		})
 	}
 }

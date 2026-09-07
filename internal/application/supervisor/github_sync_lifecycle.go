@@ -158,6 +158,7 @@ func (l *Loop) reconcileIssueProjection(ctx context.Context, number int) error {
 	if err := l.GitHub.ReconcileIssue(ctx, l.Config, number, status, snapshot.NeedsHuman(number, l.Config.Completion.AutoMerge)); err != nil {
 		return failure.Wrap(failure.Transient, "reconcile GitHub Issue projection", err)
 	}
+	recordScheduleGitHubSuccess(ctx, nil)
 	latest, err := l.Store.Load()
 	if err != nil {
 		return err

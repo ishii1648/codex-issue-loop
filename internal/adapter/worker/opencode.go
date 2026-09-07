@@ -101,6 +101,7 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 		return Result{Identity: identity}, err
 	}
 	cmd := exec.Command(cfg.Worker.EffectiveCommand(), "--pure", "serve", "--hostname", "127.0.0.1", "--port", "0")
+	cmd.WaitDelay = cfg.Worker.TimeoutGrace.Duration
 	cmd.Dir = workspace
 	cmd.Env = replaceEnvironment(os.Environ(), "OPENCODE_CONFIG_CONTENT", string(policyJSON))
 	cmd.Env = replaceEnvironment(cmd.Env, "OPENCODE_SERVER_USERNAME", serverUsername)

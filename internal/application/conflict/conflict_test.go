@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
@@ -78,6 +79,76 @@ func TestConflictRecoveryPreservesBothChangeIntentsAndPublishesWithoutForce(t *t
 			restarted, err := manager.Prepare(context.Background(), cfg, repo, branch, &recovery)
 			if err != nil || !restarted.Published || restarted.Commit != published.Commit {
 				t.Fatalf("restart preparation=%+v err=%v", restarted, err)
+			}
+		})
+	}
+}
+
+func TestConflictPublicationAllowsWhitespaceWithoutConflicts(t *testing.T) {
+	repo, branch, file, cfg := conflictRepository(t,
+		"first\nsecond\nthird\nfourth\nlast\n",
+		"PR  \nsecond\nthird\nfourth\nlast\n",
+		"first\nsecond\nthird\nfourth\nbase  \n\n")
+	runGit(t, repo, "config", "core.whitespace", "blank-at-eol,blank-at-eof,space-before-tab,indent-with-non-tab")
+	manager := Manager{}
+	prepared, err := manager.Prepare(context.Background(), cfg, repo, branch, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.Resolved || len(prepared.ConflictFiles) != 0 {
+		t.Fatalf("preparation=%+v", prepared)
+	}
+	recovery := state.ConflictRecovery{TargetBaseSHA: prepared.TargetBaseSHA, OriginalHeadSHA: prepared.OriginalHeadSHA, AllowedPaths: prepared.AllowedPaths}
+	published, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 1}, repo, branch, recovery, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "PR  \nsecond\nthird\nfourth\nbase  \n\n" {
+		t.Fatalf("merged content=%q", data)
+	}
+	if remote := strings.Fields(gitOutput(t, repo, "ls-remote", "--heads", "origin", "refs/heads/"+branch))[0]; remote != published.Commit {
+		t.Fatalf("remote=%s commit=%s", remote, published.Commit)
+	}
+}
+
+func TestConflictPublicationRejectsMarkersWithoutRetry(t *testing.T) {
+	for _, untracked := range []bool{false, true} {
+		name := "resolved file"
+		if untracked {
+			name = "untracked file staged during publication"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo, branch, file, cfg := conflictRepository(t, "one\n", "one\npr\n", "one\nbase\n")
+			manager := Manager{}
+			prepared, err := manager.Prepare(context.Background(), cfg, repo, branch, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovery := state.ConflictRecovery{TargetBaseSHA: prepared.TargetBaseSHA, OriginalHeadSHA: prepared.OriginalHeadSHA, ConflictFiles: prepared.ConflictFiles, AllowedPaths: prepared.AllowedPaths}
+			if untracked {
+				if err := os.WriteFile(filepath.Join(repo, file), []byte("one\nbase\npr\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				file = "new.txt"
+				recovery.AllowedPaths = append(recovery.AllowedPaths, file)
+			}
+			if err := os.WriteFile(filepath.Join(repo, file), []byte("<<<<<<< HEAD\npr\n=======\nbase\n>>>>>>> base\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = manager.Publish(context.Background(), cfg, gh.Issue{Number: 1}, repo, branch, recovery, []worker.Test{{Command: "test", Result: "passed"}})
+			var fatal NonRecoverableError
+			if !errors.As(err, &fatal) || !strings.Contains(err.Error(), "leftover conflict marker") {
+				t.Fatalf("err=%v", err)
+			}
+			if head := gitOutput(t, repo, "rev-parse", "HEAD"); head != prepared.OriginalHeadSHA {
+				t.Fatalf("HEAD changed: %s", head)
+			}
+			if remote := strings.Fields(gitOutput(t, repo, "ls-remote", "--heads", "origin", "refs/heads/"+branch))[0]; remote != prepared.OriginalHeadSHA {
+				t.Fatalf("remote changed: %s", remote)
 			}
 		})
 	}
@@ -230,4 +301,108 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func TestConflictRecoveryCanceledContext(t *testing.T) {
+	for _, timeout := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		want := context.Canceled
+		if timeout {
+			cancel()
+			ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			want = context.DeadlineExceeded
+		}
+		cancel()
+		manager := Manager{}
+		_, prepareErr := manager.Prepare(ctx, config.Config{}, t.TempDir(), "branch", nil)
+		_, publishErr := manager.Publish(ctx, config.Config{}, gh.Issue{}, t.TempDir(), "branch", state.ConflictRecovery{TargetBaseSHA: "target", OriginalHeadSHA: "head"}, nil)
+		for operation, err := range map[string]error{"Prepare": prepareErr, "Publish": publishErr} {
+			var fatal NonRecoverableError
+			if !errors.Is(err, want) || errors.As(err, &fatal) {
+				t.Fatalf("%s timeout=%v: err=%v", operation, timeout, err)
+			}
+		}
+	}
+}
+
+func TestConflictRecoveryGitTimeout(t *testing.T) {
+	for _, test := range []struct {
+		operation string
+		command   string
+	}{
+		{"Prepare", "symbolic-ref --quiet --short HEAD"},
+		{"Prepare", "rev-parse --verify HEAD"},
+		{"Prepare", "rev-parse --verify MERGE_HEAD"},
+		{"Prepare", "merge-base head target"},
+		{"Prepare", "diff --name-only target...head --"},
+		{"Prepare", "diff --name-only --diff-filter=U --"},
+		{"Publish", "rev-parse --verify MERGE_HEAD"},
+		{"Publish", "rev-list --parents -n 1 head"},
+	} {
+		t.Run(test.operation+"/"+test.command, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "git")
+			script := `#!/bin/sh
+shift 2
+if [ "$*" = "` + test.command + `" ]; then
+  exec sleep 30
+fi
+case "$*" in
+  'symbolic-ref --quiet --short HEAD') echo branch ;;
+  'rev-parse --verify HEAD') echo head ;;
+  'rev-parse --verify MERGE_HEAD') exit 1 ;;
+  'rev-parse --verify refs/remotes/origin/main') echo target ;;
+  'merge-base head target') echo base ;;
+esac
+`
+			if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			manager := Manager{GitPath: path}
+			cfg := config.Defaults()
+			cfg.Git.BaseBranch = "main"
+			var err error
+			if test.operation == "Prepare" {
+				_, err = manager.Prepare(ctx, cfg, t.TempDir(), "branch", nil)
+			} else {
+				_, err = manager.Publish(ctx, cfg, gh.Issue{}, t.TempDir(), "branch", state.ConflictRecovery{TargetBaseSHA: "target", OriginalHeadSHA: "head"}, nil)
+			}
+			var fatal NonRecoverableError
+			if !errors.Is(err, context.DeadlineExceeded) || errors.As(err, &fatal) || !strings.Contains(err.Error(), test.command) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestConflictPublicationDistinguishesParentInspectionFailure(t *testing.T) {
+	for _, fail := range []bool{true, false} {
+		path := filepath.Join(t.TempDir(), "git")
+		parents := "echo head other-base other-parent"
+		if fail {
+			parents = "exit 23"
+		}
+		script := `#!/bin/sh
+shift 2
+case "$*" in
+  'rev-parse --verify MERGE_HEAD') exit 1 ;;
+  'rev-parse --verify HEAD') echo head ;;
+  'rev-list --parents -n 1 head') ` + parents + ` ;;
+esac
+`
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, err := (Manager{GitPath: path}).Publish(context.Background(), config.Config{}, gh.Issue{}, t.TempDir(), "branch", state.ConflictRecovery{TargetBaseSHA: "target", OriginalHeadSHA: "head"}, nil)
+		var fatal NonRecoverableError
+		if fail {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 || errors.As(err, &fatal) || !strings.Contains(err.Error(), "exit status 23") || strings.Contains(err.Error(), "does not retain target base SHA") {
+				t.Fatalf("err=%v", err)
+			}
+		} else if !errors.As(err, &fatal) || !strings.Contains(err.Error(), "does not retain target base SHA") {
+			t.Fatalf("err=%v", err)
+		}
+	}
 }

@@ -96,7 +96,8 @@ func (w *LineWriter) Write(p []byte) (int, error) {
 			break
 		}
 		line := string(w.buf[:index+1])
-		if strings.Contains(line, "-----BEGIN PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN RSA PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN EC PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN OPENSSH PRIVATE KEY-----") {
+		if (strings.Contains(line, "-----BEGIN PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN RSA PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN EC PRIVATE KEY-----") || strings.Contains(line, "-----BEGIN OPENSSH PRIVATE KEY-----")) &&
+			!(strings.Contains(line, "-----END ") && strings.Contains(line, "PRIVATE KEY-----")) {
 			w.pem = true
 			if _, err := io.WriteString(w.dst, "[REDACTED PRIVATE KEY]\n"); err != nil {
 				return 0, err
