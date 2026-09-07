@@ -83,6 +83,76 @@ func TestConflictRecoveryPreservesBothChangeIntentsAndPublishesWithoutForce(t *t
 	}
 }
 
+func TestConflictPublicationAllowsWhitespaceWithoutConflicts(t *testing.T) {
+	repo, branch, file, cfg := conflictRepository(t,
+		"first\nsecond\nthird\nfourth\nlast\n",
+		"PR  \nsecond\nthird\nfourth\nlast\n",
+		"first\nsecond\nthird\nfourth\nbase  \n\n")
+	runGit(t, repo, "config", "core.whitespace", "blank-at-eol,blank-at-eof,space-before-tab,indent-with-non-tab")
+	manager := Manager{}
+	prepared, err := manager.Prepare(context.Background(), cfg, repo, branch, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.Resolved || len(prepared.ConflictFiles) != 0 {
+		t.Fatalf("preparation=%+v", prepared)
+	}
+	recovery := state.ConflictRecovery{TargetBaseSHA: prepared.TargetBaseSHA, OriginalHeadSHA: prepared.OriginalHeadSHA, AllowedPaths: prepared.AllowedPaths}
+	published, err := manager.Publish(context.Background(), cfg, gh.Issue{Number: 1}, repo, branch, recovery, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "PR  \nsecond\nthird\nfourth\nbase  \n\n" {
+		t.Fatalf("merged content=%q", data)
+	}
+	if remote := strings.Fields(gitOutput(t, repo, "ls-remote", "--heads", "origin", "refs/heads/"+branch))[0]; remote != published.Commit {
+		t.Fatalf("remote=%s commit=%s", remote, published.Commit)
+	}
+}
+
+func TestConflictPublicationRejectsMarkersWithoutRetry(t *testing.T) {
+	for _, untracked := range []bool{false, true} {
+		name := "resolved file"
+		if untracked {
+			name = "untracked file staged during publication"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo, branch, file, cfg := conflictRepository(t, "one\n", "one\npr\n", "one\nbase\n")
+			manager := Manager{}
+			prepared, err := manager.Prepare(context.Background(), cfg, repo, branch, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovery := state.ConflictRecovery{TargetBaseSHA: prepared.TargetBaseSHA, OriginalHeadSHA: prepared.OriginalHeadSHA, ConflictFiles: prepared.ConflictFiles, AllowedPaths: prepared.AllowedPaths}
+			if untracked {
+				if err := os.WriteFile(filepath.Join(repo, file), []byte("one\nbase\npr\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				file = "new.txt"
+				recovery.AllowedPaths = append(recovery.AllowedPaths, file)
+			}
+			if err := os.WriteFile(filepath.Join(repo, file), []byte("<<<<<<< HEAD\npr\n=======\nbase\n>>>>>>> base\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = manager.Publish(context.Background(), cfg, gh.Issue{Number: 1}, repo, branch, recovery, []worker.Test{{Command: "test", Result: "passed"}})
+			var fatal NonRecoverableError
+			if !errors.As(err, &fatal) || !strings.Contains(err.Error(), "leftover conflict marker") {
+				t.Fatalf("err=%v", err)
+			}
+			if head := gitOutput(t, repo, "rev-parse", "HEAD"); head != prepared.OriginalHeadSHA {
+				t.Fatalf("HEAD changed: %s", head)
+			}
+			if remote := strings.Fields(gitOutput(t, repo, "ls-remote", "--heads", "origin", "refs/heads/"+branch))[0]; remote != prepared.OriginalHeadSHA {
+				t.Fatalf("remote changed: %s", remote)
+			}
+		})
+	}
+}
+
 func TestConflictRecoveryDescribesDeletedConflictResolutionOnRetry(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")

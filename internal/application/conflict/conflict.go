@@ -197,8 +197,8 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 			return worker.GitResult{}, NonRecoverableError{fmt.Errorf("resolved merge changes path outside the recorded scope: %s", name)}
 		}
 	}
-	if output, checkErr := m.run(ctx, worktreePath, "diff", "--check", recovery.TargetBaseSHA, "--"); checkErr != nil {
-		return worker.GitResult{}, fmt.Errorf("resolved merge contains whitespace errors or conflict markers: %w: %s", checkErr, strings.TrimSpace(output))
+	if output, checkErr := m.run(ctx, worktreePath, "-c", "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab,-tab-in-indent", "diff", "--check", recovery.TargetBaseSHA, "--"); checkErr != nil {
+		return worker.GitResult{}, NonRecoverableError{fmt.Errorf("validate resolved merge conflict markers: %w: %s", checkErr, strings.TrimSpace(output))}
 	}
 
 	mergeHead, _ := m.revParse(ctx, worktreePath, "MERGE_HEAD")
@@ -216,8 +216,8 @@ func (m Manager) Publish(ctx context.Context, cfg config.Config, issue gh.Issue,
 		if len(unmerged) != 0 {
 			return worker.GitResult{}, fmt.Errorf("unmerged index entries remain after supervisor staging: %s", strings.Join(unmerged, ", "))
 		}
-		if output, err := m.run(ctx, worktreePath, "diff", "--cached", "--check"); err != nil {
-			return worker.GitResult{}, fmt.Errorf("validate resolved merge: %w: %s", err, strings.TrimSpace(output))
+		if output, err := m.run(ctx, worktreePath, "-c", "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab,-tab-in-indent", "diff", "--cached", "--check"); err != nil {
+			return worker.GitResult{}, NonRecoverableError{fmt.Errorf("validate staged merge conflict markers: %w: %s", err, strings.TrimSpace(output))}
 		}
 		git := m.gitPath()
 		message := fmt.Sprintf("Resolve base merge conflicts for #%d", issue.Number)
