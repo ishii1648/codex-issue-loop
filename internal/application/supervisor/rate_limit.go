@@ -144,6 +144,24 @@ func (l *Loop) enableRateLimitGate() {
 	}
 }
 
+func (l *Loop) targetedRESTClient() (gh.TargetedRESTClient, error) {
+	delegate := l.GitHub
+	guarded, wrapped := delegate.(*rateLimitedGitHub)
+	if wrapped {
+		delegate = guarded.delegate
+	}
+	targeted, ok := delegate.(gh.TargetedRESTClient)
+	if !ok {
+		return nil, nil
+	}
+	if wrapped {
+		if err := guarded.before(); err != nil {
+			return nil, err
+		}
+	}
+	return targeted, nil
+}
+
 func cooldownFromError(err error, now time.Time) (ratelimit.Cooldown, bool) {
 	limited, ok := gh.AsRateLimit(err)
 	if !ok {

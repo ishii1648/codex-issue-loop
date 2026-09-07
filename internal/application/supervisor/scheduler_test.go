@@ -1036,6 +1036,74 @@ func TestWebhookSchedulerRecoversAfterTransientMailboxFailures(t *testing.T) {
 	}
 }
 
+func TestWebhookRateLimitGateWithoutTargetedRESTSupport(t *testing.T) {
+	loop, github := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+	loop.enableRateLimitGate()
+	issue, err := loop.getIssue(context.Background(), github.issue.Number)
+	if err != nil || issue.Number != github.issue.Number {
+		t.Fatalf("issue=%+v err=%v", issue, err)
+	}
+	_, err = loop.inspectIssue(context.Background(), state.Issue{Number: github.issue.Number, PullRequestNumber: 7})
+	if err != nil || github.inspectCalls != 1 {
+		t.Fatalf("inspections=%d err=%v", github.inspectCalls, err)
+	}
+}
+
+func TestWebhookTargetedReadsWithRateLimitGate(t *testing.T) {
+	for _, operation := range []string{"get", "inspect issue", "inspect PR", "inspect PR URL"} {
+		for _, cooldown := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/cooldown=%v", operation, cooldown), func(t *testing.T) {
+				loop, base := testLoop(t, worker.Result{})
+				loop.Config.Webhook.Mode = "webhook"
+				loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+				github := &webhookFakeGitHub{fakeGitHub: base}
+				loop.GitHub = github
+				loop.enableRateLimitGate()
+				resetAt := loop.now().Add(time.Hour)
+				if cooldown {
+					if _, err := loop.RateLimits.Observe(ratelimit.Cooldown{Resource: "graphql", ResetAt: resetAt, Source: "rest-rate-limit"}, loop.now()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				current := state.Issue{Number: base.issue.Number}
+				if operation == "inspect PR" {
+					current.PullRequestNumber = 7
+				}
+				if operation == "inspect PR URL" {
+					current.PullRequestURL = "https://github.com/owner/repo/pull/7"
+				}
+				var err error
+				if operation == "get" {
+					_, err = loop.getIssue(context.Background(), current.Number)
+				} else {
+					_, err = loop.inspectIssue(context.Background(), current)
+				}
+				wantGets, wantInspections := 0, 0
+				if cooldown {
+					limited, ok := gh.AsRateLimit(err)
+					if !ok || limited.Resource != "graphql" || !limited.ResetAt.Equal(resetAt) {
+						t.Fatalf("expected shared cooldown error, got %v", err)
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if operation == "get" || operation == "inspect issue" {
+						wantGets = 1
+					} else {
+						wantInspections = 1
+					}
+				}
+				if github.restGets != wantGets || github.restInspections != wantInspections || github.inspectCalls != wantInspections || github.listCalls != 0 {
+					t.Fatalf("REST gets=%d REST inspections=%d total inspections=%d queue polls=%d", github.restGets, github.restInspections, github.inspectCalls, github.listCalls)
+				}
+			})
+		}
+	}
+}
+
 type webhookFakeGitHub struct {
 	*fakeGitHub
 	listCalls        int
