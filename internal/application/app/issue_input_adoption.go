@@ -37,11 +37,11 @@ func (a App) inspectInputAdoption(ctx context.Context, l layout.Layout, p issueP
 		if p.snapshot.ActiveExecution != nil {
 			action.Reasons = append(action.Reasons, "repository execution is occupied")
 		}
-		manager := worktree.Manager{StateRoot: l.Root}
+		manager := worktree.Manager{StateRoot: l.Root, GitPath: p.gitPath}
 		p.launch, p.launchErr = manager.ValidateLaunch(ctx, p.cfg, item.Worktree, item.Branch)
 		p.inspection, p.inspectErr = manager.Inspect(ctx, p.cfg, item.Worktree, item.Branch)
 		p.worktreeSHA256, p.worktreeDigestErr = manager.ContentDigest(ctx, item.Worktree)
-		p.baseOK, p.baseErr = checkpointBaseAncestor(ctx, "git", item, p.inspection)
+		p.baseOK, p.baseErr = checkpointBaseAncestor(ctx, p.gitPath, item, p.inspection)
 		p.remote, p.remoteErr = (gh.CLI{Path: p.ghPath, Secrets: p.cfg.RedactionValues()}).Inspect(ctx, p.cfg, item.Number, item.Branch)
 		if p.launchErr != nil || !p.launch.Valid || p.inspectErr != nil || !p.inspection.Valid || p.inspection.Head == "" || p.inspection.RemoteHead != "" || p.worktreeDigestErr != nil || p.worktreeSHA256 == "" || !p.baseOK || p.baseErr != nil {
 			action.Reasons = append(action.Reasons, "saved workspace or unpublished branch cannot be verified")

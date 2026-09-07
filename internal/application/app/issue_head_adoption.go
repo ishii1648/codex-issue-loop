@@ -27,7 +27,7 @@ func missingResumeHead(item *state.Issue) bool {
 }
 
 func verifyAdoptedHead(ctx context.Context, planned issuePlanningContext, head, root string) error {
-	manager := worktree.Manager{StateRoot: root}
+	manager := worktree.Manager{StateRoot: root, GitPath: planned.gitPath}
 	inspection, err := manager.Inspect(ctx, planned.cfg, planned.issue.Worktree, planned.issue.Branch)
 	if err != nil || !inspection.Valid || inspection.Head != head || inspection.RemoteHead != "" || inspection.Branch != planned.issue.Branch {
 		return fmt.Errorf("worktree HEAD changed before adoption")
@@ -66,7 +66,7 @@ func publicationCheckpointHeadRepair(ctx context.Context, cfg config.Config, ghP
 
 func verifyPublicationCheckpointHeadRepair(ctx context.Context, planned issuePlanningContext, root string) error {
 	item := planned.issue
-	manager := worktree.Manager{StateRoot: root}
+	manager := worktree.Manager{StateRoot: root, GitPath: planned.gitPath}
 	inspection, inspectErr := manager.Inspect(ctx, planned.cfg, item.Worktree, item.Branch)
 	digest, digestErr := manager.ContentDigest(ctx, item.Worktree)
 	remote, remoteErr := (gh.CLI{Path: planned.ghPath, Secrets: planned.cfg.RedactionValues()}).Inspect(ctx, planned.cfg, item.Number, item.Branch)

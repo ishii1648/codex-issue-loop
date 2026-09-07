@@ -14,7 +14,7 @@ import (
 )
 
 func TestAdoptInputVerifiesRealWorkspaceAndPreservesAnswer(t *testing.T) {
-	for _, scenario := range []string{"valid", "wrong-head", "published", "missing-session", "worker-alive", "wrong-generation"} {
+	for _, scenario := range []string{"valid", "path-git-fails", "wrong-head", "published", "missing-session", "worker-alive", "wrong-generation"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newIssueResolutionFixture(t, 459, "OPEN", nil)
 			runIssueGit(t, f.worktree, "push", "origin", "--delete", f.branch)
@@ -64,6 +64,9 @@ func TestAdoptInputVerifiesRealWorkspaceAndPreservesAnswer(t *testing.T) {
 			if scenario == "wrong-head" {
 				expected = f.base
 			}
+			if scenario == "path-git-fails" {
+				failIssueResolutionPathGit(t)
+			}
 			var out, stderr bytes.Buffer
 			a := App{Out: &out, Err: &stderr}
 			code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "adopt-input", "--expected-head", expected, "--json"})
@@ -71,7 +74,7 @@ func TestAdoptInputVerifiesRealWorkspaceAndPreservesAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if scenario != "valid" {
+			if scenario != "valid" && scenario != "path-git-fails" {
 				if code == 0 || !reflect.DeepEqual(before, after) {
 					t.Fatalf("refusal code=%d changed=%v stderr=%s", code, !reflect.DeepEqual(before, after), stderr.String())
 				}

@@ -45,6 +45,7 @@ type issuePlanReport struct {
 }
 
 type issuePlanningContext struct {
+	gitPath            string
 	ghPath             string
 	cfg                config.Config
 	store              state.Store
@@ -144,7 +145,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 				},
 				ReadOnly: readErr == nil && bytes.Equal(before, after),
 			}
-			p := a.inspectInputAdoption(ctx, l, issuePlanningContext{ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, quarantine: quarantine, report: report})
+			p := a.inspectInputAdoption(ctx, l, issuePlanningContext{gitPath: entry.Commands["git"], ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, quarantine: quarantine, report: report})
 			return a.inspectChecksRecovery(ctx, l, p), nil
 		}
 		return issuePlanningContext{}, exitError{4, fmt.Errorf("Issue #%d is missing from canonical state", number)}
@@ -217,7 +218,7 @@ func (a App) buildIssuePlan(ctx context.Context, l layout.Layout, repo string, n
 		},
 		Actions: actions, ReadOnly: readOnly,
 	}
-	return issuePlanningContext{ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, issue: item,
+	return issuePlanningContext{gitPath: entry.Commands["git"], ghPath: entry.Commands["gh"], cfg: cfg, store: store, snapshot: snapshot, issue: item,
 		remote: remote, remoteErr: remoteErr, launch: launch, launchErr: launchErr,
 		inspection: inspection, inspectErr: inspectErr, worktreeSHA256: worktreeSHA256, worktreeDigestErr: worktreeDigestErr,
 		baseOK: baseOK, baseErr: baseErr,

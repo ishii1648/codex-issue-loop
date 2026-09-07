@@ -17,7 +17,7 @@ import (
 )
 
 func TestRetryPublicationRepairsCheckpointWithRemoteHead(t *testing.T) {
-	for _, scenario := range []string{"valid", "diverged", "dirty", "wrong-result", "fork", "wrong-head"} {
+	for _, scenario := range []string{"valid", "path-git-fails", "diverged", "dirty", "wrong-result", "fork", "wrong-head"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newIssueResolutionFixture(t, 459, "OPEN", nil)
 			url := "https://example.test/pull/493"
@@ -84,13 +84,17 @@ func TestRetryPublicationRepairsCheckpointWithRemoteHead(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			originalPath := os.Getenv("PATH")
+			if scenario == "path-git-fails" {
+				failIssueResolutionPathGit(t)
+			}
 			var out, stderr bytes.Buffer
 			code := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "retry-stage", "--json"})
 			after, err := f.store.ReadCanonicalSnapshot()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if scenario != "valid" {
+			if scenario != "valid" && scenario != "path-git-fails" {
 				if code == 0 || !reflect.DeepEqual(before, after) {
 					t.Fatalf("code=%d changed=%v stderr=%s", code, !reflect.DeepEqual(before, after), stderr.String())
 				}
@@ -103,6 +107,7 @@ func TestRetryPublicationRepairsCheckpointWithRemoteHead(t *testing.T) {
 			if i.Status != issuedomain.StatusResumePending || i.Continuation.HeadSHA != f.head || i.HeadSHA != published || i.Continuation.ResultSHA256 != before.Issues["459"].Continuation.ResultSHA256 || i.Worktree != f.worktree || i.RunID != f.runID {
 				t.Fatalf("repair lost evidence: %+v", i)
 			}
+			t.Setenv("PATH", originalPath)
 			if runIssueGit(t, f.worktree, "rev-parse", "HEAD") != f.head {
 				t.Fatal("recovery mutated worktree HEAD")
 			}
