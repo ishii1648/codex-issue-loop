@@ -424,7 +424,9 @@ func (s Store) loadStateUnlocked() (DurableState, error) {
 	return state, nil
 }
 
-func (s Store) SaveState(state DurableState, metrics Metrics) error {
+// SaveState rejects stale revisions without writing either file. metricsDelta contains
+// only increments to analysis and Issue counters; episode gauges are recomputed.
+func (s Store) SaveState(state DurableState, expectedRevision uint64, metricsDelta Metrics) error {
 	if err := s.Ensure(); err != nil {
 		return err
 	}
@@ -433,8 +435,30 @@ func (s Store) SaveState(state DurableState, metrics Metrics) error {
 		return err
 	}
 	defer unlockFile(lock)
+	current, err := s.loadStateUnlocked()
+	if err != nil {
+		return err
+	}
+	if current.Revision != expectedRevision {
+		return fmt.Errorf("incident state revision mismatch: expected %d, got %d; rerun RunOnce", expectedRevision, current.Revision)
+	}
+	metrics, err := s.loadMetricsUnlocked()
+	if err != nil {
+		return err
+	}
+	for key, count := range metricsDelta.AnalysisAttempts {
+		metrics.AnalysisAttempts[key] += count
+	}
+	for key, count := range metricsDelta.AnalysisFailures {
+		metrics.AnalysisFailures[key] += count
+	}
+	for key, count := range metricsDelta.Issues {
+		metrics.Issues[key] += count
+	}
+	recomputeEpisodeMetrics(&metrics, state)
+	metrics.UpdatedAt = state.UpdatedAt
 	state.Version = SchemaVersion
-	state.Revision++
+	state.Revision = expectedRevision + 1
 	if err := state.Validate(); err != nil {
 		return err
 	}
@@ -507,9 +531,11 @@ func (s Store) ResetCircuit(fingerprint string, at time.Time) (Episode, error) {
 	if !validFingerprint(fingerprint) || at.IsZero() {
 		return Episode{}, errors.New("valid fingerprint and recovery timestamp are required")
 	}
-	if err := s.Ensure(); err != nil {
+	release, err := s.TryProcessLock()
+	if err != nil {
 		return Episode{}, err
 	}
+	defer release()
 	lock, err := s.lock("data.lock", true)
 	if err != nil {
 		return Episode{}, err

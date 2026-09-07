@@ -106,10 +106,7 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 		return report, err
 	}
 	analysisSignals := append(append([]Signal(nil), signals...), deriveInvariantSignals(signals)...)
-	metrics, err := p.Store.LoadMetrics()
-	if err != nil {
-		return report, err
-	}
+	metrics := emptyMetrics()
 	fingerprints := make([]string, 0, len(state.Episodes))
 	for fingerprint := range state.Episodes {
 		fingerprints = append(fingerprints, fingerprint)
@@ -195,7 +192,7 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 		}
 		report.IssueDrafts = append(report.IssueDrafts, draft)
 		if p.Config.DryRun {
-			metrics.Issues["dry_run"] = uint64(len(report.IssueDrafts))
+			metrics.Issues["dry_run"]++
 			report.Decisions = append(report.Decisions, newIssueDecision(now, episode, true, "dry_run", "eligible_dry_run", nil))
 		} else {
 			ref, reused, createErr := p.ensureIssue(ctx, draft)
@@ -241,10 +238,8 @@ func (p Pipeline) RunOnce(ctx context.Context) (RunReport, error) {
 		}
 	}
 	report.EpisodeCount = len(state.Episodes)
-	recomputeEpisodeMetrics(&metrics, state)
-	metrics.UpdatedAt = now
 	state.UpdatedAt = now
-	if err := p.Store.SaveState(state, metrics); err != nil {
+	if err := p.Store.SaveState(state, previous.Revision, metrics); err != nil {
 		return report, err
 	}
 	if err := p.Store.AppendDecisions(report.Decisions, now); err != nil {
