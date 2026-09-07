@@ -681,6 +681,116 @@ func TestAssignmentRetryRollbackValidatesRetainedTransactionAndClearsFence(t *te
 	}
 }
 
+func TestAssignmentRollbackStopsRefuseUnsafeSnapshot(t *testing.T) {
+	for _, operation := range []string{"retry_rollback", "rollback_switch", "retry"} {
+		for _, snapshotKind := range []string{"worker_pid", "active_execution", "load_error"} {
+			t.Run(operation+"/"+snapshotKind, func(t *testing.T) {
+				l, configPath, entries, _ := assignmentFixture(t)
+				controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: &releaseRunner{}}
+				if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := LoadConfig(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entry := entries[0]
+				current := cfg.Assignments[entry.RepoID]
+				candidate, err := (Verifier{GH: "gh", Runner: controller.Runner, CacheDir: RuntimePaths(l.Root).Cache, ExpectedVersion: "v1.2.3"}).Check(context.Background(), cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				desired := SlotRef(l, candidate.Manifest.Version, candidate.Manifest.Commit, candidate.Digest)
+				if err := StageSlot(l, desired, filepath.Join(candidate.Dir, BinaryAsset)); err != nil {
+					t.Fatal(err)
+				}
+				commandLog := filepath.Join(t.TempDir(), "launchctl.log")
+				t.Setenv("FAKE_LAUNCHCTL_LOG", commandLog)
+				script := `#!/bin/sh
+printf '%s\n' "$*" >>"$FAKE_LAUNCHCTL_LOG"
+case "$1" in
+  print) printf 'state = running\npid = 8101\n' ;;
+  *) exit 91 ;;
+esac
+`
+				if err := os.WriteFile(entry.Commands["launchctl"], []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+				if _, _, err := store.StartExecution(state.ExecutionStart{IssueNumber: 1, Title: "fixture", RunID: "run-1", StartedAt: time.Now().UTC()}); err != nil {
+					t.Fatal(err)
+				}
+				if snapshotKind == "worker_pid" {
+					if _, err := store.Update("fixture", 1, "run-1", nil, func(snapshot *state.Snapshot) error {
+						item := snapshot.Issues["1"]
+						item.WorkerPID, item.WorkerPGID = 7101, 7101
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if snapshotKind == "load_error" {
+					lockPath := filepath.Join(store.Dir, "state.lock")
+					if err := os.Remove(lockPath); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(lockPath, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				tx := AssignmentTransaction{
+					RepositoryID: entry.RepoID, Operation: AssignmentOperationApply, Phase: AssignmentRollbackFailed,
+					ExpectedGeneration: current.Generation, TargetGeneration: current.Generation + 1,
+					Current: current.AssignmentRef, Desired: desired, WasLoaded: true,
+					Result: "rollback_failed", Reason: "injected health failure", StartedAt: time.Now().UTC(),
+				}
+				if operation == "rollback_switch" {
+					tx.Phase, tx.Result = AssignmentValidating, "validating"
+				}
+				txPath := l.DeliveryAssignmentTransactionPath(entry.RepoID)
+				if err := SaveAssignmentTransaction(txPath, tx); err != nil {
+					t.Fatal(err)
+				}
+				fencePath := l.DeliveryAssignmentFencePath(entry.RepoID)
+				fence := Maintenance{Version: 1, Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}
+				if err := WriteMaintenance(fencePath, fence); err != nil {
+					t.Fatal(err)
+				}
+				switch operation {
+				case "retry_rollback":
+					_, err = controller.RetryRollback(context.Background(), entry.RepoPath)
+				case "rollback_switch":
+					_, err = controller.rollbackSwitch(context.Background(), cfg, entry, current, &tx, errors.New("injected health failure"))
+				case "retry":
+					_, err = controller.Retry(context.Background(), entry.RepoPath, current.Generation)
+				}
+				want := "refuses to stop an active worker"
+				if snapshotKind == "load_error" {
+					want = "inspect assignment state"
+				}
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("error=%v, want %q", err, want)
+				}
+				commands, err := os.ReadFile(commandLog)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(commands), "bootout") || strings.Contains(string(commands), "bootstrap") {
+					t.Fatalf("unsafe snapshot caused LaunchAgent mutation:\n%s", commands)
+				}
+				retained, err := LoadAssignmentTransaction(txPath)
+				if err != nil || retained.Phase != AssignmentRollbackFailed || retained.Result != "rollback_failed" {
+					t.Fatalf("transaction=%+v err=%v", retained, err)
+				}
+				retainedFence, err := LoadMaintenance(fencePath)
+				if err != nil || retainedFence != fence {
+					t.Fatalf("fence=%+v err=%v", retainedFence, err)
+				}
+			})
+		}
+	}
+}
+
 func TestAssignmentRetryCompletesExactRollbackFailedTarget(t *testing.T) {
 	l, configPath, entries, _ := assignmentFixture(t)
 	runner := &releaseRunner{}

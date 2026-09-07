@@ -499,6 +499,9 @@ func (c AssignmentController) RetryRollback(ctx context.Context, repoPath string
 		return AssignmentReport{}, errors.New("repository loaded state changed since the failed assignment")
 	}
 	if status.Loaded {
+		if err := c.inspectAssignmentStop(entry); err != nil {
+			return AssignmentReport{}, err
+		}
 		if err := manager.Stop(ctx, entry); err != nil {
 			return AssignmentReport{}, err
 		}
@@ -642,12 +645,18 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 	}
 	if retrying {
 		stateStore := state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
-		snapshot, loadErr := stateStore.Load()
-		if loadErr != nil {
-			return AssignmentReport{}, fmt.Errorf("inspect retained assignment state: %w", loadErr)
-		}
-		if snapshotHasWorker(snapshot) {
-			return AssignmentReport{}, errors.New("retained assignment retry refuses to stop an active worker")
+		if status.Loaded {
+			if err := c.inspectAssignmentStop(entry); err != nil {
+				return AssignmentReport{}, err
+			}
+		} else {
+			snapshot, loadErr := stateStore.Load()
+			if loadErr != nil {
+				return AssignmentReport{}, fmt.Errorf("inspect retained assignment state: %w", loadErr)
+			}
+			if snapshotHasWorker(snapshot) {
+				return AssignmentReport{}, errors.New("retained assignment retry refuses to stop an active worker")
+			}
 		}
 		if status.Loaded {
 			if err := manager.Stop(ctx, entry); err != nil {
@@ -814,14 +823,29 @@ func reconcileStoppedAssignmentState(store state.Store, now time.Time) error {
 	return err
 }
 
+func (c AssignmentController) inspectAssignmentStop(entry registry.Entry) error {
+	store := state.Store{Dir: c.Layout.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath}
+	snapshot, err := store.Load()
+	if err != nil {
+		return fmt.Errorf("inspect assignment state before stopping runtime: %w", err)
+	}
+	if snapshotHasWorker(snapshot) || snapshot.ActiveExecution != nil {
+		return errors.New("assignment refuses to stop an active worker")
+	}
+	return nil
+}
+
 func (c AssignmentController) rollbackSwitch(ctx context.Context, cfg Config, entry registry.Entry, current RepositoryAssignment, tx *AssignmentTransaction, cause error) (AssignmentReport, error) {
 	tx.Phase = AssignmentRollingBack
 	tx.Result = "rolling_back"
 	tx.Reason = cause.Error()
 	_ = SaveAssignmentTransaction(c.Layout.DeliveryAssignmentTransactionPath(entry.RepoID), *tx)
 	manager := launchd.Manager{Layout: c.Layout, Launchctl: entry.Commands["launchctl"]}
-	_ = manager.Stop(ctx, entry)
-	rollbackErr := VerifySlot(current.AssignmentRef)
+	rollbackErr := c.inspectAssignmentStop(entry)
+	if rollbackErr == nil {
+		_ = manager.Stop(ctx, entry)
+		rollbackErr = VerifySlot(current.AssignmentRef)
+	}
 	if rollbackErr == nil {
 		rollbackErr = manager.WritePlist(entry, current.Slot)
 	}
