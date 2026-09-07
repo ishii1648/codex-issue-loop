@@ -491,8 +491,8 @@ func (m Manager) openPullRequest(ctx context.Context, cfg config.Config, issue g
 
 	body := fmt.Sprintf("Automated implementation for #%d.\n\n%s", issue.Number, strings.TrimSpace(summary))
 	body = redact.StringWithSecrets(body, m.Secrets)
-	if len(body) > 4096 {
-		body = body[:4096]
+	if runes := []rune(body); len(runes) > 4096 {
+		body = string(runes[:4096])
 	}
 	args := []string{"pr", "create", "--repo", cfg.GitHub.Repo, "--base", cfg.Git.BaseBranch, "--head", branch, "--title", issue.Title, "--body", body}
 	if cfg.Completion.CreateDraftPR {
@@ -515,8 +515,8 @@ func (m Manager) run(ctx context.Context, path string, args ...string) (string, 
 
 func commitTitle(issue gh.Issue) string {
 	title := strings.Join(strings.Fields(issue.Title), " ")
-	if len(title) > 120 {
-		title = title[:120]
+	if runes := []rune(title); len(runes) > 120 {
+		title = string(runes[:120])
 	}
 	return fmt.Sprintf("Implement #%d: %s", issue.Number, title)
 }

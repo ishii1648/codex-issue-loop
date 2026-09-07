@@ -12,11 +12,80 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
+
+func TestCommitTitle(t *testing.T) {
+	for _, unit := range []string{"a", "日", "😀"} {
+		for _, length := range []int{119, 120, 121} {
+			t.Run(fmt.Sprintf("%s/%d", unit, length), func(t *testing.T) {
+				title := "a" + strings.Repeat(unit, length-1)
+				want := "Implement #389: a" + strings.Repeat(unit, min(length, 120)-1)
+				got := commitTitle(gh.Issue{Number: 389, Title: " \n" + title + "\t "})
+				if !utf8.ValidString(got) {
+					t.Fatalf("commit title is not valid UTF-8: %q", got)
+				}
+				if got != want {
+					t.Fatalf("commit title = %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestOpenPullRequestTruncatesBodyByRunes(t *testing.T) {
+	root := t.TempDir()
+	fakeGH := filepath.Join(root, "gh")
+	bodyPath := filepath.Join(root, "body")
+	t.Setenv("PUBLISH_TEST_BODY", bodyPath)
+	script := `#!/bin/sh
+case "$1 $2" in
+  "pr list") printf '%s' '[]' ;;
+  "pr create")
+    while test "$#" -gt 0; do
+      if test "$1" = "--body"; then
+        printf '%s' "$2" > "$PUBLISH_TEST_BODY"
+        break
+      fi
+      shift
+    done
+    printf '%s' 'https://github.example/owner/repo/pull/389'
+    ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(fakeGH, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{GHPath: fakeGH}
+	prefix := "Automated implementation for #389.\n\n"
+	for _, unit := range []string{"a", "日", "😀"} {
+		for _, length := range []int{4095, 4096, 4097} {
+			t.Run(fmt.Sprintf("%s/%d", unit, length), func(t *testing.T) {
+				summary := strings.Repeat(unit, length-len(prefix))
+				_, err := manager.openPullRequest(context.Background(), config.Defaults(), gh.Issue{Number: 389}, "branch", summary)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := os.ReadFile(bodyPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !utf8.ValidString(string(body)) {
+					t.Fatal("PR body is not valid UTF-8")
+				}
+				want := prefix + strings.Repeat(unit, min(length, 4096)-len(prefix))
+				if string(body) != want {
+					t.Fatalf("PR body differs: got %d runes, want %d", utf8.RuneCount(body), utf8.RuneCountInString(want))
+				}
+			})
+		}
+	}
+}
 
 func TestPublishCommitsPushesAndCreatesDraftPullRequestIdempotently(t *testing.T) {
 	root := t.TempDir()
