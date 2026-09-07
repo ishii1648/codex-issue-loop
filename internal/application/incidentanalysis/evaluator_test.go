@@ -12,7 +12,6 @@ import (
 
 func TestCommittedCorpusEvaluatesDeterministically(t *testing.T) {
 	root := repositoryRoot(t)
-	withWorkingDirectory(t, root)
 	dataDir := filepath.Join(root, "analysis", "incident-taxonomy")
 	corpus, rules, err := Load(filepath.Join(dataDir, "corpus.json"), filepath.Join(dataDir, "rules.json"))
 	if err != nil {
@@ -189,20 +188,4 @@ func repositoryRoot(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", ".."))
-}
-
-func withWorkingDirectory(t *testing.T, directory string) {
-	t.Helper()
-	previous, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(directory); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(previous); err != nil {
-			t.Errorf("restore working directory: %v", err)
-		}
-	})
 }
