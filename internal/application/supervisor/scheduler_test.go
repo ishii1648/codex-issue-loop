@@ -833,7 +833,7 @@ func TestStartupReconciliationUsesSharedCooldownBeforeGitHub(t *testing.T) {
 	}
 }
 
-func TestStartupReconciliationShortensStaleCooldownWhenRESTHasRemaining(t *testing.T) {
+func TestStartupReconciliationPreservesCooldownWhenRESTHasRemaining(t *testing.T) {
 	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
 	loop, fake := testLoop(t, worker.Result{})
 	loop.Clock = fixedClock{value: now}
@@ -868,7 +868,7 @@ func TestStartupReconciliationShortensStaleCooldownWhenRESTHasRemaining(t *testi
 		t.Fatalf("startup called GitHub before recovered retry deadline: %d", client.inspectCalls)
 	}
 	cooldown, active, err := loop.RateLimits.Current(now)
-	if err != nil || !active || !cooldown.ResetAt.Equal(now.Add(5*time.Second)) || cooldown.Source != "rest-rate-limit-recovered" {
+	if err != nil || !active || !cooldown.ResetAt.Equal(now.Add(time.Hour)) || cooldown.Source != "rest-rate-limit" {
 		t.Fatalf("revalidated cooldown=%+v active=%v err=%v", cooldown, active, err)
 	}
 	if client.statusCalls != 1 {
@@ -2677,6 +2677,86 @@ func TestFaultGitHubRetryDeadlineGuardsRunningJobs(t *testing.T) {
 	}
 	if _, err := loop.GitHub.Inspect(context.Background(), loop.Config, 1, ""); err != nil || client.inspectCalls != 1 || loop.now().Before(deadline) {
 		t.Fatalf("request after wait: reads=%d now=%s deadline=%s err=%v", client.inspectCalls, loop.now(), deadline, err)
+	}
+}
+
+func TestSchedulerRESTInconsistencyWaitsBeforeRetry(t *testing.T) {
+	for _, failures := range []int{1, 3} {
+		t.Run(fmt.Sprintf("failures_%d", failures), func(t *testing.T) {
+			now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+			loop, fake := testLoop(t, worker.Result{})
+			loop.Logger = log.New(io.Discard, "", 0)
+			loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+			client := &countingGitHub{fakeGitHub: fake}
+			loop.GitHub = client
+			loop.enableRateLimitGate()
+			s := &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+			other, otherFake := testLoop(t, worker.Result{})
+			other.RateLimits = loop.RateLimits
+			otherClient := &countingGitHub{fakeGitHub: otherFake, empty: true}
+			other.GitHub = otherClient
+			other.enableRateLimitGate()
+			for attempt := 0; attempt < failures; attempt++ {
+				loop.Clock = fixedClock{value: now}
+				fake.listErr = &gh.RateLimitError{Resource: "graphql", ResetAt: now.Add(5 * time.Second), Source: "rest-rate-limit-inconsistent", Err: errors.New("GraphQL: rate limit exceeded")}
+				if _, err := s.schedule(context.Background(), true); err == nil {
+					t.Fatal("expected rate limit")
+				} else if err := s.handleCycleError(err); err != nil {
+					t.Fatal(err)
+				}
+				deadline := now.Add(time.Hour)
+				if !s.cooldownUntil.Equal(deadline) || s.consecutiveFailures != 0 || client.calls() != attempt+1 {
+					t.Fatalf("attempt=%d cooldown=%s failures=%d calls=%d", attempt, s.cooldownUntil, s.consecutiveFailures, client.calls())
+				}
+				for _, elapsed := range []time.Duration{5 * time.Second, time.Minute, time.Hour - time.Nanosecond} {
+					loop.Clock = fixedClock{value: now.Add(elapsed)}
+					other.Clock = loop.Clock
+					for _, poll := range []bool{false, true} {
+						if result, err := s.schedule(context.Background(), poll); err != nil || result.githubAttempted || result.githubAccessSucceeded {
+							t.Fatalf("wake at %s result=%+v err=%v", loop.now(), result, err)
+						}
+					}
+					if _, err := other.GitHub.ListReady(context.Background(), other.Config); err == nil {
+						t.Fatal("other repository bypassed shared cooldown")
+					}
+					if client.calls() != attempt+1 || otherClient.calls() != 0 {
+						t.Fatalf("calls during cooldown: %d, %d", client.calls(), otherClient.calls())
+					}
+				}
+				now = deadline
+			}
+			loop.Clock = fixedClock{value: now}
+			client.empty = true
+			if result, err := s.schedule(context.Background(), true); err != nil || !result.githubSucceeded || !s.cooldownUntil.IsZero() {
+				t.Fatalf("recovery at %s result=%+v err=%v cooldown=%s", now, result, err, s.cooldownUntil)
+			}
+			if client.calls() != failures+1 {
+				t.Fatalf("recovery calls=%d", client.calls())
+			}
+		})
+	}
+}
+
+func TestCooldownFromErrorPreservesResetAndFallback(t *testing.T) {
+	now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		reset  time.Time
+		source string
+		want   time.Time
+	}{
+		{"response reset", now.Add(10 * time.Minute), "x-ratelimit-reset", now.Add(10 * time.Minute)},
+		{"REST exhausted", now.Add(20 * time.Minute), "rest-rate-limit", now.Add(20 * time.Minute)},
+		{"probe failed", time.Time{}, "", now.Add(time.Hour)},
+		{"inconsistent expired reset", now.Add(-time.Minute), "rest-rate-limit-inconsistent", now.Add(time.Hour)},
+		{"inconsistent later reset", now.Add(2 * time.Hour), "rest-rate-limit-inconsistent", now.Add(2 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := cooldownFromError(&gh.RateLimitError{ResetAt: tc.reset, Source: tc.source, Err: errors.New("rate limit")}, now)
+			if !ok || !got.ResetAt.Equal(tc.want) {
+				t.Fatalf("cooldown=%+v limited=%v want=%s", got, ok, tc.want)
+			}
+		})
 	}
 }
 

@@ -14,8 +14,6 @@ import (
 
 var resetHeaderPattern = regexp.MustCompile(`(?i)x-ratelimit-reset\s*[:=]\s*([0-9]+)`)
 
-const recoveredRateLimitRetry = 5 * time.Second
-
 type RateLimitStatus struct {
 	Resource  string
 	ResetAt   time.Time
@@ -49,11 +47,10 @@ func (c CLI) commandError(ctx context.Context, path, operation string, commandEr
 	}
 	if resetAt.IsZero() && ctx.Err() == nil {
 		if status, ok := c.observeRateLimitStatus(ctx, path, resource); ok {
+			resetAt = status.ResetAt
 			if status.Remaining > 0 {
-				resetAt = time.Now().UTC().Add(recoveredRateLimitRetry)
-				source = "rest-rate-limit-recovered"
+				source = "rest-rate-limit-inconsistent"
 			} else {
-				resetAt = status.ResetAt
 				source = "rest-rate-limit"
 			}
 		}
