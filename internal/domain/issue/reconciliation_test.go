@@ -42,6 +42,20 @@ func TestDecideReconciliationOwnsLifecycleTargets(t *testing.T) {
 	}
 }
 
+func TestDecideReconciliationMergedPullRequestClearsWorkerIdentity(t *testing.T) {
+	for _, status := range []Status{StatusRunning, StatusAwaitingMerge} {
+		t.Run(string(status), func(t *testing.T) {
+			current := ReconciliationState{Status: status, WorkerPID: 42, WorkerPGID: 42}
+			got := DecideReconciliation(current, ReconciliationObservation{
+				PullRequests: []ReconciliationPullRequest{{URL: "pr", Merged: true}},
+			})
+			if got.Status != StatusCompleted || got.WorkerPID != 0 || got.WorkerPGID != 0 {
+				t.Fatalf("decision=%+v want completed with zero worker PID and PGID", got)
+			}
+		})
+	}
+}
+
 func TestDecideReconciliationBlocksUnsafeRecovery(t *testing.T) {
 	retryAt := time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
 	openPR := ReconciliationPullRequest{URL: "pr", State: "OPEN", HeadRefName: "codex/issue-1"}

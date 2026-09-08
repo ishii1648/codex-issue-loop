@@ -128,9 +128,6 @@ func (l *Loop) reconcileStartup(ctx context.Context, snapshot state.Snapshot) er
 				}
 			}
 			decision := l.decideReconciliation(latest, *current, remote, inspection)
-			if decision.workerPID == 0 {
-				decision.workerPGID = 0
-			}
 			lifecycleTransition, transitionErr := issuedomain.ReconcileObservation(current.Status, decision.status)
 			if transitionErr != nil {
 				l.Logger.Printf("Issue #%d startup lifecycle reconciliation failed without stopping the queue: %v", number, transitionErr)
@@ -328,9 +325,6 @@ func (l *Loop) applyWebhookReconciliation(ctx context.Context, current state.Iss
 	decision := l.decideReconciliation(latest, current, remote, inspection)
 	if !decision.status.TerminalForWebhook() {
 		return true, l.reconcileIssueProjection(ctx, current.Number)
-	}
-	if decision.workerPID == 0 {
-		decision.workerPGID = 0
 	}
 	lifecycleTransition, transitionErr := issuedomain.ReconcileObservation(current.Status, decision.status)
 	if transitionErr != nil {

@@ -158,6 +158,7 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 	if merged != nil {
 		decision.Status, decision.LastError, decision.PullRequest = StatusCompleted, "", merged.URL
 		decision.PullRequestMerged, decision.WorkerPID, decision.RetryAt, decision.Reason = true, 0, nil, "merged Pull Request discovered"
+		decision.WorkerPGID = 0
 		decision.Effect = EffectMarkDone
 		return decision
 	}
