@@ -197,3 +197,76 @@ func TestResolutionReleasePreservesPublicationHeadBinding(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutionReleaseTimestampPersistsOnlyOnSlotRelease(t *testing.T) {
+	for _, mode := range []string{"explicit", "finalized", "completed", "quarantined"} {
+		t.Run(mode, func(t *testing.T) {
+			store := newStore(t)
+			started, identity, err := store.StartExecution(ExecutionStart{IssueNumber: 1, RunID: "run1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !started.LastExecutionReleasedAt.IsZero() {
+				t.Fatal("start recorded release")
+			}
+			before := time.Now().UTC()
+			released, err := store.Update("release_fixture", 1, identity.RunID, nil, func(snapshot *Snapshot) error {
+				item := snapshot.Issues["1"]
+				target := issuedomain.StatusFailed
+				if mode == "completed" {
+					target = issuedomain.StatusCompleted
+				}
+				if mode == "quarantined" {
+					item.Generation++
+					return nil
+				}
+				transition, err := issuedomain.NewTransition("fixture", item.Status, target)
+				if err != nil {
+					return err
+				}
+				if err := ApplyIssueTransition(item, transition); err != nil {
+					return err
+				}
+				if mode == "explicit" {
+					return CaptureContinuation(snapshot, 1, identity, "checkpoint1", before)
+				}
+				if mode == "completed" {
+					return ReleaseExecution(snapshot, 1, identity)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stamp := released.LastExecutionReleasedAt
+			if released.ActiveExecution != nil || stamp.Before(before) || stamp.After(time.Now().UTC()) {
+				t.Fatalf("release=%+v", released)
+			}
+			if mode == "quarantined" && released.QuarantinedIssues["1"] == nil {
+				t.Fatal("expected quarantine")
+			}
+			reloadedStore := Store{Dir: store.Dir, RepoID: store.RepoID, RepoPath: store.RepoPath}
+			reloaded, err := reloadedStore.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reloaded.LastExecutionReleasedAt.Equal(stamp) {
+				t.Fatal("reload changed release")
+			}
+			updated, err := reloadedStore.Update("unrelated", 0, "", nil, func(snapshot *Snapshot) error { snapshot.Supervisor.Message = "observed"; return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !updated.LastExecutionReleasedAt.Equal(stamp) {
+				t.Fatal("unrelated update changed release")
+			}
+			reacquired, _, err := reloadedStore.StartExecution(ExecutionStart{IssueNumber: 2, RunID: "run2"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reacquired.LastExecutionReleasedAt.Equal(stamp) {
+				t.Fatal("reacquisition changed release")
+			}
+		})
+	}
+}
