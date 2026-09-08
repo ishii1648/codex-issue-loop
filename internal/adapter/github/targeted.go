@@ -199,7 +199,7 @@ func (c CLI) apiJSON(ctx context.Context, endpoint string, target any) error {
 	}
 	out, err := exec.CommandContext(ctx, path, "api", "--method", "GET", "-H", "Accept: application/vnd.github+json", endpoint).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("gh api: %w: %s", err, c.safe(out))
+		return c.commandError(ctx, path, "gh api", err, out)
 	}
 	if err := json.Unmarshal(out, target); err != nil {
 		return fmt.Errorf("decode gh api response: %w", err)

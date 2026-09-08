@@ -434,6 +434,9 @@ func effectiveIntervals(storage store.Store, repository string, timeout time.Dur
 		return nil, errors.New("monitor snapshot changed during history read")
 	}
 	if snapshot != nil {
+		if len(intervals) > 0 && !intervals[len(intervals)-1].EndedAt.Equal(snapshot.Current.StartedAt) {
+			return nil, errors.New("monitor interval commit is incomplete")
+		}
 		intervals = append(intervals, snapshot.Current)
 	} else if len(intervals) > 0 {
 		return nil, errors.New("monitor history has no current snapshot")

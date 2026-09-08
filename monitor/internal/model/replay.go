@@ -7,6 +7,8 @@ import (
 )
 
 // Unlabeled events alone cannot distinguish label replacement from queue exit.
+// Their interpretation belongs to replayEvents and github.issueHistory;
+// applyEvent must receive only resolved label additions and queue exits.
 // Validate the entire batch before exposing any interval transitions.
 func replayEvents(previous Snapshot, observation Observation) ([]QueueEvent, error) {
 	events := append([]QueueEvent(nil), observation.Events...)
