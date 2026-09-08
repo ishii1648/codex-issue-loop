@@ -666,59 +666,6 @@ func checkpointBaseAncestor(ctx context.Context, gitPath string, item *state.Iss
 	return true, nil
 }
 
-func (a App) synchronizeIssueResolution(ctx context.Context, planned issuePlanningContext, action issuedomain.ResolutionAction, number int) error {
-	before, loadErr := planned.store.Load()
-	if loadErr != nil {
-		return loadErr
-	}
-	if !reflect.DeepEqual(before.Issues[strconv.Itoa(number)], planned.issue) {
-		return fmt.Errorf("Issue #%d changed before resolution synchronization", number)
-	}
-	expectedEffect := state.PendingEffect(&before, number)
-	client := gh.CLI{Path: planned.ghPath, Secrets: planned.cfg.RedactionValues()}
-	var err error
-	if action == issuedomain.ResolutionAdoptPR {
-		err = client.MarkDone(ctx, planned.cfg, number, planned.issue.PullRequestURL)
-	} else if action != issuedomain.ResolutionCancel {
-		err = client.MarkRunning(ctx, planned.cfg, number)
-	}
-	if err == nil {
-		err = client.ReconcileIssue(ctx, planned.cfg, number, planned.issue.Status, before.NeedsHuman(number, planned.cfg.Completion.AutoMerge))
-	}
-	if err != nil {
-		return fmt.Errorf("synchronize Issue #%d resolution %s: %w", number, action, err)
-	}
-	_, err = planned.store.Update("issue_resolution_github_synced", number, planned.issue.RunID, map[string]any{"action": action}, func(snapshot *state.Snapshot) error {
-		item := snapshot.Issues[strconv.Itoa(number)]
-		if item == nil {
-			return fmt.Errorf("Issue #%d disappeared during GitHub synchronization", number)
-		}
-		if item.Status != planned.issue.Status || item.RunID != planned.issue.RunID || item.Generation != planned.issue.Generation {
-			return fmt.Errorf("Issue #%d changed during resolution synchronization", number)
-		}
-		expected := issuedomain.EffectApplyResolution
-		if action == issuedomain.ResolutionAdoptPR {
-			expected = issuedomain.EffectMarkDone
-		}
-		effect := state.PendingEffect(snapshot, number)
-		if effect == nil {
-			return nil
-		}
-		if effect.Kind != expected || expectedEffect == nil || effect.ID != expectedEffect.ID {
-			return fmt.Errorf("Issue #%d resolution synchronization changed", number)
-		}
-		if err := state.ClearEffect(snapshot, number, effect.ID); err != nil {
-			return err
-		}
-		if action == issuedomain.ResolutionAdoptPR {
-			item.Continuation = nil
-			item.Suspension = nil
-		}
-		return nil
-	})
-	return err
-}
-
 func containsAction(actions []issuedomain.ResolutionAction, target issuedomain.ResolutionAction) bool {
 	for _, action := range actions {
 		if action == target {
