@@ -451,11 +451,7 @@ func canonicalPrivateRoot(root string) (string, error) {
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return "", fmt.Errorf("create worktree root: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", fmt.Errorf("resolve worktree root symlinks: %w", err)
-	}
-	return filepath.Clean(resolved), nil
+	return canonicalExistingRoot(abs)
 }
 
 func canonicalExistingRoot(root string) (string, error) {
@@ -463,12 +459,12 @@ func canonicalExistingRoot(root string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve worktree root: %w", err)
 	}
-	info, err := os.Lstat(abs)
+	info, err := os.Stat(abs)
 	if err != nil {
 		return "", fmt.Errorf("inspect worktree root: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", fmt.Errorf("worktree root must be a real directory: %s", abs)
+	if !info.IsDir() {
+		return "", fmt.Errorf("worktree root must be a directory: %s", abs)
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
