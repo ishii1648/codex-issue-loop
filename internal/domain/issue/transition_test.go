@@ -345,3 +345,24 @@ func TestAdmissionMatchesStartClaim(t *testing.T) {
 		t.Fatal("failed Issue must resume through suspension resolution")
 	}
 }
+
+func TestAdoptCheckpointRequiresSuspendedCompatibleStage(t *testing.T) {
+	for _, from := range []Status{StatusBlocked, StatusFailed, StatusRunning, StatusCompleted} {
+		for _, suspension := range []SuspensionStatus{SuspensionActive, SuspensionQuarantined, SuspensionResolved} {
+			for _, stage := range []ContinuationStage{ContinuationStageResume, ContinuationStageConflict, ContinuationStagePublish, ContinuationStageChecks, ContinuationStageNone} {
+				for _, action := range []ResolutionAction{ResolutionAdoptHead, ResolutionAdoptWorktree, ResolutionCancel} {
+					want := (from == StatusBlocked || from == StatusFailed) &&
+						(action == ResolutionAdoptHead && suspension == SuspensionActive && stage == ContinuationStageResume ||
+							action == ResolutionAdoptWorktree && suspension == SuspensionQuarantined && (stage == ContinuationStageResume || stage == ContinuationStageConflict))
+					got, err := AdoptCheckpoint(from, suspension, stage, action)
+					if (err == nil) != want {
+						t.Fatalf("AdoptCheckpoint(%s, %s, %s, %s): %s, %v", from, suspension, stage, action, got, err)
+					}
+					if want && (action == ResolutionAdoptHead && got != stage || action == ResolutionAdoptWorktree && got != ContinuationStageConflict) {
+						t.Fatalf("unexpected adopted stage %s", got)
+					}
+				}
+			}
+		}
+	}
+}
