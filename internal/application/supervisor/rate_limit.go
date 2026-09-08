@@ -13,7 +13,6 @@ import (
 )
 
 const unknownRateLimitCooldown = 1 * time.Hour
-const recoveredRateLimitCooldown = 5 * time.Second
 
 type primaryRateLimitStatusObserver interface {
 	PrimaryRateLimitStatus(context.Context, string) (gh.RateLimitStatus, bool)
@@ -190,6 +189,9 @@ func cooldownFromError(err error, now time.Time) (ratelimit.Cooldown, bool) {
 	}
 	resetAt := limited.ResetAt
 	source := limited.Source
+	if source == "rest-rate-limit-inconsistent" && resetAt.Before(now.Add(unknownRateLimitCooldown)) {
+		resetAt = now.Add(unknownRateLimitCooldown)
+	}
 	if !resetAt.After(now) {
 		resetAt = now.Add(unknownRateLimitCooldown)
 		source = "fallback"
@@ -225,7 +227,5 @@ func (l *Loop) revalidateStartupCooldown(ctx context.Context, cooldown ratelimit
 		}
 		return cooldown, nil
 	}
-	cooldown.ResetAt = now.Add(recoveredRateLimitCooldown)
-	cooldown.Source = "rest-rate-limit-recovered"
-	return l.RateLimits.Replace(cooldown, now)
+	return cooldown, nil
 }
