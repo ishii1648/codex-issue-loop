@@ -1,0 +1,110 @@
+{
+  "version": 5,
+  "semantic_contract_version": 4,
+  "issue_lifecycle_api_version": "2.1",
+  "repo_id": "repo-deadbeef",
+  "repo_path": "/tmp/repo",
+  "state_revision": 0,
+  "supervisor": {
+    "state": "stopped",
+    "started_at": "0001-01-01T00:00:00Z",
+    "updated_at": "2026-08-30T00:00:00Z"
+  },
+  "issues": {
+    "439": {
+      "number": 439,
+      "title": "",
+      "status": "needs_input",
+      "run_id": "run_1",
+      "generation": 4,
+      "continuation": {
+        "id": "checkpoint_next",
+        "kind": "needs_input",
+        "request_id": "req_4305dd6d98ba09bb",
+        "created_at": "2026-09-08T17:50:00Z",
+        "run_id": "run_1",
+        "generation": 4,
+        "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workspace": {
+          "path": "/tmp/repo",
+          "branch": "codex/issue-1",
+          "repo_id": "repo-deadbeef",
+          "repository": "owner/repo",
+          "git_common_dir": "/tmp/repo/.git",
+          "main_checkout": "/tmp/repo",
+          "captured_at": "2026-09-04T12:00:00Z"
+        },
+        "session": {
+          "backend": "codex",
+          "id": "session_anonymous"
+        },
+        "stage": "resume"
+      },
+      "branch": "codex/issue-1",
+      "worktree": "/tmp/repo",
+      "workspace": {
+        "path": "/tmp/repo",
+        "branch": "codex/issue-1",
+        "repo_id": "repo-deadbeef",
+        "repository": "owner/repo",
+        "git_common_dir": "/tmp/repo/.git",
+        "main_checkout": "/tmp/repo",
+        "captured_at": "2026-09-04T12:00:00Z"
+      },
+      "attempts": 2,
+      "continuations": 0,
+      "session_id": "session_anonymous",
+      "session": {
+        "backend": "codex",
+        "id": "session_anonymous"
+      },
+      "worker_identity": {
+        "backend": ""
+      },
+      "answers": [
+        {
+          "request_id": "req_44fe4448eeceeb3a",
+          "question": "Continue?",
+          "answer": "yes",
+          "answered_at": "2026-09-04T12:00:00Z"
+        }
+      ],
+      "updated_at": "2026-09-04T12:00:00Z"
+    }
+  },
+  "pending_effects": {},
+  "quarantined_issues": {},
+  "intake_verifications": {},
+  "pending_requests": {
+    "req_4305dd6d98ba09bb": {
+      "id": "req_4305dd6d98ba09bb",
+      "issue_number": 439,
+      "question": "Next choice?",
+      "allow_free_text": false,
+      "run_id": "run_1",
+      "checkpoint_id": "checkpoint_next",
+      "released_execution": {
+        "run_id": "run_1",
+        "generation": 4
+      },
+      "status": "pending",
+      "created_at": "2026-09-08T17:50:00Z"
+    },
+    "req_44fe4448eeceeb3a": {
+      "id": "req_44fe4448eeceeb3a",
+      "issue_number": 439,
+      "question": "Continue?",
+      "allow_free_text": false,
+      "run_id": "run_1",
+      "checkpoint_id": "checkpoint_1",
+      "released_execution": {
+        "run_id": "run_1",
+        "generation": 3
+      },
+      "status": "answered",
+      "answer": "yes",
+      "created_at": "2026-09-04T12:00:00Z",
+      "answered_at": "2026-09-04T12:00:00Z"
+    }
+  }
+}

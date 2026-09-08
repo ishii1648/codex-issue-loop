@@ -35,9 +35,19 @@ func (a App) status(ctx context.Context, l layout.Layout, args []string) error {
 		return err
 	}
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
-	snapshot, err := store.Load()
+	runtimeErr := diagnosticRuntime(l, entry)
+	var snapshot state.Snapshot
+	if runtimeErr == nil {
+		snapshot, _, err = store.ReadDiagnosticSnapshot()
+	} else {
+		err = runtimeErr
+	}
 	if err != nil {
-		return err
+		item := stateDiagnostic(entry, err)
+		if outputErr := a.output(jsonOut, item); outputErr != nil {
+			return outputErr
+		}
+		return exitError{1, fmt.Errorf("%s: %w", item.Code, err)}
 	}
 	if cooldown, active, cooldownErr := (ratelimit.Store{Path: l.RateLimitPath()}).Current(time.Now().UTC()); cooldownErr != nil {
 		return cooldownErr
