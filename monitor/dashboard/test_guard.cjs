@@ -9,15 +9,24 @@ function fixture() {
   const classes = new Set(['expired']);
   const nodes = Object.fromEntries(['freshness','error','repos','range','window','custom','selection','from','to'].map(id => [id,{addEventListener(name,fn){this[name]=fn;},classList:{toggle(){}}}]));
   let details = [];
+  let bars = [];
+  const documentEvents = {}, windowEvents = {};
   let html = '';
   Object.defineProperty(nodes.repos, 'innerHTML', {
     get:()=>html,
-    set:value=>{ html=value; details=[...value.matchAll(/<details data-repository="([^"]+)"/g)].map(match=>({dataset:{repository:match[1]},open:false})); },
+    set:value=>{ html=value;
+      bars=[...value.matchAll(/class="bar timeline" data-from="(\d+)" data-to="(\d+)"/g)].map(match=>({
+        dataset:{from:match[1],to:match[2]},
+        getBoundingClientRect:()=>({left:100,width:1000}),
+        closest(){return this;},append(overlay){this.overlay=overlay;},
+        setPointerCapture(id){this.capture=id;},hasPointerCapture(id){return this.capture===id;},releasePointerCapture(){this.capture=null;},
+      }));
+      details=[...value.matchAll(/<details data-repository="([^"]+)"/g)].map(match=>({dataset:{repository:match[1]},open:false})); },
   });
   nodes.repos.querySelectorAll = selector => details.filter(detail => selector !== 'details[open]' || detail.open);
   const context = vm.createContext({
-    document:{body:{classList:{add:x=>classes.add(x),remove:x=>classes.delete(x)}},getElementById:x=>nodes[x],addEventListener(){}},
-    window:{addEventListener(){}},Date:class extends Date {static now(){return f.now;}},
+    document:{createElement:()=>({style:{},remove(){this.removed=true;}}),body:{classList:{add:x=>classes.add(x),remove:x=>classes.delete(x)}},getElementById:x=>nodes[x],addEventListener(name,fn){documentEvents[name]=fn;}},
+    window:{addEventListener(name,fn){windowEvents[name]=fn;}},Date:class extends Date {static now(){return f.now;}},
     performance:{now:()=>f.now},setInterval(){},AbortSignal,URLSearchParams,
     fetch:async url => {
       f.urls.push(url);
@@ -46,7 +55,7 @@ function fixture() {
     },
   });
   vm.runInContext(code, context);
-  return {f,classes,nodes,context,refresh:()=>vm.runInContext('refresh()',context)};
+  return {f,classes,nodes,context,documentEvents,windowEvents,bars:()=>bars,refresh:()=>vm.runInContext('refresh()',context)};
 }
 test('transport failures, stale and missing scrape, sleep expire all displayed values and recover', async () => {
   const {f,classes,nodes,context,refresh} = fixture();
@@ -260,4 +269,102 @@ test('unset and zero dates display dashes for IDLE snapshots and unproven queue 
     assert.doesNotMatch(nodes.repos.innerHTML,/0001-/);
     f.state='IDLE';
   }
+});
+
+function pointer(nodes,bar,type,x,extra={}) {
+  nodes.repos[type]({target:bar,clientX:x,pointerId:1,isPrimary:true,button:0,preventDefault(){},...extra});
+}
+
+test('drag arbitrary positions in either direction, clamp bounds and apply exact JST inputs to all repositories', async () => {
+  for (const [start,end] of [[423.456,876.543],[876.543,423.456],[600,1500],[600,-100],[880,1030]]) {
+    const {f,nodes,bars,refresh} = fixture();
+    f.repositories=['owner/one','owner/two'];
+    await refresh();
+    const bar=bars()[1];
+    const baseFrom=Number(bar.dataset.from), baseTo=Number(bar.dataset.to);
+    pointer(nodes,bar,'pointerdown',start);
+    pointer(nodes,bar,'pointermove',end);
+    assert.equal(bar.overlay.hidden,false);
+    assert.ok(parseFloat(bar.overlay.style.width)>0);
+    pointer(nodes,bar,'pointerup',end);
+    assert.equal(bar.capture,null);
+    assert.equal(bar.overlay.removed,true);
+    assert.equal(nodes.window.value,'custom');
+    const from=Math.floor(baseFrom+(Math.max(100,Math.min(start,end))-100)/1000*(baseTo-baseFrom));
+    const to=Math.ceil(baseFrom+(Math.min(1100,Math.max(start,end))-100)/1000*(baseTo-baseFrom));
+    assert.equal(Date.parse(nodes.from.value+'+09:00'),from);
+    assert.equal(Date.parse(nodes.to.value+'+09:00'),to);
+    await refresh();
+    const url=f.urls.filter(u=>u.startsWith('/api/timeline?')).at(-1);
+    const query=new URL(url,'http://localhost').searchParams;
+    assert.equal(Date.parse(query.get('from')),from);
+    assert.equal(Date.parse(query.get('to')),to);
+    assert.ok(f.urls.includes(url.replace('/api/timeline','/api/report')));
+    assert.equal(bars().length,2);
+    for (const rendered of bars()) assert.deepEqual(rendered.dataset,{from:String(from),to:String(to)});
+    assert.equal((nodes.repos.innerHTML.match(/<b>HEALTHY<\/b>/g)||[]).length,2);
+    nodes.selection.submit({preventDefault(){}}); await refresh();
+    assert.equal(f.urls.filter(u=>u.startsWith('/api/timeline?')).at(-1),url);
+    nodes.window.value='24'; nodes.window.change(); await refresh();
+    assert.equal(Number(bars()[0].dataset.to)-Number(bars()[0].dataset.from),86400000);
+  }
+});
+
+test('click, small movement, pointer cancellation, lost capture, Escape and blur release selection without applying', async () => {
+  for (const cancel of ['click','small','pointercancel','lostpointercapture','Escape','blur','hidden']) {
+    const {f,nodes,bars,context,documentEvents,windowEvents,refresh} = fixture();
+    await refresh();
+    const bar=bars()[0], requests=f.urls.length;
+    pointer(nodes,bar,'pointerdown',500);
+    pointer(nodes,bar,'pointermove',cancel==='small'?504:700);
+    if(cancel==='click' || cancel==='small') pointer(nodes,bar,'pointerup',cancel==='small'?504:500);
+    else if(cancel==='Escape') documentEvents.keydown({key:'Escape'});
+    else if(cancel==='blur') windowEvents.blur();
+    else if(cancel==='hidden') { vm.runInContext('document.hidden=true',context); documentEvents.visibilitychange(); }
+    else pointer(nodes,bar,cancel,700);
+    assert.equal(bar.overlay.removed,true,cancel);
+    assert.equal(bar.capture,null,cancel);
+    assert.equal(vm.runInContext('drag',context),null);
+    assert.equal(vm.runInContext('selected.hours',context),24);
+    assert.equal(f.urls.length,requests);
+  }
+});
+
+test('drag retains rendered bounds across in-flight refresh and automatic updates while expiry still cancels', async () => {
+  const {f,nodes,bars,context,classes,refresh} = fixture();
+  await refresh();
+  const bar=bars()[0], baseFrom=Number(bar.dataset.from), baseTo=Number(bar.dataset.to);
+  let release;
+  f.now+=15000; f.sample=f.now;
+  f.pause=new Promise(resolve=>{release=resolve;});
+  const old=refresh(); f.pause=null;
+  pointer(nodes,bar,'pointerdown',350);
+  const requests=f.urls.length;
+  await refresh(); assert.equal(f.urls.length,requests);
+  release(); await old;
+  assert.equal(bars()[0],bar);
+  pointer(nodes,bar,'pointerup',850);
+  await refresh();
+  assert.equal(Number(bars()[0].dataset.from),baseFrom+(baseTo-baseFrom)*0.25);
+  assert.equal(Number(bars()[0].dataset.to),baseFrom+(baseTo-baseFrom)*0.75);
+  const current=bars()[0];
+  pointer(nodes,current,'pointerdown',350);
+  f.now+=45000;
+  vm.runInContext('checkExpiry()',context);
+  assert.equal(classes.has('expired'),true);
+  assert.equal(current.overlay.removed,true);
+  assert.equal(vm.runInContext('drag',context),null);
+  pointer(nodes,current,'pointerup',850);
+  assert.equal(Number(bars()[0].dataset.from),baseFrom+(baseTo-baseFrom)*0.25);
+});
+
+test('narrow sub-second range stays nonempty at input precision', async () => {
+  const {nodes,bars,refresh} = fixture();
+  nodes.from.value='2026-01-01T00:00:00.001'; nodes.to.value='2026-01-01T00:00:00.005';
+  nodes.selection.submit({preventDefault(){}}); await refresh();
+  const bar=bars()[0];
+  pointer(nodes,bar,'pointerdown',500);
+  pointer(nodes,bar,'pointerup',506);
+  assert.ok(Date.parse(nodes.from.value+'+09:00')<Date.parse(nodes.to.value+'+09:00'));
+  assert.match(page,/type="datetime-local" step="0.001"/);
 });
