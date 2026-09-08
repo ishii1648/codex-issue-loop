@@ -110,3 +110,78 @@ func TestBackfillReplacesOverlappingHistoryIdempotently(t *testing.T) {
 		}
 	}
 }
+
+func TestRepositoryCaseChangeAcrossRestart(t *testing.T) {
+	for _, names := range [][2]string{{"Owner/Repo", "owner/repo"}, {"owner/repo", "Owner/Repo"}} {
+		t.Run(names[0], func(t *testing.T) {
+			storage := Store{Root: t.TempDir()}
+			base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+			observation := model.Observation{Repository: names[0], ObservedAt: base, Cursor: 1, CursorInitialized: true}
+			current, closed, err := model.Apply(nil, observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Commit(current, closed); err != nil {
+				t.Fatal(err)
+			}
+			previous, err := storage.Load(names[1])
+			if err != nil || previous == nil {
+				t.Fatalf("Load after case change = %+v, err = %v", previous, err)
+			}
+			observation.Repository = names[1]
+			observation.ObservedAt = base.Add(time.Minute)
+			observation.Error = "unavailable"
+			next, closed, err := model.Apply(previous, observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Commit(next, closed); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range names {
+				loaded, err := storage.Load(name)
+				if err != nil || loaded == nil || loaded.Current.Status != model.Unknown || !loaded.LastObservationAt.Equal(observation.ObservedAt) {
+					t.Fatalf("Load(%q) = %+v, err = %v", name, loaded, err)
+				}
+				intervals, err := storage.AllIntervals(name)
+				if err != nil || len(intervals) != 2 || intervals[0].Status != model.Idle || !intervals[0].EndedAt.Equal(intervals[1].StartedAt) {
+					t.Fatalf("AllIntervals(%q) = %+v, err = %v", name, intervals, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadAndApplyRejectIdentityOrSchemaMismatch(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		repository    string
+		schemaVersion int
+	}{
+		{"repository", "other/repo", model.SchemaVersion},
+		{"schema", "Owner/Repo", model.SchemaVersion + 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			storage := Store{Root: t.TempDir()}
+			base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+			snapshot, closed, err := model.Apply(nil, model.Observation{Repository: "owner/repo", ObservedAt: base, CursorInitialized: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.Commit(snapshot, closed); err != nil {
+				t.Fatal(err)
+			}
+			snapshot.Repository = test.repository
+			snapshot.SchemaVersion = test.schemaVersion
+			if err := writeJSON(storage.currentPath("owner/repo"), snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := storage.Load("owner/repo"); err == nil {
+				t.Fatal("Load accepted mismatched snapshot")
+			}
+			if _, _, err := model.Apply(&snapshot, model.Observation{Repository: "owner/repo", ObservedAt: base.Add(time.Minute), CursorInitialized: true}); err == nil {
+				t.Fatal("Apply accepted mismatched snapshot")
+			}
+		})
+	}
+}

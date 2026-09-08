@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -32,7 +33,7 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 	if previous == nil || previous.Current.Status == "" {
 		return bootstrap(observation)
 	}
-	if previous.SchemaVersion != SchemaVersion || previous.Repository != observation.Repository {
+	if previous.SchemaVersion != SchemaVersion || !strings.EqualFold(previous.Repository, observation.Repository) {
 		return Snapshot{}, nil, fmt.Errorf("snapshot identity or schema mismatch")
 	}
 	if observation.ObservedAt.Before(previous.LastObservationAt) {
