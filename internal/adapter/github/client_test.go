@@ -651,6 +651,9 @@ esac
 			if len(remote.PullRequests) != 1 {
 				t.Fatalf("remote=%+v", remote)
 			}
+			if remote.Issue.Number != 7 || len(remote.Issue.Comments) != 1 || remote.Issue.Comments[0] != "claim" {
+				t.Fatalf("Issue evidence=%+v", remote.Issue)
+			}
 			pr := remote.PullRequests[0]
 			mergeSHA := ""
 			if test.merged {

@@ -88,7 +88,7 @@ func TestDurableLifecycleAssignmentsStayWithinRegisteredBoundaries(t *testing.T)
 			"internal/adapter/state/execution.go", "internal/adapter/state/suspension.go", "internal/adapter/state/state.go"),
 		"Continuation": paths(
 			"internal/adapter/state/execution.go", "internal/adapter/state/issue_transition.go", "internal/adapter/state/suspension.go",
-			"internal/application/app/issue_resolution.go", "internal/application/supervisor/github_sync_lifecycle.go"),
+			"internal/application/app/issue_resolution_sync.go", "internal/application/supervisor/github_sync_lifecycle.go"),
 		"Request.Status": paths(
 			"internal/adapter/state/lease.go", "internal/adapter/state/issue_transition.go", "internal/application/app/app.go",
 			"internal/application/app/status.go", "internal/application/app/operator_attention.go",

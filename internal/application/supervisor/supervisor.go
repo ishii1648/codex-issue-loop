@@ -252,91 +252,6 @@ func (l *Loop) reconcileStartupWithRateLimit(ctx context.Context, snapshot state
 	}
 }
 
-func (l *Loop) waitForWork(ctx context.Context, delay time.Duration, watcher *fsnotify.Watcher) {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	var events <-chan fsnotify.Event
-	var watchErrors <-chan error
-	if watcher != nil {
-		events, watchErrors = watcher.Events, watcher.Errors
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			return
-		case <-watchErrors:
-			// Durable timer reconciliation remains active.
-		case event, ok := <-events:
-			if !ok {
-				events = nil
-				watchErrors = nil
-				continue
-			}
-			base := filepath.Base(event.Name)
-			if base != "state.json" && base != "events.jsonl" {
-				continue
-			}
-			snapshot, err := l.Store.Load()
-			if err != nil {
-				continue
-			}
-			if nextPending(snapshot, l.now()) != nil {
-				return
-			}
-		}
-	}
-}
-
-func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
-	l.enableRateLimitGate()
-	snapshot, err := l.Store.Load()
-	if err != nil {
-		return false, failure.Wrap(failure.Supervisor, "load durable state", err)
-	}
-	for _, number := range needsInputIssues(snapshot) {
-		if err := l.reconcileInputIssue(ctx, number); err != nil {
-			return false, failure.Wrap(failure.Transient, "reconcile GitHub input control", err)
-		}
-	}
-	snapshot, err = l.Store.PrepareAnsweredRequests(l.now())
-	if err != nil {
-		return false, err
-	}
-	diskAvailable := l.DiskAvailable
-	if diskAvailable == nil {
-		diskAvailable = retention.AvailableBytes
-	}
-	available, err := diskAvailable(l.Store.Dir)
-	if err != nil {
-		return false, failure.Wrap(failure.Supervisor, "inspect log storage capacity", err)
-	}
-	reserve := uint64(l.Config.Logs.RotateBytes * 2)
-	if available < reserve {
-		return false, failure.Wrap(failure.Supervisor, "log storage safety reserve exhausted", fmt.Errorf("available=%d required=%d", available, reserve))
-	}
-	if err := l.pruneRunLogs(snapshot); err != nil {
-		return false, failure.Wrap(failure.Supervisor, "prune worker run logs", err)
-	}
-	if issueState := nextPending(snapshot, l.now()); issueState != nil {
-		return true, l.processExisting(ctx, *issueState)
-	}
-	issues, err := l.GitHub.ListReady(ctx, l.Config)
-	if err != nil {
-		return false, failure.Wrap(failure.Transient, "poll GitHub Issue queue", err)
-	}
-	selector := &scheduler{loop: l, active: map[int]activeJob{}}
-	selected, ok, err := selector.selectReady(ctx, issues, snapshot)
-	if err != nil {
-		return false, failure.Wrap(failure.Supervisor, "select Issue admission", err)
-	}
-	if !ok {
-		return false, l.markPolling("")
-	}
-	return true, l.startIssue(ctx, selected, state.NewID("run"))
-}
-
 func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	exclude := map[string]bool{}
 	for _, issue := range snapshot.Issues {
@@ -358,23 +273,6 @@ func (l *Loop) pruneRunLogs(snapshot state.Snapshot) error {
 	}
 	_, err = l.Store.Update("worker_logs_pruned", 0, "", map[string]any{"run_ids": removed}, func(*state.Snapshot) error { return nil })
 	return err
-}
-
-func nextPending(snapshot state.Snapshot, now time.Time) *state.Issue {
-	var selected *state.Issue
-	for _, issue := range snapshot.Issues {
-		if !issue.Status.DispatchPending(state.PendingEffect(&snapshot, issue.Number) != nil) {
-			continue
-		}
-		if issue.RetryAfter != nil && issue.RetryAfter.After(now) {
-			continue
-		}
-		if selected == nil || issue.Number < selected.Number {
-			copy := *issue
-			selected = &copy
-		}
-	}
-	return selected
 }
 
 func (l *Loop) startIssue(ctx context.Context, issue gh.Issue, runID string) error {

@@ -227,6 +227,44 @@ func ValidateNeedsInputContinuation(issue *Issue, request *Request) error {
 	return nil
 }
 
+func (s Store) ReconcileStoppedAssignment(now time.Time) error {
+	if _, _, err := s.RecoverUnstartedConflictLaunch(now); err != nil {
+		return err
+	}
+	_, err := s.Update("assignment_stopped_state_reconciled", 0, "", map[string]string{"reason": "retained stopped assignment retry"}, func(snapshot *Snapshot) error {
+		for _, item := range snapshot.Issues {
+			if item != nil && (item.WorkerPID != 0 || item.WorkerPGID != 0) {
+				return fmt.Errorf("stopped assignment state retains a worker process identity")
+			}
+		}
+		if active := snapshot.ActiveExecution; active != nil {
+			item := snapshot.Issues[fmt.Sprint(active.IssueNumber)]
+			if item == nil || item.Status != issuedomain.StatusLaunching || item.WorkerPID != 0 || item.WorkerPGID != 0 ||
+				item.RunID != active.RunID || item.Generation != active.Generation || item.LaunchSource == issuedomain.StatusResolvingConflict {
+				return fmt.Errorf("stopped assignment active execution is not an unstarted worker launch")
+			}
+			transition, transitionErr := issuedomain.AbortWorkerLaunch(item.Status, item.LaunchSource)
+			if transitionErr != nil {
+				return transitionErr
+			}
+			identity := ExecutionIdentity{RunID: active.RunID, Generation: active.Generation}
+			if releaseErr := ReleaseExecution(snapshot, item.Number, identity); releaseErr != nil {
+				return releaseErr
+			}
+			if transitionErr := ApplyIssueTransition(item, transition); transitionErr != nil {
+				return transitionErr
+			}
+			item.UpdatedAt = now.UTC()
+		}
+		snapshot.Supervisor.State = SupervisorStateStopped
+		snapshot.Supervisor.PID = 0
+		snapshot.Supervisor.Message = "retained stopped assignment retry"
+		snapshot.Supervisor.UpdatedAt = now.UTC()
+		return nil
+	})
+	return err
+}
+
 // RecoverUnstartedConflictLaunch releases only a conflict launch whose complete
 // persisted identity chain proves that no worker process identity was recorded.
 func (s Store) RecoverUnstartedConflictLaunch(now time.Time) (Snapshot, bool, error) {

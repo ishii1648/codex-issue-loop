@@ -14,6 +14,62 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 )
 
+func TestRecoveryValidatorsEnforceManagedRoot(t *testing.T) {
+	store := newStore(t)
+	root := filepath.Join(store.Dir, "recovery")
+	backup := filepath.Join(root, "backup")
+	if err := os.MkdirAll(backup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(backup, "state.json")
+	if err := os.WriteFile(staged, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parentLink := filepath.Join(root, "parent-link")
+	if err := os.Symlink(store.Dir, parentLink); err != nil {
+		t.Fatal(err)
+	}
+	for _, validator := range []struct {
+		name     string
+		validate func(string) error
+		valid    string
+	}{
+		{"backup", func(path string) error {
+			resolved, err := store.validateExactRecoveryBackup(path, path)
+			if err == nil {
+				want, resolveErr := filepath.EvalSymlinks(path)
+				if resolveErr != nil || resolved != want {
+					t.Errorf("resolved=%q want=%q err=%v", resolved, want, resolveErr)
+				}
+			}
+			return err
+		}, backup},
+		{"file", store.validateManagedRecoveryFile, staged},
+	} {
+		t.Run(validator.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				path string
+			}{
+				{"parent", store.Dir},
+				{"root", root},
+				{"parent_symlink", parentLink},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if err := validator.validate(tc.path); err == nil || !strings.Contains(err.Error(), "outside the managed recovery root") {
+						t.Fatalf("path=%q err=%v", tc.path, err)
+					}
+				})
+			}
+			t.Run("managed", func(t *testing.T) {
+				if err := validator.validate(validator.valid); err != nil {
+					t.Fatal(err)
+				}
+			})
+		})
+	}
+}
+
 func TestSemanticMismatchRecoveryRestoresOneExactBackupWithoutRewritingIt(t *testing.T) {
 	store := newStore(t)
 	if _, err := store.Update("checkpoint", 0, "", nil, func(*Snapshot) error { return nil }); err != nil {

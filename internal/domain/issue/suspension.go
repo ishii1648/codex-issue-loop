@@ -71,3 +71,20 @@ const (
 	RecoverabilityNone      Recoverability = "none"
 	RecoverabilityAmbiguous Recoverability = "ambiguous"
 )
+
+func AdoptCheckpoint(from Status, suspension SuspensionStatus, stage ContinuationStage, action ResolutionAction) (ContinuationStage, error) {
+	if from != StatusBlocked && from != StatusFailed {
+		return ContinuationStageNone, fmt.Errorf("checkpoint cannot be adopted from status %q", from)
+	}
+	switch action {
+	case ResolutionAdoptHead:
+		if suspension == SuspensionActive && stage == ContinuationStageResume {
+			return stage, nil
+		}
+	case ResolutionAdoptWorktree:
+		if suspension == SuspensionQuarantined && (stage == ContinuationStageResume || stage == ContinuationStageConflict) {
+			return ContinuationStageConflict, nil
+		}
+	}
+	return ContinuationStageNone, fmt.Errorf("cannot adopt checkpoint stage %q with suspension %q using %q", stage, suspension, action)
+}

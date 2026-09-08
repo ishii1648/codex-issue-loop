@@ -23,7 +23,7 @@ const testTagObject = "abcdef0123456789abcdef0123456789abcdef01"
 
 type releaseRunner struct {
 	binaryRuns, updates, doctors, rollbacks int
-	releaseViews                            int
+	releaseViews, downloads                 int
 	replaceReleaseAtView                    int
 	attestationFailure                      bool
 	badChecksum                             bool
@@ -81,6 +81,7 @@ func (r *releaseRunner) Run(_ context.Context, name string, args ...string) ([]b
 		return []byte(fmt.Sprintf(`{"tag":"v1.2.3","object":{"type":"commit","sha":"%s"}}`, testCommit)), nil
 	}
 	if len(args) >= 2 && args[0] == "release" && args[1] == "download" {
+		r.downloads++
 		dir := ""
 		for index, arg := range args {
 			if arg == "--dir" && index+1 < len(args) {
@@ -346,6 +347,42 @@ func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 	}
 }
 
+func TestReconcileNeverDiscoversWithoutDownloading(t *testing.T) {
+	root := t.TempDir()
+	l := layout.Layout{Root: root}
+	current := VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)}
+	if err := fsutil.WriteJSON(filepath.Join(root, "install.json"), map[string]any{"version": current.Version, "commit": current.Commit, "schema_version": 4, "semantic_contract_version": 1}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "delivery.yaml")
+	if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
+		t.Fatal(err)
+	}
+	runner := &releaseRunner{}
+	now := time.Now().UTC()
+	controller := Controller{Layout: l, ConfigPath: configPath, GH: "gh", Runner: runner, Now: func() time.Time { return now }}
+	for attempt := 1; attempt <= 2; attempt++ {
+		report, err := controller.Reconcile(context.Background(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "deferred" || report.Reason != "auto_apply is never" || report.Phase != PhaseDiscovered || report.Desired != txDesiredVersion() || report.Plan != nil {
+			t.Fatalf("report=%+v", report)
+		}
+		tx, err := LoadTransaction(RuntimePaths(root).Transaction)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tx.Desired != report.Desired || tx.Current != current || tx.LastResult != "deferred" || tx.Attempt != attempt || !tx.LastCheckAt.Equal(now) || !tx.NextCheckAt.Equal(now.Add(15*time.Minute)) {
+			t.Fatalf("transaction=%+v", tx)
+		}
+		if runner.downloads != 0 || runner.binaryRuns != 0 || runner.releaseViews != attempt {
+			t.Fatalf("runner=%+v", runner)
+		}
+		now = now.Add(15 * time.Minute)
+	}
+}
+
 func TestReconcileDisabledPreservesActiveTransaction(t *testing.T) {
 	for _, result := range []string{"rollback_failed", "rolling_back", "validating"} {
 		t.Run(result, func(t *testing.T) {
@@ -520,39 +557,43 @@ func txDesiredVersion() VersionRef {
 }
 
 func TestFaultControllerResumesPostApplyValidationWithoutReapplying(t *testing.T) {
-	root := t.TempDir()
-	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"), BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills"), LaunchAgents: filepath.Join(root, "launch")}
-	if err := os.MkdirAll(l.BinDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsutil.WriteJSON(filepath.Join(root, "install.json"), map[string]any{"version": "v1.2.3", "commit": testCommit, "schema_version": 4, "semantic_contract_version": 1}, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(root, "delivery.yaml")
-	if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
-		t.Fatal(err)
-	}
-	paths := RuntimePaths(root)
-	if err := paths.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	tx := Transaction{Version: 1, Phase: PhaseApplying, Attempt: 1, Current: VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)}, Previous: VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)}, Desired: VersionRef{Version: "v1.2.3", Commit: testCommit}, MaintenanceGeneration: "maintenance_resume", BackupPath: filepath.Join(root, "backups", "delivery-maintenance_resume-v1.2.2")}
-	if err := SaveTransaction(paths.Transaction, tx); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteMaintenance(paths.Maintenance, Maintenance{Generation: tx.MaintenanceGeneration, Desired: tx.Desired}); err != nil {
-		t.Fatal(err)
-	}
-	runner := &releaseRunner{}
-	report, err := (Controller{Layout: l, ConfigPath: configPath, GH: "gh", Runner: runner, Soak: -1}).Reconcile(context.Background(), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.Result != "succeeded" || runner.updates != 0 || runner.doctors != 1 {
-		t.Fatalf("report=%+v updates=%d doctors=%d", report, runner.updates, runner.doctors)
-	}
-	if _, err := os.Stat(paths.Maintenance); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("fence remains: %v", err)
+	for _, phase := range []Phase{PhaseApplying, PhaseValidating} {
+		t.Run(string(phase), func(t *testing.T) {
+			root := t.TempDir()
+			l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos"), BinDir: filepath.Join(root, "bin"), SkillsDir: filepath.Join(root, "skills"), LaunchAgents: filepath.Join(root, "launch")}
+			if err := os.MkdirAll(l.BinDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsutil.WriteJSON(filepath.Join(root, "install.json"), map[string]any{"version": "v1.2.3", "commit": testCommit, "schema_version": 4, "semantic_contract_version": 1}, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(root, "delivery.yaml")
+			if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
+				t.Fatal(err)
+			}
+			paths := RuntimePaths(root)
+			if err := paths.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			tx := Transaction{Version: 1, Phase: phase, Attempt: 1, Current: VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)}, Previous: VersionRef{Version: "v1.2.2", Commit: strings.Repeat("a", 40)}, Desired: VersionRef{Version: "v1.2.3", Commit: testCommit}, MaintenanceGeneration: "maintenance_resume", BackupPath: filepath.Join(root, "backups", "delivery-maintenance_resume-v1.2.2")}
+			if err := SaveTransaction(paths.Transaction, tx); err != nil {
+				t.Fatal(err)
+			}
+			if err := WriteMaintenance(paths.Maintenance, Maintenance{Generation: tx.MaintenanceGeneration, Desired: tx.Desired}); err != nil {
+				t.Fatal(err)
+			}
+			runner := &releaseRunner{}
+			report, err := (Controller{Layout: l, ConfigPath: configPath, GH: "gh", Runner: runner, Soak: -1}).Reconcile(context.Background(), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Result != "succeeded" || runner.updates != 0 || runner.doctors != 1 {
+				t.Fatalf("report=%+v updates=%d doctors=%d", report, runner.updates, runner.doctors)
+			}
+			if _, err := os.Stat(paths.Maintenance); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("fence remains: %v", err)
+			}
+		})
 	}
 }
 
@@ -622,7 +663,7 @@ func TestFaultControllerCompletesInterruptedRollbackWithoutReapplying(t *testing
 		t.Fatal(err)
 	}
 	runner := &releaseRunner{}
-	report, err := (Controller{Layout: l, ConfigPath: configPath, GH: "gh", Runner: runner, Soak: -1}).Reconcile(context.Background(), true)
+	report, err := (Controller{Layout: l, ConfigPath: configPath, GH: "gh", Runner: runner, Soak: -1}).Reconcile(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}

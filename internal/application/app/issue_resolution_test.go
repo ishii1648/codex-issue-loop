@@ -264,6 +264,132 @@ func TestIssueResolveResumeRetriesGitHubWithoutRefencing(t *testing.T) {
 	}
 }
 
+func TestIssueResolveResumeSupervisorSynchronizesDuringCLI(t *testing.T) {
+	fixture := newIssueResolutionFixture(t, 449, "OPEN", nil)
+	fixture.block(t, issuedomain.StatusRunning, "network unavailable", true, "")
+	original, err := os.ReadFile(fixture.ghPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "sync")
+	t.Setenv("AGENT_LOOP_TEST_SYNC_MARKER", marker)
+	script := strings.Replace(string(original), `  "issue edit")`, `  "issue edit")
+    if test ! -f "$AGENT_LOOP_TEST_SYNC_MARKER.done"; then
+      touch "$AGENT_LOOP_TEST_SYNC_MARKER"
+      while test ! -f "$AGENT_LOOP_TEST_SYNC_MARKER.done"; do sleep 0.01; done
+    fi`, 1)
+	if err := os.WriteFile(fixture.ghPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var out, stderr bytes.Buffer
+	result := make(chan int, 1)
+	go func() {
+		result <- (App{Out: &out, Err: &stderr}).Run(ctx, []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "449", "--action", "resume", "--json"})
+	}()
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case code := <-result:
+			t.Fatalf("CLI exited before synchronization: code=%d stderr=%s", code, stderr.String())
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	advanceResolutionFixture(t, fixture.store)
+	if err := os.WriteFile(marker+".done", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-result; code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+	after, err := fixture.store.Load()
+	if err != nil || after.Issues["449"].Status != issuedomain.StatusLaunching || state.PendingEffect(&after, 449) != nil {
+		t.Fatalf("supervisor progress lost: snapshot=%+v err=%v", after, err)
+	}
+}
+
+func TestSynchronizeIssueResolutionAfterSupervisorProgress(t *testing.T) {
+	for _, change := range []string{"cleared", "launching", "run", "generation", "resolution", "suspension"} {
+		t.Run(change, func(t *testing.T) {
+			fixture := newIssueResolutionFixture(t, 449, "OPEN", nil)
+			fixture.block(t, issuedomain.StatusRunning, "network unavailable", true, "")
+			marker := filepath.Join(t.TempDir(), "fail")
+			if err := os.WriteFile(marker, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("AGENT_LOOP_TEST_FAIL_EDIT_ONCE", marker)
+			var out, stderr bytes.Buffer
+			a := App{Out: &out, Err: &stderr}
+			if code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", fixture.repo, "--issue", "449", "--action", "resume"}); code == 0 {
+				t.Fatal("expected initial GitHub failure")
+			}
+			before, err := fixture.store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			planned := issuePlanningContext{store: fixture.store, issue: before.Issues["449"], cfg: mustConfig(t, fixture.repo), ghPath: fixture.ghPath}
+			if change == "launching" {
+				advanceResolutionFixture(t, fixture.store)
+			} else if _, err := fixture.store.Update("fixture_sync", 449, fixture.runID, nil, func(snapshot *state.Snapshot) error {
+				item := snapshot.Issues["449"]
+				if err := state.ClearEffect(snapshot, 449, state.PendingEffect(snapshot, 449).ID); err != nil {
+					return err
+				}
+				switch change {
+				case "run":
+					item.RunID = "new_run"
+					item.Continuation.RunID = item.RunID
+				case "generation":
+					item.Generation++
+				case "resolution":
+					item.Suspension.Resolution = issuedomain.ResolutionRetryStage
+				case "suspension":
+					item.Suspension.ID = "new_suspension"
+				}
+				item.UpdatedAt = time.Now().UTC()
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			calls := filepath.Join(t.TempDir(), "github-called")
+			t.Setenv("AGENT_LOOP_TEST_GITHUB_CALLED", calls)
+			if err := os.WriteFile(fixture.ghPath, []byte("#!/bin/sh\ntouch \"$AGENT_LOOP_TEST_GITHUB_CALLED\"\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err = a.synchronizeIssueResolution(context.Background(), planned, issuedomain.ResolutionResume, 449)
+			wantSuccess := change == "cleared" || change == "launching"
+			if (err == nil) != wantSuccess {
+				t.Fatalf("success=%v err=%v", wantSuccess, err)
+			}
+			if _, err := os.Stat(calls); !os.IsNotExist(err) {
+				t.Fatalf("unexpected GitHub call: %v", err)
+			}
+		})
+	}
+}
+
+func advanceResolutionFixture(t *testing.T, store state.Store) {
+	t.Helper()
+	if _, err := store.Update("fixture_supervisor_sync", 449, "run_449", nil, func(snapshot *state.Snapshot) error {
+		item := snapshot.Issues["449"]
+		if err := state.ClearEffect(snapshot, 449, state.PendingEffect(snapshot, 449).ID); err != nil {
+			return err
+		}
+		item.Status = issuedomain.StatusLaunching
+		item.LaunchSource = issuedomain.StatusResumePending
+		item.UpdatedAt = time.Now().UTC()
+		snapshot.ActiveExecution = &state.ActiveExecution{IssueNumber: 449, RunID: item.RunID, Generation: item.Generation, BaseSHA: item.Continuation.BaseSHA, StartedAt: item.UpdatedAt}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIssueResolveResumeRejectsChangedWorktreeAndCheckpointBase(t *testing.T) {
 	fixture := newIssueResolutionFixture(t, 450, "OPEN", nil)
 	fixture.block(t, issuedomain.StatusRunning, "environment unavailable", true, "")
@@ -893,6 +1019,15 @@ esac
 	}
 }
 
+func failIssueResolutionPathGit(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func runIssueGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	output, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
@@ -941,7 +1076,7 @@ func containsReason(reasons []string, target string) bool {
 }
 
 func TestAdoptHeadPreservesCheckpointAndRequiresExactEvidence(t *testing.T) {
-	for _, scenario := range []string{"valid", "wrong-head", "changed-content", "existing-head", "published", "missing-session", "worker-pid", "missing-expected-head"} {
+	for _, scenario := range []string{"valid", "path-git-fails", "wrong-head", "changed-content", "existing-head", "published", "missing-session", "worker-pid", "missing-expected-head"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newIssueResolutionFixture(t, 459, "OPEN", nil)
 			runIssueGit(t, f.worktree, "push", "origin", "--delete", f.branch)
@@ -987,6 +1122,9 @@ func TestAdoptHeadPreservesCheckpointAndRequiresExactEvidence(t *testing.T) {
 			if scenario == "missing-expected-head" {
 				expected = ""
 			}
+			if scenario == "path-git-fails" {
+				failIssueResolutionPathGit(t)
+			}
 			var out, stderr bytes.Buffer
 			a := App{Out: &out, Err: &stderr}
 			code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "adopt-head", "--expected-head", expected, "--json"})
@@ -994,7 +1132,7 @@ func TestAdoptHeadPreservesCheckpointAndRequiresExactEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if scenario != "valid" {
+			if scenario != "valid" && scenario != "path-git-fails" {
 				if code == 0 || !reflect.DeepEqual(before, after) {
 					t.Fatalf("refusal code=%d changed=%v stderr=%s", code, !reflect.DeepEqual(before, after), stderr.String())
 				}

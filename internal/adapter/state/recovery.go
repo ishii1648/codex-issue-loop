@@ -151,7 +151,7 @@ func (s Store) emptySnapshot() Snapshot {
 	now := time.Now().UTC()
 	return Snapshot{
 		Version: CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion, IssueLifecycleAPIVersion: issuedomain.LifecycleAPICurrent, RepoID: s.RepoID, RepoPath: s.RepoPath,
-		Supervisor: Supervisor{State: "stopped", UpdatedAt: now},
+		Supervisor: Supervisor{State: SupervisorStateStopped, UpdatedAt: now},
 		Issues:     map[string]*Issue{}, QuarantinedIssues: map[string]*QuarantineRecord{},
 		PendingEffects:      map[string]*EffectIntent{},
 		IntakeVerifications: map[string]*queuedomain.AuthorVerification{}, PendingRequests: map[string]*Request{},
@@ -416,7 +416,7 @@ func (s Store) quarantineUnlocked(cause error) (Snapshot, error) {
 	snapshot.StateRevision = 1
 	safeCause := redact.StringWithSecrets(cause.Error(), s.Secrets)
 	snapshot.Supervisor = Supervisor{
-		State: "blocked", UpdatedAt: now,
+		State: SupervisorStateBlocked, UpdatedAt: now,
 		Message: fmt.Sprintf("durable state recovery blocked: %s (backup: %s)", safeCause, backupDir),
 	}
 	snapshot.Recovery = &Recovery{Status: RecoveryStateBlocked, Reason: safeCause, BackupDir: backupDir, DetectedAt: now}
