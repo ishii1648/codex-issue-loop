@@ -323,6 +323,7 @@ type Snapshot struct {
 	RepoPath                 string                                     `json:"repo_path"`
 	StateRevision            uint64                                     `json:"state_revision"`
 	Supervisor               Supervisor                                 `json:"supervisor"`
+	LastExecutionReleasedAt  time.Time                                  `json:"last_execution_released_at,omitzero"`
 	ActiveExecution          *ActiveExecution                           `json:"active_execution,omitempty"`
 	Issues                   map[string]*Issue                          `json:"issues"`
 	PendingEffects           map[string]*EffectIntent                   `json:"pending_effects"`
@@ -454,6 +455,7 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == RecoveryStateBlocked {
 		return Snapshot{}, fmt.Errorf("durable state is recovery-blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)
 	}
+	hadActiveExecution := snapshot.ActiveExecution != nil
 	var lastValid *Issue
 	normalizeSnapshot(&snapshot)
 	if issueNumber > 0 {
@@ -477,6 +479,9 @@ func (s Store) Update(eventType string, issueNumber int, runID string, payload a
 		}
 		payload = map[string]any{"rejected_event": eventType, "reason_code": "issue_invariant_violation", "reason": validationErr.Error()}
 		eventType = "issue_quarantined"
+	}
+	if hadActiveExecution && snapshot.ActiveExecution == nil {
+		snapshot.LastExecutionReleasedAt = now
 	}
 	snapshot.StateRevision++
 	snapshot.Supervisor.UpdatedAt = now
