@@ -27,6 +27,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
 )
 
 type workspaceMutationWorker struct {
@@ -2958,6 +2959,8 @@ func TestWebhookReviewDecisionGatesMergeAndPreservesUnknown(t *testing.T) {
 			loop.Config.Webhook.Mode = "webhook"
 			client := &webhookFakeGitHub{fakeGitHub: base}
 			loop.GitHub = client
+			loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+			loop.enableRateLimitGate()
 			base.remote = &gh.RemoteState{PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "open", IsDraft: true, HeadRefName: "codex/issue-1-test", MergeStateStatus: "clean", ChecksStatus: "success", ReviewDecision: test.observed}}}
 			if _, err := loop.Store.Update("test_review", 1, "", nil, func(s *state.Snapshot) error {
 				s.Issues["1"].ReviewDecision = test.saved
