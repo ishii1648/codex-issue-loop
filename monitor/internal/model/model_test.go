@@ -1,6 +1,8 @@
 package model
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -85,5 +87,28 @@ func TestBuildReportExcludesIdleAndUnknownFromDemandAvailability(t *testing.T) {
 	}
 	if report.ObservationCoverage != float64(50)/60 {
 		t.Fatalf("coverage = %v", report.ObservationCoverage)
+	}
+}
+
+func TestSnapshotJSONTimeRoundTrip(t *testing.T) {
+	at := time.Date(2026, 9, 5, 12, 0, 0, 123456789, time.UTC)
+	for _, timestamp := range []time.Time{{}, at} {
+		original := Snapshot{
+			SchemaVersion: SchemaVersion, Repository: "owner/repo",
+			Current:         Interval{ID: "current", Repository: "owner/repo", Status: Idle, StartedAt: at, EndedAt: timestamp},
+			Queue:           []QueueItem{{Number: 1, Phase: Ready, PhaseSince: timestamp, Deadline: timestamp}},
+			QueuePhaseSince: timestamp, QueueDeadline: timestamp, LastSuccessAt: timestamp, LastObservationAt: at,
+		}
+		data, err := json.Marshal(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded Snapshot
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(decoded, original) {
+			t.Fatalf("round trip mismatch: %s", data)
+		}
 	}
 }

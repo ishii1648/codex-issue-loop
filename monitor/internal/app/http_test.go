@@ -546,3 +546,66 @@ func TestSelectedPeriodTimelineMatchesCLIReport(t *testing.T) {
 		})
 	}
 }
+
+func TestStatusAndHistoryJSONOmitUnsetTimes(t *testing.T) {
+	cfg, storage, at := dashboardFixture(t)
+	snapshot := model.Snapshot{
+		SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at,
+		Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Unknown, StartedAt: at.Add(-time.Minute)},
+		Queue:   []model.QueueItem{{Number: 1, Phase: model.Ready}},
+	}
+	if err := storage.Commit(snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"status", "history"} {
+		t.Run(command, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			cli := App{Out: &out, Err: &stderr, Now: func() time.Time { return at }}
+			if code := cli.Run(context.Background(), []string{command, "--config", cfg.Path, "--json"}); code != 0 {
+				t.Fatal(stderr.String())
+			}
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if command == "status" {
+				var snapshots []map[string]json.RawMessage
+				if err := json.Unmarshal(payload["repositories"], &snapshots); err != nil {
+					t.Fatal(err)
+				}
+				if len(snapshots) != 1 {
+					t.Fatalf("snapshots = %s", payload["repositories"])
+				}
+				for _, key := range []string{"queue_phase_since", "queue_deadline", "last_success_at"} {
+					if _, ok := snapshots[0][key]; ok {
+						t.Errorf("unset %s present: %s", key, out.String())
+					}
+				}
+				var items []map[string]json.RawMessage
+				if err := json.Unmarshal(snapshots[0]["queue"], &items); err != nil {
+					t.Fatal(err)
+				}
+				if len(items) != 1 {
+					t.Fatalf("queue = %s", snapshots[0]["queue"])
+				}
+				for _, key := range []string{"phase_since", "deadline"} {
+					if _, ok := items[0][key]; ok {
+						t.Errorf("unset %s present: %s", key, out.String())
+					}
+				}
+			} else {
+				var histories map[string][]map[string]json.RawMessage
+				if err := json.Unmarshal(payload["repositories"], &histories); err != nil {
+					t.Fatal(err)
+				}
+				rows := histories["owner/repo"]
+				if len(rows) != 1 {
+					t.Fatalf("history = %s", payload["repositories"])
+				}
+				if _, ok := rows[0]["ended_at"]; ok {
+					t.Errorf("open interval ended_at present: %s", out.String())
+				}
+			}
+		})
+	}
+}
