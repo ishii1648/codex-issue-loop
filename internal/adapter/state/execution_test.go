@@ -270,3 +270,63 @@ func TestExecutionReleaseTimestampPersistsOnlyOnSlotRelease(t *testing.T) {
 		})
 	}
 }
+
+func TestReconcileStoppedAssignmentRecoversConflictLaunch(t *testing.T) {
+	store, now := productionUnstartedConflictLaunchFixture(t)
+	observedAt := now.Add(time.Minute)
+	if err := store.ReconcileStoppedAssignment(observedAt); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot.Issues["277"]
+	if snapshot.ActiveExecution != nil || item.Status != issuedomain.StatusResolvingConflict ||
+		item.LaunchSource != issuedomain.StatusUnset || item.Generation != 15 ||
+		item.Continuation == nil || item.Continuation.Generation != 14 || !item.UpdatedAt.Equal(observedAt) {
+		t.Fatalf("active=%+v issue=%+v", snapshot.ActiveExecution, item)
+	}
+	if snapshot.Supervisor.State != SupervisorStateStopped || snapshot.Supervisor.PID != 0 ||
+		snapshot.Supervisor.Message != "retained stopped assignment retry" {
+		t.Fatalf("supervisor=%+v", snapshot.Supervisor)
+	}
+}
+
+func TestReconcileStoppedAssignmentRejectsUnsafeRecovery(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Snapshot)
+	}{
+		{name: "worker process identity", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["277"].WorkerPID = 8123
+			snapshot.Issues["277"].WorkerPGID = 8123
+		}},
+		{name: "missing conflict evidence", mutate: func(snapshot *Snapshot) { snapshot.Issues["277"].Continuation = nil }},
+		{name: "non-launching execution", mutate: func(snapshot *Snapshot) {
+			snapshot.Issues["277"].Status = issuedomain.StatusClaimed
+			snapshot.Issues["277"].LaunchSource = issuedomain.StatusUnset
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, now := productionUnstartedConflictLaunchFixture(t)
+			before, err := store.Update("fixture_unsafe_recovery", 277, "", nil, func(snapshot *Snapshot) error {
+				test.mutate(snapshot)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ReconcileStoppedAssignment(now.Add(time.Minute)); err == nil {
+				t.Fatal("unsafe recovery was accepted")
+			}
+			after, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("rejected recovery changed state: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -368,7 +369,7 @@ exit 1
 	}
 }
 
-func TestCLIPrimaryGraphQLRateLimitUsesShortRetryWhenRESTHasRemaining(t *testing.T) {
+func TestCLIPrimaryGraphQLRateLimitReportsInconsistencyWhenRESTHasRemaining(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")
 	nextReset := time.Now().UTC().Add(time.Hour)
@@ -385,15 +386,13 @@ exit 1
 	}
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
-	before := time.Now().UTC()
 	_, err := (CLI{Path: fake}).ListReady(context.Background(), cfg)
-	after := time.Now().UTC()
 	limited, ok := AsRateLimit(err)
 	if !ok {
 		t.Fatalf("error was not classified as primary rate limit: %v", err)
 	}
-	if limited.Source != "rest-rate-limit-recovered" || limited.ResetAt.Before(before.Add(4*time.Second)) || limited.ResetAt.After(after.Add(6*time.Second)) {
-		t.Fatalf("recovered rate limit=%+v before=%s after=%s", limited, before, after)
+	if limited.Source != "rest-rate-limit-inconsistent" || !limited.ResetAt.Equal(time.Unix(nextReset.Unix(), 0)) {
+		t.Fatalf("inconsistent rate limit=%+v", limited)
 	}
 }
 
@@ -662,6 +661,30 @@ esac
 			}
 			if pr.ReviewDecision != test.want || pr.BaseRefName != "main" || pr.HeadRepository != "fork/repo" || pr.MergeCommitSHA != mergeSHA || pr.MergeSHA != mergeSHA || pr.HeadSHA != "head123" || pr.ChecksStatus != "success" {
 				t.Fatalf("PullRequest=%+v, want review decision %q", pr, test.want)
+			}
+		})
+	}
+}
+
+func TestCLIPrimaryRateLimitProbeFailureAndSecondaryClassification(t *testing.T) {
+	for _, message := range []string{"GraphQL: rate limit exceeded", "secondary rate limit exceeded", "abuse detection: rate limit exceeded"} {
+		t.Run(message, func(t *testing.T) {
+			dir := t.TempDir()
+			fake := filepath.Join(dir, "fake-gh")
+			logPath := filepath.Join(dir, "calls")
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit 1\n", logPath)
+			if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err := (CLI{}).commandError(context.Background(), fake, "list", errors.New("exit 1"), []byte(message))
+			limited, ok := AsRateLimit(err)
+			calls, readErr := os.ReadFile(logPath)
+			if strings.HasPrefix(message, "GraphQL") {
+				if !ok || !limited.ResetAt.IsZero() || readErr != nil || string(calls) != "api /rate_limit\n" {
+					t.Fatalf("error=%v calls=%s readErr=%v", err, calls, readErr)
+				}
+			} else if ok || !os.IsNotExist(readErr) {
+				t.Fatalf("secondary error=%v primary=%v probe error=%v", err, ok, readErr)
 			}
 		})
 	}

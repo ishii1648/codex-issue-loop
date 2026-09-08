@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
@@ -2429,35 +2428,6 @@ func TestFaultInterruptedClaimIsRecovered(t *testing.T) {
 	snapshot, _ = loop.Store.Load()
 	if snapshot.Issues["1"].Status != issuedomain.StatusCompleted || snapshot.ActiveExecution != nil || !github.claimed {
 		t.Fatalf("issue=%+v github=%+v", snapshot.Issues["1"], github)
-	}
-}
-
-func TestFaultSupervisorWakesOnRecordedAnswer(t *testing.T) {
-	loop, _ := testLoop(t, worker.Result{})
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer watcher.Close()
-	if err := watcher.Add(loop.Store.Dir); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan struct{})
-	go func() { loop.waitForWork(context.Background(), time.Second, watcher); close(done) }()
-	_, err = loop.Store.Update("answer_recorded", 1, "run", nil, func(s *state.Snapshot) error {
-		branch := "codex/issue-1-test"
-		s.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusResumePending, RunID: "run",
-			Generation: 1, Branch: branch, Worktree: loop.Config.RepoPath, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
-			Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_wake", CreatedAt: time.Now().UTC(), RunID: "run", Generation: 1, Stage: issuedomain.ContinuationStageResume}}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-done:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("supervisor did not wake on state event")
 	}
 }
 

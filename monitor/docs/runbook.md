@@ -28,7 +28,7 @@ agent-loop-monitor report --config ~/.agent-loop-monitor.yaml --from 2026-09-01T
 
 `service stop`はLaunchAgentだけを停止し、config、current state、interval log、event cursorを保持します。再開は`service start`、設定・binary更新後は`service restart`を使います。停止中は`observation_timeout`以降を一時的に`UNKNOWN`として表示しますが、再開pollでrepository eventのcursorまでの完全な履歴を取得できればdeadlineとevent時刻から区間をreplayします。cursorを発見できない場合はgapを推測せず`UNKNOWN`のまま扱います。
 
-GitHub失敗はrepositoryごとの`last_error`と`UNKNOWN`に記録されます。他repositoryのpollは継続します。認証、rate limit、repository名を修復後に`run --once --json`を実行し、`status`で復旧を確認します。破損したstateを推測で編集せず、該当directoryを保全して原因を調査します。
+GitHub失敗はrepositoryごとの`last_error`と`UNKNOWN`に記録されます。他repositoryのpollは継続します。認証、rate limit、repository名を修復後は`service stop --config ~/.agent-loop-monitor.yaml`でmonitorを停止してから`run --config ~/.agent-loop-monitor.yaml --once --json`を実行し、`status`で復旧を確認して`service start --config ~/.agent-loop-monitor.yaml`で再開します。`another monitor is already running`で終了した場合は、同じ`state_dir`を使用する別のrunの終了を確認してから再実行します。ロックファイルは削除しないでください。破損したstateを推測で編集せず、該当directoryを保全して原因を調査します。
 
 `last_error`がsnapshot不一致なら、cursorを操作せず次の通常pollで収束を確認します。`queue exit history is insufficient`、再入履歴不足、cursor探索上限の場合は、現在snapshotだけを根拠に正常扱いへ戻しません。cursor探索は最大1,000 eventで停止し、古いcursorの全履歴探索は行いません。継続するUNKNOWNは履歴不足として調査し、cursorの早送りやinterval削除で隠さないでください。完全な履歴を検証できれば、最終成功時点からeventとdeadlineを再生して一時的なUNKNOWNを補完します。履歴が不足する期間はUNKNOWNを残し、現在状態は検証したpoll時刻から始まります。
 

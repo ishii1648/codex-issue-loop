@@ -10,12 +10,33 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/config"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 )
 
 type Store struct{ Root string }
+
+// Lock must be held across Load, observation, and Commit, including time between polls.
+// Close the returned file to release it; removing the lock file breaks exclusion.
+func (s Store) Lock() (*os.File, error) {
+	if err := s.Ensure(); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(filepath.Join(s.Root, "monitor.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("another monitor is already running for state root %s: %w", s.Root, err)
+		}
+		return nil, fmt.Errorf("lock monitor state: %w", err)
+	}
+	return file, nil
+}
 
 func (s Store) Ensure() error {
 	if !filepath.IsAbs(s.Root) {
@@ -39,7 +60,7 @@ func (s Store) Load(repository string) (*model.Snapshot, error) {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return nil, fmt.Errorf("decode monitor current state: %w", err)
 	}
-	if snapshot.SchemaVersion != model.SchemaVersion || snapshot.Repository != repository {
+	if snapshot.SchemaVersion != model.SchemaVersion || !strings.EqualFold(snapshot.Repository, repository) {
 		return nil, fmt.Errorf("monitor current state identity or schema mismatch")
 	}
 	return &snapshot, nil

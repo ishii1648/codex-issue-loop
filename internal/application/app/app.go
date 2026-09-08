@@ -167,9 +167,11 @@ func (a App) Run(ctx context.Context, args []string) int {
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
-	if err := l.Ensure(); err != nil {
-		fmt.Fprintln(a.Err, err)
-		return 1
+	if args[0] != "status" && args[0] != "doctor" {
+		if err := l.Ensure(); err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
 	}
 	err = a.run(ctx, l, args[0], args[1:])
 	if err == nil {
@@ -484,6 +486,21 @@ func (a App) resolve(l layout.Layout, name string, args []string) (registry.Entr
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return registry.Entry{}, false, exitError{2, err}
+	}
+	if name == "unregister" && *repo != "" {
+		path, err := filepath.Abs(*repo)
+		if err != nil {
+			return registry.Entry{}, false, exitError{3, err}
+		}
+		registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+		if err != nil {
+			return registry.Entry{}, false, exitError{3, err}
+		}
+		for _, entry := range registered.Repos {
+			if entry.RepoPath == path {
+				return entry, *jsonOut, nil
+			}
+		}
 	}
 	entry, err := a.resolvePath(l, *repo)
 	return entry, *jsonOut, err

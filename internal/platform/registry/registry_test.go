@@ -8,7 +8,52 @@ import (
 	"testing"
 
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 )
+
+func TestRegistryResolveNestedRepositories(t *testing.T) {
+	root := t.TempDir()
+	outer := filepath.Join(root, "mono")
+	inner := filepath.Join(outer, "pkg")
+	for _, path := range []string{filepath.Join(inner, "internal"), filepath.Join(outer, "pkg-other")} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repos := map[string]Entry{}
+	for id, path := range map[string]string{"outer": outer, "inner": inner} {
+		canonical, err := config.CanonicalRepoPath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repos[id] = Entry{RepoID: id, RepoPath: canonical}
+	}
+	store := Store{Path: filepath.Join(root, "registry.json")}
+	if err := fsutil.WriteJSON(store.Path, Registry{Version: CurrentVersion, Repos: repos}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name     string
+		explicit string
+		cwd      string
+		want     string
+	}{
+		{name: "inner descendant", cwd: filepath.Join(inner, "internal"), want: "inner"},
+		{name: "inner root", cwd: inner, want: "inner"},
+		{name: "outer root", cwd: outer, want: "outer"},
+		{name: "path boundary", cwd: filepath.Join(outer, "pkg-other"), want: "outer"},
+		{name: "explicit outer", explicit: outer, cwd: inner, want: "outer"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for i := 0; i < 100; i++ {
+				entry, err := store.Resolve(tt.explicit, tt.cwd)
+				if err != nil || entry.RepoID != tt.want {
+					t.Fatalf("resolved=%+v err=%v, want %s", entry, err, tt.want)
+				}
+			}
+		})
+	}
+}
 
 func TestFaultRegistryAddResolveRemoveAndAmbiguity(t *testing.T) {
 	root := t.TempDir()

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -82,15 +81,8 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 		}
 		diagnostics = append(filtered, passedDiagnostic("ASSIGNMENT_RUNTIME_ISOLATED", "host", "", "repository assignment runtimeをglobal operator installと分離して検査します", "global install diagnostics omitted for this scoped health check"))
 	}
-	schemaDiagnostics, schemaReady := diagnoseSchemas(l)
+	schemaDiagnostics, _ := diagnoseSchemas(l)
 	diagnostics = append(diagnostics, schemaDiagnostics...)
-	if !schemaReady {
-		result := doctorResult{SchemaVersion: doctorSchemaVersion, OK: false, GeneratedAt: time.Now().UTC(), Diagnostics: diagnostics}
-		if err := a.writeDoctorResult(*jsonOut, result); err != nil {
-			return err
-		}
-		return exitError{1, fmt.Errorf("doctor found failing diagnostics")}
-	}
 	registryStore := registry.Store{Path: l.RegistryPath}
 	registered, registryErr := registryStore.Load()
 	if registryErr != nil {
@@ -451,7 +443,11 @@ func diagnoseWebhook(ctx context.Context, l layout.Layout, entry registry.Entry,
 	sweep, sweepErr := webhook.LoadSweepState(l.RepoDir(entry.RepoID))
 	deliveries, mailboxErr := webhook.ReadMailbox(l.RepoDir(entry.RepoID))
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
-	snapshot, snapshotErr := store.ReadCanonicalSnapshot()
+	snapshotErr := diagnosticRuntime(l, entry)
+	var snapshot state.Snapshot
+	if snapshotErr == nil {
+		snapshot, _, snapshotErr = store.ReadDiagnosticSnapshot()
+	}
 	interval := cfg.Webhook.SafetySweepInterval.Duration
 	if interval <= 0 {
 		interval = 15 * time.Minute
@@ -642,31 +638,17 @@ func containsModelLine(output, model string) bool {
 
 func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Config) []diagnostic {
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
-	data, err := os.ReadFile(store.StatePath())
-	if errors.Is(err, os.ErrNotExist) {
-		if len(entry.Commands) == 0 {
-			return nil
-		}
-		return []diagnostic{failedDiagnostic("STATE_MISSING", "repository", entry.RepoID, "durable stateがありません", store.StatePath(), command("repositoryを再登録します", fmt.Sprintf("agent-loop register --repo %q", entry.RepoPath)))}
+	if err := diagnosticRuntime(l, entry); err != nil {
+		return []diagnostic{stateDiagnostic(entry, err)}
 	}
+	snapshot, events, err := store.ReadDiagnosticSnapshot()
 	if err != nil {
-		return []diagnostic{failedDiagnostic("STATE_UNREADABLE", "repository", entry.RepoID, "durable stateを読み取れません", err.Error(), instruction("state directoryの所有者とpermissionを確認してください"))}
+		return []diagnostic{stateDiagnostic(entry, err)}
 	}
-	var snapshot state.Snapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Version != state.CurrentVersion || snapshot.RepoID != entry.RepoID || snapshot.RepoPath != entry.RepoPath {
-		detail := errorText(err)
-		if err == nil {
-			detail = fmt.Sprintf("version=%d repo_id=%q repo_path=%q", snapshot.Version, snapshot.RepoID, snapshot.RepoPath)
-		}
-		return []diagnostic{failedDiagnostic("STATE_CORRUPT", "repository", entry.RepoID, "durable stateが破損または対象repositoryと不一致です", detail,
-			command("supervisorを停止します", fmt.Sprintf("agent-loop stop --repo %q", entry.RepoPath)),
-			instruction("state directoryを削除せず別の場所へbackupし、events.jsonlとlogを確認してから復旧してください"))}
-	}
-
 	diagnostics := []diagnostic{passedDiagnostic("STATE_VALID", "repository", entry.RepoID, "durable stateを読み込めます", fmt.Sprintf("revision=%d", snapshot.StateRevision))}
-	event, eventErr := latestEvent(store.EventsPath())
-	if eventErr != nil {
-		diagnostics = append(diagnostics, failedDiagnostic("EVENT_LOG_INVALID", "repository", entry.RepoID, "event logの末尾を解釈できません", eventErr.Error(), instruction("events.jsonlを削除せずbackupし、supervisor再起動前に内容を確認してください")))
+	var event state.Event
+	if len(events) > 0 {
+		event = events[len(events)-1]
 	}
 	contextDetail := fmt.Sprintf("state=%s message=%s", snapshot.Supervisor.State, snapshot.Supervisor.Message)
 	if event.Type != "" {
@@ -706,31 +688,6 @@ func diagnoseDurableState(l layout.Layout, entry registry.Entry, cfg config.Conf
 		diagnostics = append(diagnostics, passedDiagnostic("SUPERVISOR_STATE_HEALTHY", "repository", entry.RepoID, "supervisor stateに停止障害はありません", contextDetail))
 	}
 	return diagnostics
-}
-
-func latestEvent(path string) (state.Event, error) {
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return state.Event{}, nil
-	}
-	if err != nil {
-		return state.Event{}, err
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	var latest state.Event
-	for scanner.Scan() {
-		if len(strings.TrimSpace(scanner.Text())) == 0 {
-			continue
-		}
-		var event state.Event
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			return latest, fmt.Errorf("decode event sequence after %d: %w", latest.Sequence, err)
-		}
-		latest = event
-	}
-	return latest, scanner.Err()
 }
 
 func tailFile(path string, limit int64) (string, error) {

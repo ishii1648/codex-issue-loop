@@ -312,7 +312,14 @@ func (s Store) Resolve(explicitPath, cwd string) (Entry, error) {
 	if cwd != "" {
 		canonical, err := config.CanonicalRepoPath(cwd)
 		if err == nil {
+			entries := make([]Entry, 0, len(r.Repos))
 			for _, entry := range r.Repos {
+				entries = append(entries, entry)
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				return len(entries[i].RepoPath) > len(entries[j].RepoPath)
+			})
+			for _, entry := range entries {
 				if canonical == entry.RepoPath || strings.HasPrefix(canonical, entry.RepoPath+string(filepath.Separator)) {
 					return entry, nil
 				}
