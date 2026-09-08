@@ -19,6 +19,15 @@ func writeConfig(t *testing.T, body string) string {
 	return dir
 }
 
+func TestLoadRequiresVersion(t *testing.T) {
+	for _, version := range []string{"", "version: null\n"} {
+		dir := writeConfig(t, version+"github:\n  repo: owner/repo\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "version is required") {
+			t.Fatalf("version %q: expected required version error, got %v", version, err)
+		}
+	}
+}
+
 func TestLoadSparseConfigUsesOperationalDefaults(t *testing.T) {
 	dir := writeConfig(t, `version: 4
 github:
