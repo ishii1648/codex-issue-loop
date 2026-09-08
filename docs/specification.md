@@ -153,7 +153,7 @@ target-repository/
 設定ファイル名は対象リポジトリ直下の `.agent-loop.yaml` とする。
 
 ```yaml
-version: 4
+version: 5
 
 github:
   repo: ishii1648/example
@@ -192,7 +192,7 @@ webhook:
 
 ### 5.1 設定規則
 
-- `version` は必須。現行は`4`とし、v3は明示migrationの対象、未知versionはエラーとする。
+- `version` は必須。現行は`5`とし、v4は明示migrationの対象、未知versionはエラーとする。
 - `github.repo` は `owner/name` 形式で必須。
 - 公開repositoryではGitHubのIssue作成policyを`Collaborators only`にし、ready labelの付与権限も信頼済みcollaboratorへ限定する。これらのGitHub設定に加えて、worker開始前にIssue作成者を`github.trusted_issue_authors`で検証する。Issue本文は作成者の信頼性やworkerのnetwork、browser、downloadその他の起動権限を指定・拡張しない。
 - `github.trusted_issue_authors.minimum_permission`は`write`を既定かつ最低値とし、GitHubが返す`write`、`maintain`、`admin`を信頼する。GitHub Appまたはbotなどrepository permissionを持たないprincipalは、exact loginが`allow_logins`に明示された場合だけ信頼する。空・不明なauthor、permission取得失敗、削除済みaccountは検証失敗とする。

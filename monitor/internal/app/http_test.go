@@ -8,11 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -230,6 +228,24 @@ func TestDashboardRejectsPartiallyCommittedIntervals(t *testing.T) {
 	}
 }
 
+func TestDashboardRejectsGapDuringReplayCommit(t *testing.T) {
+	cfg, storage, at := dashboardFixture(t)
+	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Unknown, StartedAt: at.Add(-time.Hour + 3*time.Minute)}}
+	closed := model.Interval{ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-2 * time.Hour), EndedAt: at.Add(-time.Hour)}
+	if err := storage.Commit(snapshot, []model.Interval{closed}); err != nil {
+		t.Fatal(err)
+	}
+	a := App{Now: func() time.Time { return at }}
+	for _, path := range []string{"/metrics", "/api/history", "/api/report?from=" + at.Add(-24*time.Hour).Format(time.RFC3339)} {
+		t.Run(path, func(t *testing.T) {
+			response := request(t, a.monitorHandler(cfg), path)
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "monitor interval commit is incomplete") {
+				t.Fatalf("%s = %d %s", path, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestMetricsUsesExactWholeSecondReference(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
 	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
@@ -275,19 +291,20 @@ type dashboardTransport func(*http.Request) (*http.Response, error)
 
 func (f dashboardTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestFreshnessQueriesGrafanaDatasourceAndFailsClosed(t *testing.T) {
+func TestFreshnessQueriesPrometheusAndFailsClosed(t *testing.T) {
 	cfg, _, at := dashboardFixture(t)
 	original := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = original })
 	for _, status := range []int{200, 502} {
+		payload := `{"status":"success","data":{"result":[{"value":[1800000000,"1800000000"]}]}}`
 		http.DefaultTransport = dashboardTransport(func(r *http.Request) (*http.Response, error) {
-			if r.Method != "GET" || r.URL.Host != "127.0.0.1:13000" || r.URL.Path != "/api/datasources/proxy/uid/monitor-prometheus/api/v1/query" {
+			if r.Method != "GET" || r.URL.Host != "127.0.0.1:19090" || r.URL.Path != "/api/v1/query" {
 				t.Fatalf("unexpected upstream: %s", r.URL)
 			}
 			if r.URL.Query().Get("query") != `agent_loop_monitor_reference_time_seconds and on() (up{job="agent-loop-monitor"} == 1)` {
 				t.Fatal(r.URL.RawQuery)
 			}
-			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"status":"success","data":{"result":[]}}`))}, nil
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(payload))}, nil
 		})
 		response := request(t, (App{Now: func() time.Time { return at }}).monitorHandler(cfg), "/api/freshness?query=ignored")
 		want := 200
@@ -296,6 +313,9 @@ func TestFreshnessQueriesGrafanaDatasourceAndFailsClosed(t *testing.T) {
 		}
 		if response.Code != want {
 			t.Fatal(response)
+		}
+		if status == 200 && response.Body.String() != payload {
+			t.Fatal(response.Body.String())
 		}
 	}
 	http.DefaultTransport = dashboardTransport(func(r *http.Request) (*http.Response, error) { return nil, fmt.Errorf("offline") })
@@ -309,65 +329,8 @@ func TestFreshnessQueriesGrafanaDatasourceAndFailsClosed(t *testing.T) {
 	}
 }
 
-func TestDashboardDetailTargets(t *testing.T) {
-	data, err := os.ReadFile("../../dashboard/dashboard.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var dashboard struct {
-		Panels []struct {
-			Type    string
-			Targets []struct {
-				URL          string
-				Parser       string
-				RootSelector string `json:"root_selector"`
-				Columns      []struct{ Selector, Text, Type string }
-			}
-			FieldConfig struct {
-				Overrides []struct {
-					Matcher    struct{ Options string }
-					Properties []struct {
-						ID    string
-						Value json.RawMessage
-					}
-				}
-			}
-		}
-	}
-	if err := json.Unmarshal(data, &dashboard); err != nil {
-		t.Fatal(err)
-	}
-	tables := 0
-	for _, panel := range dashboard.Panels {
-		if panel.Type != "table" {
-			continue
-		}
-		tables++
-		target := panel.Targets[0]
-		if target.Parser != "backend" || target.RootSelector != "rows" {
-			t.Fatalf("expected simple backend rows selector: %+v", target)
-		}
-		u, err := url.Parse(target.URL)
-		if err != nil {
-			t.Fatal(err)
-		}
-		repo := u.Query().Get("repo")
-		link := ""
-		for _, override := range panel.FieldConfig.Overrides {
-			if override.Matcher.Options != "Issue" {
-				continue
-			}
-			for _, property := range override.Properties {
-				if property.ID != "links" {
-					continue
-				}
-				var links []struct{ URL string }
-				if err := json.Unmarshal(property.Value, &links); err != nil {
-					t.Fatal(err)
-				}
-				link = links[0].URL
-			}
-		}
+func TestDashboardDetails(t *testing.T) {
+	for _, repo := range []string{"ishii1648/codex-issue-loop", "ishii1648/zeitreise"} {
 		for _, scenario := range []string{"multiple", "down-empty", "idle", "unknown", "missing", "stale"} {
 			t.Run(repo+"/"+scenario, func(t *testing.T) {
 				cfg, storage, at := dashboardFixture(t)
@@ -414,7 +377,7 @@ func TestDashboardDetailTargets(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				response := request(t, (App{Now: func() time.Time { return at }}).monitorHandler(cfg), u.RequestURI())
+				response := request(t, (App{Now: func() time.Time { return at }}).monitorHandler(cfg), "/api/details?repo="+repo)
 				if response.Code != 200 {
 					t.Fatal(response.Body.String())
 				}
@@ -422,7 +385,7 @@ func TestDashboardDetailTargets(t *testing.T) {
 				if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 					t.Fatal(err)
 				}
-				rows := payload[target.RootSelector]
+				rows := payload["rows"]
 				wantCount := len(numbers)
 				if wantCount == 0 {
 					wantCount = 1
@@ -431,31 +394,14 @@ func TestDashboardDetailTargets(t *testing.T) {
 					t.Fatalf("rows = %+v", rows)
 				}
 				for i, row := range rows {
-					cells := map[string]any{}
-					for _, column := range target.Columns {
-						value, exists := row[column.Selector]
-						if !exists {
-							t.Fatalf("missing column %s", column.Selector)
-						}
-						cells[column.Text] = value
-						if value != nil && column.Type == "timestamp" {
-							if _, err := time.Parse(time.RFC3339, value.(string)); err != nil {
-								t.Fatal(err)
-							}
-						}
-					}
-					want := map[string]any{"状態": wantStatus, "理由 / 観測エラー": wantDetail, "Issue": nil, "queue期限": nil, "Issue期限": nil}
+					want := map[string]any{"status": wantStatus, "detail": wantDetail, "issue": nil, "deadline": nil, "item_deadline": nil}
 					if len(numbers) > 0 {
-						want["Issue"] = float64(numbers[i])
-						want["queue期限"] = snapshot.QueueDeadline.Format(time.RFC3339)
-						want["Issue期限"] = snapshot.Queue[i].Deadline.Format(time.RFC3339)
-						actualLink := strings.ReplaceAll(link, "${__value.raw}", strconv.Itoa(int(cells["Issue"].(float64))))
-						if actualLink != fmt.Sprintf("https://github.com/%s/issues/%d", repo, numbers[i]) {
-							t.Fatal(actualLink)
-						}
+						want["issue"] = float64(numbers[i])
+						want["deadline"] = snapshot.QueueDeadline.Format(time.RFC3339)
+						want["item_deadline"] = snapshot.Queue[i].Deadline.Format(time.RFC3339)
 					}
-					if !reflect.DeepEqual(cells, want) {
-						t.Fatalf("cells = %+v, want %+v", cells, want)
+					if !reflect.DeepEqual(row, want) {
+						t.Fatalf("row = %+v, want %+v", row, want)
 					}
 				}
 				after, err := storage.Load(repo)
@@ -464,9 +410,6 @@ func TestDashboardDetailTargets(t *testing.T) {
 				}
 			})
 		}
-	}
-	if tables != 2 {
-		t.Fatalf("table count = %d", tables)
 	}
 }
 
@@ -523,6 +466,69 @@ func TestSelectedPeriodTimelineMatchesCLIReport(t *testing.T) {
 				expected.DurationsSeconds[model.Unknown] = to.Sub(from).Seconds() - known
 				if !reflect.DeepEqual(actual, expected) {
 					t.Fatalf("timeline %+v differs from CLI report %+v", actual, expected)
+				}
+			}
+		})
+	}
+}
+
+func TestStatusAndHistoryJSONOmitUnsetTimes(t *testing.T) {
+	cfg, storage, at := dashboardFixture(t)
+	snapshot := model.Snapshot{
+		SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at,
+		Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Unknown, StartedAt: at.Add(-time.Minute)},
+		Queue:   []model.QueueItem{{Number: 1, Phase: model.Ready}},
+	}
+	if err := storage.Commit(snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"status", "history"} {
+		t.Run(command, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			cli := App{Out: &out, Err: &stderr, Now: func() time.Time { return at }}
+			if code := cli.Run(context.Background(), []string{command, "--config", cfg.Path, "--json"}); code != 0 {
+				t.Fatal(stderr.String())
+			}
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if command == "status" {
+				var snapshots []map[string]json.RawMessage
+				if err := json.Unmarshal(payload["repositories"], &snapshots); err != nil {
+					t.Fatal(err)
+				}
+				if len(snapshots) != 1 {
+					t.Fatalf("snapshots = %s", payload["repositories"])
+				}
+				for _, key := range []string{"queue_phase_since", "queue_deadline", "last_success_at"} {
+					if _, ok := snapshots[0][key]; ok {
+						t.Errorf("unset %s present: %s", key, out.String())
+					}
+				}
+				var items []map[string]json.RawMessage
+				if err := json.Unmarshal(snapshots[0]["queue"], &items); err != nil {
+					t.Fatal(err)
+				}
+				if len(items) != 1 {
+					t.Fatalf("queue = %s", snapshots[0]["queue"])
+				}
+				for _, key := range []string{"phase_since", "deadline"} {
+					if _, ok := items[0][key]; ok {
+						t.Errorf("unset %s present: %s", key, out.String())
+					}
+				}
+			} else {
+				var histories map[string][]map[string]json.RawMessage
+				if err := json.Unmarshal(payload["repositories"], &histories); err != nil {
+					t.Fatal(err)
+				}
+				rows := histories["owner/repo"]
+				if len(rows) != 1 {
+					t.Fatalf("history = %s", payload["repositories"])
+				}
+				if _, ok := rows[0]["ended_at"]; ok {
+					t.Errorf("open interval ended_at present: %s", out.String())
 				}
 			}
 		})

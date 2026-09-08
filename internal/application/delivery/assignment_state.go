@@ -47,21 +47,14 @@ type AssignmentTransaction struct {
 
 func LoadAssignmentTransaction(path string) (AssignmentTransaction, error) {
 	var tx AssignmentTransaction
-	info, err := os.Lstat(path)
+	data, err := fsutil.ReadPrivateRegular(path, "assignment transaction")
 	if errors.Is(err, os.ErrNotExist) {
 		return tx, nil
 	}
 	if err != nil {
 		return tx, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return tx, errors.New("assignment transaction must be an owner-only regular file")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return tx, err
-	}
-	if err := decodeStrictJSON(data, &tx); err != nil {
+	if err := fsutil.DecodeStrictJSON(data, &tx); err != nil {
 		return tx, fmt.Errorf("decode assignment transaction: %w", err)
 	}
 	if tx.Version != 1 || tx.RepositoryID == "" || !knownAssignmentPhase(tx.Phase) {

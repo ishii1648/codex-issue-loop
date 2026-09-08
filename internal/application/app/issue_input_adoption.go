@@ -74,7 +74,7 @@ func (a App) resolveInputAdoption(ctx context.Context, l layout.Layout, opts *is
 		return err
 	}
 	if !reflect.DeepEqual(p.quarantine, latest.quarantine) || !reflect.DeepEqual(p.report.Observations, latest.report.Observations) || !reflect.DeepEqual(p.report.Actions, latest.report.Actions) {
-		return fmt.Errorf("input recovery evidence changed")
+		return exitError{4, fmt.Errorf("input recovery evidence changed")}
 	}
 	if err := verifyAdoptedHead(ctx, latest, opts.expectedHead, l.Root); err != nil {
 		return err

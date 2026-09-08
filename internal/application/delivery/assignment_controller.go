@@ -970,7 +970,7 @@ func (c AssignmentController) assignmentProtocol(ctx context.Context, program st
 		return 0, fmt.Errorf("inspect repository assignment protocol: %w", err)
 	}
 	var info BinaryInfo
-	if err := decodeStrictJSON(out, &info); err != nil {
+	if err := fsutil.DecodeStrictJSON(out, &info); err != nil {
 		return 0, fmt.Errorf("decode repository assignment protocol: %w", err)
 	}
 	if info.Version != ref.Version || info.Commit != ref.Commit {

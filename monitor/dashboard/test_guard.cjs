@@ -29,7 +29,7 @@ function fixture() {
       const durations = Object.fromEntries(states.map((s,i) => [s,(to-from)/1000*f.fractions[i]]));
       let payload;
       if (u.pathname === '/api/freshness') payload = {status:'success',data:{result:f.missing?[]:[{value:[f.now/1000,String(f.sample/1000)]}]}};
-      if (u.pathname === '/api/status') payload = {repositories:f.repositories.map(repository=>({repository,current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue}))};
+      if (u.pathname === '/api/status') payload = {repositories:f.repositories.map(repository=>({repository,current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:f.lastObservationAt ?? new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue}))};
       if (u.pathname === '/api/report') payload = {reports:f.repositories.map((repository,index)=>({repository,from:new Date(from).toISOString(),to:new Date(to).toISOString(),durations_seconds:durations,demand_availability:durations.HEALTHY+durations.DOWN ? durations.HEALTHY/(durations.HEALTHY+durations.DOWN) : null,observation_coverage:f.fractions.slice(0,3).reduce((a,b)=>a+b,0),...(f.report ? f.report(from,to,index) : {})}))};
       if (u.pathname === '/api/timeline') {
         let cursor=from;
@@ -238,5 +238,26 @@ test('historical 100 second metrics use state durations and include unknown and 
     await refresh();
     assert.equal(classes.has('expired'),true);
     assert.match(nodes.error.textContent,/期間集計が不一致/);
+  }
+});
+
+test('unset and zero dates display dashes for IDLE snapshots and unproven queue items', async () => {
+  const {f,nodes,classes,refresh} = fixture();
+  f.state='IDLE';
+  for (const value of [undefined,'0001-01-01T00:00:00Z','invalid']) {
+    f.queueDeadline=value;
+    f.lastObservationAt=value === undefined ? '' : value;
+    f.queue=[];
+    await refresh();
+    assert.equal(classes.has('expired'),false);
+    assert.match(nodes.repos.innerHTML,/queue期限: —/);
+    assert.match(nodes.repos.innerHTML,/最終観測: —/);
+    f.state='UNKNOWN';
+    f.queue=[{number:1,phase:'ready',deadline:value}];
+    await refresh();
+    assert.equal(classes.has('expired'),false);
+    assert.match(nodes.repos.innerHTML,/期限 —/);
+    assert.doesNotMatch(nodes.repos.innerHTML,/0001-/);
+    f.state='IDLE';
   }
 });

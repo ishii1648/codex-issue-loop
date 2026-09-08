@@ -112,7 +112,7 @@ func VerifySlot(ref AssignmentRef) error {
 		return err
 	}
 	var manifest SlotManifest
-	if err := decodeStrictJSON(data, &manifest); err != nil {
+	if err := fsutil.DecodeStrictJSON(data, &manifest); err != nil {
 		return fmt.Errorf("decode slot manifest: %w", err)
 	}
 	if manifest.Version != slotManifestVersion || manifest.ReleaseVersion != ref.Version || manifest.Commit != ref.Commit || manifest.ArtifactSHA256 != ref.ArtifactSHA256 || manifest.Binary != filepath.Base(ref.Slot) {

@@ -28,6 +28,14 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 		return exitError{2, fmt.Errorf("--rollback requires --backup, and --backup requires --rollback")}
 	}
 
+	_, brokerLoaded, err := loadedWebhookBroker(ctx, l)
+	if err != nil {
+		return err
+	}
+	if (*apply || *rollback) && brokerLoaded {
+		return fmt.Errorf("schema migration requires the shared webhook broker to be stopped")
+	}
+
 	if *rollback {
 		repositories, err := schema.RegisteredRepositories(l)
 		if err != nil {
@@ -56,7 +64,7 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 		return err
 	}
 	if !*apply && !*rollback {
-		return a.output(*jsonOut, map[string]any{"report": report, "loaded_repositories": repoIDs(loaded), "apply_allowed": len(loaded) == 0 && len(report.Unsupported) == 0 && len(report.NonMigratable) == 0})
+		return a.output(*jsonOut, map[string]any{"report": report, "loaded_repositories": repoIDs(loaded), "loaded_webhook_broker": brokerLoaded, "apply_allowed": !brokerLoaded && len(loaded) == 0 && len(report.Unsupported) == 0 && len(report.NonMigratable) == 0})
 	}
 	if len(loaded) > 0 {
 		return fmt.Errorf("schema migration requires every registered LaunchAgent to be stopped; loaded: %v", repoIDs(loaded))

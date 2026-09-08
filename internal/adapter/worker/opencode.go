@@ -132,7 +132,20 @@ func (o OpenCode) execute(parent context.Context, cfg config.Config, runID, sess
 	client, transport := newOpenCodeClient(0, serverUsername, serverPassword)
 	defer transport.CloseIdleConnections()
 	startupCtx, startupCancel := context.WithTimeout(ctx, 10*time.Second)
-	port, err := listening.Wait(startupCtx)
+	var port int
+	select {
+	case port = <-listening.port:
+	case err = <-waitDone:
+		startupCancel()
+		_ = safeOut.Flush()
+		_ = safeErr.Flush()
+		if err == nil {
+			err = errors.New("process exited before announcing its listening port")
+		}
+		return Result{SessionID: sessionID, Identity: identity}, fmt.Errorf("start opencode server: %w", err)
+	case <-startupCtx.Done():
+		err = startupCtx.Err()
+	}
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	if err == nil {
 		err = waitForOpenCode(startupCtx, client, baseURL)
@@ -299,15 +312,6 @@ func (w *openCodeListeningWriter) Write(data []byte) (int, error) {
 		if err == nil && port >= 1 && port <= 65535 {
 			w.once.Do(func() { w.port <- port })
 		}
-	}
-}
-
-func (w *openCodeListeningWriter) Wait(ctx context.Context) (int, error) {
-	select {
-	case port := <-w.port:
-		return port, nil
-	case <-ctx.Done():
-		return 0, ctx.Err()
 	}
 }
 

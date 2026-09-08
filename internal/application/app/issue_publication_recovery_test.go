@@ -88,6 +88,7 @@ func TestRetryPublicationRepairsCheckpointWithRemoteHead(t *testing.T) {
 			if scenario == "path-git-fails" {
 				failIssueResolutionPathGit(t)
 			}
+			assertRecoveryGitHubOutsideStateLock(t, f)
 			var out, stderr bytes.Buffer
 			code := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "retry-stage", "--json"})
 			after, err := f.store.ReadCanonicalSnapshot()

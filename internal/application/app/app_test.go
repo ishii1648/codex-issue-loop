@@ -1661,6 +1661,83 @@ func TestRewritePlistsPreservesPerRepositoryAssignment(t *testing.T) {
 	}
 }
 
+func TestRollbackRestartsBrokerWhenRewritePlistsFails(t *testing.T) {
+	repo, l, entry, _, launchctl := operatorControlFixture(t)
+	serviceDir := t.TempDir()
+	t.Setenv("ROLLBACK_SERVICE_DIR", serviceDir)
+	for _, service := range []string{"broker", "repo"} {
+		if err := os.WriteFile(filepath.Join(serviceDir, service), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := `#!/bin/sh
+case "$2 $3" in *broker*) service=broker ;; *) service=repo ;; esac
+case "$1" in
+  print) test -f "$ROLLBACK_SERVICE_DIR/$service" && printf 'state = running\npid = 4242\n' ;;
+  bootout)
+    rm -f "$ROLLBACK_SERVICE_DIR/$service"
+    printf 'stop %s\n' "$service" >> "$ROLLBACK_SERVICE_DIR/log"
+    ;;
+  bootstrap)
+    touch "$ROLLBACK_SERVICE_DIR/$service"
+    printf 'start %s\n' "$service" >> "$ROLLBACK_SERVICE_DIR/log"
+    ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "webhook-secret")
+	if err := os.WriteFile(secret, []byte("fixture-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := fmt.Sprintf("version: 5\ngithub:\n  repo: owner/repo\n  repository_id: 1234\nwebhook:\n  mode: webhook\n  listener_address: 127.0.0.1:8787\n  public_url_identifier: fixture.example/webhook\n  secret_source:\n    file: %q\n  installation_ids: [99]\n", secret)
+	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "agent-loop")
+	if err := os.WriteFile(source, []byte("release-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := installArtifacts(l, source, "v1.2.3", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rewritePlists(l); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := backupInstallation(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryConfigPath, err := delivery.ResolveConfigPath("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.WriteConfig(deliveryConfigPath, delivery.DefaultConfig("owner/release")); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = (App{Out: &output, Err: &output}).rollback(context.Background(), l, []string{"--backup", backup})
+	wantErr := fmt.Sprintf("registered repository %s has no delivery assignment", entry.RepoID)
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("rollback error=%v, want %q", err, wantErr)
+	}
+	manager := launchd.Manager{Layout: l, Launchctl: launchctl}
+	if status, err := manager.BrokerStatus(context.Background()); err != nil || !status.Loaded {
+		t.Fatalf("broker status=%+v err=%v", status, err)
+	}
+	if status, err := manager.Status(context.Background(), entry); err != nil || !status.Loaded {
+		t.Fatalf("repository status=%+v err=%v", status, err)
+	}
+	logData, err := os.ReadFile(filepath.Join(serviceDir, "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(logData), "stop repo\nstop broker\nstart broker\nstart repo\n"; got != want {
+		t.Fatalf("service operations=%q, want %q", got, want)
+	}
+}
+
 func TestUninstallPreservesLegacyCredentialFile(t *testing.T) {
 	_, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
@@ -1866,6 +1943,164 @@ func TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback(t *testin
 	}
 }
 
+func TestSchemaOperationsRequireStoppedWebhookBroker(t *testing.T) {
+	for _, operation := range []string{"update", "apply", "migration-rollback", "installation-rollback"} {
+		t.Run(operation, func(t *testing.T) {
+			repo, l := testEnvironment(t)
+			if err := l.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(t.TempDir(), "old-agent-loop")
+			if err := os.WriteFile(source, []byte("old-release"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			manifest, _, err := installArtifacts(l, source, "old", "old")
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.SchemaVersion = schema.CurrentVersion - 1
+			writeJSONFixture(t, filepath.Join(l.Root, "install.json"), manifest)
+			writeLegacySchemas(t, repo, l)
+			brokerState, _ := fakeInstallationBroker(t, l)
+			var out bytes.Buffer
+			a := App{Out: &out, Err: &out}
+			var run func() error
+			switch operation {
+			case "update":
+				run = func() error { return a.update(context.Background(), l, []string{"--json"}) }
+			case "apply":
+				if err := a.migrate(context.Background(), l, []string{"--json"}); err != nil {
+					t.Fatal(err)
+				}
+				var inspection struct {
+					BrokerLoaded bool `json:"loaded_webhook_broker"`
+					ApplyAllowed bool `json:"apply_allowed"`
+				}
+				if err := json.Unmarshal(out.Bytes(), &inspection); err != nil || !inspection.BrokerLoaded || inspection.ApplyAllowed {
+					t.Fatalf("inspection=%s err=%v", out.String(), err)
+				}
+				run = func() error { return a.migrate(context.Background(), l, []string{"--apply", "--json"}) }
+			case "migration-rollback":
+				result, err := (schema.Migrator{Layout: l}).Apply()
+				if err != nil {
+					t.Fatal(err)
+				}
+				run = func() error {
+					return a.migrate(context.Background(), l, []string{"--rollback", "--backup", result.Backup, "--json"})
+				}
+			case "installation-rollback":
+				backup, err := backupInstallation(l)
+				if err != nil {
+					t.Fatal(err)
+				}
+				run = func() error { return a.rollback(context.Background(), l, []string{"--backup", backup, "--json"}) }
+			}
+			paths := []string{l.RegistryPath, filepath.Join(l.BinDir, "agent-loop"), filepath.Join(l.Root, "install.json"), filepath.Join(repo, config.FileName), filepath.Join(l.RepoDir("repo-v3"), "state.json")}
+			before := make(map[string][]byte)
+			for _, path := range paths {
+				before[path], err = os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			out.Reset()
+			if err := run(); err == nil || !strings.Contains(err.Error(), "shared webhook broker to be stopped") {
+				t.Fatalf("loaded broker was not rejected: %v", err)
+			}
+			for _, path := range paths {
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(before[path], after) {
+					t.Fatalf("rejected operation changed %s: %v", path, err)
+				}
+			}
+			if err := os.Remove(brokerState); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(); err != nil {
+				t.Fatalf("operation with stopped broker: %v", err)
+			}
+			if operation == "update" && !strings.Contains(out.String(), `"webhook_broker_restarted": false`) {
+				t.Fatalf("missing broker outcome: %s", out.String())
+			}
+		})
+	}
+}
+
+func TestUpdateRestartsLoadedWebhookBrokerWithoutMigration(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "old-agent-loop")
+	if err := os.WriteFile(source, []byte("old-release"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := installArtifacts(l, source, "old", "old"); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacySchemas(t, repo, l)
+	brokerState, logPath := fakeInstallationBroker(t, l)
+	if _, err := (schema.Migrator{Layout: l}).Apply(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := (App{Out: &out, Err: &out}).update(context.Background(), l, []string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"webhook_broker_restarted": true`) {
+		t.Fatalf("missing broker restart outcome: %s", out.String())
+	}
+	if _, err := os.Stat(brokerState); err != nil {
+		t.Fatalf("broker not restarted: %v", err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || string(log) != "bootout\nbootstrap\n" {
+		t.Fatalf("broker operations=%q err=%v", log, err)
+	}
+}
+
+func fakeInstallationBroker(t *testing.T, l layout.Layout) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	brokerState := filepath.Join(dir, "loaded")
+	logPath := filepath.Join(dir, "operations")
+	launchctl := filepath.Join(dir, "launchctl")
+	t.Setenv("INSTALL_TEST_BROKER", brokerState)
+	t.Setenv("INSTALL_TEST_LOG", logPath)
+	if err := os.WriteFile(brokerState, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+case "$1" in
+  print)
+    case "$2" in
+      *broker*) test -f "$INSTALL_TEST_BROKER" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  bootout)
+    rm "$INSTALL_TEST_BROKER"
+    echo bootout >> "$INSTALL_TEST_LOG"
+    ;;
+  bootstrap)
+    touch "$INSTALL_TEST_BROKER"
+    echo bootstrap >> "$INSTALL_TEST_LOG"
+    ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := schema.RegisteredRepositories(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries[0].Commands["launchctl"] = launchctl
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: schema.CurrentVersion - 1, Repos: map[string]registry.Entry{entries[0].RepoID: entries[0]}})
+	return brokerState, logPath
+}
+
 func writeLegacySchemas(t *testing.T, repo string, l layout.Layout) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(fmt.Sprintf("version: %d\ngithub:\n  repo: owner/repo\nnotifications:\n  enabled: false\n", schema.CurrentVersion-1)), 0o600); err != nil {
@@ -1893,5 +2128,66 @@ func writeJSONFixture(t *testing.T, path string, value any) {
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSuperviseRotationKeepsStderrVisibleInLogs(t *testing.T) {
+	repo, l := testEnvironment(t)
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	commands := map[string]string{}
+	for name, output := range map[string]string{
+		"codex": "0.136.0 --json --output-schema --output-last-message --sandbox --cd --approve-for-me",
+		"gh":    "2.69.0 --json --limit --label --assignee --milestone --add-label --remove-label --body",
+	} {
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\necho '"+output+"'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		commands[name] = path
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := mustConfig(t, repo)
+	entry := registry.Entry{RepoID: registry.RepoID(cfg.GitHub.Repo, cfg.RepoPath), RepoPath: cfg.RepoPath, Commands: commands}
+	data, err := json.Marshal(registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.RegistryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logDir := l.RepoDir(entry.RepoID)
+	if err := os.MkdirAll(filepath.Join(logDir, "supervisor.log"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stderrPath := filepath.Join(logDir, "launchd.stderr.log")
+	stderr, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	if _, err := stderr.WriteString("previous run\n"); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().Add(-2 * cfg.Logs.RotateInterval.Duration)
+	if err := os.Chtimes(stderrPath, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a := App{Out: &out, Err: stderr}
+	if code := a.Run(context.Background(), []string{"run", "--repo", repo}); code != 1 {
+		t.Fatalf("run code=%d", code)
+	}
+	active, err := os.ReadFile(stderrPath)
+	if err != nil || !strings.Contains(string(active), "open supervisor log:") || strings.Contains(string(active), "previous run") {
+		t.Fatalf("active=%q err=%v", active, err)
+	}
+	if code := a.Run(context.Background(), []string{"logs", "--repo", repo, "--stderr"}); code != 0 {
+		t.Fatalf("logs code=%d", code)
+	}
+	if out.String() != "previous run\n"+string(active) {
+		t.Fatalf("logs=%q active=%q", out.String(), active)
 	}
 }

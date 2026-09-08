@@ -86,15 +86,14 @@ func (a App) resolveChecksRecovery(ctx context.Context, l layout.Layout, opts *i
 		return err
 	}
 	if !reflect.DeepEqual(p.quarantine, latest.quarantine) || !reflect.DeepEqual(p.report.Observations, latest.report.Observations) || !reflect.DeepEqual(p.report.Actions, latest.report.Actions) {
-		return fmt.Errorf("checks recovery evidence changed")
+		return exitError{4, fmt.Errorf("checks recovery evidence changed")}
 	}
 	updated, err := p.store.Update("issue_answered_checks_restored", opts.number, p.quarantine.RunID, map[string]any{"quarantine": p.quarantine, "observations": p.report.Observations}, func(s *state.Snapshot) error {
 		if s.StateRevision != latest.snapshot.StateRevision || !reflect.DeepEqual(s.QuarantinedIssues[strconv.Itoa(opts.number)], p.quarantine) {
 			return fmt.Errorf("checks recovery state changed")
 		}
-		observed := a.inspectChecksRecovery(ctx, l, latest)
-		if !reflect.DeepEqual(latest.report.Observations, observed.report.Observations) || !reflect.DeepEqual(latest.report.Actions, observed.report.Actions) || !reflect.DeepEqual(latest.inspection, observed.inspection) || latest.worktreeSHA256 != observed.worktreeSHA256 {
-			return fmt.Errorf("checks recovery workspace or publication changed")
+		if err := verifyRecoveryWorkspace(ctx, latest, l.Root); err != nil {
+			return err
 		}
 		return state.RestoreAnsweredChecks(s, opts.number, p.inspection.Head, p.worktreeSHA256, time.Now().UTC())
 	})

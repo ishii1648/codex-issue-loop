@@ -91,7 +91,7 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 	}
 	if match {
 		manifest, _ := readInstallManifest(filepath.Join(l.Root, "install.json"))
-		return a.output(*jsonOut, map[string]any{"changed": false, "manifest": manifest, "schema_migration_required": migrationNeeded})
+		return a.output(*jsonOut, map[string]any{"changed": false, "manifest": manifest, "schema_migration_required": migrationNeeded, "webhook_broker_restarted": false})
 	}
 	var loaded []registry.Entry
 	if migrationNeeded {
@@ -108,13 +108,12 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 			return err
 		}
 	}
-	brokerManager := launchd.Manager{Layout: l}
-	brokerLoaded := false
-	if !migrationNeeded {
-		brokerManager, brokerLoaded, err = loadedWebhookBroker(ctx, l)
-		if err != nil {
-			return err
-		}
+	brokerManager, brokerLoaded, err := loadedWebhookBroker(ctx, l)
+	if err != nil {
+		return err
+	}
+	if migrationNeeded && brokerLoaded {
+		return fmt.Errorf("update to a schema-changing binary requires the shared webhook broker to be stopped")
 	}
 	var backup string
 	if *deliveryBackup != "" {
@@ -162,7 +161,7 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 		}
 		return fmt.Errorf("update failed and was rolled back: %w", updateErr)
 	}
-	return a.output(*jsonOut, map[string]any{"changed": true, "backup": backup, "manifest": manifest, "restarted": repoIDs(loaded), "schema_migration_required": migrationNeeded})
+	return a.output(*jsonOut, map[string]any{"changed": true, "backup": backup, "manifest": manifest, "restarted": repoIDs(loaded), "schema_migration_required": migrationNeeded, "webhook_broker_restarted": brokerLoaded})
 }
 
 func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error {
@@ -210,13 +209,12 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 			return err
 		}
 	}
-	brokerManager := launchd.Manager{Layout: l}
-	brokerLoaded := false
-	if !legacySchemaRollback {
-		brokerManager, brokerLoaded, err = loadedWebhookBroker(ctx, l)
-		if err != nil {
-			return err
-		}
+	brokerManager, brokerLoaded, err := loadedWebhookBroker(ctx, l)
+	if err != nil {
+		return err
+	}
+	if legacySchemaRollback && brokerLoaded {
+		return fmt.Errorf("installation rollback across schema versions requires the shared webhook broker to be stopped")
 	}
 	if err := stopEntries(ctx, l, loaded, a.ProcessController); err != nil {
 		_ = startEntries(ctx, l, loaded)
@@ -237,6 +235,9 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 	}
 	if !legacySchemaRollback {
 		if err := rewritePlists(l); err != nil {
+			if brokerLoaded {
+				_ = brokerManager.StartBroker(ctx)
+			}
 			_ = startEntries(ctx, l, loaded)
 			return err
 		}
@@ -622,26 +623,22 @@ func rewritePlists(l layout.Layout) error {
 }
 
 func loadedWebhookBroker(ctx context.Context, l layout.Layout) (launchd.Manager, bool, error) {
-	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
+	registered, err := schema.RegisteredRepositories(l)
 	if err != nil {
 		return launchd.Manager{}, false, err
 	}
-	for _, entry := range registered.Repos {
-		cfg, loadErr := config.Load(entry.RepoPath)
-		if loadErr != nil {
-			return launchd.Manager{}, false, loadErr
-		}
-		if !cfg.Webhook.Enabled() {
-			continue
-		}
-		manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
-		status, statusErr := manager.BrokerStatus(ctx)
-		if statusErr != nil {
-			return manager, false, statusErr
-		}
-		return manager, status.Loaded, nil
+	manager := launchd.Manager{Layout: l}
+	if len(registered) == 0 {
+		return manager, false, nil
 	}
-	return launchd.Manager{Layout: l}, false, nil
+	for _, entry := range registered {
+		if entry.Commands["launchctl"] != "" {
+			manager.Launchctl = entry.Commands["launchctl"]
+			break
+		}
+	}
+	status, err := manager.BrokerStatus(ctx)
+	return manager, status.Loaded, err
 }
 
 func repoIDs(entries []registry.Entry) []string {

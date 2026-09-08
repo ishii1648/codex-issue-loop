@@ -152,8 +152,34 @@ func validate(cfg *Config) error {
 		if repo.AcceptanceTimeout.Duration <= 0 || repo.ProcessingTimeout.Duration <= 0 {
 			return fmt.Errorf("repository %q timeouts must be positive", repo.Name)
 		}
-		if hasBlank(repo.ReadyLabels) || hasBlank(repo.TerminalLabels) || strings.TrimSpace(repo.RunningLabel) == "" {
+		if hasBlank(repo.ReadyLabels) || hasBlank(repo.TerminalLabels) || hasBlank(repo.ExcludeLabels) || strings.TrimSpace(repo.RunningLabel) == "" {
 			return fmt.Errorf("repository %q labels must not be blank", repo.Name)
+		}
+		ready := map[string]bool{}
+		running := strings.ToLower(repo.RunningLabel)
+		for _, label := range repo.ReadyLabels {
+			key := strings.ToLower(label)
+			if key == running {
+				return fmt.Errorf("repository %q ready_labels and running_label overlap at %q", repo.Name, label)
+			}
+			ready[key] = true
+		}
+		for _, group := range []struct {
+			name   string
+			labels []string
+		}{
+			{"terminal_labels", repo.TerminalLabels},
+			{"exclude_labels", repo.ExcludeLabels},
+		} {
+			for _, label := range group.labels {
+				key := strings.ToLower(label)
+				if ready[key] {
+					return fmt.Errorf("repository %q ready_labels and %s overlap at %q", repo.Name, group.name, label)
+				}
+				if key == running {
+					return fmt.Errorf("repository %q running_label and %s overlap at %q", repo.Name, group.name, label)
+				}
+			}
 		}
 	}
 	return nil

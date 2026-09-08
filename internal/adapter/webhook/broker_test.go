@@ -184,6 +184,43 @@ func TestSignedDeliveryIsDurableDeduplicatedAndRouted(t *testing.T) {
 	}
 }
 
+func TestCheckAndWorkflowDeliveryHeadSHA(t *testing.T) {
+	const headSHA = "0123456789abcdef0123456789abcdef01234567"
+	for _, event := range []string{"check_run", "workflow_run"} {
+		for _, prNumber := range []int{0, 42} {
+			t.Run(fmt.Sprintf("%s/pr-%d", event, prNumber), func(t *testing.T) {
+				b, _ := testBroker(t)
+				pullRequests := "[]"
+				if prNumber != 0 {
+					pullRequests = fmt.Sprintf(`[{"number":%d}]`, prNumber)
+				}
+				body := []byte(fmt.Sprintf(`{"action":"completed","repository":{"id":1234,"full_name":"owner/repo"},"installation":{"id":99},%q:{"head_sha":%q,"pull_requests":%s}}`, event, headSHA, pullRequests))
+				req := signedRequest(body, "ci-delivery")
+				req.Header.Set("X-GitHub-Event", event)
+				recorder := httptest.NewRecorder()
+				b.ServeHTTP(recorder, req)
+				if recorder.Code != http.StatusAccepted {
+					t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+				}
+				if err := b.route("ci-delivery"); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(filepath.Join(b.Root, "repos", "repo-123", "webhook-mailbox", "ci-delivery.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var delivery Delivery
+				if err := json.Unmarshal(data, &delivery); err != nil {
+					t.Fatal(err)
+				}
+				if delivery.HeadSHA != headSHA || delivery.PullRequestNumber != prNumber {
+					t.Fatalf("delivery=%+v, want HeadSHA=%s PullRequestNumber=%d", delivery, headSHA, prNumber)
+				}
+			})
+		}
+	}
+}
+
 func TestWebhookRejectsBeforeDurableStateChange(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -208,6 +245,101 @@ func TestWebhookRejectsBeforeDurableStateChange(t *testing.T) {
 				t.Fatalf("rejected request changed inbox: %v", entries)
 			}
 		})
+	}
+}
+
+func TestWebhookRejectionsPersistOnHeartbeat(t *testing.T) {
+	b, body := testBroker(t)
+	statusFile, err := os.Open(b.statusPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusFile.Close()
+	initialInfo, err := statusFile.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		want int
+	}{
+		{name: "missing signature", want: http.StatusUnauthorized},
+		{name: "invalid header", want: http.StatusBadRequest},
+		{name: "unregistered repository", want: http.StatusForbidden},
+		{name: "overflow", want: http.StatusServiceUnavailable},
+	}
+	const requestsPerCase = 100
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.name == "overflow" {
+				for i := 0; i < cap(b.requests); i++ {
+					b.requests <- struct{}{}
+				}
+				defer func() {
+					for len(b.requests) > 0 {
+						<-b.requests
+					}
+				}()
+			}
+			for i := 0; i < requestsPerCase; i++ {
+				req := signedRequest(body, fmt.Sprintf("rejected-%d", i))
+				req.Header.Del("X-Hub-Signature-256")
+				switch test.name {
+				case "invalid header":
+					req.Header.Del("X-GitHub-Delivery")
+				case "unregistered repository":
+					req = signedRequest(bytes.ReplaceAll(body, []byte("owner/repo"), []byte("other/repo")), "unknown-repo")
+					req.Header.Del("X-Hub-Signature-256")
+				}
+				recorder := httptest.NewRecorder()
+				b.ServeHTTP(recorder, req)
+				if recorder.Code != test.want {
+					t.Fatalf("status=%d want=%d", recorder.Code, test.want)
+				}
+				info, err := os.Stat(b.statusPath())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !os.SameFile(initialInfo, info) || !initialInfo.ModTime().Equal(info.ModTime()) {
+					t.Fatal("rejected request rewrote status.json")
+				}
+			}
+		})
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	wantRejected := uint64(len(tests) * requestsPerCase)
+	if b.status.Rejected != wantRejected {
+		t.Fatalf("Rejected=%d want=%d", b.status.Rejected, wantRejected)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.heartbeat(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	deadline := time.Now().Add(40 * time.Second)
+	for {
+		data, err := os.ReadFile(b.statusPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var status Status
+		if err := json.Unmarshal(data, &status); err != nil {
+			t.Fatal(err)
+		}
+		if status.Rejected == wantRejected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("heartbeat Rejected=%d want=%d", status.Rejected, wantRejected)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

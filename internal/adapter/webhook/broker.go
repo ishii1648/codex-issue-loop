@@ -544,10 +544,14 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if delivery.PullRequestNumber == 0 && len(payload.CheckRun.PullRequests) > 0 {
 		delivery.PullRequestNumber = payload.CheckRun.PullRequests[0].Number
-		delivery.HeadSHA = payload.CheckRun.HeadSHA
 	}
 	if delivery.PullRequestNumber == 0 && len(payload.WorkflowRun.PullRequests) > 0 {
 		delivery.PullRequestNumber = payload.WorkflowRun.PullRequests[0].Number
+	}
+	if delivery.HeadSHA == "" {
+		delivery.HeadSHA = payload.CheckRun.HeadSHA
+	}
+	if delivery.HeadSHA == "" {
 		delivery.HeadSHA = payload.WorkflowRun.HeadSHA
 	}
 	if delivery.HeadSHA == "" {
@@ -817,7 +821,6 @@ func (b *Broker) reject(w http.ResponseWriter, code int) {
 	b.mu.Lock()
 	b.status.Rejected++
 	b.status.UpdatedAt = b.Now()
-	b.persistStatusLocked()
 	b.mu.Unlock()
 	http.Error(w, http.StatusText(code), code)
 }

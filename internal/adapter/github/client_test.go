@@ -450,7 +450,7 @@ func TestListReadyDoesNotTruncateQueuesOverOneHundredIssues(t *testing.T) {
 	}
 }
 
-func TestListReadyPreservesORFilteringForMultipleReadyLabels(t *testing.T) {
+func TestListReadyUsesANDFilteringForMultipleReadyLabels(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")
 	argsPath := filepath.Join(dir, "args.txt")
@@ -467,8 +467,8 @@ func TestListReadyPreservesORFilteringForMultipleReadyLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(args), "--label") {
-		t.Fatalf("multiple ready labels were changed from OR to GitHub CLI AND filtering: %s", args)
+	if !strings.Contains(string(args), "--label ready:a --label ready:b") {
+		t.Fatalf("GitHub CLI AND filtering requires all ready labels: %s", args)
 	}
 }
 
@@ -651,6 +651,9 @@ esac
 			}
 			if len(remote.PullRequests) != 1 {
 				t.Fatalf("remote=%+v", remote)
+			}
+			if remote.Issue.Number != 7 || len(remote.Issue.Comments) != 1 || remote.Issue.Comments[0] != "claim" {
+				t.Fatalf("Issue evidence=%+v", remote.Issue)
 			}
 			pr := remote.PullRequests[0]
 			mergeSHA := ""

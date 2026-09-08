@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -194,6 +195,27 @@ func TestOpenCodeTimeoutRetriesSessionAbortBeforeStoppingServer(t *testing.T) {
 	}
 }
 
+func TestOpenCodeServerExitDuringStartup(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "opencode")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := backendTestConfig(dir, "opencode", fake, "opencode-go/test", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := (OpenCode{StateDir: dir}).Run(ctx, cfg, gh.Issue{Number: 1}, state.Issue{RunID: "run_startup_exit", Attempts: 1}, "", nil)
+	elapsed := time.Since(start)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(err.Error(), "start opencode server") {
+		t.Fatalf("expected startup exit status 1, got %v", err)
+	}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("startup exit took %s", elapsed)
+	}
+}
+
 func TestOpenCodeProviderFailuresAreNormalized(t *testing.T) {
 	for _, mode := range []string{"auth", "model"} {
 		t.Run(mode, func(t *testing.T) {
@@ -218,17 +240,21 @@ func TestOpenCodeListeningWriterRequiresConcreteLoopbackPortAnnouncement(t *test
 	if _, err := writer.Write([]byte("43210\n")); err != nil {
 		t.Fatal(err)
 	}
-	port, err := writer.Wait(context.Background())
-	if err != nil || port != 43210 {
-		t.Fatalf("port=%d err=%v", port, err)
+	select {
+	case port := <-writer.port:
+		if port != 43210 {
+			t.Fatalf("port=%d", port)
+		}
+	default:
+		t.Fatal("missing port announcement")
 	}
 
 	invalid := newOpenCodeListeningWriter()
 	_, _ = invalid.Write([]byte("opencode server listening on http://127.0.0.1:0\n"))
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := invalid.Wait(canceled); !errors.Is(err, context.Canceled) {
-		t.Fatalf("invalid port announcement was accepted: %v", err)
+	select {
+	case port := <-invalid.port:
+		t.Fatalf("invalid port announcement was accepted: %d", port)
+	default:
 	}
 }
 

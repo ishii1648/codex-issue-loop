@@ -3,15 +3,18 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 )
 
@@ -87,6 +90,35 @@ func TestRetryStageRestoresAnsweredChecksQuarantine(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if scenario == "valid" {
+				a := App{}
+				planned, err := a.buildIssuePlan(context.Background(), f.l, f.repo, 459, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !actionEligibility(planned.report.Actions, issuedomain.ResolutionRetryStage) {
+					t.Fatal("recovery must be eligible before workspace changes")
+				}
+				changedPath := filepath.Join(f.worktree, "changed-after-plan.txt")
+				if err := os.WriteFile(changedPath, []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				err = a.resolveChecksRecovery(context.Background(), f.l, &issueResolveOptions{repo: f.repo, number: 459, action: issuedomain.ResolutionRetryStage}, planned)
+				var ee exitError
+				if !errors.As(err, &ee) || ee.Code != 4 || ee.Error() != "checks recovery evidence changed" {
+					t.Fatalf("changed evidence error=%v, want exit 4", err)
+				}
+				after, err := f.store.ReadCanonicalSnapshot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(planned.snapshot, after) {
+					t.Fatal("changed evidence mutated canonical state")
+				}
+				if err := os.Remove(changedPath); err != nil {
+					t.Fatal(err)
+				}
+			}
 			before, err := f.store.ReadCanonicalSnapshot()
 			if err != nil {
 				t.Fatal(err)
@@ -94,6 +126,7 @@ func TestRetryStageRestoresAnsweredChecksQuarantine(t *testing.T) {
 			if scenario == "path-git-fails" {
 				failIssueResolutionPathGit(t)
 			}
+			assertRecoveryGitHubOutsideStateLock(t, f)
 			var out, stderr bytes.Buffer
 			code := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "retry-stage", "--json"})
 			after, err := f.store.ReadCanonicalSnapshot()
@@ -116,6 +149,70 @@ func TestRetryStageRestoresAnsweredChecksQuarantine(t *testing.T) {
 			}
 			if i.Continuation.Kind != "" || i.Continuation.RequestID != "" || i.Continuation.Stage != issuedomain.ContinuationStageChecks || i.Continuation.HeadSHA != f.head || i.Continuation.ID == saved.Continuation.ID || !reflect.DeepEqual(i.Answers, saved.Answers) || !reflect.DeepEqual(after.PendingRequests["req_original"], before.QuarantinedIssues["459"].Requests[0]) {
 				t.Fatalf("evidence not preserved: %+v", i)
+			}
+		})
+	}
+}
+
+func TestRecoveryGitHubStateLockProbe(t *testing.T) {
+	path := os.Getenv("RECOVERY_STATE_LOCK_PROBE")
+	if path == "" {
+		return
+	}
+	lock, err := os.OpenFile(path, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("GitHub called while state lock held: %v", err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+}
+
+func assertRecoveryGitHubOutsideStateLock(t *testing.T, f *issueResolutionFixture) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RECOVERY_STATE_LOCK_PROBE", filepath.Join(f.store.Dir, "state.lock"))
+	script, err := os.ReadFile(f.ghPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := "'" + strings.ReplaceAll(executable, "'", "'\"'\"'") + "' -test.run=^TestRecoveryGitHubStateLockProbe$ >/dev/null || exit 1\n"
+	if err := os.WriteFile(f.ghPath, []byte(strings.Replace(string(script), "\n", "\n"+probe, 1)), 0700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecoveryWorkspaceRejectsLocalChanges(t *testing.T) {
+	for _, change := range []string{"none", "head", "content"} {
+		t.Run(change, func(t *testing.T) {
+			f := newIssueResolutionFixture(t, 459, "OPEN", nil)
+			ctx := context.Background()
+			digest, err := worktree.ContentDigest(ctx, "git", f.worktree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			planned := issuePlanningContext{
+				gitPath:        "/usr/bin/git",
+				issue:          &state.Issue{Number: 459, Worktree: f.worktree},
+				inspection:     worktree.Inspection{Head: f.head},
+				worktreeSHA256: digest,
+			}
+			switch change {
+			case "head":
+				runIssueGit(t, f.worktree, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "changed HEAD")
+			case "content":
+				if err := os.WriteFile(filepath.Join(f.worktree, "changed.txt"), []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = verifyRecoveryWorkspace(ctx, planned, f.l.Root)
+			if (err == nil) != (change == "none") {
+				t.Fatalf("change=%s err=%v", change, err)
 			}
 		})
 	}

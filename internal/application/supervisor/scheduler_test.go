@@ -1104,6 +1104,115 @@ func TestWebhookTargetedReadsWithRateLimitGate(t *testing.T) {
 	}
 }
 
+func TestTargetedRESTErrorsWithRateLimitGate(t *testing.T) {
+	for _, operation := range []string{"get", "inspect PR"} {
+		for _, limited := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/rateLimit=%v", operation, limited), func(t *testing.T) {
+				loop, base := testLoop(t, worker.Result{})
+				loop.Config.Webhook.Mode = "webhook"
+				loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+				now := loop.now()
+				loop.Clock = fixedClock{value: now}
+				resetAt := now.Add(time.Hour).Truncate(time.Second)
+				message := "HTTP 503: service unavailable"
+				if limited {
+					message = fmt.Sprintf("API rate limit exceeded; x-ratelimit-reset: %d", resetAt.Unix())
+				}
+				fake := filepath.Join(t.TempDir(), "gh")
+				logPath := filepath.Join(t.TempDir(), "calls")
+				script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+for endpoint do :; done
+if [ %q = 'inspect PR' ]; then
+  case "$endpoint" in
+    */issues/%d) echo '{"number":%d,"state":"open"}'; exit 0 ;;
+    */comments*) echo '[]'; exit 0 ;;
+  esac
+fi
+printf '%%s\n' %q >&2
+exit 1
+`, logPath, operation, base.issue.Number, base.issue.Number, message)
+				if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				loop.GitHub = gh.CLI{Path: fake}
+				loop.enableRateLimitGate()
+				read := func() error {
+					if operation == "get" {
+						_, err := loop.getIssue(context.Background(), base.issue.Number)
+						return err
+					}
+					_, err := loop.inspectIssue(context.Background(), state.Issue{Number: base.issue.Number, PullRequestNumber: 7})
+					return err
+				}
+				err := read()
+				if err == nil || !strings.Contains(err.Error(), message) {
+					t.Fatalf("REST error=%v", err)
+				}
+				rateErr, ok := gh.AsRateLimit(err)
+				if ok != limited {
+					t.Fatalf("rate limit classification=%v, error=%v", ok, err)
+				}
+				if limited && (rateErr.Resource != "core" || !rateErr.ResetAt.Equal(resetAt)) {
+					t.Fatalf("rate limit=%+v", rateErr)
+				}
+				s := &scheduler{loop: loop}
+				if fatal := s.handleCycleError(failure.Wrap(failure.Transient, "read webhook target", err)); fatal != nil {
+					t.Fatal(fatal)
+				}
+				snapshot, err := loop.Store.Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !limited {
+					if snapshot.Supervisor.ConsecutiveFailures != 1 || snapshot.Supervisor.RetryAfter == nil || snapshot.Supervisor.RateLimit != nil {
+						t.Fatalf("supervisor=%+v", snapshot.Supervisor)
+					}
+					return
+				}
+				if !s.rateLimitActive || !s.cooldownUntil.Equal(resetAt) || snapshot.Supervisor.ConsecutiveFailures != 0 || snapshot.Supervisor.RateLimit == nil {
+					t.Fatalf("supervisor=%+v cooldown=%s", snapshot.Supervisor, s.cooldownUntil)
+				}
+				calls, err := os.ReadFile(logPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := gh.AsRateLimit(read()); !ok {
+					t.Fatal("cooldown did not return rate limit error")
+				}
+				after, err := os.ReadFile(logPath)
+				if err != nil || string(after) != string(calls) {
+					t.Fatalf("delegate called during cooldown: %s, err=%v", after, err)
+				}
+				loop.Clock = fixedClock{value: resetAt.Add(time.Second)}
+				if err := read(); err == nil || !strings.Contains(err.Error(), message) {
+					t.Fatalf("resumed REST error=%v", err)
+				}
+				after, err = os.ReadFile(logPath)
+				if err != nil || string(after) != string(calls)+string(calls) {
+					t.Fatalf("REST calls did not resume: %s, err=%v", after, err)
+				}
+			})
+		}
+	}
+}
+
+func TestPollingWithRateLimitGatePreservesNonRESTReads(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+	github := &webhookFakeGitHub{fakeGitHub: base}
+	loop.GitHub = github
+	loop.enableRateLimitGate()
+	issue, err := loop.getIssue(context.Background(), base.issue.Number)
+	if err != nil || issue.Number != base.issue.Number {
+		t.Fatalf("issue=%+v err=%v", issue, err)
+	}
+	_, err = loop.inspectIssue(context.Background(), state.Issue{Number: base.issue.Number, PullRequestNumber: 7})
+	if err != nil || github.inspectCalls != 1 || github.restGets != 0 || github.restInspections != 0 {
+		t.Fatalf("inspections=%d REST gets=%d REST inspections=%d err=%v", github.inspectCalls, github.restGets, github.restInspections, err)
+	}
+}
+
 type webhookFakeGitHub struct {
 	*fakeGitHub
 	listCalls        int

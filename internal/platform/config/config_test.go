@@ -19,6 +19,15 @@ func writeConfig(t *testing.T, body string) string {
 	return dir
 }
 
+func TestLoadRequiresVersion(t *testing.T) {
+	for _, version := range []string{"", "version: null\n"} {
+		dir := writeConfig(t, version+"github:\n  repo: owner/repo\n")
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "version is required") {
+			t.Fatalf("version %q: expected required version error, got %v", version, err)
+		}
+	}
+}
+
 func TestLoadSparseConfigUsesOperationalDefaults(t *testing.T) {
 	dir := writeConfig(t, `version: 4
 github:
@@ -114,6 +123,79 @@ func TestLoadPercentJitterForExpandedConfigCompatibility(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsMultipleDocumentsAndInvalidJitter(t *testing.T) {
+	for _, test := range []struct{ name, fragment, want string }{
+		{"second document", "---\ngithub:\n  repo: other/repo\n", "must contain one YAML document"},
+		{"empty second document", "---\n", "must contain one YAML document"},
+		{"jitter without percent", "watch:\n  reconcile_jitter: '25'\n", "reconcile_jitter must be a percentage"},
+		{"jitter boolean", "watch:\n  reconcile_jitter: true\n", "invalid reconcile_jitter type"},
+		{"jitter sequence", "watch:\n  reconcile_jitter: [25]\n", "invalid reconcile_jitter type"},
+		{"jitter mapping", "watch:\n  reconcile_jitter: {percent: 25}\n", "invalid reconcile_jitter type"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\n"+test.fragment)
+			if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidRepositoryAndTrustedAuthors(t *testing.T) {
+	for _, test := range []struct{ name, fragment, want string }{
+		{"missing owner", "repo: /repo", "github.repo must use owner/name format"},
+		{"missing repository", "repo: owner/", "github.repo must use owner/name format"},
+		{"missing separator", "repo: owner", "github.repo must use owner/name format"},
+		{"extra separator", "repo: owner/repo/extra", "github.repo must use owner/name format"},
+		{"uppercase login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: [Alice]", "allow_logins must contain lowercase exact logins"},
+		{"leading whitespace login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: [' alice']", "allow_logins must contain lowercase exact logins"},
+		{"trailing whitespace login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: ['alice ']", "allow_logins must contain lowercase exact logins"},
+		{"empty login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: ['']", "allow_logins must contain lowercase exact logins"},
+		{"duplicate login", "repo: owner/repo\n  trusted_issue_authors:\n    allow_logins: [alice, alice]", "allow_logins must not contain duplicate login"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := writeConfig(t, "version: 4\ngithub:\n  "+test.fragment+"\n")
+			if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidWebhookSecretSources(t *testing.T) {
+	for _, field := range []string{"secret_source", "previous_secret_source"} {
+		t.Run(field, func(t *testing.T) {
+			dir := t.TempDir()
+			repoPath, err := CanonicalRepoPath(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, test := range []struct{ name, source, want string }{
+				{"repository directory", fmt.Sprintf("file: %q", repoPath), ".file must be outside the repository"},
+				{"repository file", fmt.Sprintf("file: %q", filepath.Join(repoPath, "webhook-secret")), ".file must be outside the repository"},
+				{"env and file", fmt.Sprintf("env: AGENT_LOOP_TEST_SECRET\n    file: %q", repoPath), " must set exactly one of env or file"},
+				{"relative file", "file: relative-secret", ".file must be absolute"},
+				{"invalid env", "env: BAD=NAME", ".env is not a valid environment variable name"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					body := fmt.Sprintf("version: %d\ngithub:\n  repo: owner/repo\n  repository_id: 123\nwebhook:\n  mode: webhook\n  public_url_identifier: hooks.example/agent-loop\n  installation_ids: [456]\n", CurrentVersion)
+					if field == "previous_secret_source" {
+						body += "  secret_source:\n    env: AGENT_LOOP_TEST_SECRET\n"
+					}
+					body += "  " + field + ":\n    " + test.source + "\n"
+					if err := os.WriteFile(filepath.Join(dir, FileName), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					want := "webhook." + field + test.want
+					if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("Load() error = %v, want substring %q", err, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestExampleConfigLoads(t *testing.T) {
 	repositoryRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	dir := t.TempDir()
@@ -153,6 +235,61 @@ webhook:
 		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "loopback") {
 			t.Fatalf("unsafe listener accepted: %s err=%v", address, err)
 		}
+	}
+}
+
+func TestSecretSourceFileMustBeOutsideRepository(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(root, "repo")
+	outside := filepath.Join(root, "repo-other")
+	for _, dir := range []string{repo, outside} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "secret"), []byte("test-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insideLink := filepath.Join(root, "inside-link")
+	outsideLink := filepath.Join(root, "outside-link")
+	dirLink := filepath.Join(root, "dir-link")
+	for link, target := range map[string]string{
+		insideLink:  filepath.Join(repo, "secret"),
+		outsideLink: filepath.Join(outside, "secret"),
+		dirLink:     repo,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name             string
+		file             string
+		wantOutsideError bool
+	}{
+		{"repository itself", repo, true},
+		{"inside file", filepath.Join(repo, "secret"), true},
+		{"parent traversal", outside + string(filepath.Separator) + "../repo/secret", true},
+		{"missing inside file with traversal", outside + string(filepath.Separator) + "../repo/missing", true},
+		{"file symlink into repository", insideLink, true},
+		{"directory symlink into repository", filepath.Join(dirLink, "secret"), true},
+		{"outside file with shared prefix", filepath.Join(outside, "secret"), false},
+		{"outside symlink", outsideLink, false},
+		{"missing outside file", filepath.Join(outside, "missing"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (SecretSource{File: tc.file}).Validate(repo, "webhook.secret_source")
+			if tc.wantOutsideError {
+				if err == nil || err.Error() != "webhook.secret_source.file must be outside the repository" {
+					t.Fatalf("expected repository containment error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

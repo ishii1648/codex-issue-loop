@@ -256,6 +256,45 @@ func TestCompatibilityBlocksMajorSchemaDowngradeAndRetag(t *testing.T) {
 	}
 }
 
+func TestReconcileVerificationFailurePreservesPhase(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		runner *releaseRunner
+	}{
+		{name: "checksum", runner: &releaseRunner{badChecksum: true}},
+		{name: "attestation", runner: &releaseRunner{attestationFailure: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := fsutil.WriteJSON(filepath.Join(root, "install.json"), map[string]any{"version": "v1.2.2", "commit": strings.Repeat("a", 40), "schema_version": 4, "semantic_contract_version": 1}, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(root, "delivery.yaml")
+			if err := WriteConfig(configPath, DefaultConfig("owner/repo")); err != nil {
+				t.Fatal(err)
+			}
+			controller := Controller{Layout: layout.Layout{Root: root}, ConfigPath: configPath, GH: "gh", Runner: test.runner}
+			report, err := controller.Reconcile(context.Background(), true)
+			if err == nil || !strings.Contains(err.Error(), test.name) {
+				t.Fatalf("report=%+v err=%v", report, err)
+			}
+			if report.Phase != PhaseDownloaded || report.Result != "blocked" || report.Reason != err.Error() {
+				t.Fatalf("unexpected verification failure report: %+v", report)
+			}
+			tx, loadErr := LoadTransaction(RuntimePaths(root).Transaction)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if tx.Phase != report.Phase || tx.LastResult != report.Result || tx.Reason != report.Reason {
+				t.Fatalf("persisted transaction=%+v report=%+v", tx, report)
+			}
+			if test.runner.binaryRuns != 0 || test.runner.updates != 0 {
+				t.Fatalf("unverified candidate executed: %+v", test.runner)
+			}
+		})
+	}
+}
+
 func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 	for _, test := range []struct {
 		name            string
@@ -301,6 +340,54 @@ func TestFaultControllerApplyAndDoctorFailureRollback(t *testing.T) {
 				next, nextErr := controller.Reconcile(context.Background(), false)
 				if nextErr != nil || next.Result != "rolled_back" || runner.binaryRuns != binaryRuns {
 					t.Fatalf("automatic reconcile retried failed candidate: next=%+v err=%v binary_runs=%d/%d", next, nextErr, runner.binaryRuns, binaryRuns)
+				}
+			}
+		})
+	}
+}
+
+func TestReconcileDisabledPreservesActiveTransaction(t *testing.T) {
+	for _, result := range []string{"rollback_failed", "rolling_back", "validating"} {
+		t.Run(result, func(t *testing.T) {
+			controller, paths, tx, runner := rollbackRetryFixture(t, txDesiredVersion())
+			cfg, err := LoadConfig(controller.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Enabled = false
+			if err := WriteConfig(controller.ConfigPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+			tx.LastResult = result
+			if err := SaveTransaction(paths.Transaction, tx); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(paths.Transaction)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := controller.Reconcile(context.Background(), false)
+			if err != nil || report.Enabled || report.Result != result || report.Reason != tx.Reason {
+				t.Fatalf("report=%+v err=%v", report, err)
+			}
+			after, err := os.ReadFile(paths.Transaction)
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("transaction changed while disabled: before=%s after=%s err=%v", before, after, err)
+			}
+			fence, err := LoadMaintenance(paths.Maintenance)
+			if err != nil || fence.Generation != tx.MaintenanceGeneration || fence.Desired != tx.Desired {
+				t.Fatalf("fence=%+v err=%v", fence, err)
+			}
+			if *runner != (releaseRunner{}) {
+				t.Fatalf("commands ran while disabled: %+v", runner)
+			}
+			if result == "rollback_failed" {
+				report, err = controller.RetryRollback(context.Background(), tx.BackupPath)
+				if err != nil || report.Result != "rolled_back" || report.Reason != tx.Reason || runner.rollbacks != 1 || runner.doctors != 1 {
+					t.Fatalf("retry report=%+v err=%v runner=%+v", report, err, runner)
+				}
+				if _, err := os.Stat(paths.Maintenance); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("successful retry retained fence: %v", err)
 				}
 			}
 		})
