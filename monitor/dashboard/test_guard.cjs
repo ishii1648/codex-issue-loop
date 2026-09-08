@@ -30,7 +30,7 @@ function fixture() {
       let payload;
       if (u.pathname === '/api/freshness') payload = {status:'success',data:{result:f.missing?[]:[{value:[f.now/1000,String(f.sample/1000)]}]}};
       if (u.pathname === '/api/status') payload = {repositories:f.repositories.map(repository=>({repository,current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue}))};
-      if (u.pathname === '/api/report') payload = {reports:f.repositories.map((repository,index)=>({repository,from:new Date(from).toISOString(),to:new Date(to).toISOString(),durations_seconds:durations,demand_availability:durations.HEALTHY+durations.DOWN ? durations.HEALTHY/(durations.HEALTHY+durations.DOWN) : null,observation_coverage:f.fractions.slice(0,3).reduce((a,b)=>a+b,0),...(f.report ? f.report(from,to,index) : {})}))};
+      if (u.pathname === '/api/report') payload = {reports:f.repositories.map((repository,index)=>({repository,from:new Date(from).toISOString(),to:new Date(to).toISOString(),completed_issue_count:0,observed_completed_issue_count:0,completion_history_complete:true,completion_uncovered_ranges:[],completion_last_verified_at:new Date(to).toISOString(),durations_seconds:durations,demand_availability:durations.HEALTHY+durations.DOWN ? durations.HEALTHY/(durations.HEALTHY+durations.DOWN) : null,observation_coverage:f.fractions.slice(0,3).reduce((a,b)=>a+b,0),...(f.report ? f.report(from,to,index) : {})}))};
       if (u.pathname === '/api/timeline') {
         let cursor=from;
         const rows=[];
@@ -239,4 +239,47 @@ test('historical 100 second metrics use state durations and include unknown and 
     assert.equal(classes.has('expired'),true);
     assert.match(nodes.error.textContent,/期間集計が不一致/);
   }
+});
+
+test('completion counts follow all presets, custom JST bounds and repository identity', async () => {
+  const {f,nodes,classes,refresh} = fixture();
+  f.repositories=['owner/one','owner/two'];
+  f.report=(from,to,index)=>({completed_issue_count:index+1,observed_completed_issue_count:index+1});
+  for (const hours of [1,24,168,720]) {
+    nodes.window.value=String(hours); nodes.window.change(); await refresh();
+    assert.equal(classes.has('expired'),false,nodes.error.textContent);
+    const articles=nodes.repos.innerHTML.split('<article>').slice(1);
+    articles.forEach((article,index)=>assert.match(article,new RegExp(`完了Issue数<strong>${index+1} 件`)));
+    const reportURL=f.urls.filter(u=>u.startsWith('/api/report?')).at(-1);
+    const params=new URL(reportURL,'http://localhost').searchParams;
+    assert.equal(Date.parse(params.get('to'))-Date.parse(params.get('from')),hours*3600000);
+    assert.ok(f.urls.includes(reportURL.replace('/api/report','/api/timeline')));
+  }
+  nodes.from.value='2026-01-01T00:00'; nodes.to.value='2026-01-02T00:00';
+  nodes.selection.submit({preventDefault(){}}); await refresh();
+  assert.equal(classes.has('expired'),false);
+  assert.match(nodes.repos.innerHTML,/完了Issue数<strong>1 件/);
+  assert.equal(new URL(f.urls.filter(u=>u.startsWith('/api/report?')).at(-1),'http://localhost').searchParams.get('from'),'2025-12-31T15:00:00.000Z');
+});
+
+test('observed zero, pending tail, internal gaps, failed fetch and stale completions remain distinct', async () => {
+  const {f,nodes,classes,refresh} = fixture();
+  const verified=f.now-30000;
+  for (const reason of ['pending','fetch_failed','stale','before_observation','history_gap']) {
+    f.report=(from,to)=>({completed_issue_count:null,observed_completed_issue_count:0,completion_history_complete:false,completion_last_verified_at:new Date(verified).toISOString(),completion_uncovered_ranges:[{from:new Date(from).toISOString(),to:new Date(to).toISOString(),reason}]});
+    await refresh();
+    assert.equal(classes.has('expired'),false,nodes.error.textContent);
+    assert.match(nodes.repos.innerHTML,/完了Issue数<strong>観測済み 0 件/);
+    assert.doesNotMatch(nodes.repos.innerHTML,/不明（観測済み/);
+    const expected={pending:'以降は取得待ち',fetch_failed:'完了履歴の取得に失敗',stale:'完了履歴の取得が遅延',before_observation:'観測開始前の履歴は未取得',history_gap:'期間内に履歴欠損あり'};
+    assert.ok(nodes.repos.innerHTML.includes(expected[reason]));
+  }
+  f.report=(from,to)=>({completed_issue_count:null,observed_completed_issue_count:3,completion_history_complete:false,completion_last_verified_at:new Date(verified).toISOString(),completion_uncovered_ranges:[{from:new Date(from).toISOString(),to:new Date(from+1000).toISOString(),reason:'history_gap'},{from:new Date(verified).toISOString(),to:new Date(to).toISOString(),reason:f.now-verified>=45000?'stale':'pending'}]});
+  await refresh();
+  assert.match(nodes.repos.innerHTML,/履歴欠損あり.*取得待ち/);
+  f.now+=15000; f.sample=f.now; await refresh();
+  assert.match(nodes.repos.innerHTML,/履歴欠損あり.*取得が遅延/);
+  assert.doesNotMatch(nodes.repos.innerHTML,/以降は取得待ち/);
+  f.report=()=>({completed_issue_count:null,observed_completed_issue_count:0,completion_history_complete:false,completion_uncovered_ranges:[]});
+  await refresh(); assert.equal(classes.has('expired'),true);
 });

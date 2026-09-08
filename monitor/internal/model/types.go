@@ -46,17 +46,18 @@ type QueueItem struct {
 }
 
 type Observation struct {
-	CurrentVerified   bool          `json:"-"`
-	Resynchronized    bool          `json:"-"`
-	Repository        string        `json:"repository"`
-	ObservedAt        time.Time     `json:"observed_at"`
-	Items             []QueueItem   `json:"queue"`
-	Events            []QueueEvent  `json:"-"`
-	Cursor            int64         `json:"event_cursor,omitempty"`
-	CursorInitialized bool          `json:"-"`
-	AcceptanceTimeout time.Duration `json:"-"`
-	ProcessingTimeout time.Duration `json:"-"`
-	Error             string        `json:"error,omitempty"`
+	Completions       CompletionObservation `json:"-"`
+	CurrentVerified   bool                  `json:"-"`
+	Resynchronized    bool                  `json:"-"`
+	Repository        string                `json:"repository"`
+	ObservedAt        time.Time             `json:"observed_at"`
+	Items             []QueueItem           `json:"queue"`
+	Events            []QueueEvent          `json:"-"`
+	Cursor            int64                 `json:"event_cursor,omitempty"`
+	CursorInitialized bool                  `json:"-"`
+	AcceptanceTimeout time.Duration         `json:"-"`
+	ProcessingTimeout time.Duration         `json:"-"`
+	Error             string                `json:"error,omitempty"`
 }
 
 type Interval struct {

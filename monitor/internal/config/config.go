@@ -38,6 +38,7 @@ type Config struct {
 }
 
 type Repository struct {
+	DoneLabel         string   `yaml:"done_label" json:"done_label"`
 	Name              string   `yaml:"name" json:"name"`
 	ReadyLabels       []string `yaml:"ready_labels" json:"ready_labels"`
 	ExcludeLabels     []string `yaml:"exclude_labels" json:"exclude_labels,omitempty"`
@@ -137,6 +138,9 @@ func validate(cfg *Config) error {
 		if len(repo.ReadyLabels) == 0 {
 			repo.ReadyLabels = []string{"codex-loop:ready"}
 		}
+		if repo.DoneLabel == "" {
+			repo.DoneLabel = "codex-loop:done"
+		}
 		if repo.RunningLabel == "" {
 			repo.RunningLabel = "codex-loop:running"
 		}
@@ -152,7 +156,7 @@ func validate(cfg *Config) error {
 		if repo.AcceptanceTimeout.Duration <= 0 || repo.ProcessingTimeout.Duration <= 0 {
 			return fmt.Errorf("repository %q timeouts must be positive", repo.Name)
 		}
-		if hasBlank(repo.ReadyLabels) || hasBlank(repo.TerminalLabels) || strings.TrimSpace(repo.RunningLabel) == "" {
+		if strings.TrimSpace(repo.DoneLabel) == "" || hasBlank(repo.ReadyLabels) || hasBlank(repo.TerminalLabels) || strings.TrimSpace(repo.RunningLabel) == "" {
 			return fmt.Errorf("repository %q labels must not be blank", repo.Name)
 		}
 	}

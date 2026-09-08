@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ishii1648/codex-issue-loop/monitor/schemas/report.schema.json",
   "type": "object",
-  "required": ["schema_version", "repository", "from", "to", "durations_seconds", "demand_availability", "observation_coverage"],
+  "required": ["schema_version", "repository", "from", "to", "durations_seconds", "demand_availability", "observation_coverage", "completed_issue_count", "observed_completed_issue_count", "completion_history_complete", "completion_last_verified_at", "completion_uncovered_ranges"],
   "properties": {
     "schema_version": {"const": 1},
     "repository": {"type": "string"},
@@ -10,7 +10,12 @@
     "to": {"type": "string", "format": "date-time"},
     "durations_seconds": {"type": "object", "required": ["IDLE", "HEALTHY", "DOWN", "UNKNOWN"], "additionalProperties": {"type": "number", "minimum": 0}},
     "demand_availability": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
-    "observation_coverage": {"type": "number", "minimum": 0, "maximum": 1}
+    "observation_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+    "completed_issue_count": {"type": ["integer", "null"], "minimum": 0},
+    "observed_completed_issue_count": {"type": "integer", "minimum": 0},
+    "completion_history_complete": {"type": "boolean"},
+    "completion_last_verified_at": {"type": ["string", "null"], "format": "date-time"},
+    "completion_uncovered_ranges": {"type": "array", "items": {"type": "object", "required": ["from", "to", "reason"], "properties": {"from": {"type": "string", "format": "date-time"}, "to": {"type": "string", "format": "date-time"}, "reason": {"enum": ["before_observation", "history_gap", "pending", "fetch_failed", "stale"]}}, "additionalProperties": false}}
   },
   "additionalProperties": false
 }

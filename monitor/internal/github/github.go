@@ -12,7 +12,7 @@ import (
 )
 
 type Observer interface {
-	Observe(context.Context, config.Repository, int64, bool, time.Time) (model.Observation, error)
+	Observe(context.Context, config.Repository, int64, bool, time.Time, *model.CompletionCheckpoint) (model.Observation, error)
 }
 
 type CLI struct{ Path string }

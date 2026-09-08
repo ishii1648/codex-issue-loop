@@ -13,7 +13,7 @@
 
 Python 3、Grafana、Prometheusを使用します。既存のHomebrew binaryを再利用し、なければ`brew install grafana prometheus`で導入します。`brew services start`は別設定のサービスを起動するため使いません。対象環境はGrafana 13.2.1、Prometheus 3.14.0、Infinity 4.0.0、公式prometheus plugin 13.1.7です。Grafana 13.2ではPrometheus datasourceも独立pluginであり、`preinstall_disabled=true`のこの構成では明示的な導入が必要です。専用rootに導入済みなら再インストールは不要です。
 
-repository rootで実行します。`--binary`にはこの変更を含むmonitor binaryを指定します。観測サービスのbinaryやstateを変更する必要はありません。
+repository rootで実行します。`--binary`にはこの変更を含むmonitor binaryを指定します。完了件数の取得には観測サービス側も対応binaryへ更新してください。旧stateはそのまま読み込み、完了履歴は更新後の観測開始から蓄積します。
 
 ```sh
 python3 monitor/dashboard/manage.py prepare --binary /absolute/path/to/agent-loop-monitor
@@ -59,6 +59,8 @@ python3 monitor/dashboard/manage.py restart
 稼働率（正常のみ）は`HEALTHY秒 / 選択期間全体秒`、正常動作率（正常+待機）は`(HEALTHY + IDLE)秒 / 選択期間全体秒`です。画面では「選択期間全体の時間に対する割合」と説明します。UNKNOWNのみ・全期間未観測の場合はどちらも0%です。観測率は0であり、需要がなかったとは断定できません。観測率は`(HEALTHY + DOWN + IDLE)秒 / 全期間秒`です。選択期間にUNKNOWNや未観測時間がある場合のみ「この期間には未観測の時間があります」と添え、混在期間への単一の正常性判定は行いません。UNKNOWN・未観測時間は正常時間にも待機時間にも加算しません。
 
 `/metrics`はCLIと同じ`effectiveSnapshot`、`effectiveIntervals`、`BuildReport`を使用します。状態コードはUNKNOWN=0、HEALTHY=1、DOWN=2、IDLE=3、需要なしは-1、不明な日時はNaNです。Issue番号・理由・errorをlabelに含めず、counterやscrapeサンプル比率で稼働率を計算しません。基準時刻は秒境界に切り捨て、その同じ時刻で全期間を計算します。読み取り中のsnapshot変更・重複区間・破損はHTTP 503として拒否します。
+
+完了Issue数も稼働率・timelineと同じ選択期間で集計します。完全な期間は「N 件」、不完全な期間は「観測済み N 件」を主表示し、確認時刻以降の取得待ち、観測開始前、期間内の履歴欠損、取得失敗・遅延を補足します。現在時刻をtoとするプリセットでは通常も未取得の末尾があるため、観測済み表示になります。完了の取得待ち・遅延は15秒更新で再判定し、通信停止時は既存の表示失効が適用されます。完了履歴は独立したcheckpointで判定し、状態の観測率とは一致しない場合があります。
 
 scrapeとdashboardは15秒更新です。monitor停止は既存の`observation_timeout`でUNKNOWNになり、queue deadlineまで境界が遡る場合があります。API停止は`up=0`、scrape基準時刻が45秒以上古い場合も現在パネルを無効化します。
 

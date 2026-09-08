@@ -278,7 +278,13 @@ func (a App) report(args []string) error {
 		if loadErr != nil {
 			return loadErr
 		}
-		reports = append(reports, model.BuildReport(repo.Name, intervals, from, to))
+		completions, err := (store.Store{Root: cfg.StateDir}).Completions(repo.Name)
+		if err != nil {
+			return err
+		}
+		report := model.BuildReport(repo.Name, intervals, from, to)
+		report.AddCompletions(completions, a.now(), cfg.ObservationTimeout.Duration)
+		reports = append(reports, report)
 	}
 	if *jsonOut {
 		return json.NewEncoder(a.Out).Encode(map[string]any{"schema_version": model.SchemaVersion, "reports": reports})

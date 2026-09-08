@@ -28,7 +28,7 @@ esac
 		t.Fatal(err)
 	}
 	repo := config.Repository{Name: "owner/repo", ReadyLabels: []string{"codex-loop:ready"}, RunningLabel: "codex-loop:running", TerminalLabels: []string{"codex-loop:done"}, AcceptanceTimeout: config.Duration{Duration: time.Minute}, ProcessingTimeout: config.Duration{Duration: time.Hour}}
-	observation, err := (CLI{Path: script}).Observe(context.Background(), repo, 10, true, time.Date(2026, 9, 5, 10, 5, 0, 0, time.UTC))
+	observation, err := (CLI{Path: script}).Observe(context.Background(), repo, 10, true, time.Date(2026, 9, 5, 10, 5, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ esac
 			if err != nil {
 				t.Fatal(err)
 			}
-			observation, err := (CLI{Path: script}).Observe(context.Background(), repo, 10, true, base.Add(20*time.Minute))
+			observation, err := (CLI{Path: script}).Observe(context.Background(), repo, 10, true, base.Add(20*time.Minute), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -123,7 +123,7 @@ esac
 	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
-	observation, err := (CLI{Path: script}).Observe(context.Background(), config.Repository{Name: "owner/repo"}, 1, true, time.Now())
+	observation, err := (CLI{Path: script}).Observe(context.Background(), config.Repository{Name: "owner/repo"}, 1, true, time.Now(), nil)
 	if err != nil || !observation.Resynchronized || len(observation.Items) != 0 {
 		t.Fatalf("error = %v", err)
 	}
@@ -131,7 +131,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(data), "/issues/events?"); got != maxEventPages+2 {
+	if got := strings.Count(string(data), "/issues/events?"); got != maxEventPages+1 {
 		t.Fatalf("event requests = %d", got)
 	}
 	if strings.Contains(string(data), "page=11") || strings.Contains(string(data), "--paginate --slurp repos/owner/repo/issues/events") {

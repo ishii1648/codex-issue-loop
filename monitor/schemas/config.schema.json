@@ -9,7 +9,7 @@
     "observation_timeout": {"type": "string"},
     "state_dir": {"type": "string"},
     "github_cli": {"type": "string"},
-    "repositories": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "ready_labels": {"type": "array", "items": {"type": "string"}}, "exclude_labels": {"type": "array", "items": {"type": "string"}}, "running_label": {"type": "string"}, "terminal_labels": {"type": "array", "items": {"type": "string"}}, "acceptance_timeout": {"type": "string"}, "processing_timeout": {"type": "string"}}, "additionalProperties": false}}
+    "repositories": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "ready_labels": {"type": "array", "items": {"type": "string"}}, "exclude_labels": {"type": "array", "items": {"type": "string"}}, "running_label": {"type": "string"}, "done_label": {"type": "string", "minLength": 1}, "terminal_labels": {"type": "array", "items": {"type": "string"}}, "acceptance_timeout": {"type": "string"}, "processing_timeout": {"type": "string"}}, "additionalProperties": false}}
   },
   "additionalProperties": false
 }

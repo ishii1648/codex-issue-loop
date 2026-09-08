@@ -17,7 +17,7 @@ type fakeObserver struct {
 	errors       map[string]error
 }
 
-func (f fakeObserver) Observe(_ context.Context, repo config.Repository, _ int64, _ bool, at time.Time) (model.Observation, error) {
+func (f fakeObserver) Observe(_ context.Context, repo config.Repository, _ int64, _ bool, at time.Time, _ *model.CompletionCheckpoint) (model.Observation, error) {
 	if err := f.errors[repo.Name]; err != nil {
 		return model.Observation{}, err
 	}

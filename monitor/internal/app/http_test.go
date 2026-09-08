@@ -528,3 +528,77 @@ func TestSelectedPeriodTimelineMatchesCLIReport(t *testing.T) {
 		})
 	}
 }
+
+func TestCompletionReportBoundsMissingDataAndFreshness(t *testing.T) {
+	cfg, disk, at := dashboardFixture(t)
+	now := at
+	app := App{Now: func() time.Time { return now }}
+	handler := app.monitorHandler(cfg)
+	fetch := func(from, to time.Time) model.Report {
+		t.Helper()
+		query := url.Values{"from": {from.Format(time.RFC3339Nano)}, "to": {to.Format(time.RFC3339Nano)}}
+		response := request(t, handler, "/api/report?"+query.Encode())
+		if response.Code != 200 {
+			t.Fatal(response.Body.String())
+		}
+		var payload struct {
+			Reports []model.Report `json:"reports"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload.Reports[0]
+	}
+	missing := fetch(at.Add(-time.Hour), at)
+	if missing.CompletedIssueCount != nil || missing.CompletionHistoryComplete || missing.ObservedCompletedIssueCount != 0 {
+		t.Fatal(missing)
+	}
+	base := at.Add(-31 * 24 * time.Hour)
+	history := model.CompletionHistory{SchemaVersion: 1, Repository: "owner/repo"}
+	if err := history.Apply("done", model.CompletionObservation{At: base, Cursor: 1, Verified: true, Result: "verified"}); err != nil {
+		t.Fatal(err)
+	}
+	var events []model.CompletionLabelEvent
+	for i, hours := range []int{720, 168, 24, 1, 0} {
+		events = append(events, model.CompletionLabelEvent{CompletionEvent: model.CompletionEvent{ID: int64(i + 2), IssueNumber: 7 + i, At: at.Add(-time.Duration(hours) * time.Hour)}, Label: "done"})
+	}
+	if err := history.Apply("done", model.CompletionObservation{At: at, Cursor: 6, FromCursor: 1, Verified: true, Continuous: true, Result: "verified", Events: events}); err != nil {
+		t.Fatal(err)
+	}
+	if err := disk.CommitCompletions(history); err != nil {
+		t.Fatal(err)
+	}
+	for i, hours := range []int{720, 168, 24, 1} {
+		report := fetch(at.Add(-time.Duration(hours)*time.Hour), at)
+		if report.CompletedIssueCount == nil || *report.CompletedIssueCount != 4-i || report.ObservationCoverage != 0 {
+			t.Fatal(report)
+		}
+	}
+	jst := time.FixedZone("JST", 9*3600)
+	custom := fetch(at.Add(-time.Hour).In(jst), at.In(jst))
+	if custom.CompletedIssueCount == nil || *custom.CompletedIssueCount != 1 || !custom.From.Equal(at.Add(-time.Hour)) {
+		t.Fatal(custom)
+	}
+	now = at.Add(time.Minute)
+	pending := fetch(at.Add(-time.Hour), now)
+	if pending.CompletedIssueCount != nil || pending.ObservedCompletedIssueCount != 2 || len(pending.CompletionUncoveredRanges) != 1 || pending.CompletionUncoveredRanges[0].Reason != "pending" {
+		t.Fatal(pending)
+	}
+	now = at.Add(cfg.ObservationTimeout.Duration)
+	stale := fetch(at.Add(-time.Hour), now)
+	if stale.CompletionUncoveredRanges[0].Reason != "stale" {
+		t.Fatal(stale)
+	}
+	path := filepath.Join(disk.Root, "repositories", "owner--repo", "completions.json")
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, handler, "/api/report?from="+base.Format(time.RFC3339)+"&to="+at.Format(time.RFC3339))
+	if response.Code != 503 {
+		t.Fatal(response.Body.String())
+	}
+	metrics := request(t, handler, "/metrics")
+	if metrics.Code != 200 {
+		t.Fatal("completion corruption affected availability metrics", metrics.Body.String())
+	}
+}

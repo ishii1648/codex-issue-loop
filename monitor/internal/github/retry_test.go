@@ -57,7 +57,7 @@ esac
 			}
 			repo := config.Repository{Name: "owner/repo"}
 			at := time.Date(2026, 9, 6, 15, 0, 0, 0, time.UTC)
-			obs, err := (CLI{Path: script}).Observe(context.Background(), repo, 1, true, at)
+			obs, err := (CLI{Path: script}).Observe(context.Background(), repo, 1, true, at, nil)
 			if err == nil {
 				t.Fatalf("observation=%+v error=%v", obs, err)
 			}

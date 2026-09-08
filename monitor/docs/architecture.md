@@ -4,10 +4,12 @@
 
 依存方向は`cmd -> app/monitor -> github + model + store + config`です。`internal/application/supervisor`、`internal/domain/issue`、`internal/adapter/state`への依存はarchitecture testで拒否します。
 
-GitHub adapterが実行できる外部操作は`gh api --method GET`だけです。open Issue一覧はpaginationし、現在actionableなIssueとbatchで変更されたIssueごとのevent履歴を現在snapshotから逆算し、phase開始・再入場時刻を取得します。repository Issue eventはnewest-firstのpage 1から永続cursorを含むpageまで一ページずつ取得し、そのpageで停止します。最大10ページ（1ページ100件）に制限し、上限までにcursorが見つからなければ現在snapshotの検証による再同期を行い、再生不能な過去区間を`UNKNOWN`として残します。通常pollでrepository event全履歴を`--paginate --slurp`しません。cursorを発見できない取得結果は完全な履歴としてstate machineへ渡しません。Issue、label、commentなどのmutation methodをinterfaceへ含めません。
+GitHub adapterが実行できる外部操作は`gh api --method GET`だけです。open Issue一覧はpaginationし、現在actionableなIssueとbatchで変更されたIssueごとのevent履歴を現在snapshotから逆算し、phase開始・再入場時刻を取得します。repository Issue eventはnewest-firstのpage 1からqueue cursorと完了checkpoint cursorの両方を含むpageまで一ページずつ取得し、両方に到達したpageで停止します。最大10ページ（1ページ100件）に制限し、上限までにcursorが見つからなければ現在snapshotの検証による再同期を行い、再生不能な過去区間を`UNKNOWN`として残します。通常pollでrepository event全履歴を`--paginate --slurp`しません。cursorを発見できない取得結果は完全な履歴としてstate machineへ渡しません。Issue、label、commentなどのmutation methodをinterfaceへ含めません。
 
 state machineはbatch全体と現在snapshotの整合性を検証してから、永続queue snapshotを起点に、cursorより新しいeventとその間のdeadlineを時系列でreplayします。runningが存在する間はprocessing phaseを優先し、terminal後にreadyが残る場合だけterminal event時刻からadmission windowを開始します。
 
-永続rootは既定で`~/Library/Application Support/codex-issue-loop-monitor`です。repositoryごとに`repositories/<owner--repo>/current.json`と`intervals.jsonl`を持ちます。current stateにはevent cursorとqueue-level phase/deadlineを保存します。確定intervalをatomicに更新してからcurrent stateをatomic renameし、同じtransition IDの再commitを除外します。event ID集合は累積しません。process再起動直後にpollすることで中断したcommitも同じ決定へ収束します。
+永続rootは既定で`~/Library/Application Support/codex-issue-loop-monitor`です。repositoryごとに`repositories/<owner--repo>/current.json`と`intervals.jsonl`を持ちます。current stateにはevent cursorとqueue-level phase/deadlineを保存します。確定intervalをatomicに更新してからcurrent stateをatomic renameし、同じtransition IDの再commitを除外します。queueのevent ID集合は累積しません。process再起動直後にpollすることで中断したcommitも同じ決定へ収束します。
+
+`completions.json`は成功ラベルの有効期間ごとのepoch、完了event、完全取得区間、独立したcheckpointと最終取得結果を保持します。完了記録をatomic renameしてdirectoryをsyncしてから、queueのcurrent stateを保存します。完了だけ保存された場合も、再起動時に両cursorを共有のpage走査で照合し、完了checkpointから連続性を判定します。完了eventはIDで重複排除します。queue再構成の失敗・再同期は、repository eventの連続性とhead検証に基づく完了履歴の完全性には流用しません。履歴JSONの容量と更新負荷は完了event数に比例します。
 
 LaunchAgentは`com.codex-issue-loop.monitor`であり、supervisorのrepository別LaunchAgentとは別に登録されます。

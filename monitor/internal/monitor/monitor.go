@@ -33,7 +33,22 @@ func (r Runner) Poll(ctx context.Context, repo config.Repository) (model.Snapsho
 		cursor = previous.EventCursor
 		initialized = previous.EventCursorInitialized
 	}
-	observation, observeErr := r.Observer.Observe(ctx, repo, cursor, initialized, now)
+	completions, err := r.Store.Completions(repo.Name)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	if completions == nil {
+		completions = &model.CompletionHistory{SchemaVersion: model.SchemaVersion, Repository: repo.Name, Epochs: []model.CompletionEpoch{}}
+	}
+	observation, observeErr := r.Observer.Observe(ctx, repo, cursor, initialized, now, completions.Checkpoint)
+	completionObservation := observation.Completions
+	completionObservation.At = now.Truncate(time.Second)
+	if err := completions.Apply(repo.DoneLabel, completionObservation); err != nil {
+		return model.Snapshot{}, err
+	}
+	if err := r.Store.CommitCompletions(*completions); err != nil {
+		return model.Snapshot{}, err
+	}
 	var next model.Snapshot
 	var closed []model.Interval
 	if observeErr == nil {

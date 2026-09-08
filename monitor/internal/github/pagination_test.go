@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/config"
+	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 )
 
 func TestEventsSinceStopsOnPageContainingCursor(t *testing.T) {
@@ -45,7 +46,16 @@ func TestEventsSinceStopsOnPageContainingCursor(t *testing.T) {
 			if err := os.WriteFile(logPath, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			events, head, err := (CLI{Path: script}).eventsSince(context.Background(), repo, test.cursor)
+			batch, err := (CLI{Path: script}).eventsSince(context.Background(), repo, test.cursor)
+			var events []model.QueueEvent
+			for _, raw := range batch.events {
+				if raw.ID > test.cursor {
+					if event, ok := queueEvent(repo, raw); ok {
+						events = append(events, event)
+					}
+				}
+			}
+			head := batch.head
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,7 +86,7 @@ func TestEventsSinceRejectsMissingCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := config.Repository{Name: "owner/repo"}
-	if _, _, err := (CLI{Path: script}).eventsSince(context.Background(), repo, 150); err == nil {
+	if batch, err := (CLI{Path: script}).eventsSince(context.Background(), repo, 150); err != nil || batch.found[150] {
 		t.Fatal("missing cursor was accepted")
 	}
 }
@@ -110,9 +120,9 @@ func TestEventsSinceBoundsRequestsWhenCursorIsMissing(t *testing.T) {
 		if err := os.WriteFile(logPath, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		batch, head, err := (CLI{Path: script}).eventsSince(context.Background(), config.Repository{Name: "owner/repo"}, cursor)
-		if err == nil || batch != nil || head != cursor {
-			t.Fatalf("incomplete history: batch=%+v head=%d err=%v", batch, head, err)
+		batch, err := (CLI{Path: script}).eventsSince(context.Background(), config.Repository{Name: "owner/repo"}, cursor)
+		if err != nil || batch.found[cursor] {
+			t.Fatalf("incomplete history: batch=%+v err=%v", batch, err)
 		}
 		data, err := os.ReadFile(logPath)
 		if err != nil {

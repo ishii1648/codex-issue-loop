@@ -3,13 +3,18 @@ package model
 import "time"
 
 type Report struct {
-	SchemaVersion       int                `json:"schema_version"`
-	Repository          string             `json:"repository"`
-	From                time.Time          `json:"from"`
-	To                  time.Time          `json:"to"`
-	DurationsSeconds    map[Status]float64 `json:"durations_seconds"`
-	DemandAvailability  *float64           `json:"demand_availability"`
-	ObservationCoverage float64            `json:"observation_coverage"`
+	CompletedIssueCount         *int                       `json:"completed_issue_count"`
+	ObservedCompletedIssueCount int                        `json:"observed_completed_issue_count"`
+	CompletionHistoryComplete   bool                       `json:"completion_history_complete"`
+	CompletionUncoveredRanges   []CompletionUncoveredRange `json:"completion_uncovered_ranges"`
+	CompletionLastVerifiedAt    *time.Time                 `json:"completion_last_verified_at"`
+	SchemaVersion               int                        `json:"schema_version"`
+	Repository                  string                     `json:"repository"`
+	From                        time.Time                  `json:"from"`
+	To                          time.Time                  `json:"to"`
+	DurationsSeconds            map[Status]float64         `json:"durations_seconds"`
+	DemandAvailability          *float64                   `json:"demand_availability"`
+	ObservationCoverage         float64                    `json:"observation_coverage"`
 }
 
 func BuildReport(repository string, intervals []Interval, from, to time.Time) Report {
@@ -42,5 +47,7 @@ func BuildReport(repository string, intervals []Interval, from, to time.Time) Re
 		value := durations[Healthy] / demand
 		availability = &value
 	}
-	return Report{SchemaVersion: SchemaVersion, Repository: repository, From: from.UTC(), To: to.UTC(), DurationsSeconds: durations, DemandAvailability: availability, ObservationCoverage: coverage}
+	report := Report{SchemaVersion: SchemaVersion, Repository: repository, From: from.UTC(), To: to.UTC(), DurationsSeconds: durations, DemandAvailability: availability, ObservationCoverage: coverage}
+	report.AddCompletions(nil, to, 0)
+	return report
 }

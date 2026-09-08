@@ -18,53 +18,79 @@ import (
 
 const maxEventPages = 10
 
-var errCursorMissing = errors.New("event cursor was not found")
 var errSnapshotChanged = errors.New("GitHub snapshot changed during observation")
 
-func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, initialized bool, observedAt time.Time) (model.Observation, error) {
-	result := model.Observation{
-		Repository:        repo.Name,
-		ObservedAt:        observedAt.UTC(),
-		Cursor:            cursor,
-		CursorInitialized: true,
-		AcceptanceTimeout: repo.AcceptanceTimeout.Duration,
-		ProcessingTimeout: repo.ProcessingTimeout.Duration,
-	}
+func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, initialized bool, observedAt time.Time, checkpoint *model.CompletionCheckpoint) (result model.Observation, observeErr error) {
+	result = model.Observation{Repository: repo.Name, ObservedAt: observedAt.UTC(), Cursor: cursor, CursorInitialized: true, AcceptanceTimeout: repo.AcceptanceTimeout.Duration, ProcessingTimeout: repo.ProcessingTimeout.Duration}
+	defer func() {
+		if observeErr != nil {
+			result = model.Observation{Completions: result.Completions}
+		}
+	}()
+	result.Completions = model.CompletionObservation{At: observedAt.UTC().Truncate(time.Second), Result: "fetch_failed"}
+	var cursors []int64
 	if initialized {
-		events, head, err := c.eventsSince(ctx, repo, cursor)
-		if err != nil {
-			if !errors.Is(err, errCursorMissing) {
-				return model.Observation{}, err
-			}
-			result.Resynchronized = true
-			head, err = c.eventHead(ctx, repo)
-			if err != nil {
-				return model.Observation{}, err
+		cursors = append(cursors, cursor)
+	}
+	if checkpoint != nil {
+		cursors = append(cursors, checkpoint.Cursor)
+	}
+	batch, scanErr := c.eventsSince(ctx, repo, cursors...)
+	if scanErr != nil && len(batch.events) == 0 {
+		return result, scanErr
+	}
+	result.Cursor = batch.head
+	result.Resynchronized = initialized && !batch.found[cursor]
+	if initialized && !result.Resynchronized {
+		for _, raw := range batch.events {
+			if raw.ID > cursor {
+				if event, ok := queueEvent(repo, raw); ok {
+					result.Events = append(result.Events, event)
+				}
 			}
 		}
-		result.Events = events
-		result.Cursor = head
-	} else {
+	}
+	completion := result.Completions
+	if scanErr == nil || checkpoint == nil || batch.found[checkpoint.Cursor] {
+		completion = completionObservation(batch, checkpoint, observedAt)
+	}
+	// Repository feed verification also runs when queue reconstruction fails.
+	defer func() {
 		head, err := c.eventHead(ctx, repo)
 		if err != nil {
-			return model.Observation{}, err
+			if observeErr == nil {
+				observeErr = err
+			}
+			return
 		}
-		result.Cursor = head
+		if head != batch.head {
+			result.Completions.Result = "invalid_batch"
+			if observeErr == nil {
+				observeErr = errSnapshotChanged
+			}
+			return
+		}
+		result.Completions = completion
+		if observeErr == nil {
+			result.CurrentVerified = true
+		}
+	}()
+	if scanErr != nil && initialized && !batch.found[cursor] {
+		return result, scanErr
 	}
 	issues, err := c.openIssues(ctx, repo)
 	if err != nil {
-		return model.Observation{}, err
+		return result, err
 	}
 	result.Items, err = c.queueItems(ctx, repo, issues, observedAt, result.Cursor)
 	if err != nil {
-		return model.Observation{}, err
+		return result, err
 	}
-
 	if initialized && !result.Resynchronized {
 		result.Events, err = c.resolveEvents(ctx, repo, result.Events, issues, cursor, result.Cursor, observedAt)
 		if err != nil {
 			if !errors.Is(err, errHistoryIncomplete) {
-				return model.Observation{}, err
+				return result, err
 			}
 			result.Events = nil
 			result.Resynchronized = true
@@ -72,57 +98,97 @@ func (c CLI) Observe(ctx context.Context, repo config.Repository, cursor int64, 
 	}
 	check, err := c.openIssues(ctx, repo)
 	if err != nil {
-		return model.Observation{}, err
+		return result, err
 	}
-	head, err := c.eventHead(ctx, repo)
-	if err != nil {
-		return model.Observation{}, err
+	if !reflect.DeepEqual(issues, check) {
+		return result, errSnapshotChanged
 	}
-	if head != result.Cursor || !reflect.DeepEqual(issues, check) {
-		return model.Observation{}, errSnapshotChanged
-	}
-	result.CurrentVerified = true
 	return result, nil
 }
 
-func (c CLI) eventsSince(ctx context.Context, repo config.Repository, cursor int64) ([]model.QueueEvent, int64, error) {
-	var result []model.QueueEvent
-	head := cursor
+type repositoryEvents struct {
+	events []rawEvent
+	head   int64
+	found  map[int64]bool
+}
+
+func (c CLI) eventsSince(ctx context.Context, repo config.Repository, cursors ...int64) (repositoryEvents, error) {
+	result := repositoryEvents{found: map[int64]bool{}}
 	for page := 1; page <= maxEventPages; page++ {
 		events, err := c.eventPage(ctx, repo, page)
 		if err != nil {
-			return nil, cursor, err
+			return result, err
 		}
-		if page == 1 {
-			for _, event := range events {
-				if event.ID > head {
-					head = event.ID
-				}
-			}
-		}
-		found := false
+		result.events = append(result.events, events...)
 		for _, event := range events {
-			if event.ID == cursor {
-				found = true
-				break
+			if page == 1 && event.ID > result.head {
+				result.head = event.ID
 			}
-			if event.ID > cursor {
-				if converted, ok := queueEvent(repo, event); ok {
-					result = append(result, converted)
+			for _, cursor := range cursors {
+				if event.ID == cursor {
+					result.found[cursor] = true
 				}
 			}
-		}
-		if found {
-			return result, head, nil
 		}
 		if len(events) < 100 {
-			if cursor == 0 {
-				return result, head, nil
+			result.found[0] = true
+		}
+		found := true
+		for _, cursor := range cursors {
+			if !result.found[cursor] {
+				found = false
 			}
-			return nil, cursor, fmt.Errorf("%w: %d for %s", errCursorMissing, cursor, repo.Name)
+		}
+		if found || len(events) < 100 {
+			break
 		}
 	}
-	return nil, cursor, fmt.Errorf("%w: %d within %d pages for %s", errCursorMissing, cursor, maxEventPages, repo.Name)
+	return result, nil
+}
+
+func completionObservation(batch repositoryEvents, checkpoint *model.CompletionCheckpoint, at time.Time) model.CompletionObservation {
+	at = at.UTC().Truncate(time.Second)
+	result := model.CompletionObservation{At: at.UTC(), Cursor: batch.head, Result: "invalid_batch"}
+	if checkpoint != nil {
+		result.FromCursor = checkpoint.Cursor
+		result.Continuous = batch.found[checkpoint.Cursor]
+		if batch.head < checkpoint.Cursor || at.Before(checkpoint.At) {
+			return result
+		}
+	}
+	seen := map[int64]rawEvent{}
+	var previous rawEvent
+	for _, event := range batch.events {
+		if checkpoint != nil && result.Continuous && event.ID < checkpoint.Cursor {
+			continue
+		}
+		if prior, ok := seen[event.ID]; ok {
+			if !reflect.DeepEqual(prior, event) {
+				return result
+			}
+			continue
+		}
+		if event.ID <= 0 || event.ID > batch.head || event.CreatedAt.IsZero() || event.CreatedAt.After(at) || (previous.ID != 0 && (event.ID > previous.ID || event.CreatedAt.After(previous.CreatedAt))) {
+			return result
+		}
+		if checkpoint != nil && event.ID > checkpoint.Cursor && event.CreatedAt.Before(checkpoint.At) {
+			return result
+		}
+		if event.Event == "labeled" && (event.Issue.Number <= 0 || strings.TrimSpace(event.Label.Name) == "") {
+			return result
+		}
+		seen[event.ID] = event
+		previous = event
+		if event.Event == "labeled" && event.Issue.PullRequest == nil {
+			result.Events = append(result.Events, model.CompletionLabelEvent{CompletionEvent: model.CompletionEvent{ID: event.ID, IssueNumber: event.Issue.Number, At: event.CreatedAt.UTC()}, Label: event.Label.Name})
+		}
+	}
+	result.Verified = true
+	result.Result = "verified"
+	if checkpoint != nil && !result.Continuous {
+		result.Result = "cursor_missing"
+	}
+	return result
 }
 
 func (c CLI) eventHead(ctx context.Context, repo config.Repository) (int64, error) {
