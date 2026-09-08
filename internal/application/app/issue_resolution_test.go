@@ -893,6 +893,15 @@ esac
 	}
 }
 
+func failIssueResolutionPathGit(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func runIssueGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	output, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
@@ -941,7 +950,7 @@ func containsReason(reasons []string, target string) bool {
 }
 
 func TestAdoptHeadPreservesCheckpointAndRequiresExactEvidence(t *testing.T) {
-	for _, scenario := range []string{"valid", "wrong-head", "changed-content", "existing-head", "published", "missing-session", "worker-pid", "missing-expected-head"} {
+	for _, scenario := range []string{"valid", "path-git-fails", "wrong-head", "changed-content", "existing-head", "published", "missing-session", "worker-pid", "missing-expected-head"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newIssueResolutionFixture(t, 459, "OPEN", nil)
 			runIssueGit(t, f.worktree, "push", "origin", "--delete", f.branch)
@@ -987,6 +996,9 @@ func TestAdoptHeadPreservesCheckpointAndRequiresExactEvidence(t *testing.T) {
 			if scenario == "missing-expected-head" {
 				expected = ""
 			}
+			if scenario == "path-git-fails" {
+				failIssueResolutionPathGit(t)
+			}
 			var out, stderr bytes.Buffer
 			a := App{Out: &out, Err: &stderr}
 			code := a.Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "adopt-head", "--expected-head", expected, "--json"})
@@ -994,7 +1006,7 @@ func TestAdoptHeadPreservesCheckpointAndRequiresExactEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if scenario != "valid" {
+			if scenario != "valid" && scenario != "path-git-fails" {
 				if code == 0 || !reflect.DeepEqual(before, after) {
 					t.Fatalf("refusal code=%d changed=%v stderr=%s", code, !reflect.DeepEqual(before, after), stderr.String())
 				}

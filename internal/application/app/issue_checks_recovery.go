@@ -36,11 +36,11 @@ func (a App) inspectChecksRecovery(ctx context.Context, l layout.Layout, p issue
 	if p.workerLive || p.snapshot.ActiveExecution != nil {
 		action.Reasons = append(action.Reasons, "repository execution is occupied")
 	}
-	manager := worktree.Manager{StateRoot: l.Root}
+	manager := worktree.Manager{StateRoot: l.Root, GitPath: p.gitPath}
 	p.launch, p.launchErr = manager.ValidateLaunch(ctx, p.cfg, item.Worktree, item.Branch)
 	p.inspection, p.inspectErr = manager.Inspect(ctx, p.cfg, item.Worktree, item.Branch)
 	p.worktreeSHA256, p.worktreeDigestErr = manager.ContentDigest(ctx, item.Worktree)
-	p.baseOK, p.baseErr = checkpointBaseAncestor(ctx, "git", item, p.inspection)
+	p.baseOK, p.baseErr = checkpointBaseAncestor(ctx, p.gitPath, item, p.inspection)
 	client := gh.CLI{Path: p.ghPath, Secrets: p.cfg.RedactionValues()}
 	p.remote, p.remoteErr = client.Inspect(ctx, p.cfg, item.Number, item.Branch)
 	headContained, ancestryErr := client.IsCommitAncestor(ctx, p.cfg, p.inspection.Head, item.HeadSHA)

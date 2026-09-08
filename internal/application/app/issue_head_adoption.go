@@ -29,7 +29,7 @@ func missingResumeHead(item *state.Issue) bool {
 }
 
 func verifyAdoptedHead(ctx context.Context, planned issuePlanningContext, head, root string) error {
-	manager := worktree.Manager{StateRoot: root}
+	manager := worktree.Manager{StateRoot: root, GitPath: planned.gitPath}
 	inspection, err := manager.Inspect(ctx, planned.cfg, planned.issue.Worktree, planned.issue.Branch)
 	if err != nil || !inspection.Valid || inspection.Head != head || inspection.RemoteHead != "" || inspection.Branch != planned.issue.Branch {
 		return fmt.Errorf("worktree HEAD changed before adoption")
@@ -68,8 +68,8 @@ func publicationCheckpointHeadRepair(ctx context.Context, cfg config.Config, ghP
 
 func verifyRecoveryWorkspace(ctx context.Context, planned issuePlanningContext, root string) error {
 	item := planned.issue
-	head, headErr := exec.CommandContext(ctx, "git", "-C", item.Worktree, "rev-parse", "HEAD").Output()
-	manager := worktree.Manager{StateRoot: root}
+	head, headErr := exec.CommandContext(ctx, planned.gitPath, "-C", item.Worktree, "rev-parse", "HEAD").Output()
+	manager := worktree.Manager{StateRoot: root, GitPath: planned.gitPath}
 	digest, digestErr := manager.ContentDigest(ctx, item.Worktree)
 	if headErr != nil || digestErr != nil || strings.TrimSpace(string(head)) != planned.inspection.Head || digest != planned.worktreeSHA256 {
 		return fmt.Errorf("Issue #%d workspace evidence changed before recovery", item.Number)
