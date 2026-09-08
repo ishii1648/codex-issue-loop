@@ -160,7 +160,7 @@ test('JST dates, details and custom bounds are independent of the browser timezo
       assert.match(html,/状態開始: 2026-09-06 23:59:50 JST/);
       assert.match(html,/最終観測: 2026-09-07 00:00:00 JST/);
       assert.match(html,/queue期限: 2026-09-07 00:30:00 JST/);
-      assert.match(html,/期限 2026-09-07 01:00:00 JST/);
+      assert.match(html,/個別参考期限（全体判定には不使用） 2026-09-07 01:00:00 JST/);
       assert.match(html,/title="正常 · 2026-09-06 00:00:00 JST → 2026-09-06 06:00:00 JST"/);
       assert.match(html,/<span>09-06 00:00 JST<\/span><span>09-07 00:00 JST<\/span>/);
       nodes.window.value='custom'; nodes.window.change();
@@ -172,6 +172,10 @@ test('JST dates, details and custom bounds are independent of the browser timezo
       assert.equal(query.get('to'),'2026-09-06T15:00:00.000Z');
       assert.ok(f.urls.includes(timeline.replace('/api/timeline','/api/report')));
       assert.equal(classes.has('expired'),false);
+      f.state = 'UNKNOWN'; f.queueDeadline = '0001-01-01T00:00:00Z';
+      await refresh();
+      assert.match(nodes.repos.innerHTML,/queue期限: —/);
+      assert.doesNotMatch(nodes.repos.innerHTML,/0001-01-01/);
     }
   } finally {
     if (previousTZ === undefined) delete process.env.TZ;

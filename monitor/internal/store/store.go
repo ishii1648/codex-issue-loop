@@ -39,7 +39,7 @@ func (s Store) Load(repository string) (*model.Snapshot, error) {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return nil, fmt.Errorf("decode monitor current state: %w", err)
 	}
-	if snapshot.SchemaVersion != model.SchemaVersion || snapshot.Repository != repository {
+	if snapshot.SchemaVersion != model.SchemaVersion || snapshot.Repository != repository || snapshot.DecisionVersion > model.DecisionVersion {
 		return nil, fmt.Errorf("monitor current state identity or schema mismatch")
 	}
 	return &snapshot, nil

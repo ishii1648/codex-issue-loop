@@ -227,7 +227,7 @@ func TestUnknownRecoveryWithOverdueQueueAndNewEvents(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if next.Current.Status != model.Down || !next.Current.StartedAt.Equal(base.Add(2*time.Minute)) || !next.QueueDeadline.Equal(old.Deadline) || next.EventCursor != 2 {
+		if next.Current.Status != model.Unknown || !next.Current.StartedAt.Equal(base) || !next.QueueDeadline.IsZero() || next.EventCursor != 2 {
 			t.Fatalf("next=%+v", next)
 		}
 	}
@@ -235,7 +235,7 @@ func TestUnknownRecoveryWithOverdueQueueAndNewEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 2 || history[0].Status != model.Unknown || !history[0].StartedAt.Equal(base) || !history[0].EndedAt.Equal(base.Add(2*time.Minute)) {
+	if len(history) != 1 || history[0].Status != model.Unknown || !history[0].StartedAt.Equal(base) || !history[0].EndedAt.IsZero() {
 		t.Fatalf("history=%+v", history)
 	}
 }

@@ -151,9 +151,9 @@ func TestVerifiedCurrentResynchronization(t *testing.T) {
 		want                  model.Status
 	}{
 		{"empty", `[]`, `[]`, model.Idle},
-		{"expired", `[{"number":459,"state":"open","labels":[{"name":"ready"}]}]`, `[{"id":2,"event":"labeled","label":{"name":"ready"},"created_at":"2026-09-06T10:00:00Z"}]`, model.Down},
+		{"expired", `[{"number":459,"state":"open","labels":[{"name":"ready"}]}]`, `[{"id":2,"event":"labeled","label":{"name":"ready"},"created_at":"2026-09-06T10:00:00Z"}]`, model.Healthy},
 		{"unproven", `[{"number":459,"state":"open","labels":[{"name":"ready"}]}]`, `[]`, model.Unknown},
-		{"reopened", `[{"number":459,"state":"open","labels":[{"name":"running"}]}]`, `[{"id":2,"event":"labeled","label":{"name":"running"},"created_at":"2026-09-06T10:00:00Z"},{"id":3,"event":"closed","created_at":"2026-09-06T10:01:00Z"},{"id":4,"event":"reopened","created_at":"2026-09-06T10:02:00Z"}]`, model.Healthy},
+		{"reopened", `[{"number":459,"state":"open","labels":[{"name":"running"}]}]`, `[{"id":2,"event":"labeled","label":{"name":"running"},"created_at":"2026-09-06T10:00:00Z"},{"id":3,"event":"closed","created_at":"2026-09-06T10:01:00Z"},{"id":4,"event":"reopened","created_at":"2026-09-06T10:02:00Z"}]`, model.Unknown},
 		{"blocked", `[{"number":459,"state":"open","labels":[{"name":"ready"}]}]`, `[{"id":2,"event":"labeled","label":{"name":"ready"},"created_at":"2026-09-06T10:00:00Z"},{"id":3,"event":"labeled","label":{"name":"blocked"},"created_at":"2026-09-06T10:01:00Z"},{"id":4,"event":"unlabeled","label":{"name":"blocked"},"created_at":"2026-09-06T10:02:00Z"}]`, model.Down},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,13 +210,17 @@ esac
 				if err != nil {
 					t.Fatal(err)
 				}
-				if next.Current.Status != tc.want || next.EventCursor != 4 {
+				want := tc.want
+				if tc.name == "expired" && poll > 0 {
+					want = model.Down
+				}
+				if next.Current.Status != want || next.EventCursor != 4 {
 					t.Fatalf("next=%+v", next)
 				}
 				if poll == 0 && tc.want != model.Unknown && (len(closed) != 1 || closed[0].Status != model.Unknown || !closed[0].EndedAt.Equal(at)) {
 					t.Fatalf("closed=%+v", closed)
 				}
-				if tc.name == "expired" && !next.QueueDeadline.Equal(base.Add(time.Minute)) {
+				if tc.name == "expired" && !next.QueueDeadline.Equal(base.Add(11*time.Minute)) {
 					t.Fatalf("deadline=%s", next.QueueDeadline)
 				}
 				if err := disk.Commit(next, closed); err != nil {
@@ -345,8 +349,8 @@ esac
 					want = model.Unknown
 				}
 				if mode == "expired current" {
-					want = model.Down
-					if !next.QueueDeadline.Equal(base.Add(-50 * time.Minute)) {
+					want = model.Healthy
+					if !next.QueueDeadline.Equal(base.Add(11 * time.Minute)) {
 						t.Fatalf("deadline=%s", next.QueueDeadline)
 					}
 				}
@@ -365,7 +369,7 @@ esac
 	}
 }
 
-func TestSamePhaseRelabelStartsNewWindow(t *testing.T) {
+func TestSamePhaseRelabelPreservesWindow(t *testing.T) {
 	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
 	for _, phase := range []model.Phase{model.Ready, model.Running} {
 		t.Run(string(phase), func(t *testing.T) {
@@ -388,16 +392,8 @@ func TestSamePhaseRelabelStartsNewWindow(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(events) != 3 {
-				t.Fatalf("events=%+v", events)
-			}
-			for i, want := range []model.EventKind{kind, model.QueueExited, kind} {
-				if events[i].Kind != want || !events[i].At.Equal(times[2-i]) {
-					t.Fatalf("events=%+v", events)
-				}
-			}
-			if !since.Equal(times[2]) {
-				t.Fatalf("since=%s", since)
+			if len(events) != 1 || events[0].Kind != kind || !events[0].At.Equal(base) || !since.Equal(base) {
+				t.Fatalf("events=%+v since=%s", events, since)
 			}
 			previous, _, err := model.Apply(nil, model.Observation{Repository: repo.Name, ObservedAt: base, Cursor: 1, CursorInitialized: true,
 				Items: []model.QueueItem{{Number: 1, Phase: phase, PhaseSince: base, Deadline: base.Add(10 * time.Minute)}}})
@@ -409,11 +405,12 @@ func TestSamePhaseRelabelStartsNewWindow(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(closed) != 2 || closed[0].Status != model.Healthy || !closed[0].StartedAt.Equal(base) || !closed[0].EndedAt.Equal(times[1]) || closed[1].Status != model.Idle || !closed[1].StartedAt.Equal(times[1]) || !closed[1].EndedAt.Equal(times[2]) {
-				t.Fatalf("closed=%+v", closed)
-			}
-			if next.Current.Status != model.Healthy || !next.Current.StartedAt.Equal(times[2]) || !next.QueueDeadline.Equal(times[2].Add(10*time.Minute)) {
-				t.Fatalf("next=%+v", next)
+			if phase == model.Ready {
+				if next.Current.Status != model.Down || !next.QueueDeadline.Equal(base.Add(10*time.Minute)) || len(closed) != 1 || !closed[0].EndedAt.Equal(base.Add(10*time.Minute)) {
+					t.Fatalf("next=%+v closed=%+v", next, closed)
+				}
+			} else if next.Current.Status != model.Unknown || !next.QueueDeadline.IsZero() || len(closed) != 0 {
+				t.Fatalf("next=%+v closed=%+v", next, closed)
 			}
 		})
 	}

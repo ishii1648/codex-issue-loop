@@ -85,7 +85,8 @@
           "valueSize": 24,
           "titleSize": 12
         }
-      }
+      },
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 3,
@@ -343,7 +344,8 @@
           "valueSize": 16,
           "titleSize": 12
         }
-      }
+      },
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 8,
@@ -439,7 +441,8 @@
           "valueSize": 16,
           "titleSize": 12
         }
-      }
+      },
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 10,
@@ -535,7 +538,8 @@
           "valueSize": 16,
           "titleSize": 12
         }
-      }
+      },
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 12,
@@ -636,11 +640,12 @@
             }
           }
         }
-      ]
+      ],
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 13,
-      "title": "DOWN理由・対象Issue / 最終取得時の詳細",
+      "title": "状態理由・queue / 個別期限は参考情報",
       "type": "table",
       "gridPos": {
         "x": 0,
@@ -820,7 +825,8 @@
             }
           }
         }
-      ]
+      ],
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 14,
@@ -896,7 +902,8 @@
           "valueSize": 24,
           "titleSize": 12
         }
-      }
+      },
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 15,
@@ -1154,7 +1161,8 @@
           "valueSize": 16,
           "titleSize": 12
         }
-      }
+      },
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 20,
@@ -1250,7 +1258,8 @@
           "valueSize": 16,
           "titleSize": 12
         }
-      }
+      },
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 22,
@@ -1346,7 +1355,8 @@
           "valueSize": 16,
           "titleSize": 12
         }
-      }
+      },
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 24,
@@ -1447,11 +1457,12 @@
             }
           }
         }
-      ]
+      ],
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     },
     {
       "id": 25,
-      "title": "DOWN理由・対象Issue / 最終取得時の詳細",
+      "title": "状態理由・queue / 個別期限は参考情報",
       "type": "table",
       "gridPos": {
         "x": 12,
@@ -1631,7 +1642,8 @@
             }
           }
         }
-      ]
+      ],
+      "description": "キュー全体の処理進行を表示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningの進捗証拠の期限切れと旧契約の時間はUNKNOWNです。"
     }
   ],
   "tags": [

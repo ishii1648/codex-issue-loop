@@ -3,6 +3,7 @@ package model
 import "time"
 
 const SchemaVersion = 1
+const DecisionVersion = 2
 
 type Status string
 
@@ -60,15 +61,18 @@ type Observation struct {
 }
 
 type Interval struct {
-	ID         string    `json:"id"`
-	Repository string    `json:"repository"`
-	Status     Status    `json:"status"`
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
+	DecisionVersion int       `json:"decision_version,omitempty"`
+	ID              string    `json:"id"`
+	Repository      string    `json:"repository"`
+	Status          Status    `json:"status"`
+	StartedAt       time.Time `json:"started_at"`
+	EndedAt         time.Time `json:"ended_at,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
 }
 
 type Snapshot struct {
+	DecisionVersion        int         `json:"decision_version,omitempty"`
+	DecisionSince          time.Time   `json:"decision_since,omitempty"`
 	SchemaVersion          int         `json:"schema_version"`
 	Repository             string      `json:"repository"`
 	Current                Interval    `json:"current"`

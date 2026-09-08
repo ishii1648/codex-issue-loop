@@ -14,8 +14,8 @@ func TestEvaluateFourStatesAndDeadlineBoundary(t *testing.T) {
 		start time.Time
 	}{
 		{name: "idle", obs: Observation{ObservedAt: now}, want: Idle, start: now},
-		{name: "healthy", obs: Observation{ObservedAt: now, Items: []QueueItem{{Number: 1, Phase: Ready, PhaseSince: now.Add(-time.Minute), Deadline: now.Add(time.Minute)}}}, want: Healthy, start: now.Add(-time.Minute)},
-		{name: "deadline is down", obs: Observation{ObservedAt: now, Items: []QueueItem{{Number: 1, Phase: Running, PhaseSince: now.Add(-time.Hour), Deadline: now}}}, want: Down, start: now},
+		{name: "healthy", obs: Observation{ObservedAt: now, Items: []QueueItem{{Number: 1, Phase: Ready, PhaseSince: now.Add(-time.Minute), Deadline: now.Add(time.Minute)}}}, want: Healthy, start: now},
+		{name: "running deadline cannot prove down", obs: Observation{ObservedAt: now, Items: []QueueItem{{Number: 1, Phase: Running, PhaseSince: now.Add(-time.Hour), Deadline: now}}}, want: Unknown, start: now},
 		{name: "missing history", obs: Observation{ObservedAt: now, Items: []QueueItem{{Number: 1, Phase: Ready}}}, want: Unknown, start: now},
 		{name: "observation failure", obs: Observation{ObservedAt: now, Error: "unavailable"}, want: Unknown, start: now},
 	}
@@ -39,10 +39,10 @@ func TestApplyStartsDownAtDeadlineAndRecoversAtProgressEvent(t *testing.T) {
 	overdue := healthy
 	overdue.ObservedAt = base.Add(20 * time.Minute)
 	current, closed, err = Apply(&current, overdue)
-	if err != nil || current.Current.Status != Down || !current.Current.StartedAt.Equal(base.Add(10*time.Minute)) {
+	if err != nil || current.Current.Status != Down || !current.Current.StartedAt.Equal(base.Add(11*time.Minute)) {
 		t.Fatalf("deadline transition: state=%+v err=%v", current, err)
 	}
-	if len(closed) != 1 || closed[0].Status != Healthy || !closed[0].EndedAt.Equal(base.Add(10*time.Minute)) {
+	if len(closed) != 1 || closed[0].Status != Healthy || !closed[0].EndedAt.Equal(base.Add(11*time.Minute)) {
 		t.Fatalf("closed healthy interval = %+v", closed)
 	}
 	recoveredAt := base.Add(21 * time.Minute)
@@ -74,10 +74,10 @@ func TestApplyObservationFailureDoesNotBecomeHealthy(t *testing.T) {
 func TestBuildReportExcludesIdleAndUnknownFromDemandAvailability(t *testing.T) {
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	intervals := []Interval{
-		{Status: Idle, StartedAt: base, EndedAt: base.Add(10 * time.Second)},
-		{Status: Healthy, StartedAt: base.Add(10 * time.Second), EndedAt: base.Add(40 * time.Second)},
-		{Status: Down, StartedAt: base.Add(40 * time.Second), EndedAt: base.Add(50 * time.Second)},
-		{Status: Unknown, StartedAt: base.Add(50 * time.Second), EndedAt: base.Add(time.Minute)},
+		{DecisionVersion: DecisionVersion, Status: Idle, StartedAt: base, EndedAt: base.Add(10 * time.Second)},
+		{DecisionVersion: DecisionVersion, Status: Healthy, StartedAt: base.Add(10 * time.Second), EndedAt: base.Add(40 * time.Second)},
+		{DecisionVersion: DecisionVersion, Status: Down, StartedAt: base.Add(40 * time.Second), EndedAt: base.Add(50 * time.Second)},
+		{DecisionVersion: DecisionVersion, Status: Unknown, StartedAt: base.Add(50 * time.Second), EndedAt: base.Add(time.Minute)},
 	}
 	report := BuildReport("owner/repo", intervals, base, base.Add(time.Minute))
 	if report.DemandAvailability == nil || *report.DemandAvailability != 0.75 {
