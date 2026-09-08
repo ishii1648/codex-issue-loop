@@ -236,16 +236,6 @@ func (r *replayState) applyEvent(event QueueEvent, acceptanceTimeout, processing
 		r.snapshot.Queue = upsertQueue(r.snapshot.Queue, index, QueueItem{Number: event.IssueNumber, Phase: Ready, PhaseSince: event.At, Deadline: event.At.Add(acceptanceTimeout)})
 	case RunningLabeled:
 		r.snapshot.Queue = upsertQueue(r.snapshot.Queue, index, QueueItem{Number: event.IssueNumber, Phase: Running, PhaseSince: event.At, Deadline: event.At.Add(processingTimeout)})
-	case ReadyUnlabeled:
-		if index >= 0 && r.snapshot.Queue[index].Phase == Ready {
-			removedPhase = Ready
-			r.snapshot.Queue = append(r.snapshot.Queue[:index], r.snapshot.Queue[index+1:]...)
-		}
-	case RunningUnlabeled:
-		if index >= 0 && r.snapshot.Queue[index].Phase == Running {
-			removedPhase = Running
-			r.snapshot.Queue = append(r.snapshot.Queue[:index], r.snapshot.Queue[index+1:]...)
-		}
 	case QueueExited:
 		if index >= 0 {
 			removedPhase = r.snapshot.Queue[index].Phase
