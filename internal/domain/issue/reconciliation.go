@@ -7,25 +7,16 @@ import (
 )
 
 type ReconciliationState struct {
-	Number                     int
-	RunID                      string
-	Generation                 uint64
-	Status                     Status
-	LastError                  string
-	Branch                     string
-	PullRequest                string
-	PullRequestNumber          int
-	HeadSHA                    string
-	Effect                     EffectKind
-	RetryAt                    *time.Time
-	WorkerPID                  int
-	WorkerPGID                 int
-	PullRequestMerged          bool
-	WorktreeSaved              bool
-	PendingRequest             bool
-	ActiveExecutionIssueNumber int
-	ActiveExecutionRunID       string
-	ActiveExecutionGeneration  uint64
+	Status            Status
+	LastError         string
+	Branch            string
+	PullRequest       string
+	Effect            EffectKind
+	RetryAt           *time.Time
+	WorkerPID         int
+	WorkerPGID        int
+	PullRequestMerged bool
+	WorktreeSaved     bool
 }
 
 type ReconciliationPullRequest struct {
@@ -47,24 +38,10 @@ type ReconciliationWorkspace struct {
 }
 
 type ReconciliationObservation struct {
-	Now                  time.Time
-	IssueOpen            bool
-	IssueClosed          bool
-	Ready                bool
-	Running              bool
-	NeedsInput           bool
-	Done                 bool
-	Failed               bool
-	Excluded             bool
-	OnlyBlockedExclusion bool
-	ManualExclusion      bool
-	DoneMarker           bool
-	FailedMarker         bool
-	PendingRequestMarker bool
-	PullRequests         []ReconciliationPullRequest
-	Workspace            ReconciliationWorkspace
-	WorkerAlive          bool
-	IssueStateReason     string
+	Now          time.Time
+	PullRequests []ReconciliationPullRequest
+	Workspace    ReconciliationWorkspace
+	WorkerAlive  bool
 }
 
 type ReconciliationDecision struct {
@@ -77,7 +54,6 @@ type ReconciliationDecision struct {
 	WorkerPID         int
 	WorkerPGID        int
 	PullRequestMerged bool
-	MarkRunning       bool
 	Reason            string
 }
 

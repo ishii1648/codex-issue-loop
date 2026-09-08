@@ -44,7 +44,6 @@ type reconciliationDecision struct {
 	workerPID   int
 	workerPGID  int
 	prMerged    bool
-	markRunning bool
 	reason      string
 }
 
@@ -418,7 +417,7 @@ func (l *Loop) decideReconciliation(snapshot state.Snapshot, current state.Issue
 		status: decision.Status, lastError: decision.LastError, branch: decision.Branch,
 		pullRequest: decision.PullRequest, prNumber: prNumber, headSHA: headSHA, effect: decision.Effect, retryAt: decision.RetryAt,
 		workerPID: decision.WorkerPID, workerPGID: decision.WorkerPGID, prMerged: decision.PullRequestMerged,
-		markRunning: decision.MarkRunning, reason: decision.Reason,
+		reason: decision.Reason,
 	}
 }
 
@@ -433,38 +432,21 @@ func reconciledPullRequestIdentity(pullRequests []gh.PullRequest, url string) (i
 
 func (l *Loop) reconciliationInputs(snapshot state.Snapshot, current state.Issue, remote gh.RemoteState, inspection worktree.Inspection) (issuedomain.ReconciliationState, issuedomain.ReconciliationObservation) {
 	currentState := issuedomain.ReconciliationState{
-		Number: current.Number, RunID: current.RunID, Generation: current.Generation,
 		Status: current.Status, LastError: current.LastError, Branch: current.Branch,
-		PullRequest: current.PullRequestURL, PullRequestNumber: current.PullRequestNumber, HeadSHA: current.HeadSHA,
-		Effect: issuedomain.EffectNone, RetryAt: current.RetryAfter,
+		PullRequest: current.PullRequestURL,
+		Effect:      issuedomain.EffectNone, RetryAt: current.RetryAfter,
 		WorkerPID: current.WorkerPID, WorkerPGID: current.WorkerPGID, PullRequestMerged: current.PullRequestMerged,
-		WorktreeSaved: current.Worktree != "", PendingRequest: pendingRequest(snapshot, current.Number) != nil,
-	}
-	if active := snapshot.ActiveExecution; active != nil {
-		currentState.ActiveExecutionIssueNumber = active.IssueNumber
-		currentState.ActiveExecutionRunID = active.RunID
-		currentState.ActiveExecutionGeneration = active.Generation
+		WorktreeSaved: current.Worktree != "",
 	}
 	if effect := state.PendingEffect(&snapshot, current.Number); effect != nil {
 		currentState.Effect = effect.Kind
 	}
-	labels := labelSet(remote.Issue.Labels)
 	observation := issuedomain.ReconciliationObservation{
-		Now: l.now(), IssueOpen: strings.EqualFold(remote.Issue.State, "open"), IssueClosed: strings.EqualFold(remote.Issue.State, "closed"),
-		IssueStateReason: remote.Issue.StateReason,
-		Ready:            hasAnyLabel(labels, l.Config.GitHub.ReadyLabels), Running: labels[l.Config.GitHub.RunningLabel],
-		NeedsInput: labels[l.Config.GitHub.NeedsInputLabel], Done: labels[l.Config.GitHub.DoneLabel],
-		Failed: labels[l.Config.GitHub.FailedLabel], Excluded: hasAnyLabel(labels, l.Config.GitHub.ExcludeLabels),
-		OnlyBlockedExclusion: l.hasOnlyBlockedExclusion(labels), ManualExclusion: l.hasManualExclusion(remote.Issue, current),
-		DoneMarker:   hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:done -->"),
-		FailedMarker: hasComment(remote.Issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number)),
+		Now: l.now(),
 		Workspace: issuedomain.ReconciliationWorkspace{
 			Exists: inspection.Exists, Valid: inspection.Valid, Branch: inspection.Branch,
 			LocalBranchExists: inspection.LocalBranchExists, RemoteBranchExists: inspection.RemoteBranchExists,
 		},
-	}
-	if request := pendingRequest(snapshot, current.Number); request != nil {
-		observation.PendingRequestMarker = observation.NeedsInput && hasComment(remote.Issue.Comments, "<!-- codex-issue-loop:request:"+request.ID+" -->")
 	}
 	for _, pr := range remote.PullRequests {
 		observation.PullRequests = append(observation.PullRequests, issuedomain.ReconciliationPullRequest{
@@ -480,24 +462,6 @@ func (l *Loop) reconciliationInputs(snapshot state.Snapshot, current state.Issue
 	return currentState, observation
 }
 
-func (l *Loop) hasOnlyBlockedExclusion(labels map[string]bool) bool {
-	if hasAnyLabel(labels, l.Config.GitHub.ReadyLabels) || labels[l.Config.GitHub.RunningLabel] ||
-		labels[l.Config.GitHub.NeedsInputLabel] || labels[l.Config.GitHub.FailedLabel] || labels[l.Config.GitHub.DoneLabel] {
-		return false
-	}
-	blocked := false
-	for _, excluded := range l.Config.GitHub.ExcludeLabels {
-		if !labels[excluded] {
-			continue
-		}
-		if !strings.EqualFold(excluded, "blocked") {
-			return false
-		}
-		blocked = true
-	}
-	return blocked
-}
-
 // decideTerminalPullRequestReconciliation is shared by startup and periodic
 // reconciliation. A terminal Issue only converges from an authoritative merge
 // when the single Pull Request returned for the saved branch is exactly the
@@ -510,23 +474,8 @@ func (l *Loop) decideTerminalPullRequestReconciliation(current state.Issue, remo
 		status: decision.Status, lastError: decision.LastError, branch: decision.Branch,
 		pullRequest: decision.PullRequest, prNumber: prNumber, headSHA: headSHA, effect: decision.Effect, retryAt: decision.RetryAt,
 		workerPID: decision.WorkerPID, workerPGID: decision.WorkerPGID, prMerged: decision.PullRequestMerged,
-		markRunning: decision.MarkRunning, reason: decision.Reason,
+		reason: decision.Reason,
 	}, ok
-}
-
-func (l *Loop) hasManualExclusion(issue gh.Issue, current state.Issue) bool {
-	labels := labelSet(issue.Labels)
-	automationBlocked := hasComment(issue.Comments, fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", current.Number))
-	for _, excluded := range l.Config.GitHub.ExcludeLabels {
-		if !labels[excluded] {
-			continue
-		}
-		if strings.EqualFold(excluded, "blocked") && automationBlocked {
-			continue
-		}
-		return true
-	}
-	return false
 }
 
 // blockDecision is an adapter only; the lifecycle outcome is owned by the
@@ -536,7 +485,7 @@ func blockDecision(decision reconciliationDecision, reason string) reconciliatio
 		Status: decision.status, LastError: decision.lastError, Branch: decision.branch,
 		PullRequest: decision.pullRequest, Effect: decision.effect, RetryAt: decision.retryAt,
 		WorkerPID: decision.workerPID, WorkerPGID: decision.workerPGID, PullRequestMerged: decision.prMerged,
-		MarkRunning: decision.markRunning, Reason: decision.reason,
+		Reason: decision.reason,
 	}, reason)
 	decision.status, decision.lastError, decision.effect = domainDecision.Status, domainDecision.LastError, domainDecision.Effect
 	decision.retryAt, decision.workerPID, decision.workerPGID, decision.reason = domainDecision.RetryAt, domainDecision.WorkerPID, domainDecision.WorkerPGID, domainDecision.Reason
@@ -564,15 +513,6 @@ func labelSet(labels []string) map[string]bool {
 func hasAnyLabel(labels map[string]bool, candidates []string) bool {
 	for _, candidate := range candidates {
 		if labels[candidate] {
-			return true
-		}
-	}
-	return false
-}
-
-func hasComment(comments []string, marker string) bool {
-	for _, comment := range comments {
-		if strings.Contains(comment, marker) {
 			return true
 		}
 	}
