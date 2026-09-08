@@ -58,6 +58,84 @@ func TestArchiveAndReplaceIsRecoverableHistory(t *testing.T) {
 	}
 }
 
+func TestWriterHistoryWithLiteralMetacharacters(t *testing.T) {
+	for _, name := range []string{"proj[wip]", "proj[1", "proj*", "proj?"} {
+		for _, inFilename := range []bool{false, true} {
+			relative := filepath.Join(name, "service.log")
+			if inFilename {
+				relative = name + ".log"
+			}
+			t.Run(relative, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), relative)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("initial!\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				w, err := OpenWriter(path, Policy{MaxBytes: 8, MaxAge: time.Hour, Keep: 2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = w.Close() })
+				var initial bytes.Buffer
+				if err := WriteHistory(&initial, path); err != nil || initial.String() != "initial!\n" {
+					t.Fatalf("initial history=%q err=%v", initial.String(), err)
+				}
+				for _, value := range []string{"first\n", "second\n", "third\n", "fourth\n"} {
+					if _, err := w.Write([]byte(value)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := w.Close(); err != nil {
+					t.Fatal(err)
+				}
+				entries, err := os.ReadDir(filepath.Dir(path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 3 {
+					t.Fatalf("expected active log and two archives, got %v", entries)
+				}
+				var history bytes.Buffer
+				if err := WriteHistory(&history, path); err != nil || history.String() != "second\nthird\nfourth\n" {
+					t.Fatalf("history=%q err=%v", history.String(), err)
+				}
+			})
+		}
+	}
+}
+
+func TestWriteHistoryMissingDirectory(t *testing.T) {
+	var history bytes.Buffer
+	if err := WriteHistory(&history, filepath.Join(t.TempDir(), "missing", "service.log")); err != nil {
+		t.Fatal(err)
+	}
+	if history.Len() != 0 {
+		t.Fatalf("history=%q", history.String())
+	}
+}
+
+func TestArchivesMatchesLiteralFilename(t *testing.T) {
+	dir := t.TempDir()
+	base := "service[1]*?.log"
+	for _, name := range []string{base + ".002.gz", base + ".001.gz", base + ".003.gz.tmp", base + "x.001.gz", "service1ab.log.001.gz"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, base+".000.gz"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	matches, err := archives(filepath.Join(dir, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 3 || matches[0] != filepath.Join(dir, base+".000.gz") || matches[1] != filepath.Join(dir, base+".001.gz") || matches[2] != filepath.Join(dir, base+".002.gz") {
+		t.Fatalf("archives=%v", matches)
+	}
+}
+
 func TestRotateExistingPreservesOpenAppendFile(t *testing.T) {
 	for _, trigger := range []string{"size", "age"} {
 		t.Run(trigger, func(t *testing.T) {

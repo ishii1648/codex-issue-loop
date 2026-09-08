@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -258,9 +259,20 @@ func archive(path string) error {
 }
 
 func archives(path string) ([]string, error) {
-	matches, err := filepath.Glob(path + ".*.gz")
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
+	}
+	prefix := filepath.Base(path) + "."
+	var matches []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) && strings.HasSuffix(entry.Name(), ".gz") {
+			matches = append(matches, filepath.Join(dir, entry.Name()))
+		}
 	}
 	sort.Strings(matches)
 	return matches, nil
