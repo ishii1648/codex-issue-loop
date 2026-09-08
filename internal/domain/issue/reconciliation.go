@@ -186,9 +186,6 @@ func DecideReconciliation(current ReconciliationState, observed ReconciliationOb
 		decision.Effect = EffectMarkDone
 		return decision
 	}
-	if len(open) > 1 {
-		return BlockReconciliation(decision, "multiple open Pull Requests target the saved branch")
-	}
 	if len(open) == 1 {
 		decision.PullRequest = open[0].URL
 		if decision.Branch == "" {

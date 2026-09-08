@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,6 +26,52 @@ func TestLoadSupportsMultipleIsolatedRepositories(t *testing.T) {
 	}
 	if RepoID(cfg.Repositories[0].Name) == RepoID(cfg.Repositories[1].Name) {
 		t.Fatal("repository state directories collide")
+	}
+}
+
+func TestLoadRejectsInvalidLabels(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		labels string
+		want   string
+	}{
+		{"empty exclude", `exclude_labels: [""]`, "labels must not be blank"},
+		{"whitespace exclude", `exclude_labels: [blocked, " \t"]`, "labels must not be blank"},
+		{"ready running", "ready_labels: [ready, shared]\n    running_label: shared", "overlap"},
+		{"ready terminal", "ready_labels: [ready, shared]\n    terminal_labels: [done, shared]", "overlap"},
+		{"running terminal", "running_label: shared\n    terminal_labels: [done, shared]", "overlap"},
+		{"ready exclude", "ready_labels: [ready, shared]\n    exclude_labels: [blocked, shared]", "overlap"},
+		{"running exclude", "running_label: shared\n    exclude_labels: [blocked, shared]", "overlap"},
+		{"ready running case", "ready_labels: [READY]\n    running_label: ready", "overlap"},
+		{"ready terminal case", "ready_labels: [READY]\n    terminal_labels: [ready]", "overlap"},
+		{"running terminal case", "running_label: RUNNING\n    terminal_labels: [running]", "overlap"},
+		{"ready exclude case", "ready_labels: [READY]\n    exclude_labels: [ready]", "overlap"},
+		{"running exclude case", "running_label: RUNNING\n    exclude_labels: [running]", "overlap"},
+		{"default ready", "running_label: CODEX-LOOP:READY", "overlap"},
+		{"default running", "terminal_labels: [CODEX-LOOP:RUNNING]", "overlap"},
+		{"default terminal", "ready_labels: [BLOCKED]", "overlap"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "monitor.yaml")
+			body := "version: 1\nrepositories:\n  - name: owner/repo\n    " + tt.labels + "\n"
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadAllowsTerminalExcludeOverlap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "monitor.yaml")
+	body := "version: 1\nrepositories:\n  - name: owner/repo\n    exclude_labels: [BLOCKED]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
 	}
 }
 

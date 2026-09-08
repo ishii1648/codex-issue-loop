@@ -30,6 +30,44 @@ func validSnapshotForInvariantTest() Snapshot {
 	}
 }
 
+func TestSnapshotValidateSupervisorAndRecoveryVocabulary(t *testing.T) {
+	tests := []struct {
+		name       string
+		supervisor SupervisorState
+		recovery   *Recovery
+		wantError  string
+	}{
+		{name: "empty supervisor"},
+		{name: "starting", supervisor: SupervisorStateStarting},
+		{name: "running", supervisor: SupervisorStateRunning},
+		{name: "polling", supervisor: SupervisorStatePolling},
+		{name: "retry wait", supervisor: SupervisorStateRetryWait},
+		{name: "blocked", supervisor: SupervisorStateBlocked},
+		{name: "stopped", supervisor: SupervisorStateStopped},
+		{name: "maintenance", supervisor: SupervisorStateMaintenance},
+		{name: "draining", supervisor: SupervisorStateDraining},
+		{name: "unknown supervisor", supervisor: "invalid-test-state", wantError: "unknown supervisor state"},
+		{name: "blocked recovery", supervisor: SupervisorStateBlocked, recovery: &Recovery{Status: RecoveryStateBlocked}},
+		{name: "empty recovery", supervisor: SupervisorStateBlocked, recovery: &Recovery{}, wantError: "unknown recovery state"},
+		{name: "unknown recovery", supervisor: SupervisorStateBlocked, recovery: &Recovery{Status: "invalid-test-state"}, wantError: "unknown recovery state"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := validSnapshotForInvariantTest()
+			snapshot.Supervisor.State = test.supervisor
+			snapshot.Recovery = test.recovery
+			err := snapshot.Validate()
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("validation error=%v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestV5DecodeRejectsRemovedRecoveryAxes(t *testing.T) {
 	base, err := json.Marshal(validSnapshotForInvariantTest())
 	if err != nil {

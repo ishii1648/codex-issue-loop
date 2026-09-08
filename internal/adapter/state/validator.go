@@ -31,6 +31,14 @@ func (e SemanticContractVersionError) Error() string {
 // Callers must run it before committing a snapshot and after completing any
 // recovery, migration, or fixture reconstruction.
 func (snapshot Snapshot) Validate() error {
+	if err := snapshot.Supervisor.State.Validate(); err != nil {
+		return err
+	}
+	if snapshot.Recovery != nil {
+		if err := snapshot.Recovery.Status.Validate(); err != nil {
+			return err
+		}
+	}
 	if snapshot.Version != CurrentVersion {
 		return SchemaVersionError{Kind: "state", Version: snapshot.Version}
 	}

@@ -11,7 +11,6 @@ import (
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
-	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
@@ -48,22 +47,13 @@ func normalizeAdoptionAllowPaths(paths []string) ([]string, error) {
 	return result, nil
 }
 
-func missingOnlyWorktreeDigest(item *state.Issue) bool {
-	return item != nil && (item.Status == issuedomain.StatusBlocked || item.Status == issuedomain.StatusFailed) &&
-		item.Continuation != nil && item.Continuation.WorktreeSHA256 == "" && item.ConflictRecovery != nil &&
-		item.Suspension != nil && item.Suspension.Status == issuedomain.SuspensionQuarantined &&
-		item.Suspension.Recoverability == issuedomain.RecoverabilityAmbiguous && item.Suspension.CheckpointID == item.Continuation.ID &&
-		len(item.Suspension.MissingEvidence) == 1 && item.Suspension.MissingEvidence[0] == "worktree_sha256" &&
-		len(item.Suspension.AllowedActions) == 1 && item.Suspension.AllowedActions[0] == issuedomain.ResolutionCancel
-}
-
 func worktreeAdoptionReasons(cfg config.Config, item *state.Issue, launch worktree.LaunchValidation, launchErr error,
 	inspection worktree.Inspection, inspectErr error, worktreeSHA256 string, worktreeDigestErr error,
 	baseOK bool, baseErr error, remote gh.RemoteState, remoteErr error,
 	adoption worktreeAdoptionObservation, adoptionErr error, adoptionAllowPaths []string,
 ) []string {
 	reasons := []string{}
-	if !missingOnlyWorktreeDigest(item) {
+	if !state.CanAdoptWorktree(item) {
 		reasons = append(reasons, "only a quarantined conflict continuation missing worktree_sha256 can be adopted")
 	}
 	if item.WorkerPID != 0 || item.WorkerPGID != 0 {

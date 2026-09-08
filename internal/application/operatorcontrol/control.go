@@ -1,11 +1,8 @@
 package operatorcontrol
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -60,14 +57,14 @@ func (tx Transaction) Active() bool {
 
 func Load(path string) (Transaction, error) {
 	var tx Transaction
-	data, err := readPrivateRegular(path, "operator control transaction")
+	data, err := fsutil.ReadPrivateRegular(path, "operator control transaction")
 	if errors.Is(err, os.ErrNotExist) {
 		return Transaction{Version: 1}, nil
 	}
 	if err != nil {
 		return tx, err
 	}
-	if err := decode(data, &tx); err != nil {
+	if err := fsutil.DecodeStrictJSON(data, &tx); err != nil {
 		return tx, fmt.Errorf("decode operator control transaction: %w", err)
 	}
 	if tx.Version != 1 || tx.Generation == "" || !knownOperation(tx.Operation) || !knownPhase(tx.Phase) || tx.RequestedAt.IsZero() || tx.DrainDeadline.IsZero() {
@@ -94,11 +91,11 @@ func WriteFence(path string, value Fence) error {
 
 func LoadFence(path string) (Fence, error) {
 	var value Fence
-	data, err := readPrivateRegular(path, "operator maintenance fence")
+	data, err := fsutil.ReadPrivateRegular(path, "operator maintenance fence")
 	if err != nil {
 		return value, err
 	}
-	if err := decode(data, &value); err != nil {
+	if err := fsutil.DecodeStrictJSON(data, &value); err != nil {
 		return value, fmt.Errorf("decode operator maintenance fence: %w", err)
 	}
 	if value.Version != 1 || value.Generation == "" || !knownOperation(value.Operation) || value.RequestedAt.IsZero() {
@@ -113,32 +110,6 @@ func ClearFence(path string) error {
 		return nil
 	}
 	return err
-}
-
-func readPrivateRegular(path, name string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file: %s", name, path)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%s is not owner-only: %s", name, path)
-	}
-	return os.ReadFile(path)
-}
-
-func decode(data []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("trailing JSON data")
-	}
-	return nil
 }
 
 func knownOperation(operation Operation) bool {

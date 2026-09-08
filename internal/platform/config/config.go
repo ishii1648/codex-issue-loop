@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -332,13 +333,12 @@ func Load(repoPath string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	f, err := os.Open(filepath.Join(canonical, FileName))
+	data, err := os.ReadFile(filepath.Join(canonical, FileName))
 	if err != nil {
 		return Config{}, fmt.Errorf("open %s: %w", FileName, err)
 	}
-	defer f.Close()
 	cfg := Defaults()
-	decoder := yaml.NewDecoder(f)
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode %s: %w", FileName, err)
@@ -348,6 +348,15 @@ func Load(repoPath string) (Config, error) {
 		return Config{}, fmt.Errorf("decode trailing YAML: %w", err)
 	} else if err == nil {
 		return Config{}, fmt.Errorf("%s must contain one YAML document", FileName)
+	}
+	var supplied struct {
+		Version *int `yaml:"version"`
+	}
+	if err := yaml.Unmarshal(data, &supplied); err != nil {
+		return Config{}, fmt.Errorf("decode %s: %w", FileName, err)
+	}
+	if supplied.Version == nil {
+		return Config{}, fmt.Errorf("config version is required")
 	}
 	if cfg.GitHub.NeedsInputLabel == "codex-loop:needs-input" {
 		cfg.GitHub.NeedsInputLabel = "needs-human"
@@ -610,7 +619,11 @@ func (s SecretSource) Validate(repoPath, field string) error {
 		if !filepath.IsAbs(s.File) {
 			return fmt.Errorf("%s.file must be absolute", field)
 		}
-		if repoPath != "" && (s.File == repoPath || strings.HasPrefix(s.File, repoPath+string(filepath.Separator))) {
+		path := filepath.Clean(s.File)
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		if repoPath != "" && (path == repoPath || strings.HasPrefix(path, repoPath+string(filepath.Separator))) {
 			return fmt.Errorf("%s.file must be outside the repository", field)
 		}
 	}
