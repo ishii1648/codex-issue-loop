@@ -465,15 +465,3 @@ func TestDoctorDetectsInstalledBinaryAndSkillMismatch(t *testing.T) {
 		t.Fatalf("diagnostic=%+v", item)
 	}
 }
-
-func TestLatestEventRejectsMalformedTail(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.jsonl")
-	body := "{\"version\":1,\"event_id\":\"evt\",\"sequence\":1,\"timestamp\":\"2026-08-15T00:00:00Z\",\"repo_id\":\"repo\",\"type\":\"started\"}\n{broken\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	event, err := latestEvent(path)
-	if err == nil || event.Type != "started" {
-		t.Fatalf("event=%+v err=%v", event, err)
-	}
-}

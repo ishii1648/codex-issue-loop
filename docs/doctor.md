@@ -52,8 +52,6 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 | `WEBHOOK_SAFETY_SWEEP_FRESH` / `WEBHOOK_QUEUE_PROGRESSING` | safety sweepと実装queueが観測上正常 | 対応不要 |
 | `GITHUB_REPOSITORY_INACCESSIBLE` | repository参照権限または認証不足 | `gh auth status`とtoken/GitHub App権限を確認 |
 | `GITHUB_LABELS_MISSING` | 必須label不足 | `bootstrap-labels`をpreviewし、確認後に`--apply` |
-| `STATE_MISSING` / `STATE_UNREADABLE` | durable stateがない、または読めない | 再register、所有者・permission確認 |
-| `STATE_CORRUPT` / `EVENT_LOG_INVALID` | stateまたはevent logの破損・不整合 | stopし、state directory全体を削除せずbackupして調査 |
 | `LOG_UNREADABLE` | supervisor logを読めない | logの所有者・permission確認 |
 | `SUPERVISOR_BLOCKED` | supervisor全体障害で停止 | status、stderr log、直近eventを確認し、原因修復後にrestart |
 | `SUPERVISOR_STOPPED` | supervisorが停止中 | 意図した停止か確認後、必要ならstart |
@@ -65,3 +63,9 @@ JSON consumerは`schema_version: 1`を確認し、`diagnostics[].code`と`ok`で
 - Codex CLIは`codex login status`で認証方式を確認し、`codex login`でbrowser flow、headless環境では`codex login --device-auth`を利用できる。[OpenAI Authentication](https://learn.chatgpt.com/docs/auth.md)
 - GitHub CLIは`gh auth status`でactive accountの認証状態を検証し、問題があれば非0で終了する。再認証は`gh auth login`を使う。[gh auth status](https://cli.github.com/manual/gh_auth_status)、[gh auth login](https://cli.github.com/manual/gh_auth_login)
 - Mac miniではSystem SettingsのEnergyから「Prevent automatic sleeping when the display is off」を有効にする。Appleは消費電力が増える点も案内している。[Apple: Set sleep and wake settings for your Mac](https://support.apple.com/en-gb/guide/mac-help/mchle41a6ccd/mac)
+
+`status` と `doctor` の durable state 診断は snapshot/events を既存 writer lock の下で読み、transaction の完了、event tail の切り詰め、隔離、recovery の実行を行わない。writer が lock を保持中、lock が欠損、prepared transaction（不正な内容を含む）、partial event tail の場合は `STATE_UNCONFIRMED` として終了コード1を返す。transaction がある場合は commit の確定を判定せず、修復も rollback もしない。snapshot の欠損は `STATE_MISSING`、整合性違反は `STATE_CORRUPT`、schema/semantic/lifecycle version 非互換は `STATE_VERSION_UNSUPPORTED`、既存 recovery marker は `STATE_RECOVERY_REQUIRED` であり、いずれも正常とは表示しない。正常な durable state の `status` は従来の形式、診断失敗時の JSON は `code`・`ok: false`・`detail` を返す。doctor は同じ診断を `diagnostics` に含め、host schema 検査で検知した `SCHEMA_VERSION_UNSUPPORTED` 等も併記する。
+
+repository assignment がある環境では `~/.agent-loop-delivery.yaml` の対象 assignment、slot manifest と binary SHA-256 を検証し、実行中の管理 CLI の version・commit・digest が一致しなければ `STATE_RUNTIME_INCOMPATIBLE` で非破壊に拒否する。lifecycle API version が一致するだけでは validator の互換性を保証しない。配備の health check 中は、対象 repository の validating transaction・現 assignment の generation/current・maintenance fence・plist がすべて一致する場合に限り、検証済み candidate slot を照合先とする。別 binary は自動実行せず、他 repository の assignment は変更しない。配備設定がない従来環境では、この CLI 自身の snapshot 契約で非破壊に検査する。
+
+旧管理 CLI の `status` には正常な新 snapshot を隔離する版があり、既配布 binary の動作を本修正で変更することはできない。repository assignment の更新は global CLI の更新とは独立しているため、診断前に `command -v agent-loop` と `agent-loop version --json` で管理 CLI を特定し、本修正を含む検証済み版を global CLI にも別途配備する。PATH、alias、監視スクリプトの固定 path に旧版が残っていないことを確認する。assignment runtime を直接使う場合も、本修正を含む版であることと配備情報との一致を確認してから実行する。旧版を新 snapshot に対して実行して安全性を試さない。複数 assignment の版が異なるときは対象ごとの検証済み runtime を使う。supervisor の明示的な recovery は別の操作として扱い、診断失敗を理由に自動再起動・復元を行わない。

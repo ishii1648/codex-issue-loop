@@ -167,9 +167,11 @@ func (a App) Run(ctx context.Context, args []string) int {
 		fmt.Fprintln(a.Err, err)
 		return 1
 	}
-	if err := l.Ensure(); err != nil {
-		fmt.Fprintln(a.Err, err)
-		return 1
+	if args[0] != "status" && args[0] != "doctor" {
+		if err := l.Ensure(); err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
 	}
 	err = a.run(ctx, l, args[0], args[1:])
 	if err == nil {

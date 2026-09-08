@@ -102,6 +102,8 @@ agent-loop start --repo /absolute/path/to/repository --json
 agent-loop status --repo /absolute/path/to/repository --json
 ```
 
+診断前に[管理 CLI と assignment の版確認手順](doctor.md)に従い、global CLI・固定 path・対象 assignment が非破壊診断を含む検証済み版であることを確認する。旧 CLI の `status` は正常な新 snapshot を隔離する場合があり、assignment の更新だけでは global CLI は更新されない。
+
 `doctor`はread-onlyである。`schema_version: 1`、`ok: true`、LaunchAgentのloaded状態、supervisorの状態を確認する。失敗codeに応じた復旧は[doctor診断・復旧runbook](doctor.md)に従い、表示されたremediationを無条件に自動実行しない。
 
 formatterを有効にした場合は`FORMATTER_GO_AVAILABLE`も確認する。`FORMATTER_GO_NOT_REGISTERED`、`FORMATTER_GO_UNAVAILABLE`、`FORMATTER_GO_CAPABILITY_MISSING`ではloopを開始せず、Go toolchainと非対話LaunchAgentのPATHを直してregister、doctorを繰り返す。registerとdoctorは固定sourceをstdinへ渡すread-only probeで実際の整形capabilityも確認する。
