@@ -15,12 +15,13 @@
 確認コマンドは次のとおりです。
 
 ```sh
-agent-loop-monitor run --config ~/.agent-loop-monitor.yaml --once --json
 agent-loop-monitor status --config ~/.agent-loop-monitor.yaml --json
 agent-loop-monitor history --config ~/.agent-loop-monitor.yaml --repo ishii1648/codex-issue-loop --from 2026-09-01T00:00:00Z --json
 agent-loop-monitor report --config ~/.agent-loop-monitor.yaml --from 2026-09-01T00:00:00Z --json
 agent-loop-monitor service status --config ~/.agent-loop-monitor.yaml --json
 ```
+
+手動で`run --once --json`を実行する場合は、先に`service stop --config ~/.agent-loop-monitor.yaml`でmonitorを停止し、確認後に`service start --config ~/.agent-loop-monitor.yaml`で再開します。同じ`state_dir`で別のrunが稼働中の場合は`another monitor is already running`で終了します。読み取りコマンドは稼働中も利用できます。
 
 状態と計算の正本は[specification](docs/specification.md)、境界は[architecture](docs/architecture.md)、導入・復旧は[runbook](docs/runbook.md)を参照してください。
 
