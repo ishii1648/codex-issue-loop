@@ -833,7 +833,7 @@ func TestStartupReconciliationUsesSharedCooldownBeforeGitHub(t *testing.T) {
 	}
 }
 
-func TestStartupReconciliationShortensStaleCooldownWhenRESTHasRemaining(t *testing.T) {
+func TestStartupReconciliationPreservesCooldownWhenRESTHasRemaining(t *testing.T) {
 	now := time.Date(2026, 8, 17, 3, 0, 0, 0, time.UTC)
 	loop, fake := testLoop(t, worker.Result{})
 	loop.Clock = fixedClock{value: now}
@@ -868,7 +868,7 @@ func TestStartupReconciliationShortensStaleCooldownWhenRESTHasRemaining(t *testi
 		t.Fatalf("startup called GitHub before recovered retry deadline: %d", client.inspectCalls)
 	}
 	cooldown, active, err := loop.RateLimits.Current(now)
-	if err != nil || !active || !cooldown.ResetAt.Equal(now.Add(5*time.Second)) || cooldown.Source != "rest-rate-limit-recovered" {
+	if err != nil || !active || !cooldown.ResetAt.Equal(now.Add(time.Hour)) || cooldown.Source != "rest-rate-limit" {
 		t.Fatalf("revalidated cooldown=%+v active=%v err=%v", cooldown, active, err)
 	}
 	if client.statusCalls != 1 {
@@ -1101,6 +1101,115 @@ func TestWebhookTargetedReadsWithRateLimitGate(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestTargetedRESTErrorsWithRateLimitGate(t *testing.T) {
+	for _, operation := range []string{"get", "inspect PR"} {
+		for _, limited := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/rateLimit=%v", operation, limited), func(t *testing.T) {
+				loop, base := testLoop(t, worker.Result{})
+				loop.Config.Webhook.Mode = "webhook"
+				loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+				now := loop.now()
+				loop.Clock = fixedClock{value: now}
+				resetAt := now.Add(time.Hour).Truncate(time.Second)
+				message := "HTTP 503: service unavailable"
+				if limited {
+					message = fmt.Sprintf("API rate limit exceeded; x-ratelimit-reset: %d", resetAt.Unix())
+				}
+				fake := filepath.Join(t.TempDir(), "gh")
+				logPath := filepath.Join(t.TempDir(), "calls")
+				script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+for endpoint do :; done
+if [ %q = 'inspect PR' ]; then
+  case "$endpoint" in
+    */issues/%d) echo '{"number":%d,"state":"open"}'; exit 0 ;;
+    */comments*) echo '[]'; exit 0 ;;
+  esac
+fi
+printf '%%s\n' %q >&2
+exit 1
+`, logPath, operation, base.issue.Number, base.issue.Number, message)
+				if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				loop.GitHub = gh.CLI{Path: fake}
+				loop.enableRateLimitGate()
+				read := func() error {
+					if operation == "get" {
+						_, err := loop.getIssue(context.Background(), base.issue.Number)
+						return err
+					}
+					_, err := loop.inspectIssue(context.Background(), state.Issue{Number: base.issue.Number, PullRequestNumber: 7})
+					return err
+				}
+				err := read()
+				if err == nil || !strings.Contains(err.Error(), message) {
+					t.Fatalf("REST error=%v", err)
+				}
+				rateErr, ok := gh.AsRateLimit(err)
+				if ok != limited {
+					t.Fatalf("rate limit classification=%v, error=%v", ok, err)
+				}
+				if limited && (rateErr.Resource != "core" || !rateErr.ResetAt.Equal(resetAt)) {
+					t.Fatalf("rate limit=%+v", rateErr)
+				}
+				s := &scheduler{loop: loop}
+				if fatal := s.handleCycleError(failure.Wrap(failure.Transient, "read webhook target", err)); fatal != nil {
+					t.Fatal(fatal)
+				}
+				snapshot, err := loop.Store.Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !limited {
+					if snapshot.Supervisor.ConsecutiveFailures != 1 || snapshot.Supervisor.RetryAfter == nil || snapshot.Supervisor.RateLimit != nil {
+						t.Fatalf("supervisor=%+v", snapshot.Supervisor)
+					}
+					return
+				}
+				if !s.rateLimitActive || !s.cooldownUntil.Equal(resetAt) || snapshot.Supervisor.ConsecutiveFailures != 0 || snapshot.Supervisor.RateLimit == nil {
+					t.Fatalf("supervisor=%+v cooldown=%s", snapshot.Supervisor, s.cooldownUntil)
+				}
+				calls, err := os.ReadFile(logPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := gh.AsRateLimit(read()); !ok {
+					t.Fatal("cooldown did not return rate limit error")
+				}
+				after, err := os.ReadFile(logPath)
+				if err != nil || string(after) != string(calls) {
+					t.Fatalf("delegate called during cooldown: %s, err=%v", after, err)
+				}
+				loop.Clock = fixedClock{value: resetAt.Add(time.Second)}
+				if err := read(); err == nil || !strings.Contains(err.Error(), message) {
+					t.Fatalf("resumed REST error=%v", err)
+				}
+				after, err = os.ReadFile(logPath)
+				if err != nil || string(after) != string(calls)+string(calls) {
+					t.Fatalf("REST calls did not resume: %s, err=%v", after, err)
+				}
+			})
+		}
+	}
+}
+
+func TestPollingWithRateLimitGatePreservesNonRESTReads(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+	github := &webhookFakeGitHub{fakeGitHub: base}
+	loop.GitHub = github
+	loop.enableRateLimitGate()
+	issue, err := loop.getIssue(context.Background(), base.issue.Number)
+	if err != nil || issue.Number != base.issue.Number {
+		t.Fatalf("issue=%+v err=%v", issue, err)
+	}
+	_, err = loop.inspectIssue(context.Background(), state.Issue{Number: base.issue.Number, PullRequestNumber: 7})
+	if err != nil || github.inspectCalls != 1 || github.restGets != 0 || github.restInspections != 0 {
+		t.Fatalf("inspections=%d REST gets=%d REST inspections=%d err=%v", github.inspectCalls, github.restGets, github.restInspections, err)
 	}
 }
 
@@ -1919,58 +2028,57 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
 	loop.Random = fixedRandom(0.5)
 	loop.Logger = log.New(io.Discard, "", 0)
+	github.issue.Number = 2
 	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
 	pool := &blockingPoolWorker{started: make(chan int, 3), release: make(chan struct{}, 3)}
 	loop.Worker = pool
+
 	_, err := loop.Store.Update("scheduler_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
-		for number, resource := range map[int]string{1: "one", 2: "two", 3: "three"} {
-			runID := "run_" + resource
-			branch := "codex/issue-1-test"
-			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
-				Number: number, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: runID,
-				Generation: 1, Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_" + resource, CreatedAt: loop.now(), RunID: runID, Generation: 1, Stage: issuedomain.ContinuationStageResume},
-				Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
-				Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
-			}
+		branch := "codex/issue-1-test"
+		snapshot.Issues["1"] = &state.Issue{
+			Number: 1, Title: "Test", Status: issuedomain.StatusRetryWait, RunID: "run_one",
+			Generation: 1, Continuation: &state.ContinuationCheckpoint{ID: "checkpoint_one", CreatedAt: loop.now(), RunID: "run_one", Generation: 1, Stage: issuedomain.ContinuationStageResume},
+			Worktree: loop.Config.RepoPath, Branch: branch, Workspace: fixtureWorkspace(loop, loop.Config.RepoPath, branch),
+			Attempts: 1, ExecutionProfile: "standard", UpdatedAt: loop.now(),
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &scheduler{
-		loop: loop, events: make(chan schedulerEvent, 3), active: map[int]activeJob{},
-		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
-	}
+
+	loop.SchedulerTimers = inertSchedulerTimers{created: make(chan struct{}, 16)}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	result, err := s.schedule(ctx, false)
-	if err != nil || !result.dispatched {
-		t.Fatalf("result=%+v err=%v", result, err)
-	}
-	first := <-pool.started
-	if first != 1 || len(s.active) != 1 {
-		t.Fatalf("started=%d active=%d", first, len(s.active))
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, nil, nil) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case first := <-pool.started:
+		if first != 1 {
+			t.Fatalf("started=%d, want 1", first)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first worker did not start")
 	}
 	select {
 	case second := <-pool.started:
 		t.Fatalf("worker %d exceeded single execution before release", second)
 	default:
 	}
-
 	pool.release <- struct{}{}
-	event := <-s.events
-	if err := s.handleEvent(event); err != nil {
-		t.Fatal(err)
+	select {
+	case second := <-pool.started:
+		if second != 2 {
+			t.Fatalf("next admitted Issue=%d, want 2", second)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker completion did not admit the next Issue")
 	}
-	if _, err := s.schedule(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	second := <-pool.started
-	if second != 2 {
-		t.Fatalf("next admitted Issue=%d, want 2", second)
-	}
-	s.cancelAndDrain()
 	pool.mu.Lock()
 	maximum := pool.maximum
 	pool.mu.Unlock()
@@ -2569,5 +2677,170 @@ func TestFaultGitHubRetryDeadlineGuardsRunningJobs(t *testing.T) {
 	}
 	if _, err := loop.GitHub.Inspect(context.Background(), loop.Config, 1, ""); err != nil || client.inspectCalls != 1 || loop.now().Before(deadline) {
 		t.Fatalf("request after wait: reads=%d now=%s deadline=%s err=%v", client.inspectCalls, loop.now(), deadline, err)
+	}
+}
+
+func TestSchedulerRESTInconsistencyWaitsBeforeRetry(t *testing.T) {
+	for _, failures := range []int{1, 3} {
+		t.Run(fmt.Sprintf("failures_%d", failures), func(t *testing.T) {
+			now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+			loop, fake := testLoop(t, worker.Result{})
+			loop.Logger = log.New(io.Discard, "", 0)
+			loop.RateLimits = ratelimit.Store{Path: filepath.Join(t.TempDir(), "rate-limit.json")}
+			client := &countingGitHub{fakeGitHub: fake}
+			loop.GitHub = client
+			loop.enableRateLimitGate()
+			s := &scheduler{loop: loop, active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
+			other, otherFake := testLoop(t, worker.Result{})
+			other.RateLimits = loop.RateLimits
+			otherClient := &countingGitHub{fakeGitHub: otherFake, empty: true}
+			other.GitHub = otherClient
+			other.enableRateLimitGate()
+			for attempt := 0; attempt < failures; attempt++ {
+				loop.Clock = fixedClock{value: now}
+				fake.listErr = &gh.RateLimitError{Resource: "graphql", ResetAt: now.Add(5 * time.Second), Source: "rest-rate-limit-inconsistent", Err: errors.New("GraphQL: rate limit exceeded")}
+				if _, err := s.schedule(context.Background(), true); err == nil {
+					t.Fatal("expected rate limit")
+				} else if err := s.handleCycleError(err); err != nil {
+					t.Fatal(err)
+				}
+				deadline := now.Add(time.Hour)
+				if !s.cooldownUntil.Equal(deadline) || s.consecutiveFailures != 0 || client.calls() != attempt+1 {
+					t.Fatalf("attempt=%d cooldown=%s failures=%d calls=%d", attempt, s.cooldownUntil, s.consecutiveFailures, client.calls())
+				}
+				for _, elapsed := range []time.Duration{5 * time.Second, time.Minute, time.Hour - time.Nanosecond} {
+					loop.Clock = fixedClock{value: now.Add(elapsed)}
+					other.Clock = loop.Clock
+					for _, poll := range []bool{false, true} {
+						if result, err := s.schedule(context.Background(), poll); err != nil || result.githubAttempted || result.githubAccessSucceeded {
+							t.Fatalf("wake at %s result=%+v err=%v", loop.now(), result, err)
+						}
+					}
+					if _, err := other.GitHub.ListReady(context.Background(), other.Config); err == nil {
+						t.Fatal("other repository bypassed shared cooldown")
+					}
+					if client.calls() != attempt+1 || otherClient.calls() != 0 {
+						t.Fatalf("calls during cooldown: %d, %d", client.calls(), otherClient.calls())
+					}
+				}
+				now = deadline
+			}
+			loop.Clock = fixedClock{value: now}
+			client.empty = true
+			if result, err := s.schedule(context.Background(), true); err != nil || !result.githubSucceeded || !s.cooldownUntil.IsZero() {
+				t.Fatalf("recovery at %s result=%+v err=%v cooldown=%s", now, result, err, s.cooldownUntil)
+			}
+			if client.calls() != failures+1 {
+				t.Fatalf("recovery calls=%d", client.calls())
+			}
+		})
+	}
+}
+
+func TestCooldownFromErrorPreservesResetAndFallback(t *testing.T) {
+	now := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		reset  time.Time
+		source string
+		want   time.Time
+	}{
+		{"response reset", now.Add(10 * time.Minute), "x-ratelimit-reset", now.Add(10 * time.Minute)},
+		{"REST exhausted", now.Add(20 * time.Minute), "rest-rate-limit", now.Add(20 * time.Minute)},
+		{"probe failed", time.Time{}, "", now.Add(time.Hour)},
+		{"inconsistent expired reset", now.Add(-time.Minute), "rest-rate-limit-inconsistent", now.Add(time.Hour)},
+		{"inconsistent later reset", now.Add(2 * time.Hour), "rest-rate-limit-inconsistent", now.Add(2 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := cooldownFromError(&gh.RateLimitError{ResetAt: tc.reset, Source: tc.source, Err: errors.New("rate limit")}, now)
+			if !ok || !got.ResetAt.Equal(tc.want) {
+				t.Fatalf("cooldown=%+v limited=%v want=%s", got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// RunOnce waits for one production scheduling cycle and its dispatched jobs.
+// Job errors are returned directly so lifecycle tests can assert their causes.
+func (l *Loop) RunOnce(ctx context.Context) (bool, error) {
+	l.enableRateLimitGate()
+	s := &scheduler{
+		loop: l, events: make(chan schedulerEvent, l.Config.Queue.Concurrency+1),
+		active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+	}
+	defer s.cancelAndDrain()
+	result, err := s.schedule(ctx, true)
+	if err != nil {
+		return result.dispatched, err
+	}
+	var jobErr error
+	for len(s.active) > 0 {
+		event := <-s.events
+		if err := s.handleEvent(event); err != nil {
+			jobErr = errors.Join(jobErr, err)
+		} else {
+			jobErr = errors.Join(jobErr, event.Err)
+		}
+	}
+	return result.dispatched, jobErr
+}
+
+func TestSchedulerResumesRecordedAnswerOnStateWake(t *testing.T) {
+	question := worker.Result{
+		Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "decision", SessionID: "session",
+		Question: &worker.Question{Text: "Which source?", AllowFreeText: true},
+	}
+	loop, _ := testLoop(t, question)
+	scripted := &scriptedWorker{results: []worker.Result{question, question}}
+	loop.Worker = scripted
+	created := make(chan struct{}, 32)
+	loop.SchedulerTimers = inertSchedulerTimers{created: created}
+	wakes := make(chan fsnotify.Event, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.runSchedulerEvents(ctx, wakes, nil) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+		if scripted.runs != 1 || scripted.resumes != 1 {
+			t.Errorf("runs=%d resumes=%d, want 1 each", scripted.runs, scripted.resumes)
+		}
+	}()
+	var requestID string
+	for requestID == "" {
+		waitForTimers(t, created, 1)
+		snapshot, err := loop.Store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current := snapshot.Issues["1"]; current != nil && current.Status == issuedomain.StatusNeedsInput {
+			for id := range snapshot.PendingRequests {
+				requestID = id
+			}
+			if snapshot.ActiveExecution != nil {
+				t.Fatal("needs_input retained execution ownership")
+			}
+		}
+	}
+	if _, _, err := loop.Store.RecordAnswer(requestID, "Use a dated source", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	wakes <- fsnotify.Event{Name: filepath.Join(loop.Store.Dir, "state.json"), Op: fsnotify.Write}
+	for {
+		waitForTimers(t, created, 1)
+		snapshot, err := loop.Store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		current := snapshot.Issues["1"]
+		if current.Status == issuedomain.StatusNeedsInput && len(current.Answers) == 1 {
+			for id := range snapshot.PendingRequests {
+				if id != requestID {
+					return
+				}
+			}
+		}
 	}
 }

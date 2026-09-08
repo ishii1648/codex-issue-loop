@@ -297,7 +297,10 @@ func (m Manager) Start(ctx context.Context, entry registry.Entry) error {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		status, _ = m.Status(ctx, entry)
+		status, err = m.Status(ctx, entry)
+		if err != nil {
+			return err
+		}
 		if status.Loaded {
 			return nil
 		}
@@ -379,6 +382,9 @@ func (m Manager) Status(ctx context.Context, entry registry.Entry) (Status, erro
 	service := target + "/" + m.Layout.Label(entry.RepoID)
 	out, err := exec.CommandContext(ctx, path, "print", service).CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return Status{}, fmt.Errorf("launchctl print: %w", ctx.Err())
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return Status{Loaded: false}, nil
@@ -398,7 +404,10 @@ func (m Manager) StartBroker(ctx context.Context) error {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		status, _ = m.BrokerStatus(ctx)
+		status, err = m.BrokerStatus(ctx)
+		if err != nil {
+			return err
+		}
 		if status.Loaded {
 			return nil
 		}
@@ -417,7 +426,10 @@ func (m Manager) StopBroker(ctx context.Context) error {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		status, _ = m.BrokerStatus(ctx)
+		status, err = m.BrokerStatus(ctx)
+		if err != nil {
+			return err
+		}
 		if !status.Loaded {
 			return nil
 		}
@@ -450,7 +462,10 @@ func (m Manager) StartDelivery(ctx context.Context) error {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		status, _ = m.DeliveryStatus(ctx)
+		status, err = m.DeliveryStatus(ctx)
+		if err != nil {
+			return err
+		}
 		if status.Loaded {
 			return nil
 		}
@@ -468,7 +483,10 @@ func (m Manager) StopDelivery(ctx context.Context) error {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		status, _ = m.DeliveryStatus(ctx)
+		status, err = m.DeliveryStatus(ctx)
+		if err != nil {
+			return err
+		}
 		if !status.Loaded {
 			return nil
 		}
@@ -520,6 +538,9 @@ func (m Manager) serviceStatus(ctx context.Context, label string) (Status, error
 	}
 	out, err := exec.CommandContext(ctx, path, "print", target+"/"+label).CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return Status{}, fmt.Errorf("launchctl print: %w", ctx.Err())
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return Status{Loaded: false}, nil

@@ -19,7 +19,7 @@ import (
 )
 
 func TestRetryStageRestoresAnsweredChecksQuarantine(t *testing.T) {
-	for _, scenario := range []string{"valid", "remote-ahead", "remote-diverged", "wrong-generation", "wrong-answer", "pending", "missing-session", "different-head", "fork", "dirty", "worker-alive"} {
+	for _, scenario := range []string{"valid", "path-git-fails", "remote-ahead", "remote-diverged", "wrong-generation", "wrong-answer", "pending", "missing-session", "different-head", "fork", "dirty", "worker-alive"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newIssueResolutionFixture(t, 459, "OPEN", nil)
 			url := "https://example.test/pull/493"
@@ -123,6 +123,9 @@ func TestRetryStageRestoresAnsweredChecksQuarantine(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if scenario == "path-git-fails" {
+				failIssueResolutionPathGit(t)
+			}
 			assertRecoveryGitHubOutsideStateLock(t, f)
 			var out, stderr bytes.Buffer
 			code := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"issue", "resolve", "--repo", f.repo, "--issue", "459", "--action", "retry-stage", "--json"})
@@ -130,7 +133,7 @@ func TestRetryStageRestoresAnsweredChecksQuarantine(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if scenario != "valid" && scenario != "remote-ahead" {
+			if scenario != "valid" && scenario != "path-git-fails" && scenario != "remote-ahead" {
 				if code == 0 || !reflect.DeepEqual(before, after) {
 					t.Fatalf("code=%d changed=%v stderr=%s", code, !reflect.DeepEqual(before, after), stderr.String())
 				}
@@ -194,6 +197,7 @@ func TestRecoveryWorkspaceRejectsLocalChanges(t *testing.T) {
 				t.Fatal(err)
 			}
 			planned := issuePlanningContext{
+				gitPath:        "/usr/bin/git",
 				issue:          &state.Issue{Number: 459, Worktree: f.worktree},
 				inspection:     worktree.Inspection{Head: f.head},
 				worktreeSHA256: digest,

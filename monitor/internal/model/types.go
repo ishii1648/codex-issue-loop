@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 const SchemaVersion = 1
 const DecisionVersion = 2
@@ -85,4 +88,56 @@ type Snapshot struct {
 	EventCursor            int64       `json:"event_cursor,omitempty"`
 	EventCursorInitialized bool        `json:"event_cursor_initialized,omitempty"`
 	LastError              string      `json:"last_error,omitempty"`
+}
+
+func (value QueueItem) MarshalJSON() ([]byte, error) {
+	type alias QueueItem
+	output := struct {
+		alias
+		PhaseSince *time.Time `json:"phase_since,omitempty"`
+		Deadline   *time.Time `json:"deadline,omitempty"`
+	}{alias: alias(value)}
+	if !value.PhaseSince.IsZero() {
+		output.PhaseSince = &value.PhaseSince
+	}
+	if !value.Deadline.IsZero() {
+		output.Deadline = &value.Deadline
+	}
+	return json.Marshal(output)
+}
+
+func (value Interval) MarshalJSON() ([]byte, error) {
+	type alias Interval
+	output := struct {
+		alias
+		EndedAt *time.Time `json:"ended_at,omitempty"`
+	}{alias: alias(value)}
+	if !value.EndedAt.IsZero() {
+		output.EndedAt = &value.EndedAt
+	}
+	return json.Marshal(output)
+}
+
+func (value Snapshot) MarshalJSON() ([]byte, error) {
+	type alias Snapshot
+	output := struct {
+		alias
+		DecisionSince   *time.Time `json:"decision_since,omitempty"`
+		QueuePhaseSince *time.Time `json:"queue_phase_since,omitempty"`
+		QueueDeadline   *time.Time `json:"queue_deadline,omitempty"`
+		LastSuccessAt   *time.Time `json:"last_success_at,omitempty"`
+	}{alias: alias(value)}
+	if !value.DecisionSince.IsZero() {
+		output.DecisionSince = &value.DecisionSince
+	}
+	if !value.QueuePhaseSince.IsZero() {
+		output.QueuePhaseSince = &value.QueuePhaseSince
+	}
+	if !value.QueueDeadline.IsZero() {
+		output.QueueDeadline = &value.QueueDeadline
+	}
+	if !value.LastSuccessAt.IsZero() {
+		output.LastSuccessAt = &value.LastSuccessAt
+	}
+	return json.Marshal(output)
 }

@@ -2,6 +2,7 @@ package launchd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,5 +98,62 @@ esac
 	}
 	if _, err := os.Stat(statePath); err != nil {
 		t.Fatalf("LaunchAgent was not loaded after restart: %v", err)
+	}
+}
+
+func TestLaunchctlPrintDeadline(t *testing.T) {
+	entry := registry.Entry{RepoID: "repo-id"}
+	for _, tc := range []struct {
+		name    string
+		initial string
+		run     func(Manager, context.Context) error
+	}{
+		{"Status", "", func(m Manager, ctx context.Context) error { _, err := m.Status(ctx, entry); return err }},
+		{"BrokerStatus", "", func(m Manager, ctx context.Context) error { _, err := m.BrokerStatus(ctx); return err }},
+		{"DeliveryStatus", "", func(m Manager, ctx context.Context) error { _, err := m.DeliveryStatus(ctx); return err }},
+		{"RequestStop", "", func(m Manager, ctx context.Context) error { _, err := m.RequestStop(ctx, entry); return err }},
+		{"WaitStopped", "", func(m Manager, ctx context.Context) error { return m.WaitStopped(ctx, entry, 5*time.Second) }},
+		{"Start", "113", func(m Manager, ctx context.Context) error { return m.Start(ctx, entry) }},
+		{"StartBroker", "113", Manager.StartBroker},
+		{"StopBroker", "0", Manager.StopBroker},
+		{"StartDelivery", "113", Manager.StartDelivery},
+		{"StopDelivery", "0", Manager.StopDelivery},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			launchctl := filepath.Join(root, "launchctl")
+			script := `#!/bin/sh
+case "$1" in
+  print)
+    if test -n "$LAUNCHD_TEST_INITIAL" && ! test -f "$LAUNCHD_TEST_STATE"; then
+      exit "$LAUNCHD_TEST_INITIAL"
+    fi
+    : > "$LAUNCHD_TEST_STARTED"
+    exec sleep 30
+    ;;
+  bootstrap|bootout)
+    : > "$LAUNCHD_TEST_STATE"
+    ;;
+  *) exit 2 ;;
+esac
+`
+			if err := os.WriteFile(launchctl, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			started := filepath.Join(root, "started")
+			t.Setenv("LAUNCHD_TEST_STARTED", started)
+			t.Setenv("LAUNCHD_TEST_STATE", filepath.Join(root, "state"))
+			t.Setenv("LAUNCHD_TEST_INITIAL", tc.initial)
+			m := Manager{Layout: layout.Layout{Root: root, LaunchAgents: filepath.Join(root, "launch")}, Launchctl: launchctl}
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			err := tc.run(m, ctx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("error = %v, want context.DeadlineExceeded", err)
+			}
+			if _, err := os.Stat(started); err != nil {
+				t.Fatalf("blocking launchctl print did not start: %v", err)
+			}
+		})
 	}
 }

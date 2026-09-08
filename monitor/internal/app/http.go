@@ -125,7 +125,7 @@ func (a App) monitorHandler(cfg config.Config) http.Handler {
 			return
 		case "/api/freshness":
 			client := &http.Client{Timeout: 5 * time.Second}
-			req, requestErr := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://127.0.0.1:13000/api/datasources/proxy/uid/monitor-prometheus/api/v1/query?query=agent_loop_monitor_reference_time_seconds%20and%20on()%20(up%7Bjob%3D%22agent-loop-monitor%22%7D%20%3D%3D%201)", nil)
+			req, requestErr := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://127.0.0.1:19090/api/v1/query?query=agent_loop_monitor_reference_time_seconds%20and%20on()%20(up%7Bjob%3D%22agent-loop-monitor%22%7D%20%3D%3D%201)", nil)
 			if requestErr != nil {
 				err = requestErr
 				break
@@ -137,7 +137,7 @@ func (a App) monitorHandler(cfg config.Config) http.Handler {
 			}
 			defer response.Body.Close()
 			if response.StatusCode != http.StatusOK {
-				err = fmt.Errorf("Grafana/Prometheus freshness query: HTTP %d", response.StatusCode)
+				err = fmt.Errorf("Prometheus freshness query: HTTP %d", response.StatusCode)
 				break
 			}
 			_, err = io.Copy(&out, io.LimitReader(response.Body, 1<<20))

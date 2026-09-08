@@ -31,6 +31,7 @@ func TestVerticalLifecycleFilesBoundOrchestrationSize(t *testing.T) {
 		"internal/application/app/operator_control.go",
 		"internal/application/app/operator_attention.go",
 		"internal/application/app/issue_resolution.go",
+		"internal/application/app/issue_resolution_sync.go",
 	}
 	for path, limit := range mainFiles {
 		assertLineLimit(t, filepath.Join(root, path), limit)
@@ -95,7 +96,8 @@ func TestVerticalLifecyclesOwnDecisionPersistenceAndEffects(t *testing.T) {
 		"internal/application/supervisor/checks_lifecycle.go":      {"issuedomain.", "l.Store.Update(", "l.GitHub.", "l.inspectIssue("},
 		"internal/application/supervisor/conflict_lifecycle.go":    {"conflict.", "l.Store.Update(", "l.Conflicts.", "l.runWorker("},
 		"internal/application/supervisor/github_sync_lifecycle.go": {"state.", "l.Store.Update(", "l.GitHub."},
-		"internal/application/app/issue_resolution.go":             {"issuedomain.", "planned.store.Update(", "client."},
+		"internal/application/app/issue_resolution.go":             {"issuedomain.", "planned.store.Update("},
+		"internal/application/app/issue_resolution_sync.go":        {"issuedomain.", "planned.store.Update(", "client."},
 	}
 	for path, markers := range required {
 		data, err := os.ReadFile(filepath.Join(root, path))

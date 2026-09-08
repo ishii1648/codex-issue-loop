@@ -671,7 +671,7 @@ func (s Store) validateExactRecoveryBackup(expected, recorded string) (string, e
 		return "", err
 	}
 	rel, err := filepath.Rel(root, resolved)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("recovery backup is outside the managed recovery root: %s", resolved)
 	}
 	return resolved, nil
@@ -703,7 +703,7 @@ func (s Store) validateManagedRecoveryFile(path string) error {
 		return err
 	}
 	rel, err := filepath.Rel(root, resolved)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return fmt.Errorf("staged recovery file is outside the managed recovery root: %s", resolved)
 	}
 	return nil

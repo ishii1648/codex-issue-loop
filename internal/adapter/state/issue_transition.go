@@ -2,6 +2,8 @@ package state
 
 import (
 	"fmt"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -220,5 +222,178 @@ func RestoreAnsweredChecks(snapshot *Snapshot, number int, head, digest string, 
 		snapshot.PendingRequests[r.ID] = r
 	}
 	delete(snapshot.QuarantinedIssues, key)
+	return nil
+}
+
+func CanAdoptHead(item *Issue) bool {
+	if item == nil || item.Continuation == nil || item.Suspension == nil {
+		return false
+	}
+	c, s := item.Continuation, item.Suspension
+	return (item.Status == issuedomain.StatusBlocked || item.Status == issuedomain.StatusFailed) &&
+		s.Status == issuedomain.SuspensionActive && s.Origin == "worker" && slices.Contains(s.AllowedActions, issuedomain.ResolutionResume) &&
+		s.CheckpointID == c.ID && c.RunID == item.RunID && c.Generation == item.Generation &&
+		c.Stage == issuedomain.ContinuationStageResume && c.HeadSHA == "" && c.WorktreeSHA256 != "" &&
+		c.Session != nil && c.Session.ID != "" && c.Workspace != nil && reflect.DeepEqual(c.Workspace, item.Workspace) &&
+		item.WorkerPID == 0 && item.WorkerPGID == 0 && item.ConflictRecovery == nil &&
+		item.PullRequestURL == "" && item.PullRequestNumber == 0 && c.PullRequestURL == "" && c.PullRequestNumber == 0
+}
+
+func CanAdoptWorktree(item *Issue) bool {
+	return item != nil && (item.Status == issuedomain.StatusBlocked || item.Status == issuedomain.StatusFailed) &&
+		item.Continuation != nil && item.Continuation.WorktreeSHA256 == "" && item.ConflictRecovery != nil &&
+		item.Suspension != nil && item.Suspension.Status == issuedomain.SuspensionQuarantined &&
+		item.Suspension.Recoverability == issuedomain.RecoverabilityAmbiguous && item.Suspension.CheckpointID == item.Continuation.ID &&
+		len(item.Suspension.MissingEvidence) == 1 && item.Suspension.MissingEvidence[0] == "worktree_sha256" &&
+		len(item.Suspension.AllowedActions) == 1 && item.Suspension.AllowedActions[0] == issuedomain.ResolutionCancel
+}
+
+type OperatorResolutionObservation struct {
+	HeadSHA               string
+	WorktreeSHA256        string
+	AllowedPaths          []string
+	ResultSummary         string
+	ResultSHA256          string
+	RepairPublicationHead bool
+	PullRequestURL        string
+	PullRequestNumber     int
+	GitHubStateReason     string
+}
+
+func ResolveOperatorSuspension(snapshot *Snapshot, number int, action issuedomain.ResolutionAction, observed OperatorResolutionObservation, now time.Time) error {
+	if snapshot == nil || now.IsZero() {
+		return fmt.Errorf("operator resolution requires snapshot and time")
+	}
+	item := snapshot.Issues[strconv.Itoa(number)]
+	if item == nil || item.Number != number || item.RunID == "" || item.Suspension == nil || item.WorkerPID != 0 || item.WorkerPGID != 0 {
+		return fmt.Errorf("Issue #%d suspension is unavailable or retains worker identity", number)
+	}
+	if snapshot.ActiveExecution != nil && (action != issuedomain.ResolutionCancel && action != issuedomain.ResolutionAdoptPR || snapshot.ActiveExecution.IssueNumber == number) {
+		return fmt.Errorf("Issue #%d execution slot changed", number)
+	}
+	var adoptedStage issuedomain.ContinuationStage
+	if action == issuedomain.ResolutionAdoptHead || action == issuedomain.ResolutionAdoptWorktree {
+		if action == issuedomain.ResolutionAdoptHead && (!CanAdoptHead(item) || observed.HeadSHA == "") ||
+			action == issuedomain.ResolutionAdoptWorktree && (!CanAdoptWorktree(item) || !validSHA256(observed.WorktreeSHA256)) {
+			return fmt.Errorf("Issue #%d checkpoint adoption evidence is inconsistent", number)
+		}
+		if item.Continuation.RunID != item.RunID || item.Continuation.Generation == 0 || item.Continuation.Generation > item.Generation {
+			return fmt.Errorf("Issue #%d continuation identity is inconsistent", number)
+		}
+		var err error
+		adoptedStage, err = issuedomain.AdoptCheckpoint(item.Status, item.Suspension.Status, item.Continuation.Stage, action)
+		if err != nil {
+			return err
+		}
+	} else {
+		if !slices.Contains(item.Suspension.AllowedActions, action) || (item.Suspension.Status != issuedomain.SuspensionActive && !(item.Suspension.Status == issuedomain.SuspensionQuarantined && action == issuedomain.ResolutionCancel)) {
+			return fmt.Errorf("Issue #%d action is not allowed by suspension", number)
+		}
+		stage := issuedomain.ContinuationStageNone
+		if item.Continuation != nil {
+			stage = item.Continuation.Stage
+		}
+		if _, err := issuedomain.ResolveSuspension(item.Status, action, stage); err != nil {
+			return err
+		}
+		if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
+			if item.Continuation == nil || item.Suspension.CheckpointID != item.Continuation.ID || item.Continuation.RunID != item.RunID || item.Continuation.Generation == 0 || item.Continuation.Generation > item.Generation {
+				return fmt.Errorf("Issue #%d continuation identity is inconsistent", number)
+			}
+			if action == issuedomain.ResolutionRetryStage && stage == issuedomain.ContinuationStagePublish && (observed.ResultSummary == "" || !validSHA256(observed.ResultSHA256) || observed.RepairPublicationHead && observed.HeadSHA == "") {
+				return fmt.Errorf("Issue #%d publication evidence is incomplete", number)
+			}
+			if action == issuedomain.ResolutionRetryStage && stage == issuedomain.ContinuationStageChecks && (observed.HeadSHA == "" || observed.PullRequestNumber <= 0) {
+				return fmt.Errorf("Issue #%d checks Pull Request identity is incomplete", number)
+			}
+		}
+	}
+	if action == issuedomain.ResolutionAdoptHead {
+		item.Continuation.HeadSHA = observed.HeadSHA
+	} else if action == issuedomain.ResolutionAdoptWorktree {
+		item.Continuation.WorktreeSHA256 = observed.WorktreeSHA256
+		item.Continuation.Stage = adoptedStage
+		item.ConflictRecovery.AllowedPaths = append(slices.Clone(item.ConflictRecovery.AllowedPaths), observed.AllowedPaths...)
+		slices.Sort(item.ConflictRecovery.AllowedPaths)
+		item.ConflictRecovery.AllowedPaths = slices.Compact(item.ConflictRecovery.AllowedPaths)
+		item.Suspension.Status = issuedomain.SuspensionActive
+		item.Suspension.Recoverability = issuedomain.RecoverabilityOperator
+		item.Suspension.MissingEvidence = nil
+		item.Suspension.AllowedActions = []issuedomain.ResolutionAction{issuedomain.ResolutionCancel, issuedomain.ResolutionRetryStage}
+	} else if action == issuedomain.ResolutionResume || action == issuedomain.ResolutionRetryStage {
+		if action == issuedomain.ResolutionRetryStage && item.ConflictRecovery != nil {
+			item.ConflictRecovery.Attempts = 0
+			item.ConflictRecovery.UpdatedAt = now
+		}
+		if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStagePublish {
+			if observed.RepairPublicationHead {
+				item.Continuation.HeadSHA = observed.HeadSHA
+			}
+			item.Continuation.Summary = observed.ResultSummary
+			item.Continuation.ResultSHA256 = observed.ResultSHA256
+		}
+		if _, err := ResumeContinuation(snapshot, item.Number, item.Continuation.ID, now); err != nil {
+			return err
+		}
+		transition, err := issuedomain.ResolveSuspension(item.Status, action, item.Continuation.Stage)
+		if err != nil {
+			return err
+		}
+		if err := ApplyIssueTransition(item, transition); err != nil {
+			return err
+		}
+		if action == issuedomain.ResolutionRetryStage && item.Continuation.Stage == issuedomain.ContinuationStageChecks {
+			item.HeadSHA = observed.HeadSHA
+			item.PullRequestNumber = observed.PullRequestNumber
+		}
+		if err := SetEffect(snapshot, item.Number, item.RunID, issuedomain.EffectApplyResolution, now); err != nil {
+			return err
+		}
+	} else if action == issuedomain.ResolutionAdoptPR {
+		if observed.PullRequestURL == "" || observed.PullRequestNumber <= 0 || observed.HeadSHA == "" {
+			return fmt.Errorf("Issue #%d matching merged Pull Request changed after planning", number)
+		}
+		transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.ContinuationStageNone)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		item.PullRequestURL = observed.PullRequestURL
+		item.PullRequestNumber = observed.PullRequestNumber
+		item.HeadSHA = observed.HeadSHA
+		item.PullRequestMerged = true
+		item.Suspension.Status = issuedomain.SuspensionResolved
+		item.Suspension.Resolution = action
+		item.Suspension.ResolvedAt = now
+		if err := SetEffect(snapshot, item.Number, item.RunID, issuedomain.EffectMarkDone, now); err != nil {
+			return err
+		}
+		if err := ApplyIssueTransition(item, transition); err != nil {
+			return err
+		}
+	} else {
+		previous := item.Status
+		transition, transitionErr := issuedomain.ResolveSuspension(item.Status, action, issuedomain.ContinuationStageNone)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if err := ApplyIssueTransition(item, transition); err != nil {
+			return err
+		}
+		CancelPendingRequests(snapshot, item.Number)
+		if err := SetEffect(snapshot, item.Number, item.RunID, issuedomain.EffectNone, now); err != nil {
+			return err
+		}
+		item.Cancellation = &Cancellation{
+			Source: "operator_resolution", GitHubStateReason: observed.GitHubStateReason,
+			PreviousStatus: previous, ExecutionReleaseResult: "not_present", CanceledAt: now,
+		}
+		item.GitHubStateReason = observed.GitHubStateReason
+	}
+	if item.Suspension != nil && action != issuedomain.ResolutionAdoptWorktree && action != issuedomain.ResolutionAdoptHead {
+		item.Suspension.Status = issuedomain.SuspensionResolved
+		item.Suspension.Resolution = action
+		item.Suspension.ResolvedAt = now
+	}
+	item.UpdatedAt = now
 	return nil
 }

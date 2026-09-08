@@ -118,11 +118,17 @@ func (a App) runMonitor(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	storage := store.Store{Root: cfg.StateDir}
+	lock, err := storage.Lock()
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	observer := a.Observer
 	if observer == nil {
 		observer = gh.CLI{Path: cfg.GitHubCLI}
 	}
-	runner := monitorruntime.Runner{Observer: observer, Store: store.Store{Root: cfg.StateDir}, ObservationTimeout: cfg.ObservationTimeout.Duration, Now: a.Now}
+	runner := monitorruntime.Runner{Observer: observer, Store: storage, ObservationTimeout: cfg.ObservationTimeout.Duration, Now: a.Now}
 	poll := func() bool {
 		failed := false
 		for _, repo := range cfg.Repositories {

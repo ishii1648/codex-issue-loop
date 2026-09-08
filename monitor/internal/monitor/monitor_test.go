@@ -17,6 +17,54 @@ type fakeObserver struct {
 	errors       map[string]error
 }
 
+type blockingObserver struct{ fakeObserver }
+
+func (f blockingObserver) Observe(ctx context.Context, repo config.Repository, cursor int64, initialized bool, at time.Time) (model.Observation, error) {
+	if repo.Name == "owner/blocked" {
+		<-ctx.Done()
+		return model.Observation{}, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return model.Observation{}, err
+	}
+	return f.fakeObserver.Observe(ctx, repo, cursor, initialized, at)
+}
+
+func TestPollTimeoutPersistsUnknownAndContinuesNextRepository(t *testing.T) {
+	runner := Runner{
+		Observer:           blockingObserver{},
+		Store:              store.Store{Root: t.TempDir()},
+		ObservationTimeout: 20 * time.Millisecond,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	got, err := runner.Poll(ctx, config.Repository{Name: "owner/blocked"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("poll error = %v, want deadline exceeded", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("poll did not return before the parent deadline")
+	}
+	if time.Since(started) < runner.ObservationTimeout {
+		t.Fatal("poll returned before observation timeout")
+	}
+	saved, err := runner.Store.Load("owner/blocked")
+	if err != nil || saved == nil {
+		t.Fatalf("load snapshot = %+v, error = %v", saved, err)
+	}
+	if saved.Current.Status != model.Unknown || saved.LastError != context.DeadlineExceeded.Error() || !reflect.DeepEqual(*saved, got) {
+		t.Fatalf("persisted timeout snapshot = %+v, returned = %+v", saved, got)
+	}
+	if _, err := runner.Poll(ctx, config.Repository{Name: "owner/good"}); err != nil {
+		t.Fatalf("next repository poll: %v", err)
+	}
+	good, err := runner.Store.Load("owner/good")
+	if err != nil || good == nil || good.Current.Status != model.Idle {
+		t.Fatalf("next repository snapshot = %+v, error = %v", good, err)
+	}
+}
+
 func (f fakeObserver) Observe(_ context.Context, repo config.Repository, _ int64, _ bool, at time.Time) (model.Observation, error) {
 	if err := f.errors[repo.Name]; err != nil {
 		return model.Observation{}, err

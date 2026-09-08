@@ -156,7 +156,10 @@ func (s Store) ReadRecoveryInputs() (Snapshot, []Event, error) {
 		if err := json.Unmarshal(stateBefore, &snapshot); err != nil {
 			return Snapshot{}, nil, fmt.Errorf("decode durable state without recovery: %w", err)
 		}
-		if !supportedRecoverySchema(snapshot.Version) || snapshot.RepoID != s.RepoID {
+		if !supportedRecoverySchema(snapshot.Version) {
+			return Snapshot{}, nil, SchemaVersionError{Kind: "state", Version: snapshot.Version}
+		}
+		if snapshot.RepoID != s.RepoID {
 			return Snapshot{}, nil, fmt.Errorf("durable state schema or repository identity differs")
 		}
 		normalizeSnapshot(&snapshot)
@@ -213,7 +216,10 @@ func decodeRecoveryEvents(data []byte, repoID string) ([]Event, error) {
 		if err := json.Unmarshal(line, &event); err != nil {
 			return nil, fmt.Errorf("decode durable recovery event: %w", err)
 		}
-		if !supportedRecoverySchema(event.Version) || event.RepoID != repoID {
+		if !supportedRecoverySchema(event.Version) {
+			return nil, SchemaVersionError{Kind: "event", Version: event.Version}
+		}
+		if event.RepoID != repoID {
 			return nil, errors.New("durable recovery event schema or repository identity differs")
 		}
 		events = append(events, event)
