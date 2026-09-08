@@ -43,8 +43,8 @@ func request(t *testing.T, handler http.Handler, path string) *httptest.Response
 
 func TestDashboardCLIParityAndReplay(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "issue 42"}}
-	closed := []model.Interval{{ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-3 * time.Hour), EndedAt: at.Add(-time.Hour)}}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "issue 42"}}
+	closed := []model.Interval{{DecisionVersion: model.DecisionVersion, ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-3 * time.Hour), EndedAt: at.Add(-time.Hour)}}
 	if err := storage.Commit(snapshot, closed); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestDashboardStatesAndMissingData(t *testing.T) {
 			if state == "stale" {
 				observed = at.Add(-10 * time.Minute)
 			}
-			snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: current, StartedAt: observed.Add(-time.Hour)}}
+			snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: current, StartedAt: observed.Add(-time.Hour)}}
 			if state != "missing" {
 				if err := storage.Commit(snapshot, nil); err != nil {
 					t.Fatal(err)
@@ -200,7 +200,7 @@ func TestDashboardReadOnlyBoundary(t *testing.T) {
 
 func TestStatusReferenceMustNotPrecedeObservation(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at}}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at}}
 	if err := storage.Commit(snapshot, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestStatusReferenceMustNotPrecedeObservation(t *testing.T) {
 
 func TestDashboardRejectsPartiallyCommittedIntervals(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
 	closed := snapshot.Current
 	closed.EndedAt = at
 	if err := storage.Commit(snapshot, []model.Interval{closed}); err != nil {
@@ -230,8 +230,8 @@ func TestDashboardRejectsPartiallyCommittedIntervals(t *testing.T) {
 
 func TestDashboardRejectsGapDuringReplayCommit(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Unknown, StartedAt: at.Add(-time.Hour + 3*time.Minute)}}
-	closed := model.Interval{ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-2 * time.Hour), EndedAt: at.Add(-time.Hour)}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Unknown, StartedAt: at.Add(-time.Hour + 3*time.Minute)}}
+	closed := model.Interval{DecisionVersion: model.DecisionVersion, ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-2 * time.Hour), EndedAt: at.Add(-time.Hour)}
 	if err := storage.Commit(snapshot, []model.Interval{closed}); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestDashboardRejectsGapDuringReplayCommit(t *testing.T) {
 
 func TestMetricsUsesExactWholeSecondReference(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
 	if err := storage.Commit(snapshot, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -271,8 +271,8 @@ func TestMetricsUsesExactWholeSecondReference(t *testing.T) {
 
 func TestHistoryRejectsMissingCurrentDuringCommit(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Down, StartedAt: at}}
-	if err := storage.Commit(snapshot, []model.Interval{{ID: "closed", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour), EndedAt: at}}); err != nil {
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Down, StartedAt: at}}
+	if err := storage.Commit(snapshot, []model.Interval{{DecisionVersion: model.DecisionVersion, ID: "closed", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour), EndedAt: at}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(storage.Root, "repositories/owner--repo/current.json")); err != nil {
@@ -345,7 +345,7 @@ func TestDashboardDetails(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: repo, LastObservationAt: at, Current: model.Interval{ID: "current", Repository: repo, Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "queue progress deadline exceeded"}}
+				snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: repo, LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: repo, Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "queue progress deadline exceeded"}}
 				wantStatus, wantDetail := "DOWN", snapshot.Current.Reason
 				numbers := []int{}
 				switch scenario {
@@ -432,9 +432,9 @@ func TestSelectedPeriodTimelineMatchesCLIReport(t *testing.T) {
 			var intervals []model.Interval
 			for i, state := range states {
 				start := observed.Add(time.Duration(i-4) * time.Hour)
-				intervals = append(intervals, model.Interval{ID: fmt.Sprint(i), Repository: "owner/repo", Status: state, StartedAt: start, EndedAt: start.Add(time.Hour)})
+				intervals = append(intervals, model.Interval{DecisionVersion: model.DecisionVersion, ID: fmt.Sprint(i), Repository: "owner/repo", Status: state, StartedAt: start, EndedAt: start.Add(time.Hour)})
 			}
-			snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: states[3], StartedAt: observed}}
+			snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: states[3], StartedAt: observed}}
 			if scenario != "missing" {
 				if err := storage.Commit(snapshot, intervals); err != nil {
 					t.Fatal(err)
@@ -472,6 +472,81 @@ func TestSelectedPeriodTimelineMatchesCLIReport(t *testing.T) {
 	}
 }
 
+func TestLegacyContractIsSeparatedAcrossDashboardAndCLI(t *testing.T) {
+	cfg, storage, at := dashboardFixture(t)
+	legacy := model.Snapshot{SchemaVersion: 1, Repository: "owner/repo", LastObservationAt: at.Add(-time.Hour),
+		Current: model.Interval{ID: "legacy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-3 * time.Hour)}}
+	if err := storage.Commit(legacy, nil); err != nil {
+		t.Fatal(err)
+	}
+	a := App{Now: func() time.Time { return at }}
+	response := request(t, a.monitorHandler(cfg), "/api/status")
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"status":"UNKNOWN"`) || !strings.Contains(response.Body.String(), "legacy decision contract") {
+		t.Fatal(response.Body.String())
+	}
+	obs := model.Observation{Repository: legacy.Repository, ObservedAt: at.Add(-30 * time.Minute), Cursor: 1, CursorInitialized: true, Items: []model.QueueItem{{Number: 1, Phase: model.Ready, PhaseSince: at.Add(-time.Hour), Deadline: at.Add(-40 * time.Minute)}}}
+	next, closed, err := model.Apply(&legacy, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs.ObservedAt = at
+	var subsequent []model.Interval
+	next, subsequent, err = model.Apply(&next, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed = append(closed, subsequent...)
+	if err := storage.Commit(next, closed); err != nil {
+		t.Fatal(err)
+	}
+	from := at.Add(-3 * time.Hour)
+	query := "?from=" + from.Format(time.RFC3339) + "&to=" + at.Format(time.RFC3339)
+	var output, stderr bytes.Buffer
+	cli := a
+	cli.Out, cli.Err = &output, &stderr
+	if code := cli.Run(context.Background(), []string{"report", "--config", cfg.Path, "--json", "--from", from.Format(time.RFC3339), "--to", at.Format(time.RFC3339)}); code != 0 {
+		t.Fatal(stderr.String())
+	}
+	response = request(t, a.monitorHandler(cfg), "/api/report"+query)
+	if response.Code != 200 || response.Body.String() != output.String() {
+		t.Fatalf("API=%s CLI=%s", response.Body.String(), output.String())
+	}
+	var reports struct {
+		Reports []model.Report `json:"reports"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &reports); err != nil {
+		t.Fatal(err)
+	}
+	report := reports.Reports[0]
+	if report.LegacySeconds != 9000 || report.DurationsSeconds[model.Unknown] != 9000 || report.DurationsSeconds[model.Down] != 600 || report.DurationsSeconds[model.Healthy] != 1200 || report.DemandAvailability == nil || *report.DemandAvailability != float64(2)/3 {
+		t.Fatalf("report=%+v", report)
+	}
+	response = request(t, a.monitorHandler(cfg), "/api/timeline"+query)
+	var timeline struct {
+		Repositories map[string][]model.Interval `json:"repositories"`
+	}
+	if response.Code != 200 {
+		t.Fatal(response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &timeline); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(model.BuildReport(legacy.Repository, timeline.Repositories[legacy.Repository], from, at), report) {
+		t.Fatalf("timeline=%s report=%+v", response.Body.String(), report)
+	}
+	if !strings.Contains(response.Body.String(), "status=HEALTHY") {
+		t.Fatal(response.Body.String())
+	}
+	history := request(t, a.monitorHandler(cfg), "/api/history"+query)
+	if !strings.Contains(history.Body.String(), `"status":"HEALTHY"`) {
+		t.Fatal(history.Body.String())
+	}
+	metrics := request(t, a.monitorHandler(cfg), "/metrics")
+	if metrics.Code != 200 || !strings.Contains(metrics.Body.String(), `agent_loop_monitor_state{repository="owner/repo"} 2`) || !strings.Contains(metrics.Body.String(), `agent_loop_monitor_demand_availability{repository="owner/repo",window="1d"} 0.6666666666666666`) {
+		t.Fatal(metrics.Body.String())
+	}
+}
+
 func TestStatusAndHistoryJSONOmitUnsetTimes(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
 	snapshot := model.Snapshot{
@@ -501,7 +576,7 @@ func TestStatusAndHistoryJSONOmitUnsetTimes(t *testing.T) {
 				if len(snapshots) != 1 {
 					t.Fatalf("snapshots = %s", payload["repositories"])
 				}
-				for _, key := range []string{"queue_phase_since", "queue_deadline", "last_success_at"} {
+				for _, key := range []string{"decision_since", "queue_phase_since", "queue_deadline", "last_success_at"} {
 					if _, ok := snapshots[0][key]; ok {
 						t.Errorf("unset %s present: %s", key, out.String())
 					}

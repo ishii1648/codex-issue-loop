@@ -4,6 +4,8 @@
   "type": "object",
   "required": ["schema_version", "repository", "from", "to", "durations_seconds", "demand_availability", "observation_coverage"],
   "properties": {
+    "legacy_seconds": {"type": "number", "minimum": 0},
+    "decision_version": {"type": "integer", "enum": [1, 2]},
     "schema_version": {"const": 1},
     "repository": {"type": "string"},
     "from": {"type": "string", "format": "date-time"},

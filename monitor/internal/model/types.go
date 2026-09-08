@@ -6,6 +6,7 @@ import (
 )
 
 const SchemaVersion = 1
+const DecisionVersion = 2
 
 type Status string
 
@@ -63,15 +64,18 @@ type Observation struct {
 }
 
 type Interval struct {
-	ID         string    `json:"id"`
-	Repository string    `json:"repository"`
-	Status     Status    `json:"status"`
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
+	DecisionVersion int       `json:"decision_version,omitempty"`
+	ID              string    `json:"id"`
+	Repository      string    `json:"repository"`
+	Status          Status    `json:"status"`
+	StartedAt       time.Time `json:"started_at"`
+	EndedAt         time.Time `json:"ended_at,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
 }
 
 type Snapshot struct {
+	DecisionVersion        int         `json:"decision_version,omitempty"`
+	DecisionSince          time.Time   `json:"decision_since,omitempty"`
 	SchemaVersion          int         `json:"schema_version"`
 	Repository             string      `json:"repository"`
 	Current                Interval    `json:"current"`
@@ -118,10 +122,14 @@ func (value Snapshot) MarshalJSON() ([]byte, error) {
 	type alias Snapshot
 	output := struct {
 		alias
+		DecisionSince   *time.Time `json:"decision_since,omitempty"`
 		QueuePhaseSince *time.Time `json:"queue_phase_since,omitempty"`
 		QueueDeadline   *time.Time `json:"queue_deadline,omitempty"`
 		LastSuccessAt   *time.Time `json:"last_success_at,omitempty"`
 	}{alias: alias(value)}
+	if !value.DecisionSince.IsZero() {
+		output.DecisionSince = &value.DecisionSince
+	}
 	if !value.QueuePhaseSince.IsZero() {
 		output.QueuePhaseSince = &value.QueuePhaseSince
 	}

@@ -68,6 +68,8 @@ fi
 
 失効監視付きURLはAPIから直接描画し、repositoryを左右に比較します。現在状態は正常 HEALTHY=緑、異常 DOWN=赤、待機 IDLE=青で大きく表示し、UNKNOWNは「状態を確認できません」と表示します。選択期間は稼働率（正常のみ）と正常動作率（正常+待機）を数値で、正確なtimelineをバーで表示します。UNKNOWNと未観測の区間は斜線と「観測できない区間」の凡例で示し、hoverで時刻を確認できます。状態開始・最終観測・理由・観測エラー・現在queueのIssue番号と期限は折り畳み詳細です。選択期間の観測率と未観測時間も詳細内で確認でき、開閉状態は自動更新後も保持します。Issue番号からGitHubへ進めます。queue-level期限と各Issue期限を区別します。履歴に当時のqueue一覧はないため、過去の対象Issueは復元しません。
 
+異常と稼働率はrepositoryキュー全体の受付・処理進行を示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningが残る進捗証拠の期限切れはUNKNOWNです。個別Issue期限は滞留の参考情報であり、全体判定・稼働率には直接使いません。旧契約の区間は新契約の集計・timelineではUNKNOWNとして区別し、詳細の`legacy_seconds`と旧状態付きreasonで確認できます。元の旧区間は`/api/history`に保持します。
+
 稼働率（正常のみ）は`HEALTHY秒 / 選択期間全体秒`、正常動作率（正常+待機）は`(HEALTHY + IDLE)秒 / 選択期間全体秒`です。画面では「選択期間全体の時間に対する割合」と説明します。UNKNOWNのみ・全期間未観測の場合はどちらも0%です。観測率は0であり、需要がなかったとは断定できません。観測率は`(HEALTHY + DOWN + IDLE)秒 / 全期間秒`です。選択期間にUNKNOWNや未観測時間がある場合のみ「この期間には未観測の時間があります」と添え、混在期間への単一の正常性判定は行いません。UNKNOWN・未観測時間は正常時間にも待機時間にも加算しません。
 
 `/metrics`はCLIと同じ`effectiveSnapshot`、`effectiveIntervals`、`BuildReport`を使用します。状態コードはUNKNOWN=0、HEALTHY=1、DOWN=2、IDLE=3、需要なしは-1、不明な日時はNaNです。Issue番号・理由・errorをlabelに含めず、counterやscrapeサンプル比率で稼働率を計算しません。基準時刻は秒境界に切り捨て、その同じ時刻で全期間を計算します。読み取り中のsnapshot変更・重複区間・破損はHTTP 503として拒否します。

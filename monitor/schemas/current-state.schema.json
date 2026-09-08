@@ -4,6 +4,8 @@
   "type": "object",
   "required": ["schema_version", "repository", "current", "last_observation_at"],
   "properties": {
+    "decision_since": {"type": "string", "format": "date-time"},
+    "decision_version": {"type": "integer", "enum": [1, 2]},
     "schema_version": {"const": 1},
     "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
     "current": {"$ref": "interval.schema.json"},

@@ -230,6 +230,10 @@ func normalizeTimeline(data *bytes.Buffer, repositories []config.Repository) err
 		rows := []model.Interval{}
 		cursor := history.From
 		for _, interval := range intervals {
+			if interval.DecisionVersion != model.DecisionVersion {
+				interval.Reason = fmt.Sprintf("legacy decision contract (status=%s): %s", interval.Status, interval.Reason)
+				interval.Status = model.Unknown
+			}
 			if interval.StartedAt.Before(cursor) {
 				interval.StartedAt = cursor
 			}
@@ -237,7 +241,7 @@ func normalizeTimeline(data *bytes.Buffer, repositories []config.Repository) err
 				interval.EndedAt = history.To
 			}
 			if interval.StartedAt.After(cursor) {
-				rows = append(rows, model.Interval{Repository: repo.Name, Status: model.Unknown, StartedAt: cursor, EndedAt: interval.StartedAt, Reason: "no observations recorded"})
+				rows = append(rows, model.Interval{DecisionVersion: model.DecisionVersion, Repository: repo.Name, Status: model.Unknown, StartedAt: cursor, EndedAt: interval.StartedAt, Reason: "no observations recorded"})
 			}
 			if interval.EndedAt.After(interval.StartedAt) {
 				rows = append(rows, interval)
@@ -245,7 +249,7 @@ func normalizeTimeline(data *bytes.Buffer, repositories []config.Repository) err
 			}
 		}
 		if cursor.Before(history.To) {
-			rows = append(rows, model.Interval{Repository: repo.Name, Status: model.Unknown, StartedAt: cursor, EndedAt: history.To, Reason: "no observations recorded"})
+			rows = append(rows, model.Interval{DecisionVersion: model.DecisionVersion, Repository: repo.Name, Status: model.Unknown, StartedAt: cursor, EndedAt: history.To, Reason: "no observations recorded"})
 		}
 		history.Repositories[repo.Name] = rows
 	}

@@ -12,17 +12,17 @@ func Evaluate(observation Observation) (Status, time.Time, string) {
 	if observation.Error != "" {
 		return Unknown, at, "GitHub observation failed"
 	}
-	phase, since, deadline, ok := aggregate(observation.Items)
+	phase, _, _, ok := aggregate(observation.Items)
 	if !ok {
 		return Unknown, at, "queue history is insufficient"
 	}
 	if phase == "" {
 		return Idle, at, "no actionable queue items"
 	}
-	if !deadline.After(at) {
-		return Down, deadline, "queue progress deadline exceeded"
+	if phase == Running {
+		return Unknown, at, "queue progress history is insufficient"
 	}
-	return Healthy, since, "queue progress is within deadline"
+	return Healthy, at, "queue progress is within deadline"
 }
 
 func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, error) {
@@ -38,6 +38,29 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 	}
 	if observation.ObservedAt.Before(previous.LastObservationAt) {
 		return Snapshot{}, nil, fmt.Errorf("observation time moved backwards")
+	}
+
+	if previous.DecisionVersion > DecisionVersion {
+		return Snapshot{}, nil, fmt.Errorf("unsupported decision version")
+	}
+	if previous.DecisionVersion != DecisionVersion {
+		next, _, err := bootstrap(observation)
+		if err != nil {
+			return Snapshot{}, nil, err
+		}
+		var closed []Interval
+		old := previous.Current
+		old.EndedAt = previous.LastObservationAt
+		if old.EndedAt.After(old.StartedAt) {
+			closed = append(closed, old)
+		}
+		if observation.ObservedAt.After(previous.LastObservationAt) {
+			gap := newInterval(previous.Repository, Unknown, previous.LastObservationAt, "decision contract migration: unverified gap")
+			gap.DecisionVersion = previous.DecisionVersion
+			gap.EndedAt = observation.ObservedAt
+			closed = append(closed, gap)
+		}
+		return next, closed, nil
 	}
 
 	replay := replayState{snapshot: cloneSnapshot(*previous)}
@@ -88,10 +111,8 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 		anchor.ensureQueuePhase()
 		anchor.snapshot.Current = newInterval(previous.Repository, Unknown, previous.LastSuccessAt, "queue history is insufficient")
 		anchor.recoverAt(previous.LastSuccessAt)
-		if anchor.snapshot.Current.Status != Unknown {
-			verified.Current = anchor.snapshot.Current
-			verified.LastObservationAt = previous.LastSuccessAt
-		}
+		verified.Current = anchor.snapshot.Current
+		verified.LastObservationAt = previous.LastSuccessAt
 	}
 	events, err := replayEvents(verified, observation)
 	if err != nil {
@@ -110,7 +131,7 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 			continue
 		}
 		event.At = event.At.UTC()
-		if verified.Current.Status == Unknown || event.At.Before(replay.snapshot.Current.StartedAt) {
+		if (verified.Current.Status == Unknown && previous.LastSuccessAt.IsZero()) || event.At.Before(replay.snapshot.Current.StartedAt) {
 			if replay.snapshot.Current.Status != Unknown {
 				return Snapshot{}, nil, fmt.Errorf("queue event time moved backwards")
 			}
@@ -157,6 +178,8 @@ func bootstrap(observation Observation) (Snapshot, []Interval, error) {
 	status, start, reason := Evaluate(observation)
 	next := Snapshot{
 		SchemaVersion:          SchemaVersion,
+		DecisionVersion:        DecisionVersion,
+		DecisionSince:          start,
 		Repository:             observation.Repository,
 		Queue:                  append([]QueueItem(nil), observation.Items...),
 		LastObservationAt:      observation.ObservedAt,
@@ -172,6 +195,11 @@ func bootstrap(observation Observation) (Snapshot, []Interval, error) {
 		next.QueuePhase = phase
 		next.QueuePhaseSince = since
 		next.QueueDeadline = deadline
+		if phase == Ready {
+			timeout := deadline.Sub(since)
+			next.QueuePhaseSince = observation.ObservedAt
+			next.QueueDeadline = observation.ObservedAt.Add(timeout)
+		}
 	}
 	next.Current = newInterval(observation.Repository, status, start, reason)
 	sortQueue(next.Queue)
@@ -195,10 +223,17 @@ func (r *replayState) setAggregateFromQueue() {
 	r.snapshot.QueuePhase = phase
 	r.snapshot.QueuePhaseSince = since
 	r.snapshot.QueueDeadline = deadline
+	if phase == Ready {
+		r.snapshot.QueuePhaseSince = r.snapshot.LastObservationAt
+		r.snapshot.QueueDeadline = r.snapshot.LastObservationAt.Add(deadline.Sub(since))
+	}
 }
 
 func (r *replayState) advanceDeadline(at time.Time) error {
 	if r.snapshot.Current.Status == Healthy && r.snapshot.QueuePhase != "" && !r.snapshot.QueueDeadline.IsZero() && !r.snapshot.QueueDeadline.After(at) {
+		if r.snapshot.QueuePhase == Running {
+			return r.transition(Unknown, r.snapshot.QueueDeadline, "running queue has no recent proven progress")
+		}
 		return r.transition(Down, r.snapshot.QueueDeadline, "queue progress deadline exceeded")
 	}
 	return nil
@@ -219,9 +254,14 @@ func (r *replayState) recoverAt(at time.Time) {
 		return
 	}
 	if r.snapshot.QueueDeadline.IsZero() {
+		_ = r.transition(Unknown, at, "queue progress history is insufficient")
 		return
 	}
 	if !r.snapshot.QueueDeadline.After(at) {
+		if r.snapshot.QueuePhase == Running {
+			_ = r.transition(Unknown, at, "running queue has no recent proven progress")
+			return
+		}
 		_ = r.transition(Down, at, "queue progress deadline exceeded")
 		return
 	}
@@ -230,8 +270,8 @@ func (r *replayState) recoverAt(at time.Time) {
 
 func (r *replayState) applyEvent(event QueueEvent, acceptanceTimeout, processingTimeout time.Duration) error {
 	oldPhase := r.snapshot.QueuePhase
-	removedPhase := Phase("")
 	index := queueIndex(r.snapshot.Queue, event.IssueNumber)
+	progress := event.Kind == RunningLabeled && index >= 0 && r.snapshot.Queue[index].Phase == Ready
 	switch event.Kind {
 	case ReadyLabeled:
 		r.snapshot.Queue = upsertQueue(r.snapshot.Queue, index, QueueItem{Number: event.IssueNumber, Phase: Ready, PhaseSince: event.At, Deadline: event.At.Add(acceptanceTimeout)})
@@ -239,7 +279,7 @@ func (r *replayState) applyEvent(event QueueEvent, acceptanceTimeout, processing
 		r.snapshot.Queue = upsertQueue(r.snapshot.Queue, index, QueueItem{Number: event.IssueNumber, Phase: Running, PhaseSince: event.At, Deadline: event.At.Add(processingTimeout)})
 	case QueueExited:
 		if index >= 0 {
-			removedPhase = r.snapshot.Queue[index].Phase
+			progress = r.snapshot.Queue[index].Phase == Running
 			r.snapshot.Queue = append(r.snapshot.Queue[:index], r.snapshot.Queue[index+1:]...)
 		}
 	default:
@@ -256,26 +296,29 @@ func (r *replayState) applyEvent(event QueueEvent, acceptanceTimeout, processing
 		r.snapshot.QueueDeadline = time.Time{}
 		return r.transition(Idle, event.At, "no actionable queue items")
 	}
-	if oldPhase == phase {
-		if phase == Running {
-			r.snapshot.QueuePhaseSince, r.snapshot.QueueDeadline = since, deadline
-		} else if r.snapshot.QueueDeadline.IsZero() {
-			r.snapshot.QueuePhaseSince, r.snapshot.QueueDeadline = since, deadline
+	r.snapshot.QueuePhase = phase
+	if progress {
+		r.snapshot.QueuePhaseSince = event.At
+		timeout := processingTimeout
+		if phase == Ready {
+			timeout = acceptanceTimeout
 		}
-	} else {
-		r.snapshot.QueuePhase = phase
-		if oldPhase == Running && phase == Ready && removedPhase == Running {
-			r.snapshot.QueuePhaseSince = event.At
-			r.snapshot.QueueDeadline = event.At.Add(acceptanceTimeout)
+		r.snapshot.QueueDeadline = event.At.Add(timeout)
+	} else if oldPhase != phase {
+		if phase == Running {
+			r.snapshot.QueuePhaseSince, r.snapshot.QueueDeadline = time.Time{}, time.Time{}
 		} else {
 			r.snapshot.QueuePhaseSince, r.snapshot.QueueDeadline = since, deadline
 		}
 	}
 	if r.snapshot.QueueDeadline.IsZero() {
-		return r.transition(Unknown, event.At, "queue history is insufficient")
+		return r.transition(Unknown, event.At, "queue progress history is insufficient")
 	}
 	if !r.snapshot.QueueDeadline.After(event.At) {
-		return r.transition(Down, r.snapshot.QueueDeadline, "queue progress deadline exceeded")
+		if phase == Running {
+			return r.transition(Unknown, event.At, "running queue has no recent proven progress")
+		}
+		return r.transition(Down, event.At, "queue progress deadline exceeded")
 	}
 	return r.transition(Healthy, event.At, "queue progress is within deadline")
 }
@@ -308,7 +351,7 @@ func aggregate(items []QueueItem) (Phase, time.Time, time.Time, bool) {
 		if item.Number <= 0 || item.PhaseSince.IsZero() || item.Deadline.IsZero() || (item.Phase != Ready && item.Phase != Running) {
 			return "", time.Time{}, time.Time{}, false
 		}
-		if item.Phase == Running && (runningItem == nil || item.Deadline.Before(runningItem.Deadline)) {
+		if item.Phase == Running {
 			runningItem = item
 		}
 		if item.Phase == Ready && (readyItem == nil || item.Deadline.Before(readyItem.Deadline)) {
@@ -316,7 +359,7 @@ func aggregate(items []QueueItem) (Phase, time.Time, time.Time, bool) {
 		}
 	}
 	if runningItem != nil {
-		return Running, runningItem.PhaseSince.UTC(), runningItem.Deadline.UTC(), true
+		return Running, time.Time{}, time.Time{}, true
 	}
 	if readyItem != nil {
 		return Ready, readyItem.PhaseSince.UTC(), readyItem.Deadline.UTC(), true
@@ -368,5 +411,5 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 
 func newInterval(repository string, status Status, start time.Time, reason string) Interval {
 	start = start.UTC()
-	return Interval{ID: fmt.Sprintf("%s:%s:%d", repository, status, start.UnixNano()), Repository: repository, Status: status, StartedAt: start, Reason: reason}
+	return Interval{DecisionVersion: DecisionVersion, ID: fmt.Sprintf("%s:%s:%d", repository, status, start.UnixNano()), Repository: repository, Status: status, StartedAt: start, Reason: reason}
 }

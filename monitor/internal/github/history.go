@@ -103,6 +103,15 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 		if since.IsZero() && after == current {
 			since = event.CreatedAt.UTC()
 		}
+		if after == "" && event.Event == "unlabeled" && before == laterEntry && len(result) > 0 {
+			entry := result[len(result)-1]
+			if since.Equal(entry.At) {
+				since = time.Time{}
+			}
+			result = result[:len(result)-1]
+			laterEntry = ""
+			continue
+		}
 		// A label replacement keeps the admission window until the next phase.
 		if after == "" && event.Event == "unlabeled" && laterEntry != "" && before != laterEntry {
 			laterEntry = ""
@@ -110,6 +119,12 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 		}
 		laterEntry = after
 		kind := model.QueueExited
+		if after == "" && event.Event == "unlabeled" {
+			kind = model.ReadyUnlabeled
+			if before == model.Running {
+				kind = model.RunningUnlabeled
+			}
+		}
 		if after == model.Ready {
 			kind = model.ReadyLabeled
 		}
