@@ -84,7 +84,7 @@ func TestV4AmbiguitiesArePreviewedAndQuarantined(t *testing.T) {
 			if err := json.Unmarshal(data, &snapshot); err != nil {
 				t.Fatal(err)
 			}
-			if err := snapshot.Validate(); err != nil {
+			if err := snapshot.ValidateLegacyV5(); err != nil {
 				t.Fatal(err)
 			}
 			for _, key := range want {

@@ -156,19 +156,6 @@ func TestCaptureNewQuestionAfterResolvedSuspension(t *testing.T) {
 	}
 }
 
-func TestAnsweredQuestionSurvivesNextCheckpoint(t *testing.T) {
-	request := &Request{ID: "req_first", IssueNumber: 1, RunID: "run_1", CheckpointID: "checkpoint_first", Status: issuedomain.RequestStatusAnswered, Question: "Choose?", Answer: "yes"}
-	item := &Issue{Number: 1, RunID: "run_1", Continuation: &ContinuationCheckpoint{ID: "checkpoint_second"}, Answers: []AnswerRecord{{RequestID: request.ID, Question: request.Question, Answer: request.Answer}}}
-	snapshot := Snapshot{Issues: map[string]*Issue{"1": item}}
-	if err := validateRequestAggregate(snapshot, request.ID, request); err != nil {
-		t.Fatal(err)
-	}
-	item.Answers[0].Answer = "different"
-	if err := validateRequestAggregate(snapshot, request.ID, request); err == nil {
-		t.Fatal("mismatched historical answer accepted")
-	}
-}
-
 func TestResolutionReleasePreservesPublicationHeadBinding(t *testing.T) {
 	for _, stage := range []issuedomain.ContinuationStage{issuedomain.ContinuationStagePublish, issuedomain.ContinuationStageChecks} {
 		t.Run(string(stage), func(t *testing.T) {

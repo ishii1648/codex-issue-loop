@@ -1451,8 +1451,6 @@ func TestLegacyDrainBeforeWorkerPIDIsSaved(t *testing.T) {
 					t.Fatal(err)
 				}
 				fixture["version"] = empty.Version
-				fixture["semantic_contract_version"] = empty.SemanticContractVersion
-				fixture["issue_lifecycle_api_version"] = empty.IssueLifecycleAPIVersion
 			}
 			if tc.idle {
 				fixture["issues"].(map[string]any)["1"].(map[string]any)["status"] = "completed"
@@ -1519,7 +1517,7 @@ esac
 				if err == nil || report.Transaction == nil || report.Transaction.Result != "deferred" {
 					t.Fatalf("report=%+v err=%v", report, err)
 				}
-				if tc.originalSchema && (!strings.Contains(err.Error(), "schema migration required") || sleeps != 0) {
+				if tc.originalSchema && (!strings.Contains(err.Error(), "migration is required") || sleeps != 0) {
 					t.Fatalf("sleeps=%d err=%v", sleeps, err)
 				}
 				if !tc.originalSchema && (!strings.Contains(err.Error(), "drain deadline") || sleeps != 1) {

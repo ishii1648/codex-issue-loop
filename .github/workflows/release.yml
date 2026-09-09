@@ -138,6 +138,7 @@ jobs:
         run: |
           cd dist/candidate
           shasum -a 256 -c checksums.txt
+          # Keep v6 unpublished until #536 and #537 integration evidence authorizes this gate.
           jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
             '.version == $version and .commit == $commit and .assignment_protocol == 1 and .semantic_contract_current == 4 and .semantic_contract_minimum == 1 and .state_schema_current == 5 and .state_schema_migration_from == 4 and .issue_lifecycle_api_current == "2.1" and .issue_lifecycle_api_minimum == "1.0"' release-manifest.json
           gh attestation verify agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"

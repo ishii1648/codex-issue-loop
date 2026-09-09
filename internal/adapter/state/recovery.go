@@ -6,24 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	queuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/queue"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"time"
-
-	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	queuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/queue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
-	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
-	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
 
-type transaction struct {
-	Version  int      `json:"version"`
-	Snapshot Snapshot `json:"snapshot"`
-	Event    Event    `json:"event"`
-}
+type transaction = statecontract.Transaction
 
 func (s Store) recoverUnlocked() (Snapshot, error) {
 	if err := s.completeQuarantineRecoveryUnlocked(); err != nil {
@@ -150,7 +144,7 @@ func (s Store) recoverUnlocked() (Snapshot, error) {
 func (s Store) emptySnapshot() Snapshot {
 	now := time.Now().UTC()
 	return Snapshot{
-		Version: CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion, IssueLifecycleAPIVersion: issuedomain.LifecycleAPICurrent, RepoID: s.RepoID, RepoPath: s.RepoPath,
+		Version: CurrentVersion, RepoID: s.RepoID, RepoPath: s.RepoPath,
 		Supervisor: Supervisor{State: SupervisorStateStopped, UpdatedAt: now},
 		Issues:     map[string]*Issue{}, QuarantinedIssues: map[string]*QuarantineRecord{},
 		PendingEffects:      map[string]*EffectIntent{},
@@ -166,49 +160,22 @@ func (s Store) loadSnapshotUnlocked() (Snapshot, bool, error) {
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("read state: %w", err)
 	}
+	if err := statecontract.ValidateEnvelope(data); err != nil {
+		return Snapshot{}, false, fmt.Errorf("decode state: %w", err)
+	}
 	var snapshot Snapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return Snapshot{}, false, fmt.Errorf("decode state: %w", err)
 	}
-	if snapshot.Version != CurrentVersion {
-		return Snapshot{}, false, SchemaVersionError{Kind: "state", Version: snapshot.Version}
+	if err := snapshot.ValidateVersion(); err != nil {
+		return Snapshot{}, false, err
 	}
-	if snapshot.RepoID != s.RepoID {
-		return Snapshot{}, false, fmt.Errorf("state repo_id %q does not match %q", snapshot.RepoID, s.RepoID)
+	if err := snapshot.ValidateRepositoryIdentity(s.RepoID); err != nil {
+		return Snapshot{}, false, err
 	}
 	normalizeSnapshot(&snapshot)
 	NormalizeLegacyWorkerLaunches(&snapshot)
 	return snapshot, true, nil
-}
-
-func normalizeSnapshot(snapshot *Snapshot) {
-	if snapshot.Issues == nil {
-		snapshot.Issues = map[string]*Issue{}
-	}
-	if snapshot.PendingRequests == nil {
-		snapshot.PendingRequests = map[string]*Request{}
-	}
-	if snapshot.PendingEffects == nil {
-		snapshot.PendingEffects = map[string]*EffectIntent{}
-	}
-	if snapshot.QuarantinedIssues == nil {
-		snapshot.QuarantinedIssues = map[string]*QuarantineRecord{}
-	}
-	if snapshot.IntakeVerifications == nil {
-		snapshot.IntakeVerifications = map[string]*queuedomain.AuthorVerification{}
-	}
-	for _, issue := range snapshot.Issues {
-		if issue == nil {
-			continue
-		}
-		if issue.Session == nil && issue.SessionID != "" {
-			// session_id predates backend selection and was only ever produced by Codex.
-			issue.Session = &WorkerSession{Backend: "codex", ID: issue.SessionID}
-		}
-		if issue.Session != nil && issue.SessionID == "" {
-			issue.SessionID = issue.Session.ID
-		}
-	}
 }
 
 func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {
@@ -237,11 +204,8 @@ func (s Store) readEventsUnlocked() ([]Event, int64, bool, error) {
 			if err := json.Unmarshal(bytes.TrimSpace(line), &event); err != nil {
 				return nil, validBytes, false, fmt.Errorf("decode event at byte %d: %w", validBytes, err)
 			}
-			if event.Version != CurrentVersion {
-				return nil, validBytes, false, SchemaVersionError{Kind: "event", Version: event.Version}
-			}
-			if event.RepoID != s.RepoID {
-				return nil, validBytes, false, fmt.Errorf("invalid event metadata at sequence %d", event.Sequence)
+			if err := event.Validate(s.RepoID); err != nil {
+				return nil, validBytes, false, err
 			}
 			events = append(events, event)
 		}
@@ -273,29 +237,7 @@ func (s Store) loadTransactionUnlocked() (transaction, bool, error) {
 }
 
 func (s Store) validateTransaction(txn transaction) error {
-	if txn.Version != CurrentVersion || txn.Snapshot.Version != CurrentVersion || txn.Event.Version != CurrentVersion {
-		version := txn.Version
-		if version == CurrentVersion && txn.Snapshot.Version != CurrentVersion {
-			version = txn.Snapshot.Version
-		}
-		if version == CurrentVersion && txn.Event.Version != CurrentVersion {
-			version = txn.Event.Version
-		}
-		return SchemaVersionError{Kind: "transaction", Version: version}
-	}
-	if txn.Snapshot.RepoID != s.RepoID || txn.Event.RepoID != s.RepoID {
-		return errors.New("transaction repository does not match state store")
-	}
-	if txn.Event.Sequence == 0 {
-		return errors.New("transaction event sequence must be positive")
-	}
-	if txn.Snapshot.StateRevision != txn.Event.Sequence {
-		return fmt.Errorf("transaction snapshot revision %d does not match event sequence %d", txn.Snapshot.StateRevision, txn.Event.Sequence)
-	}
-	if err := txn.Snapshot.Validate(); err != nil {
-		return fmt.Errorf("prepared transaction snapshot: %w", err)
-	}
-	return nil
+	return txn.Validate(s.RepoID)
 }
 
 func (s Store) validateConsistency(snapshot Snapshot, events []Event) error {
@@ -303,28 +245,6 @@ func (s Store) validateConsistency(snapshot Snapshot, events []Event) error {
 		return err
 	}
 	return snapshot.Validate()
-}
-
-func validateEventSequence(snapshot Snapshot, events []Event) error {
-	last := uint64(0)
-	for index, event := range events {
-		if index == 0 && event.Type == "event_log_checkpoint" {
-			if event.Sequence == 0 {
-				return fmt.Errorf("event log checkpoint sequence must be positive")
-			}
-			last = event.Sequence
-			continue
-		}
-		expected := last + 1
-		if event.Sequence != expected {
-			return fmt.Errorf("event sequence at index %d is %d, expected %d", index, event.Sequence, expected)
-		}
-		last = event.Sequence
-	}
-	if snapshot.StateRevision != last {
-		return fmt.Errorf("state revision %d does not match last event sequence %d", snapshot.StateRevision, last)
-	}
-	return nil
 }
 
 func sameEvent(left, right Event) bool {
@@ -377,6 +297,9 @@ func (s Store) recordRepairUnlocked(snapshot Snapshot, eventType string, payload
 		Timestamp: now, RepoID: s.RepoID, Type: eventType, Payload: payloadJSON,
 	}
 	txn := transaction{Version: CurrentVersion, Snapshot: snapshot, Event: event}
+	if err := txn.Validate(s.RepoID); err != nil {
+		return Snapshot{}, err
+	}
 	if err := fsutil.WriteJSON(s.TransactionPath(), txn, 0o600); err != nil {
 		return Snapshot{}, err
 	}
@@ -428,6 +351,9 @@ func (s Store) quarantineUnlocked(cause error) (Snapshot, error) {
 		Version: CurrentVersion, EventID: NewID("evt"), Sequence: 1, Timestamp: now,
 		RepoID: s.RepoID, Type: "recovery_blocked", Payload: payload,
 	}
+	if err := snapshot.Validate(); err != nil {
+		return Snapshot{}, err
+	}
 	if err := s.appendEventUnlocked(event); err != nil {
 		return Snapshot{}, err
 	}
@@ -457,4 +383,10 @@ func isVersionCompatibilityError(err error) bool {
 	}
 	var lifecycleError LifecycleAPIVersionError
 	return errors.As(err, &lifecycleError)
+}
+
+func normalizeSnapshot(snapshot *Snapshot) { statecontract.NormalizeSnapshot(snapshot) }
+
+func validateEventSequence(snapshot Snapshot, events []Event) error {
+	return statecontract.ValidateEventSequence(snapshot, events)
 }

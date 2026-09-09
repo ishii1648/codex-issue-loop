@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	CurrentVersion       = 4
-	MinimumVersion       = 1
-	CurrentSchemaVersion = 5
-	MigrationFromSchema  = 4
+	CurrentVersion       = 6
+	MinimumVersion       = CurrentVersion
+	CurrentSchemaVersion = CurrentVersion
+	MigrationFromSchema  = 5
 )
 
 type Class string

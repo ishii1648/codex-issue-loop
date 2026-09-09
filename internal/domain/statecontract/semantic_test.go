@@ -1,4 +1,4 @@
-package state
+package statecontract
 
 import (
 	"errors"
@@ -6,12 +6,11 @@ import (
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 )
 
 func TestEveryExecutionRequiredFieldHasRuntimeValidator(t *testing.T) {
-	for _, field := range statecontract.Current().Fields {
-		if field.Class == statecontract.ExecutionRequiredProvenance && !supportsExecutionRequiredField(field.Path) {
+	for _, field := range Current().Fields {
+		if field.Class == ExecutionRequiredProvenance && !SupportsExecutionRequiredField(field.Path) {
 			t.Fatalf("execution-required field %s has no runtime validator", field.Path)
 		}
 	}

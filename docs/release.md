@@ -26,11 +26,11 @@ candidate integrityは待機を挟まず、candidate prereleaseから取得し�
 
 Pull Requestとmainの通常CIでも`scripts/check-release.sh`を実行し、固定test versionから2回作成したartifactのbyte一致と埋め込みversion/commitを確認する。
 
-release artifactの`version --json`とinstall manifestはstorage schemaのcurrent/migration-from、およびsemantic contractのcurrent/minimumを明示する。release checkはこの範囲とversioned state contractを検査し、execution-required provenance追加にmigration/compatibility ruleがないbuildを拒否する。release前にはsupported旧versionのactive、blocked、needs-input、retry、publication recovery fixtureへcurrent validatorを適用する。
+release artifactの`version --json`とinstall manifestは単一snapshot version=6を既存のstate schema/semantic contract表示欄から示す。config/registry schemaはv5を維持する。release checkはこの範囲とversioned state contractを検査し、execution-required provenance追加にmigration/compatibility ruleがないbuildを拒否する。release前にはsupported旧versionのactive、blocked、needs-input、retry、publication recovery fixtureへcurrent validatorを適用する。
 
 ## Release作成
 
-1. `main`のCIとIssue/milestoneを確認する。
+1. `main`のCIとIssue/milestone、および[配布保留の解除条件](release-gates.md)を確認する。#535/#536の中間commitには通常配布用tagを発行しない。
 2. releaseするcommitへannotated tagを作る。
 3. tagをpushし、`verify-stable-release`までのRelease workflow成功を確認する。
 

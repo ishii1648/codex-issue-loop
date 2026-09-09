@@ -114,7 +114,7 @@ func TestProductionDerivedV4RecoveryMatrixMigratesElevenIssuesAndFourteenSubstat
 	if err := json.Unmarshal(migrated, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshot.Validate(); err != nil {
+	if err := snapshot.ValidateLegacyV5(); err != nil {
 		t.Fatal(err)
 	}
 	if len(snapshot.Issues) != 11 || len(snapshot.PendingRequests) != 1 || snapshot.StateRevision != beforeRevision+1 {
@@ -202,7 +202,7 @@ func TestV5MigrationConvertsLegacyScenarioStatusesToTypedSuspensions(t *testing.
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshot.Validate(); err != nil {
+	if err := snapshot.ValidateLegacyV5(); err != nil {
 		t.Fatal(err)
 	}
 	for key, item := range snapshot.Issues {

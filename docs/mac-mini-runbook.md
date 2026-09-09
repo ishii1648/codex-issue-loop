@@ -251,7 +251,7 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 
 terminal Issueはroot `active_execution`を持たず、base SHA、workspace、session、result digestはIssue-local `continuation`へ保持する。`resume`または`retry-stage`だけがgenerationを進めて単一実行枠を取得する。ambiguousなIssueはそのIssueだけをquarantineし、上記の限定された`adopt-worktree`または`cancel`以外を許可しないため、後続queueのcapacityを消費しない。
 
-GitHub同期またはtransaction途中で停止した場合も同じ`issue plan`から再確認し、同じactionを再実行して冪等に収束させる。state/event/label/worktreeを手編集せず、別Issueのexecutionを変更せず、欠けたauthorityをevent件数・error文言・現在のbaseから合成しない。旧scenario別recordは全loop停止中のtyped migrationだけがv4 raw入力からgeneric continuationへ変換し、v5に残る旧状態はfail closedとする。
+GitHub同期またはtransaction途中で停止した場合も同じ`issue plan`から再確認し、同じactionを再実行して冪等に収束させる。state/event/label/worktreeを手編集せず、別Issueのexecutionを変更せず、欠けたauthorityをevent件数・error文言・現在のbaseから合成しない。旧scenario別recordは全loop停止中のtyped migrationだけがv4 raw入力からgeneric continuationへ変換し、v5/v6に残る旧状態はfail closedとする。
 
 管理対象Issueの手動close/reopenやlabel変更は停止・再開・cancelの指示にはならない。supervisorは内部状態から管理labelと開閉状態を同期し直す。cancelには`issue resolve --action cancel`を使い、`status --json`の`canceled`とcancellation evidenceを確認する。GitHub障害で表示同期だけが失敗しても内部のcancelは保持され、同じcommandの再実行または定期reconciliationで収束する。quarantineのcancel後も管理記録を残すため、古いrunning labelが再度付与されても除去される。workerへのsignal、worktree削除、state/label手編集で判定を通過させてはならない。
 
@@ -353,6 +353,8 @@ retry中の新validator readが、旧`completed + pull_request_merged` recordの
 ```
 
 LaunchAgent非稼働、`eligible=true`、`github_verified=true`、mutation scope、全repairsをoperatorが確認した場合だけ、`--dry-run`を`--confirm-legacy-merged-identities`へ置き換える。成功後は`doctor`を実行し、同じdelivery backupで`retry-rollback`を再実行する。追加invariant違反、別repo/fork/open PR、URL/branch/number不一致、exact backup不一致では使用しない。
+
+現行runtimeはsnapshot version=6だけを通常loadする。旧(5,4,2.0/2.1)からの起動前migrationは#537の統合まで未提供であり、[Release gates](release-gates.md)で配布を保留する。以下の旧quarantine復元手順は対応する検証済み旧binary用で、v6 runtimeから旧markerを復元する経路ではない。v6を旧binaryへ直接読ませず、rollbackは停止下で移行前backupと対応binaryを対で戻す。
 
 semantic contract更新前後のbinaryでreadした結果、version mismatchだけを理由とするrevision 1 recovery markerが既に作られている場合は、markerが記録するbackupを1段ずつ指定する。別backupやstate fileをcopyしない。
 

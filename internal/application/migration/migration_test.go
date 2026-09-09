@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
 )
@@ -67,8 +67,8 @@ func TestApplyMigratesV4FixturesAndRestoreRecoversOriginalBytes(t *testing.T) {
 	if err != nil || loadedRegistry.Version != registry.CurrentVersion {
 		t.Fatalf("registry=%+v err=%v", loadedRegistry, err)
 	}
-	snapshot, err := (state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}).Load()
-	if err != nil || snapshot.Version != state.CurrentVersion || snapshot.SemanticContractVersion != statecontract.CurrentVersion || snapshot.StateRevision != 2 {
+	snapshot, err := readLegacySnapshot(filepath.Join(l.RepoDir("repo-1"), "state.json"))
+	if err != nil || snapshot.Version != 5 || snapshot.SemanticContractVersion != 4 || snapshot.StateRevision != 2 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	events, err := os.ReadFile(filepath.Join(l.RepoDir("repo-1"), "events.jsonl"))
@@ -140,7 +140,7 @@ func TestZeitreise442MissingWorkspaceMigratesToIsolatedQuarantine(t *testing.T) 
 	if err := json.Unmarshal(migrated, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshot.Validate(); err != nil {
+	if err := snapshot.ValidateLegacyV5(); err != nil {
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["442"]
@@ -158,7 +158,7 @@ func TestApplyMigratesV5SemanticV2CheckpointWithoutChangingEvidence(t *testing.T
 		t.Fatal(err)
 	}
 	store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
-	snapshot, err := store.Load()
+	snapshot, err := readLegacySnapshot(store.StatePath())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,12 +195,12 @@ func TestApplyMigratesV5SemanticV2CheckpointWithoutChangingEvidence(t *testing.T
 	if _, err := (Migrator{Layout: l, Now: func() time.Time { return second }}).Apply(); err != nil {
 		t.Fatal(err)
 	}
-	migrated, err := store.Load()
+	migrated, err := readLegacySnapshot(store.StatePath())
 	if err != nil {
 		t.Fatal(err)
 	}
 	item := migrated.Issues["7"]
-	if migrated.SemanticContractVersion != statecontract.CurrentVersion || item == nil || item.Continuation == nil ||
+	if migrated.SemanticContractVersion != 4 || item == nil || item.Continuation == nil ||
 		item.Continuation.Stage != issuedomain.ContinuationStagePublish || !reflect.DeepEqual(item.Continuation.Evidence, originalEvidence) ||
 		item.Suspension == nil || item.Suspension.Reason != "retained reason" || migrated.ActiveExecution != nil {
 		t.Fatalf("migrated snapshot=%+v issue=%+v", migrated, item)
@@ -241,7 +241,7 @@ func TestFaultMigrationCanRestorePreparedBackupWithoutTouchingWorktree(t *testin
 }
 
 func TestInterruptedApplyReusesJournalAndConvergesIdempotently(t *testing.T) {
-	l, repo, _ := writeV4Fixture(t, false)
+	l, _, _ := writeV4Fixture(t, false)
 	fixed := time.Date(2026, 8, 16, 2, 0, 0, 0, time.UTC)
 	writes := 0
 	first := Migrator{Layout: l, Now: func() time.Time { return fixed }, AfterWrite: func(string) error {
@@ -285,7 +285,7 @@ func TestInterruptedApplyReusesJournalAndConvergesIdempotently(t *testing.T) {
 	if err != nil || again.Changed {
 		t.Fatalf("idempotent apply=%+v err=%v", again, err)
 	}
-	snapshot, err := (state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}).Load()
+	snapshot, err := readLegacySnapshot(filepath.Join(l.RepoDir("repo-1"), "state.json"))
 	if err != nil || snapshot.StateRevision != 2 {
 		t.Fatalf("prepared transaction was not recovered: snapshot=%+v err=%v", snapshot, err)
 	}
@@ -332,7 +332,7 @@ func TestActiveExecutionAndContinuationBlockRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := (state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}).Load()
+	loaded, err := readLegacySnapshot(filepath.Join(l.RepoDir("repo-1"), "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestActiveExecutionAndContinuationBlockRollback(t *testing.T) {
 		t.Fatalf("active execution rollback was accepted: %v", err)
 	}
 	store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
-	if _, err := store.Update("issue_blocked", 63, issue.RunID, nil, func(snapshot *state.Snapshot) error {
+	if err := func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues["63"]
 		if err := state.CaptureContinuation(snapshot, item.Number, identity, "checkpoint_63", time.Now().UTC()); err != nil {
 			return err
@@ -355,17 +355,23 @@ func TestActiveExecutionAndContinuationBlockRollback(t *testing.T) {
 			return err
 		}
 		return state.ApplyIssueTransition(item, decision.Transition)
-	}); err != nil {
+	}(&loaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.WriteJSON(store.StatePath(), loaded, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "retained continuation") {
 		t.Fatalf("retained continuation rollback was accepted: %v", err)
 	}
-	if _, err := store.Update("test_park_completed", 63, issue.RunID, nil, func(snapshot *state.Snapshot) error {
+	if err := func(snapshot *state.Snapshot) error {
 		snapshot.Issues["63"].Continuation = nil
 		snapshot.Issues["63"].Suspension = nil
 		return nil
-	}); err != nil {
+	}(&loaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.WriteJSON(store.StatePath(), loaded, 0600); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := (Migrator{Layout: l}).Restore(result.Backup)
@@ -396,11 +402,11 @@ func TestV4PreparedTransactionMigratesItsSnapshotThroughTheSameV5Boundary(t *tes
 	if err := json.Unmarshal(object["snapshot"], &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshot.Validate(); err != nil {
+	if err := snapshot.ValidateLegacyV5(); err != nil {
 		t.Fatal(err)
 	}
 	item := snapshot.Issues["1"]
-	if snapshot.Version != 5 || snapshot.SemanticContractVersion != statecontract.CurrentVersion || item == nil || snapshot.ActiveExecution != nil ||
+	if snapshot.Version != 5 || snapshot.SemanticContractVersion != 4 || item == nil || snapshot.ActiveExecution != nil ||
 		item.Continuation == nil || item.Suspension == nil || item.Suspension.Status != issuedomain.SuspensionQuarantined {
 		t.Fatalf("migrated transaction snapshot=%+v Issue=%+v", snapshot, item)
 	}
@@ -452,4 +458,16 @@ func writeV4Fixture(t *testing.T, withTransaction bool) (layout.Layout, string, 
 		original[path] = append([]byte(nil), data...)
 	}
 	return l, repo, original
+}
+
+func readLegacySnapshot(path string) (state.Snapshot, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return state.Snapshot{}, err
+	}
+	var snapshot state.Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return state.Snapshot{}, err
+	}
+	return snapshot, snapshot.ValidateLegacyV5()
 }

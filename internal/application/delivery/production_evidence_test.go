@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"gopkg.in/yaml.v3"
 )
 
@@ -433,9 +432,9 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	if strings.Count(text, "scripts/build-release.sh") != 2 {
 		t.Fatal("release workflow must build the canonical candidate once and one comparison-only rebuild")
 	}
-	semanticPredicate := fmt.Sprintf(".semantic_contract_current == %d", statecontract.CurrentVersion)
+	semanticPredicate := ".semantic_contract_current == 4"
 	if strings.Count(text, semanticPredicate) != 1 {
-		t.Fatalf("release workflow does not require current semantic contract %d", statecontract.CurrentVersion)
+		t.Fatal("release workflow must retain the legacy manifest predicate until v6 migration integration")
 	}
 	checkData, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts", "check-release.sh"))
 	if err != nil {

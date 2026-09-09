@@ -25,7 +25,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
 
@@ -299,7 +298,7 @@ func migratedFixtureSnapshot(bundle Bundle) (state.Snapshot, error) {
 	}
 	raw := map[string]any{
 		"version":                     bundle.Manifest.SourceSchemaVersion,
-		"semantic_contract_version":   statecontract.CurrentVersion,
+		"semantic_contract_version":   4,
 		"issue_lifecycle_api_version": issuedomain.LifecycleAPICurrent,
 		"repo_id":                     bundle.Capture.Durable.RepoID, "repo_path": bundle.Capture.Durable.RepoPath,
 		"state_revision":   bundle.Capture.Durable.StateRevision,
@@ -307,19 +306,27 @@ func migratedFixtureSnapshot(bundle Bundle) (state.Snapshot, error) {
 		"issues":           map[string]json.RawMessage{strconv.Itoa(bundle.Manifest.IssueNumber): bundle.Capture.Durable.Issue},
 		"pending_requests": pending,
 	}
+	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion {
+		delete(raw, "semantic_contract_version")
+		delete(raw, "issue_lifecycle_api_version")
+	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {
 		return state.Snapshot{}, err
 	}
-	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion-1 {
+	if bundle.Manifest.SourceSchemaVersion == 4 {
 		return migration.DecodePreviousSnapshot(encoded, bundle.Manifest.CapturedAt)
 	}
-	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion {
+	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion || bundle.Manifest.SourceSchemaVersion == 5 {
 		var snapshot state.Snapshot
 		if err := json.Unmarshal(encoded, &snapshot); err != nil {
 			return state.Snapshot{}, fmt.Errorf("decode current recovery fixture: %w", err)
 		}
-		if err := snapshot.Validate(); err != nil {
+		validate := snapshot.Validate
+		if snapshot.Version == 5 {
+			validate = snapshot.ValidateLegacyV5
+		}
+		if err := validate(); err != nil {
 			return state.Snapshot{}, fmt.Errorf("validate current recovery fixture: %w", err)
 		}
 		return snapshot, nil

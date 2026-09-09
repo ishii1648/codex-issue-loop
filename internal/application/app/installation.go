@@ -189,11 +189,15 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 		return err
 	}
 	for _, artifact := range schemaReport.Artifacts {
-		if artifact.Version != 0 && artifact.Version != backupSchemaVersion {
-			return fmt.Errorf("installation rollback requires schema version %d but %s is version %d; restore the matching migration backup first", backupSchemaVersion, artifact.Path, artifact.Version)
+		expectedVersion := backupSchemaVersion
+		if backupSchemaVersion == statecontract.CurrentVersion && (artifact.Kind == "config" || artifact.Kind == "registry") {
+			expectedVersion = schemaversion.Current
+		}
+		if artifact.Version != 0 && artifact.Version != expectedVersion {
+			return fmt.Errorf("installation rollback requires schema version %d but %s is version %d; restore the matching migration backup first", expectedVersion, artifact.Path, artifact.Version)
 		}
 	}
-	legacySchemaRollback := backupSchemaVersion != schema.CurrentVersion
+	legacySchemaRollback := backupSchemaVersion != statecontract.CurrentVersion
 	var loaded []registry.Entry
 	if legacySchemaRollback {
 		loaded, err = loadedMigrationEntries(ctx, l, schemaReport.Repositories)
@@ -287,8 +291,8 @@ func installArtifacts(l layout.Layout, source, version, commit string) (installM
 	if err := fsutil.WriteFile(filepath.Join(skillDir, "VERSION"), []byte(version+"\n"), 0o600); err != nil {
 		return installManifest{}, false, fmt.Errorf("install Skill version: %w", err)
 	}
-	manifest := installManifest{Version: version, Commit: commit, SchemaVersion: schema.CurrentVersion,
-		SchemaMigrationFrom: schemaversion.Previous, SemanticContractVersion: statecontract.CurrentVersion,
+	manifest := installManifest{Version: version, Commit: commit, SchemaVersion: statecontract.CurrentVersion,
+		SchemaMigrationFrom: statecontract.MigrationFromSchema, SemanticContractVersion: statecontract.CurrentVersion,
 		BinarySHA256: binaryHash, SkillSHA256: skillHash, InstalledAt: time.Now().UTC()}
 	if err := fsutil.WriteJSON(manifestPath, manifest, 0o600); err != nil {
 		return installManifest{}, false, fmt.Errorf("write install manifest: %w", err)
@@ -304,8 +308,8 @@ func installationMatches(l layout.Layout, source, version, commit string) (bool,
 	if err != nil {
 		return false, err
 	}
-	if manifest.Version != version || manifest.Commit != commit || manifest.SchemaVersion != schema.CurrentVersion ||
-		manifest.SchemaMigrationFrom != schemaversion.Previous || manifest.SemanticContractVersion != statecontract.CurrentVersion {
+	if manifest.Version != version || manifest.Commit != commit || manifest.SchemaVersion != statecontract.CurrentVersion ||
+		manifest.SchemaMigrationFrom != statecontract.MigrationFromSchema || manifest.SemanticContractVersion != statecontract.CurrentVersion {
 		return false, nil
 	}
 	sourceHash, err := fileSHA256(source)

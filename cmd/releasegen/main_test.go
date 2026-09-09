@@ -79,7 +79,7 @@ func TestGenerateSBOMProducesDeterministicSPDXDocument(t *testing.T) {
 }
 
 func TestReleaseContractConstantsStayAligned(t *testing.T) {
-	if delivery.ProtocolVersion != 1 || schema.Current != statecontract.CurrentSchemaVersion || schema.Previous != statecontract.MigrationFromSchema {
+	if delivery.ProtocolVersion != 1 || statecontract.CurrentVersion != statecontract.CurrentSchemaVersion || statecontract.MigrationFromSchema != 5 {
 		t.Fatalf("protocol/schema contract drift: protocol=%d schema=%d/%d contract=%d/%d", delivery.ProtocolVersion, schema.Current, schema.Previous, statecontract.CurrentSchemaVersion, statecontract.MigrationFromSchema)
 	}
 }

@@ -1,8 +1,10 @@
 # 永続state schema / semantic migration runbook
 
-現行artifactのstorage schemaはv5、semantic contractはv4、Issue lifecycle APIはv2.1である。v2.1 runtimeは同一majorのv2.0 snapshotとprepared transactionを読み取り時に互換正規化し、次のstate更新でv2.1として保存する。storageはv4からv5へのforward migrationをサポートし、v5に旧runtime fieldまたは旧statusが残る入力は拒否する。binaryの`version --json`、install manifest、`migrate --json`はstorage schema、semantic contract、Issue lifecycle APIのcurrent/minimumを表示する。
+現行runtimeのsnapshot永続化契約は単一`version=6`であり、旧`semantic_contract_version`と`issue_lifecycle_api_version`を保存しない。旧(5,4,2.0/2.1)は移行元として識別できるが、v6 runtimeへ直接loadしない。起動前migrationは#537で統合するまで未提供であり、[配布保留境界](release-gates.md)を解除しない。移行不能なら原本を変更せず移行全体を中止する。新旧readerの受理条件は[architecture §10](architecture.md#10-issue-lifecycle-apiと互換性)を正本とする。
 
-contract v4はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。実行statusではroot `active_execution`、Issue `generation`、`workspace`の一致を要求し、待機時の再開材料をIssue-localな`continuation`、`continuation.evidence`、`suspension`へ分離する。宣言、対象status、validator、migration ruleは`internal/domain/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
+以下のv4→v5・semantic migration手順は既存の旧形式用で、v6への移行経路ではない。config/registry schemaはv5を維持する。旧形式の専用quarantine復元commandもv6 runtimeから旧markerをloadして実行できない。対応する検証済み旧binaryと停止条件を確認せず実行しない。
+
+contract v4はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。実行statusではroot `active_execution`、Issue `generation`、`workspace`の一致を要求し、待機時の再開材料をIssue-localな`continuation`、`continuation.evidence`、`suspension`へ分離する。v6の宣言、対象status、validatorは`internal/domain/statecontract`を正本とし、以下のcontract v4 migration ruleは旧経路に限る。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
 
 ## Read-only preview
 
@@ -62,6 +64,8 @@ fileごとの置換はatomicで、同じprepared journalを使う再実行は同
 v4→v5 migrationは11 Issue・14 legacy recovery substateのproduction由来matrixで、Issue、request/answer、execution generation、session、publication/PR auditの件数とidentityを保存する。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、current aggregate validatorを通す。
 
 ## Paired rollback
+
+v6への移行後に旧binaryへ戻す場合は、停止下で移行前backupと対応binaryを対で復元する。v6 snapshotを旧binaryで直接読まない。起動前migrationとそのrollback実装・停止fixtureでの検証は#537の配布解除条件であり、以下の既存v4→v5 rollbackを代用しない。
 
 ```sh
 agent-loop stop --repo /absolute/path/to/repository

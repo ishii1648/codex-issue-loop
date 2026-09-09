@@ -11,7 +11,6 @@ import (
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 )
 
@@ -54,7 +53,7 @@ func DecodePreviousSnapshot(data []byte, migratedAt time.Time) (state.Snapshot, 
 		return state.Snapshot{}, err
 	}
 	object["version"] = json.RawMessage(fmt.Sprint(schemaversion.Current))
-	object["semantic_contract_version"] = json.RawMessage(fmt.Sprint(statecontract.CurrentVersion))
+	object["semantic_contract_version"] = json.RawMessage("4")
 	delete(object, "notifications")
 	encoded, err := json.Marshal(object)
 	if err != nil {
@@ -64,7 +63,7 @@ func DecodePreviousSnapshot(data []byte, migratedAt time.Time) (state.Snapshot, 
 	if err := json.Unmarshal(encoded, &snapshot); err != nil {
 		return state.Snapshot{}, fmt.Errorf("decode migrated v5 snapshot: %w", err)
 	}
-	if err := snapshot.Validate(); err != nil {
+	if err := snapshot.ValidateLegacyV5(); err != nil {
 		return state.Snapshot{}, fmt.Errorf("validate migrated v5 snapshot: %w", err)
 	}
 	return snapshot, nil

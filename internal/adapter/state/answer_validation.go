@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -13,9 +14,7 @@ import (
 
 const MaxAnswerBytes = 16 * 1024
 
-type ConflictError struct{ Message string }
-
-func (e ConflictError) Error() string { return e.Message }
+type ConflictError = statecontract.ConflictError
 
 func ValidateAnswer(request *Request, answer string, secrets []string) error {
 	if strings.TrimSpace(answer) == "" {

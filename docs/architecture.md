@@ -47,7 +47,7 @@ GitHub外形監視も別bounded contextである。独立processがGitHubのIssu
 
 ### 3.1 Durable Issue lifecycle境界
 
-現行実装では、状態語彙、遷移decision、不変条件を`internal/domain/issue`が所有し、`internal/adapter/state/issue_transition.go`がdurable snapshotへのstatus commit境界を担う。applicationはdomain decisionの呼び出しとeffectの調停に限定し、この規律のrepository作業ルールは[ルートの`AGENTS.md`](../AGENTS.md#durable-issue-lifecycle)、公開状態の互換性は[§10](#10-issue-lifecycle-apiと互換性)を参照する。
+現行実装では、状態語彙と遷移decisionを`internal/domain/issue`、snapshot全体の型・JSON解釈・受理条件・aggregate不変条件を`internal/domain/statecontract`が所有し、`internal/adapter/state/issue_transition.go`がdurable snapshotへのstatus commit境界を担う。applicationはdomain decisionの呼び出しとeffectの調停に限定し、この規律のrepository作業ルールは[ルートの`AGENTS.md`](../AGENTS.md#durable-issue-lifecycle)、公開状態の互換性は[§10](#10-issue-lifecycle-apiと互換性)を参照する。
 
 | 責務 | 入力 | 出力 | 所有しないもの |
 | --- | --- | --- | --- |
@@ -210,24 +210,47 @@ GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠�
 
 ## 10. Issue lifecycle APIと互換性
 
-公開lifecycle contractは、状態ごとの意味、許可遷移、terminal判定、実行枠消費、自動継続可否、人間操作要否を一つのversioned sourceとして定義する。CLI JSON、event、GitHub表示、migration、validatorはこのcontractから同じ意味へprojectする。
+snapshot全体は再起動・更新をまたぐ永続化APIである。JSONの型、フィールドの意味、受理条件、状態間の不変条件、許可遷移を一体の契約とし、単一の整数`version=6`で識別する。snapshotは手編集用の公開インターフェースではなく、更新は正式な操作と`Store.Update`のtransactionを通す。`state_revision`はcommitごとの更新番号で、互換性versionではない。
 
-内部storage schemaとIssue lifecycle APIを分離する。
+契約変更のCI検出対象パス集合は次のとおり。型・validatorだけでなく、JSON decoder、正規化、実行権・回答履歴・取消・resolutionの受理条件も対象に含む。
 
-- storage変更を決定的に移行でき、公開上の意味が変わらない場合はAPI majorを維持する。
-- 同一majorの旧minor fixtureは新minorで読み、同じ意味で継続できなければならない。
-- 公開状態の削除・改名・意味変更、terminal判定、実行枠消費、許可遷移の非互換変更ではAPI majorを更新する。
-- major更新でも、根拠が十分なIssueは決定的に移行する。
-- 移行不能なIssueは`Quarantined`へ変換し、他Issueを継続する。
+- `internal/domain/statecontract/**`
+- `internal/domain/issue/**`
+- `internal/domain/publication/audit.go`（snapshot内のpublication evidence型）
+- `internal/domain/queue/author.go`（snapshot内のauthor verification型）
 
-migration decoderは旧形式を読む境界に限定する。旧scenario別runtime経路を互換性のために残さず、変換後は現行aggregateと共通lifecycleだけを使用する。
+`statecontract/snapshot.go`のJSON型と`validator.go`・`execution_validation.go`・`semantic.go`の判定がフィールド契約の正本である。
+
+| フィールド群 | 意味・必須条件 |
+| --- | --- |
+| `version`, `repo_id`, `repo_path` | 現行versionと非空のrepository identity。Storeが観測したrepository IDとの一致も検査する |
+| `state_revision`, transaction, event | snapshot更新番号とevent sequenceを一致させ、単調なevent chainを維持する。eventは実行権の根拠にしない |
+| `supervisor`, `recovery` | supervisor状態語彙、障害・観測情報。recoveryがあれば`blocked`の語彙に限る |
+| `issues` | キーは正のIssue番号と一致。status、run、generation、PID/PGID、session、PR identityをaggregateとして検証する |
+| `active_execution` | repository唯一の実行権。実行statusのIssue・run・generation・開始時刻と一致する |
+| Issueの`workspace`, `continuation`, `suspension` | 実行由来情報、再開checkpoint、停止理由と許可操作。必要statusはissue domainから導出し、checkpointのID・run・generation・stageと参照整合性を要求する |
+| Issueの`cancellation`, `github_state_reason` | 取消元、直前status、実行権解放結果、取消時刻。GitHub由来なら観測済み`NOT_PLANNED`が一致する |
+| `pending_requests`, Issueの`answers` | 質問と回答のidentity・provenance。回答済み旧質問は一致する回答履歴があれば現在のcheckpointと異なってよい |
+| `pending_effects` | Issue・runに属する未完了GitHub同期。effect kindとstatusを一致させる |
+| `quarantined_issues`, `intake_verifications` | 管理中Issueとの排他、隔離理由・時刻・保存証拠、および受付時のauthor観測 |
+
+aggregateのmapはデコード時に空mapへ正規化する。省略可能な観測値と実行に必須のprovenanceの区別は`contract.go`を参照する。ファイルI/O、lock、atomic保存、時計・プロセス・Git・GitHubの観測はadapter/applicationが行い、domainへ値を渡す。domainはそれらを直接観測しない。
+
+通常loadはpayloadを解釈する前にversionを検査し、復旧後のsnapshotを`Snapshot.Validate`で検証する。保存前とprepared transactionの復旧前は`Transaction.Validate`から同じaggregate契約を通る。許可遷移は既存issue domainのdecisionを使い、`internal/adapter/state/issue_transition.go`で古いstatusに対するdecisionのcommitを拒否する。取消・resolutionの外部観測に対する受理条件もstatecontractに置き、状態機械を重複させない。
+
+versionは構造、必須条件、受理条件、意味、不変条件、許可遷移のいずれかが変わるたびに増分する。全旧snapshotを同じ意味で扱える変更を互換変更、それ以外を非互換変更とし、受理範囲の拡大も旧readerが拒否し得るためversion更新対象とする。実装だけの変更で契約が同じなら更新しない。整数の大小だけから互換性を推定せず、runtimeは現行versionとの完全一致を要求する。互換変更でも旧版を読む経路は明示的な移行・検証を必要とする。
+
+旧移行元は`(version, semantic_contract_version, issue_lifecycle_api_version)=(5,4,2.0または2.1)`で識別する。Go型に残る旧2項目は旧形式の解釈専用で、v6の保存には含めず、v6への混在は値が0や空文字でも拒否する。旧readerはv6を拒否し得るが、誤隔離しない保証はないため直接読ませない。v4→v5の既存変換は`ValidateLegacyV5`で検証し、runtime load/commitの許可とは区別する。
+
+v5→v6の起動前migrationは#537で実装する。移行不能な入力では原本を変えず移行全体を中止し、Issue単位の推測による修復を行わない。配布解除条件と#535→#536→#537の統合順は[Release gates](release-gates.md)を参照する。CLI出力schema、config/registry schema、monitor等の別versionは統合しない。既存CLI/manifestの`state_schema_current`と`semantic_contract_current`は同じsnapshot version定数から出力する互換用の表示であり、独立したsnapshot互換性識別子ではない。Issue lifecycle API表示値もsnapshot readerの受理判定には使用しない。
 
 ## 11. Package境界
 
 ```text
 internal/
 ├── domain/
-│   ├── issue/       # aggregate、lifecycle contract、decision、invariant
+│   ├── issue/       # lifecycle vocabulary、decision、invariant
+│   ├── statecontract/ # snapshot aggregate、JSON、validator、transaction contract
 │   └── queue/       # author policy、eligibility、deterministic ordering
 ├── application/
 │   ├── supervisor/  # queue loop、単一実行、Issue-local failure boundary
@@ -260,7 +283,7 @@ internal/
 - workerにqueue選択、commit、push、PR作成を許可しない。
 - 同一publication intentの再試行で別branchまたは別PRを作らない。
 - PR待機中にbase branchが進んでもfast-forwardなら同一publication intentを継続し、履歴分岐だけを拒否する。
-- 同一API majorのminor updateでIssue状態の意味を変えない。
+- snapshotの受理条件・意味・遷移変更をversion更新なしで配布しない。
 
 ## 13. 実装との関係
 

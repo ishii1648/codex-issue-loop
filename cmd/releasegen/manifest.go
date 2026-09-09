@@ -15,7 +15,6 @@ import (
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
-	"github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 )
 
 var releaseVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$`)
@@ -54,7 +53,7 @@ func generateManifest(artifact, version, commit, output string) error {
 	manifest := delivery.ReleaseManifest{
 		ManifestVersion: 1, DeliveryProtocol: delivery.ProtocolVersion, AssignmentProtocol: delivery.AssignmentProtocolVersion, Version: version, Commit: commit,
 		Target: "darwin/arm64", Artifact: filepath.Base(artifact), ArtifactSHA256: hex.EncodeToString(sum[:]),
-		StateSchemaCurrent: schema.Current, StateSchemaMigrationFrom: schema.Previous,
+		StateSchemaCurrent: statecontract.CurrentVersion, StateSchemaMigrationFrom: statecontract.MigrationFromSchema,
 		SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,
 		IssueLifecycleAPICurrent: issuedomain.LifecycleAPICurrent, IssueLifecycleAPIMinimum: issuedomain.LifecycleAPIMinimum,
 	}

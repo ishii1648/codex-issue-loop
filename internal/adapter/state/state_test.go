@@ -1080,23 +1080,19 @@ func TestDurableStateRejectsUnknownIssueStatus(t *testing.T) {
 	}
 }
 
-func TestLifecycleAPIPreviousMinorNormalizesCompatibly(t *testing.T) {
-	store := newStore(t)
-	snapshot, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy := strings.Replace(string(encoded), `"issue_lifecycle_api_version":"`+issuedomain.LifecycleAPICurrent+`"`, `"issue_lifecycle_api_version":"`+issuedomain.LifecycleAPIPreviousMinor+`"`, 1)
-	var decoded Snapshot
-	if err := json.Unmarshal([]byte(legacy), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.IssueLifecycleAPIVersion != issuedomain.LifecycleAPICurrent || decoded.Validate() != nil {
-		t.Fatalf("version=%q validation=%v", decoded.IssueLifecycleAPIVersion, decoded.Validate())
+func TestLegacyLifecycleMinorIsIdentifiedWithoutRuntimeUpgrade(t *testing.T) {
+	for _, minor := range []string{"2.0", "2.1"} {
+		encoded := fmt.Sprintf(`{"version":5,"semantic_contract_version":4,"issue_lifecycle_api_version":%q}`, minor)
+		var snapshot Snapshot
+		if err := json.Unmarshal([]byte(encoded), &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if !snapshot.LegacySource() || snapshot.IssueLifecycleAPIVersion != minor {
+			t.Fatalf("legacy envelope changed: %+v", snapshot)
+		}
+		if err := snapshot.Validate(); err == nil {
+			t.Fatal("legacy snapshot was accepted without migration")
+		}
 	}
 }
 
@@ -1503,7 +1499,7 @@ func TestUnsupportedSemanticContractVersionIsRejectedWithoutQuarantine(t *testin
 	if _, err := store.Load(); err == nil {
 		t.Fatal("unsupported semantic contract was accepted")
 	} else {
-		var versionErr SemanticContractVersionError
+		var versionErr SchemaVersionError
 		if !errors.As(err, &versionErr) {
 			t.Fatalf("error=%T %v", err, err)
 		}
@@ -1559,8 +1555,8 @@ func TestUnsupportedLifecycleAPIVersionIsRejectedWithoutQuarantine(t *testing.T)
 	if _, err := store.Load(); err == nil {
 		t.Fatal("unsupported lifecycle API was accepted")
 	} else {
-		var versionErr LifecycleAPIVersionError
-		if !errors.As(err, &versionErr) || versionErr.Version != "99.0" || versionErr.Current != issuedomain.LifecycleAPICurrent {
+		var versionErr SchemaVersionError
+		if !errors.As(err, &versionErr) || versionErr.Version != CurrentVersion {
 			t.Fatalf("error=%T %v", err, err)
 		}
 	}

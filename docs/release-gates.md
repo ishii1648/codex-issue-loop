@@ -48,7 +48,11 @@ raw snapshotとoffline contractはmode `0600`の`production-state-private-eviden
 
 tag push後にworkflow自体のrelease blockerを修正した場合は、tagを移動せず、default branchの修正版workflowを`workflow_dispatch`で実行する。入力したtagがannotated stable tagであること、そのpeeled commitが入力commitと一致すること、そのcommitが`main`のancestorであることを検査し、同じtagged sourceからcandidateを新規作成して全gateを再実行する。
 
-manifestのsemantic contract predicateを変更する場合は、tag作成前なら変更commitをrevertして旧predicateへ戻せる。tag作成後はtagやcandidateを移動・再利用せず、修正版workflowをdefault branchへmergeして上記`workflow_dispatch`から同じtagged sourceの全gateを再実行する。
+snapshot v6の配布は、既存`verify-attestation-and-manifest`の`(state_schema_current, semantic_contract_current, issue_lifecycle_api_current)=(5,4,2.1)`限定predicateで保留する。v6 artifactはこのjobで失敗し、既存`needs`依存によりcandidate prerelease公開、`promotion-evidence`、`promote-stable`へ進まない。通常CIの`make ci`はv6を検証するため、auto_mergeによるmain統合とReleaseの公開可否は別境界である。新しい設定・job・配布機構、Environmentの承認設定には依存しない。
+
+統合順は#535（契約層・v6）→#536（契約変更検出CI）→#537（起動前migration・旧cancel正規化）とする。#535/#536の中間commitに通常配布用tagを発行しない。#537は#535/#536を含む統合SHAに対し、必須CI、契約変更検出、旧(5,4,2.0/2.1)移行、prepared transaction、移行不能時の原本不変、旧cancel正規化、停止fixture上のpaired rollbackの成功を確認する。対象SHAとCI結果を#537のPRへ記録し、同じPRで初めてRelease predicateをv6へ更新する。SHAが変わった場合はそのSHAの証拠を取得する。解除後もtag対象commitで既存Releaseの全gateを再実行する。
+
+`v*` tag pushと`workflow_dispatch`の双方に同じmanifest検証を適用する。過去workflowを使った手動公開など既存経路外の操作まで禁止する機構ではない。tag作成後の修正でもtagを移動・再利用せず、対象sourceの統合・検証証拠がないv6 artifactを再実行だけで公開しない。
 
 失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production rollout failure時は対象repositoryをprevious versionへrollbackし、state、active execution、continuation、request、worktreeを手編集しない。rollout failureだけを理由にRelease workflowを失敗へ戻したり、新patchを作成したりしない。
 
