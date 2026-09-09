@@ -166,6 +166,35 @@ func TestDashboardStatesAndMissingData(t *testing.T) {
 	}
 }
 
+func TestDashboardAcceptsHosts(t *testing.T) {
+	cfg, storage, at := dashboardFixture(t)
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at}}
+	if err := storage.Commit(snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := (App{Now: func() time.Time { return at }}).monitorHandler(cfg)
+	for _, path := range []string{"/", "/api/status", "/api/details", "/api/history", "/api/report", "/api/timeline", "/metrics"} {
+		if path == "/api/history" || path == "/api/report" || path == "/api/timeline" {
+			path += "?from=" + at.Add(-time.Hour).Format(time.RFC3339) + "&to=" + at.Format(time.RFC3339)
+		}
+		want := request(t, handler, path)
+		if want.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, want.Code, want.Body.String())
+		}
+		for _, host := range []string{"localhost:19110", "127.0.0.1:19110", "[::1]:19110", "machine.tailnet.ts.net", "machine.tailnet.ts.net:443", "monitor.example"} {
+			t.Run(host+path, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:19110"+path, nil)
+				req.Host = host
+				got := httptest.NewRecorder()
+				handler.ServeHTTP(got, req)
+				if got.Code != want.Code || got.Body.String() != want.Body.String() || !reflect.DeepEqual(got.Header(), want.Header()) {
+					t.Fatalf("response differs: %d %s headers=%v", got.Code, got.Body.String(), got.Header())
+				}
+			})
+		}
+	}
+}
+
 func TestDashboardReadOnlyBoundary(t *testing.T) {
 	cfg, _, at := dashboardFixture(t)
 	a := App{Now: func() time.Time { return at }}
@@ -176,10 +205,11 @@ func TestDashboardReadOnlyBoundary(t *testing.T) {
 	}{
 		{"POST", "http://127.0.0.1:19110/api/status", 405},
 		{"POST", "http://127.0.0.1:19110/api/details", 405},
-		{"GET", "http://attacker.example/api/details", 403},
+		{"POST", "http://machine.tailnet.ts.net/api/details", 405},
+		{"POST", "http://machine.tailnet.ts.net/api/status", 405},
+		{"POST", "http://machine.tailnet.ts.net/", 405},
 		{"GET", "http://127.0.0.1:19110/api/details?config=/etc/passwd", 400},
 		{"GET", "http://127.0.0.1:19110/api/details?repo=unknown/repo", 503},
-		{"GET", "http://attacker.example/api/status", 403},
 		{"GET", "http://127.0.0.1:19110/api/status?config=/etc/passwd", 400},
 		{"GET", "http://127.0.0.1:19110/api/status?at=invalid", 503},
 		{"GET", "http://127.0.0.1:19110/api/report?from=2026-09-07T00:00:00Z&to=2026-09-06T00:00:00Z", 503},
@@ -190,10 +220,16 @@ func TestDashboardReadOnlyBoundary(t *testing.T) {
 		if r.Code != tc.code {
 			t.Fatalf("%s: %d", tc.url, r.Code)
 		}
+		if r.Header().Get("Cache-Control") != "no-store" || r.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("%s: headers=%v", tc.url, r.Header())
+		}
+		if tc.code == 405 && r.Header().Get("Allow") != "GET" {
+			t.Fatalf("%s: Allow=%q", tc.url, r.Header().Get("Allow"))
+		}
 	}
 	for _, addr := range []string{"0.0.0.0:19110", "localhost:19110", "192.168.1.2:19110", "[::]:19110"} {
-		if err := a.serve(context.Background(), []string{"--listen", addr, "--config", cfg.Path}); err == nil {
-			t.Fatalf("allowed %s", addr)
+		if err := a.serve(context.Background(), []string{"--listen", addr, "--config", cfg.Path}); err == nil || err.Error() != "--listen must use a loopback IP address" {
+			t.Fatalf("%s: %v", addr, err)
 		}
 	}
 }

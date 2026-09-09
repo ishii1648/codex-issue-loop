@@ -6,7 +6,7 @@
 - Prometheus: <http://127.0.0.1:19090>
 - read-only API: <http://127.0.0.1:19110/api/status>
 
-すべてloopbackのみです。ローカルの他ユーザーも閲覧可能です。外部公開、reverse proxy、通知、Alertmanagerは構成しません。
+listen先はすべてloopbackのみです。monitor webはHTTP Hostを制限しないため、Tailscale ServeなどからHostを保持したまま転送できます。ローカルの他ユーザーも閲覧可能です。この手順では外部公開、reverse proxy、通知、Alertmanagerは構成しません。
 
 ## 準備・起動
 
