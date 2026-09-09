@@ -63,21 +63,13 @@ func (a App) monitorHandler(cfg config.Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		host, _, err := net.SplitHostPort(r.Host)
-		if err != nil {
-			host = r.Host
-		}
-		ip := net.ParseIP(host)
-		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-			http.Error(w, "loopback Host required", http.StatusForbidden)
-			return
-		}
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
 			http.Error(w, "read-only endpoint", http.StatusMethodNotAllowed)
 			return
 		}
 		now := a.now()
+		var err error
 		var out bytes.Buffer
 		reader := a
 		reader.Out = &out
