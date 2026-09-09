@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
+	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/githubqueue"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"

@@ -14,6 +14,7 @@ import (
 func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	fs.SetOutput(a.Err)
+	repo := fs.String("repo", "", "registered repository path")
 	apply := fs.Bool("apply", false, "apply the supported forward migration")
 	rollback := fs.Bool("rollback", false, "restore a migration backup")
 	backup := fs.String("backup", "", "absolute migration backup path")
@@ -28,6 +29,14 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 		return exitError{2, fmt.Errorf("--rollback requires --backup, and --backup requires --rollback")}
 	}
 
+	var repositoryID string
+	if *repo != "" {
+		entry, err := (registry.Store{Path: l.RegistryPath}).Resolve(*repo, "")
+		if err != nil {
+			return err
+		}
+		repositoryID = entry.RepoID
+	}
 	_, brokerLoaded, err := loadedWebhookBroker(ctx, l)
 	if err != nil {
 		return err
@@ -38,6 +47,15 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 
 	if *rollback {
 		repositories, err := schema.RegisteredRepositories(l)
+		if repositoryID != "" {
+			selected := []registry.Entry{}
+			for _, entry := range repositories {
+				if entry.RepoID == repositoryID {
+					selected = append(selected, entry)
+				}
+			}
+			repositories = selected
+		}
 		if err != nil {
 			return err
 		}
@@ -48,14 +66,14 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 		if len(loaded) > 0 {
 			return fmt.Errorf("schema migration requires every registered LaunchAgent to be stopped; loaded: %v", repoIDs(loaded))
 		}
-		result, err := (schema.Migrator{Layout: l}).Restore(*backup)
+		result, err := (schema.Migrator{Layout: l, RepositoryID: repositoryID}).Restore(*backup)
 		if err != nil {
 			return err
 		}
 		return a.output(*jsonOut, result)
 	}
 
-	report, err := schema.Inspect(l)
+	report, err := schema.InspectRepository(l, repositoryID)
 	if err != nil {
 		return err
 	}
@@ -70,13 +88,13 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 		return fmt.Errorf("schema migration requires every registered LaunchAgent to be stopped; loaded: %v", repoIDs(loaded))
 	}
 
-	migrator := schema.Migrator{Layout: l}
+	migrator := schema.Migrator{Layout: l, RepositoryID: repositoryID}
 	var result schema.Result
 	result, err = migrator.Apply()
 	if err != nil {
 		return err
 	}
-	if *apply {
+	if *apply && repositoryID == "" {
 		if err := rewritePlists(l); err != nil {
 			return fmt.Errorf("schema migrated but LaunchAgent plist rewrite failed: %w", err)
 		}

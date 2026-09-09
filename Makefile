@@ -11,6 +11,7 @@ GO_TOOLCHAIN ?= go1.25.13
 export GOTOOLCHAIN := $(GO_TOOLCHAIN)
 
 build:
+	$(GO) build -trimpath -o bin/agent-loopctl ./cmd/agent-loopctl
 	$(GO) build -trimpath -o bin/agent-loop ./cmd/agent-loop
 	$(GO) build -trimpath -o bin/agent-loop-monitor ./monitor/cmd/agent-loop-monitor
 
@@ -88,4 +89,4 @@ ci: workflow-shell-check fmt-check schema-check tidy-check test fault-test confo
 
 clean:
 	$(GO) clean
-	rm -f bin/agent-loop bin/agent-loop-monitor bin/shellcheck
+	rm -f bin/agent-loopctl bin/agent-loop bin/agent-loop-monitor bin/shellcheck

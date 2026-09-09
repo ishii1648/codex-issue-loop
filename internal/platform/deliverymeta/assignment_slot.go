@@ -1,10 +1,11 @@
-package delivery
+package deliverymeta
 
 import (
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
@@ -23,24 +24,24 @@ type SlotManifest struct {
 }
 
 func SlotRef(l layout.Layout, version, commit, digest string) AssignmentRef {
-	dir := filepath.Join(l.DeliverySlotsDir(), safeName(version)+"-"+digest)
+	dir := filepath.Join(l.DeliverySlotsDir(), SafeName(version)+"-"+digest)
 	return AssignmentRef{Version: version, Commit: commit, ArtifactSHA256: digest, Slot: filepath.Join(dir, "agent-loop")}
 }
 
 func StageSlot(l layout.Layout, ref AssignmentRef, source string) error {
-	if err := validateAssignmentRef(ref); err != nil {
+	if err := ValidateAssignmentRef(ref); err != nil {
 		return err
 	}
 	want := SlotRef(l, ref.Version, ref.Commit, ref.ArtifactSHA256)
 	if filepath.Clean(want.Slot) != filepath.Clean(ref.Slot) {
 		return errors.New("assignment slot is not the canonical version and digest path")
 	}
-	if digest, err := fileDigest(source); err != nil {
+	if digest, err := FileDigest(source); err != nil {
 		return err
 	} else if digest != ref.ArtifactSHA256 {
 		return errors.New("slot source digest does not match the assignment")
 	}
-	if err := ensurePrivateDirectory(l.DeliverySlotsDir()); err != nil {
+	if err := EnsurePrivateDirectory(l.DeliverySlotsDir()); err != nil {
 		return err
 	}
 	dir := filepath.Dir(ref.Slot)
@@ -81,7 +82,7 @@ func StageSlot(l layout.Layout, ref AssignmentRef, source string) error {
 }
 
 func VerifySlot(ref AssignmentRef) error {
-	if err := validateAssignmentRef(ref); err != nil {
+	if err := ValidateAssignmentRef(ref); err != nil {
 		return err
 	}
 	dir := filepath.Dir(ref.Slot)
@@ -118,7 +119,7 @@ func VerifySlot(ref AssignmentRef) error {
 	if manifest.Version != slotManifestVersion || manifest.ReleaseVersion != ref.Version || manifest.Commit != ref.Commit || manifest.ArtifactSHA256 != ref.ArtifactSHA256 || manifest.Binary != filepath.Base(ref.Slot) {
 		return errors.New("assignment slot manifest does not match the assignment")
 	}
-	digest, err := fileDigest(ref.Slot)
+	digest, err := FileDigest(ref.Slot)
 	if err != nil {
 		return err
 	}
@@ -128,7 +129,7 @@ func VerifySlot(ref AssignmentRef) error {
 	return nil
 }
 
-func ensurePrivateDirectory(path string) error {
+func EnsurePrivateDirectory(path string) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("delivery path is not a regular directory: %s", path)
@@ -140,4 +141,16 @@ func ensurePrivateDirectory(path string) error {
 		return err
 	}
 	return os.Chmod(path, 0o700)
+}
+
+func SafeName(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }

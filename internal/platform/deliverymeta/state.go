@@ -1,4 +1,4 @@
-package delivery
+package deliverymeta
 
 import (
 	"errors"
@@ -107,7 +107,7 @@ func LoadTransaction(path string) (Transaction, error) {
 	if tx.Version != 1 {
 		return tx, fmt.Errorf("unsupported delivery transaction version %d", tx.Version)
 	}
-	if !knownPhase(tx.Phase) {
+	if !KnownPhase(tx.Phase) {
 		return tx, fmt.Errorf("unknown delivery transaction phase %q; keep maintenance fence and inspect %s", tx.Phase, path)
 	}
 	return tx, nil
@@ -116,7 +116,7 @@ func LoadTransaction(path string) (Transaction, error) {
 func SaveTransaction(path string, tx Transaction) error {
 	tx.Version = 1
 	tx.UpdatedAt = time.Now().UTC()
-	if !knownPhase(tx.Phase) {
+	if !KnownPhase(tx.Phase) {
 		return fmt.Errorf("refuse to persist unknown delivery transaction phase %q", tx.Phase)
 	}
 	return fsutil.WriteJSON(path, tx, 0o600)
@@ -142,7 +142,7 @@ func LoadMaintenance(path string) (Maintenance, error) {
 	return value, nil
 }
 
-func knownPhase(phase Phase) bool {
+func KnownPhase(phase Phase) bool {
 	switch phase {
 	case PhaseIdle, PhaseDiscovered, PhaseDownloaded, PhaseVerified, PhaseDraining, PhaseApplying, PhaseValidating, PhaseSucceeded:
 		return true
@@ -150,7 +150,10 @@ func knownPhase(phase Phase) bool {
 	return false
 }
 
-type Lock struct{ file *os.File }
+type Lock struct {
+	file     *os.File
+	borrowed bool
+}
 
 func AcquireLock(path string) (*Lock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -180,9 +183,15 @@ func AcquireLock(path string) (*Lock, error) {
 }
 
 func (l *Lock) Close() error {
-	if l == nil || l.file == nil {
+	if l == nil || l.file == nil || l.borrowed {
 		return nil
 	}
 	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
 	return l.file.Close()
+}
+
+type DrainProgress struct {
+	Total   int      `json:"total"`
+	Ready   int      `json:"ready"`
+	Waiting []string `json:"waiting,omitempty"`
 }

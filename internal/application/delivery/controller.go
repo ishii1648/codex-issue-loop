@@ -64,12 +64,6 @@ type Report struct {
 	Maintenance        string             `json:"maintenance_fence"`
 }
 
-type DrainProgress struct {
-	Total   int      `json:"total"`
-	Ready   int      `json:"ready"`
-	Waiting []string `json:"waiting,omitempty"`
-}
-
 func (c Controller) Check(ctx context.Context) (Report, error) {
 	paths, cfg, current, err := c.prepare()
 	if err != nil {
@@ -221,7 +215,7 @@ func (c Controller) Reconcile(ctx context.Context, force bool) (Report, error) {
 			return c.reportFrom(paths, cfg, tx, DrainProgress{}), nil
 		}
 		if deferAutoApply {
-			if err := verifier.reportProgress(VerificationProgress{Phase: PhaseDiscovered, Desired: discovered}); err != nil {
+			if err := verifier.ReportProgress(VerificationProgress{Phase: PhaseDiscovered, Desired: discovered}); err != nil {
 				return Report{}, err
 			}
 			tx.LastResult = "deferred"
@@ -766,17 +760,6 @@ func verificationResult(err error) string {
 		return "deferred"
 	}
 	return "blocked"
-}
-func safeName(value string) string {
-	var b strings.Builder
-	for _, r := range value {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('-')
-		}
-	}
-	return b.String()
 }
 
 func transactionActive(tx Transaction) bool {

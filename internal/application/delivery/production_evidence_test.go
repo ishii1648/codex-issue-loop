@@ -312,6 +312,7 @@ func TestProductionAssignmentHealthRequiresExactStableAssignmentsAndRollbackDril
 	root := t.TempDir()
 	operator := writeExecutable(t, root, "assignment-agent-loop", `#!/bin/sh
 case "$1 $2 $3" in
+  "version --json ") printf '%s\n' '{"repository_command_protocol":1}' ;;
   "delivery assignment status")
     printf '{"version":1,"assignments":[{"repository_id":"repo-a","assignment":{"repository_id":"repo-a","version":"v0.9.0","commit":"%s","artifact_sha256":"%s","slot":"/private/slot","generation":4,"previous":{"version":"v0.8.5"}},"runtime":{"digest":"%s","matches":true,"launchd":{"loaded":true,"running":true,"pid":1001}},"transaction":{"phase":"succeeded"},"fence_active":false}]}\n' "$RELEASE_COMMIT" "$STABLE_BINARY_SHA256" "$STABLE_BINARY_SHA256" ;;
   "delivery assignment verify")
@@ -326,10 +327,7 @@ case "$1 $2 $3" in
     fi ;;
 esac
 `)
-	digest, err := fileDigest(operator)
-	if err != nil {
-		t.Fatal(err)
-	}
+	digest := strings.Repeat("b", 64)
 	repositories := filepath.Join(root, "repositories.json")
 	if err := os.WriteFile(repositories, []byte(`[{"repo_id":"repo-a","path":"/private/repo-a"}]`), 0o600); err != nil {
 		t.Fatal(err)

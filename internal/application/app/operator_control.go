@@ -5,21 +5,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
-	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
+	"github.com/ishii1648/codex-issue-loop/internal/application/hostcli"
 	"github.com/ishii1648/codex-issue-loop/internal/application/operatorcontrol"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	meta "github.com/ishii1648/codex-issue-loop/internal/platform/deliverymeta"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
@@ -54,6 +53,11 @@ func (a App) register(l layout.Layout, args []string) error {
 		return fmt.Errorf("--repo must point to the Git repository root: %s", gitRoot)
 	}
 	installed := filepath.Join(l.BinDir, "agent-loop")
+	if _, err := meta.ReadHostInstallation(l); err == nil {
+		installed = filepath.Join(l.BinDir, "agent-loopctl")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if _, err := os.Stat(installed); err != nil {
 		return fmt.Errorf("agent-loop is not installed at %s; run agent-loop install first", installed)
 	}
@@ -71,7 +75,7 @@ func (a App) register(l layout.Layout, args []string) error {
 		_ = fsutil.WriteJSON(l.RegistryPath, registryBefore, 0o600)
 		return err
 	}
-	assignment, assignmentManaged, err := (delivery.AssignmentController{Layout: l, ConfigPath: assignmentPath}).EnsureRepositoryAssignment(entry)
+	assignment, assignmentManaged, err := (delivery.AssignmentController{Lock: a.assignmentLock, Layout: l, ConfigPath: assignmentPath}).EnsureRepositoryAssignment(entry)
 	if err != nil {
 		_ = fsutil.WriteJSON(l.RegistryPath, registryBefore, 0o600)
 		return err
@@ -136,7 +140,7 @@ func (a App) unregister(ctx context.Context, l layout.Layout, args []string) err
 		_ = fsutil.WriteJSON(l.RegistryPath, registryBefore, 0o600)
 		return err
 	}
-	if _, err := (delivery.AssignmentController{Layout: l, ConfigPath: assignmentPath}).RemoveRepositoryAssignment(entry.RepoID); err != nil {
+	if _, err := (delivery.AssignmentController{Lock: a.assignmentLock, Layout: l, ConfigPath: assignmentPath}).RemoveRepositoryAssignment(entry.RepoID); err != nil {
 		_ = fsutil.WriteJSON(l.RegistryPath, registryBefore, 0o600)
 		return err
 	}
@@ -265,7 +269,7 @@ func (a App) resolveControl(l layout.Layout, command string, args []string) (reg
 }
 
 func (a App) drainControl(ctx context.Context, l layout.Layout, entry registry.Entry, cfg config.Config, lm launchd.Manager, store state.Store, command string, options controlOptions) error {
-	hostLock, err := delivery.AcquireLock(delivery.RuntimePaths(l.Root).Lock)
+	hostLock, err := a.acquireDeliveryLock(l)
 	if err != nil {
 		return err
 	}
@@ -629,36 +633,7 @@ func (a App) forceControl(ctx context.Context, l layout.Layout, entry registry.E
 }
 
 func (a App) runBroker(ctx context.Context, l layout.Layout, args []string) error {
-	fs := flag.NewFlagSet("broker", flag.ContinueOnError)
-	fs.SetOutput(a.Err)
-	if err := fs.Parse(args); err != nil {
-		return exitError{2, err}
-	}
-	if fs.NArg() != 0 {
-		return exitError{2, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
-	}
-	registered, err := (registry.Store{Path: l.RegistryPath}).Load()
-	if err != nil {
-		return err
-	}
-	ids := make([]string, 0, len(registered.Repos))
-	for id := range registered.Repos {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	registrations := make([]webhook.Registration, 0, len(ids))
-	for _, id := range ids {
-		entry := registered.Repos[id]
-		cfg, loadErr := config.Load(entry.RepoPath)
-		if loadErr != nil {
-			return fmt.Errorf("load webhook repository %s: %w", entry.RepoID, loadErr)
-		}
-		if cfg.Webhook.Enabled() {
-			registrations = append(registrations, webhook.Registration{Entry: entry, Config: cfg})
-		}
-	}
-	broker := &webhook.Broker{Root: l.Root, Registrations: registrations, Logger: log.New(a.Err, "agent-loop broker: ", log.LstdFlags|log.LUTC)}
-	return broker.Run(ctx)
+	return (hostcli.App{In: a.In, Out: a.Out, Err: a.Err}).Broker(ctx, l, args)
 }
 
 func recordSupervisorControl(store state.Store, supervisorState state.SupervisorState, message string) error {

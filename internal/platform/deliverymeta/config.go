@@ -1,4 +1,4 @@
-package delivery
+package deliverymeta
 
 import (
 	"bytes"
@@ -84,7 +84,7 @@ func LoadConfig(path string) (Config, error) {
 	if !filepath.IsAbs(path) {
 		return Config{}, errors.New("delivery config path must be absolute")
 	}
-	if err := validatePrivateRegularFile(path); err != nil {
+	if err := ValidatePrivateRegularFile(path); err != nil {
 		return Config{}, err
 	}
 	data, err := os.ReadFile(path)
@@ -107,7 +107,7 @@ func LoadLegacyConfig(path string) (LegacyConfig, error) {
 	if !filepath.IsAbs(path) {
 		return LegacyConfig{}, errors.New("delivery config path must be absolute")
 	}
-	if err := validatePrivateRegularFile(path); err != nil {
+	if err := ValidatePrivateRegularFile(path); err != nil {
 		return LegacyConfig{}, err
 	}
 	data, err := os.ReadFile(path)
@@ -123,7 +123,7 @@ func LoadLegacyConfig(path string) (LegacyConfig, error) {
 	if cfg.Version != LegacyConfigVersion {
 		return LegacyConfig{}, fmt.Errorf("delivery config version is %d, not the migratable version %d", cfg.Version, LegacyConfigVersion)
 	}
-	if cfg.ReleaseRepository == "" || !validRepository(cfg.ReleaseRepository) || cfg.Channel != "stable" {
+	if cfg.ReleaseRepository == "" || !ValidRepository(cfg.ReleaseRepository) || cfg.Channel != "stable" {
 		return LegacyConfig{}, errors.New("legacy delivery config repository or channel is invalid")
 	}
 	if poll, err := time.ParseDuration(cfg.PollInterval); err != nil || poll < time.Minute {
@@ -150,7 +150,7 @@ func (c Config) Validate() error {
 	if c.Version != ConfigVersion {
 		return fmt.Errorf("unsupported delivery config version %d; this controller supports %d", c.Version, ConfigVersion)
 	}
-	if c.ReleaseRepository == "" || !validRepository(c.ReleaseRepository) {
+	if c.ReleaseRepository == "" || !ValidRepository(c.ReleaseRepository) {
 		return errors.New("release_repository must be owner/repository")
 	}
 	if c.Channel != "stable" {
@@ -180,11 +180,11 @@ func (c Config) Validate() error {
 		if assignment.UpdatedAt.IsZero() {
 			return fmt.Errorf("assignment %s updated_at must be present", id)
 		}
-		if err := validateAssignmentRef(assignment.AssignmentRef); err != nil {
+		if err := ValidateAssignmentRef(assignment.AssignmentRef); err != nil {
 			return fmt.Errorf("assignment %s: %w", id, err)
 		}
 		if assignment.Previous != nil {
-			if err := validateAssignmentRef(*assignment.Previous); err != nil {
+			if err := ValidateAssignmentRef(*assignment.Previous); err != nil {
 				return fmt.Errorf("assignment %s previous: %w", id, err)
 			}
 			if *assignment.Previous == assignment.AssignmentRef {
@@ -195,14 +195,14 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func validateAssignmentRef(ref AssignmentRef) error {
+func ValidateAssignmentRef(ref AssignmentRef) error {
 	if _, err := ParseSemVer(ref.Version); err != nil {
 		return err
 	}
-	if !validSHA(ref.Commit) {
+	if !ValidSHA(ref.Commit) {
 		return errors.New("commit must be a lowercase 40-character SHA")
 	}
-	if !validDigest(ref.ArtifactSHA256) {
+	if !ValidDigest(ref.ArtifactSHA256) {
 		return errors.New("artifact_sha256 must be a lowercase SHA-256")
 	}
 	if !filepath.IsAbs(ref.Slot) {
@@ -235,7 +235,7 @@ func WriteConfig(path string, cfg Config) error {
 		return err
 	}
 	if _, err := os.Lstat(path); err == nil {
-		if err := validatePrivateRegularFile(path); err != nil {
+		if err := ValidatePrivateRegularFile(path); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -248,10 +248,10 @@ func WriteConfig(path string, cfg Config) error {
 	if err := fsutil.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write delivery config: %w", err)
 	}
-	return validatePrivateRegularFile(path)
+	return ValidatePrivateRegularFile(path)
 }
 
-func validatePrivateRegularFile(path string) error {
+func ValidatePrivateRegularFile(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("inspect delivery config: %w", err)
@@ -269,7 +269,7 @@ func validatePrivateRegularFile(path string) error {
 	return nil
 }
 
-func validRepository(value string) bool {
+func ValidRepository(value string) bool {
 	parts := 0
 	segment := 0
 	for _, r := range value {

@@ -1,5 +1,7 @@
 # Mac mini常駐運用runbook
 
+ホスト CLI は `agent-loopctl`、repository runtime は immutable slot の `agent-loop` を使う。既存環境の切替・PATH・旧 binary の扱いは [release の導入手順](release.md#ホスト-cli-の導入切替) に従う。ホストだけの更新で repository assignment を変更しない。
+
 最終確認日: 2026-08-16
 
 repositoryごとのversion更新は[Repository別stable delivery](per-repository-delivery.md)を、`codex-issue-loop`自身が壊れて通常loopを利用できない場合は[break-glass repair](break-glass-repair.md)を正本とする。stable Release公開だけでは登録repositoryを自動更新しない。
@@ -25,19 +27,16 @@ FileVaultを利用するMacでは、OS再起動後に利用者がdiskをunlock�
 
 ### 2.1 ソースの検証とインストール
 
-配布releaseがない間は、確認済みのcommitをcloneしてbuildする。`main`の未確認な最新状態をそのまま本番へ入れない。
+本番導入には checksum・attestation・version/commit を確認した stable release を使う。ソース checkout での `make ci` は開発用の検証であり、version が未確定な開発 binary を本番 install しない。取得・検証は [release の導入手順](release.md#ホスト-cli-の導入切替) を参照する。
 
 ```sh
-cd /absolute/path/to/codex-issue-loop
-make install-shellcheck
-make ci
-./bin/agent-loop --version
-./bin/agent-loop install --json
+./agent-loopctl_Darwin_arm64 version --json
+./agent-loopctl_Darwin_arm64 install --json
 ```
 
 インストール先は次の2か所である。
 
-- `~/Library/Application Support/codex-issue-loop/bin/agent-loop`
+- `~/Library/Application Support/codex-issue-loop/bin/agent-loopctl`
 - `~/.codex/skills/agent-loop/SKILL.md`
 
 以降、インストール済みbinaryへPATHを通すか、絶対パスで実行する。LaunchAgentには登録時のbinary絶対パスが記録される。
@@ -70,9 +69,9 @@ codex login
 まず不足ラベルのplanだけを表示し、内容を確認してから適用する。
 
 ```sh
-agent-loop bootstrap-labels --repo /absolute/path/to/repository --json
-agent-loop bootstrap-labels --repo /absolute/path/to/repository --apply --json
-agent-loop bootstrap-labels --repo /absolute/path/to/repository --json
+agent-loopctl bootstrap-labels --repo /absolute/path/to/repository --json
+agent-loopctl bootstrap-labels --repo /absolute/path/to/repository --apply --json
+agent-loopctl bootstrap-labels --repo /absolute/path/to/repository --json
 ```
 
 2回目のpreviewで`create`が0件であることを確認する。既存ラベルの色や説明は上書きされず、ラベルは削除されない。必要なGitHub権限と部分失敗時の再実行方法は[GitHubラベルbootstrap runbook](github-labels.md)に従う。
@@ -96,10 +95,10 @@ sudo pmset -c sleep 0
 ### 2.5 登録、診断、開始
 
 ```sh
-agent-loop register --repo /absolute/path/to/repository --json
-agent-loop doctor --repo /absolute/path/to/repository --json
-agent-loop start --repo /absolute/path/to/repository --json
-agent-loop status --repo /absolute/path/to/repository --json
+agent-loopctl register --repo /absolute/path/to/repository --json
+agent-loopctl doctor --repo /absolute/path/to/repository --json
+agent-loopctl start --repo /absolute/path/to/repository --json
+agent-loopctl status --repo /absolute/path/to/repository --json
 ```
 
 診断前に[管理 CLI と assignment の版確認手順](doctor.md)に従い、global CLI・固定 path・対象 assignment が非破壊診断を含む検証済み版であることを確認する。旧 CLI の `status` は正常な新 snapshot を隔離する場合があり、assignment の更新だけでは global CLI は更新されない。
@@ -147,7 +146,7 @@ IssueはGitHub UI、`gh`、GitHub API、GitHub Actions等のautomation、また�
 監視taskへ「現在のstatusを確認して」と依頼する。CLIを直接確認する場合は次を使う。
 
 ```sh
-agent-loop status --repo /absolute/path/to/repository --json
+agent-loopctl status --repo /absolute/path/to/repository --json
 ```
 
 ### 監視へ再接続
@@ -155,7 +154,7 @@ agent-loop status --repo /absolute/path/to/repository --json
 Codex taskが終了または切断してもループ本体は継続する。同じ監視taskまたは新しいtaskからstatusを読み、未回答requestがなければ次を1回実行する。
 
 ```sh
-agent-loop watch --repo /absolute/path/to/repository --until-attention --json
+agent-loopctl watch --repo /absolute/path/to/repository --until-attention --json
 ```
 
 監視task未接続時のattentionは永続snapshotに保持される。再接続時は`status`から現在のrequestを読み直し、未回答requestをwatchより先に表示する。
@@ -165,7 +164,7 @@ agent-loop watch --repo /absolute/path/to/repository --until-attention --json
 `needs_input`では、監視taskがquestion、recommendation、options、request IDを提示する。回答にはcredentialやsecretを含めない。Codexは回答を標準入力から渡す。
 
 ```sh
-printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
+printf '%s\n' '選択した方針と必要な補足' | agent-loopctl answer \
   --repo /absolute/path/to/repository \
   --request-id req_... \
   --message-file - \
@@ -174,34 +173,34 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
 
 記録後、同じrequest IDがansweredになったことをstatusで確認する。別Issueがroot `active_execution`を保持していれば、回答済みIssueはcontinuationを保持して待機し、実行枠が空いた後にschedulerが再開する。ready/running label、state、execution identityを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
-別端末から回答する場合は、AIがIssue本文と質問コメントを読み、表示されたrequest・選択肢を照合して `agent-loop answer --via github --repo owner/repo --issue N --request-id <id> --message-file - --json` へ標準入力で渡す。checkout・ローカル登録は不要で、`gh` はsupervisorと同一の人間アカウントで認証する。別ユーザーはadminでも受理されない。ホスト固有のsecret設定は遠隔へ公開せず、検出不能なsecretを回答へ含めない。
+別端末から回答する場合は、AIがIssue本文と質問コメントを読み、表示されたrequest・選択肢を照合して `agent-loopctl answer --via github --repo owner/repo --issue N --request-id <id> --message-file - --json` へ標準入力で渡す。checkout・ローカル登録は不要で、`gh` はsupervisorと同一の人間アカウントで認証する。別ユーザーはadminでも受理されない。ホスト固有のsecret設定は遠隔へ公開せず、検出不能なsecretを回答へ含めない。
 
 利用開始前に、既存delivery手順でIssue #331の同一ユーザー対応を含む受信側Releaseを対象repositoryへ配備し、delivery statusのassignmentと稼働バイナリ、doctorを確認する。mainへマージ済み・Release公開済みだけでは配備確認にならない。その後に別端末からテスト用の正式質問へ回答し、同一ユーザーの受理通知とホストstatusのcanonical保存を照合する。実機確認を行っていなければ未実施と記録する。
 
-`submitted` は投稿成功だけを示す。返ったコメントIDで `agent-loop answer --via github --repo owner/repo --issue N --request-id <id> --check --comment-id <id> --json` を実行し、`accepted` と `recorded="true"` を確認する。POST結果不明でIDがなければ `--check` から `--comment-id` を省略して既存投稿を照会し、無条件に再送しない。通知がなくても受信側停止や通知失敗があり得るため、回答失敗と断定しない。`execution="unknown"` はホストstatusで別途確認する。受理前は観測した最新本文を検証するが、保存後の編集・削除は回答の変更・撤回にならない。`conflict` は未保存を意味しない。
+`submitted` は投稿成功だけを示す。返ったコメントIDで `agent-loopctl answer --via github --repo owner/repo --issue N --request-id <id> --check --comment-id <id> --json` を実行し、`accepted` と `recorded="true"` を確認する。POST結果不明でIDがなければ `--check` から `--comment-id` を省略して既存投稿を照会し、無条件に再送しない。通知がなくても受信側停止や通知失敗があり得るため、回答失敗と断定しない。`execution="unknown"` はホストstatusで別途確認する。受理前は観測した最新本文を検証するが、保存後の編集・削除は回答の変更・撤回にならない。`conflict` は未保存を意味しない。
 
 ### 停止
 
 対象repositoryを確認してから、監視taskへ「状態とworktreeを残してloopを停止して」と依頼する。
 
 ```sh
-agent-loop stop --repo /absolute/path/to/repository --json
-agent-loop status --repo /absolute/path/to/repository --json
+agent-loopctl stop --repo /absolute/path/to/repository --json
+agent-loopctl status --repo /absolute/path/to/repository --json
 ```
 
 通常停止はdurable fenceで新規dispatchを止め、active lifecycleがresult/session/publication/GitHub同期を完了するまでworkerへsignalを送らず待つ。`status --json`の`operator_control.phase`と`operator_maintenance_fence`で進捗を確認する。CLIやDesktopが中断した場合はtransaction/fenceを編集せず、同じ`stop`または`restart`を再実行して同じgenerationを再開する。host reboot後も同じ手順とする。
 
-`--timeout`では期限切れ時にworkerをkillせず通常運転へ戻る。drain中にsupervisor PIDが変わりorphan lifecycleが残った場合だけはfenceを保持してforce recoveryを要求する。再試行できない緊急時は対象と影響を再確認し、`agent-loop stop --force ...`または`restart --force ...`を使う。forceは保存process groupへ`SIGTERM`を送り、grace後の残存groupだけを`SIGKILL`する。通常停止もforce停止もstate、event、Issue worktree、未commit変更を削除しない。
+`--timeout`では期限切れ時にworkerをkillせず通常運転へ戻る。drain中にsupervisor PIDが変わりorphan lifecycleが残った場合だけはfenceを保持してforce recoveryを要求する。再試行できない緊急時は対象と影響を再確認し、`agent-loopctl stop --force ...`または`restart --force ...`を使う。forceは保存process groupへ`SIGTERM`を送り、grace後の残存groupだけを`SIGKILL`する。通常停止もforce停止もstate、event、Issue worktree、未commit変更を削除しない。
 
 ## 5. 停止・障害からの復旧
 
 復旧の基本順序は、変更を増やさずに`status`、`doctor`、logを集め、原因を1つずつ直し、`restart`することである。stateやworktreeを最初に削除しない。
 
 ```sh
-agent-loop status --repo /absolute/path/to/repository --json
-agent-loop doctor --repo /absolute/path/to/repository --json
-agent-loop logs --repo /absolute/path/to/repository
-agent-loop logs --repo /absolute/path/to/repository --stderr
+agent-loopctl status --repo /absolute/path/to/repository --json
+agent-loopctl doctor --repo /absolute/path/to/repository --json
+agent-loopctl logs --repo /absolute/path/to/repository
+agent-loopctl logs --repo /absolute/path/to/repository --stderr
 ```
 
 `logs`は保持中のgzip世代と現行`supervisor.log`を古い順に連結して表示する。`--stderr`はlaunchdが捕捉した起動失敗を同様に表示する。既定のrotation・保持値は`.agent-loop.yaml`の`logs`で変更できるが、容量reserveを小さくしすぎない。
@@ -209,8 +208,8 @@ agent-loop logs --repo /absolute/path/to/repository --stderr
 Incident起票判定は次で確認する。`decision_log`の保持期間は固定7日で、`decisions`は起票、再利用、dry-run、見送り、失敗のreason codeを返す。読み取りエラー時はfileを手編集せずautomationを停止し、[Incident自動対応runbook](incident-automation.md)のfail-closed手順に従う。
 
 ```sh
-agent-loop incident status --repo /absolute/path/to/repository --json
-agent-loop incident decisions --repo /absolute/path/to/repository --json
+agent-loopctl incident status --repo /absolute/path/to/repository --json
+agent-loopctl incident decisions --repo /absolute/path/to/repository --json
 ```
 
 ### `needs_input`
@@ -222,8 +221,8 @@ agent-loop incident decisions --repo /absolute/path/to/repository --json
 `doctor`の`diagnostics[].code`、直近event、supervisor stderrの順で原因を特定する。認証、設定、CLI互換性、GitHub権限、worktree不整合を直し、次を実行する。
 
 ```sh
-agent-loop restart --repo /absolute/path/to/repository --json
-agent-loop status --repo /absolute/path/to/repository --json
+agent-loopctl restart --repo /absolute/path/to/repository --json
+agent-loopctl status --repo /absolute/path/to/repository --json
 ```
 
 worktreeのbranch変更、未commit変更、remote PRとの不一致がある場合は自動修復しない。対象Issueのworktreeを人が確認し、変更を保持する方針を決める。
@@ -233,7 +232,7 @@ worktreeのbranch変更、未commit変更、remote PRとの不一致がある場
 terminal `blocked` / `failed` Issueを復旧するときは、scenario別commandやevent列の一致判定を使わない。まずcanonical snapshotと現在のprocess、worktree、Git、GitHubをまとめてread-only評価する。
 
 ```sh
-agent-loop issue plan --repo /absolute/path/to/repository --issue 123 --json
+agent-loopctl issue plan --repo /absolute/path/to/repository --issue 123 --json
 ```
 
 planの`suspension`、`continuation_checkpoint`、evidence、missing evidence、および`resume|retry-stage|adopt-head|adopt-worktree|adopt-pr|cancel`それぞれのeligible/refusal codeを確認する。active PID/PGID、root execution identity、pending request、worktree/branch/head、open/merged PR、labelのいずれかが変わればresolveは拒否される。
@@ -241,7 +240,7 @@ planの`suspension`、`continuation_checkpoint`、evidence、missing evidence、
 operatorがplan上eligibleなactionを選択した後だけ適用する。
 
 ```sh
-agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action retry-stage --json
+agent-loopctl issue resolve --repo /absolute/path/to/repository --issue 123 --action retry-stage --json
 ```
 
 - `resume`は保存session/workspaceからworker境界を継続する。
@@ -276,7 +275,7 @@ Mac mini上で`gh auth login`または`codex login`を実行し、`doctor`が成
 
 ```sh
 df -h
-agent-loop stop --repo /absolute/path/to/repository --json
+agent-loopctl stop --repo /absolute/path/to/repository --json
 ```
 
 state directoryやIssue worktreeを容量確保のために直接削除しない。まず対象外のcache、download、古いbuild artifactなど、復旧可能性に影響しない領域を管理者が整理する。空き容量確保後にstate directoryをbackupし、`doctor`、`start`、`status`の順で確認する。どのfileの書き込みまで成功したか不明ならstate破損として扱う。
@@ -289,8 +288,8 @@ loopを停止し、`~/Library/Application Support/codex-issue-loop`全体を削�
 
 1. FileVaultをunlockし、運用用macOSユーザーへloginする。
 2. Codex desktop appが起動し、Remote Controlが有効か確認する。
-3. `agent-loop status`でLaunchAgentのloaded状態を確認する。
-4. loadedでなければ`doctor`後に`agent-loop start`を実行する。
+3. `agent-loopctl status`でLaunchAgentのloaded状態を確認する。
+4. loadedでなければ`doctor`後に`agent-loopctl start`を実行する。
 5. 未回答requestを先に処理し、その後watchへ再接続する。
 
 logoutはLaunchAgentとRemoteの両方を停止させる。screen lockやdisplay sleepはsystem sleepと異なり、Macがawakeでuser sessionが維持されていれば運用を継続できる。
@@ -327,9 +326,9 @@ path、ユーザー、CLI version、state schemaが異なるMacへ移す場合�
 release artifactの検証と更新方針は[Release・install・update方針](release.md)を正本とする。通常のschema-compatible updateはMac側pull型controllerを使う。
 
 ```sh
-agent-loop delivery configure --json
-agent-loop delivery configure --apply --json
-agent-loop delivery status --json
+agent-loopctl delivery configure --json
+agent-loopctl delivery configure --apply --json
+agent-loopctl delivery status --json
 ```
 
 `$HOME/.agent-loop-delivery.yaml`はownerがLaunchAgent user、mode `0600`、symlinkでないことを確認する。repository別`.agent-loop.yaml`へdelivery設定を追加しない。`status --json`でphase、current/desired/previous、drain進捗、backup、last/next checkを確認する。`rollback_failed`ではmaintenance fenceを手動削除せず、表示されたbackupを保全してdoctorの失敗codeを調査する。
@@ -405,15 +404,15 @@ controllerを使えない復旧時だけ、次の手動手順を使う。
 repositoryを管理対象から外す前に、running Issueと未回答request、未commit worktreeを確認する。
 
 ```sh
-agent-loop status --repo /absolute/path/to/repository --json
-agent-loop stop --repo /absolute/path/to/repository --json
-agent-loop unregister --repo /absolute/path/to/repository --json
+agent-loopctl status --repo /absolute/path/to/repository --json
+agent-loopctl stop --repo /absolute/path/to/repository --json
+agent-loopctl unregister --repo /absolute/path/to/repository --json
 ```
 
 `unregister`はregistryとplistを外すがstateとworktreeを保持する。全repositoryを停止・登録解除し、binaryとSkillも削除するときだけ次を実行する。
 
 ```sh
-agent-loop uninstall --json
+agent-loopctl uninstall --json
 ```
 
 `uninstall`もstateとworktreeを保持する。worktreeの整理は直接削除せず、[Worktree保持・cleanup・purge runbook](worktree-lifecycle.md)に従う。通常は`cleanup --json`でpreviewし、対象と理由をレビューしてからloop停止中に`cleanup --apply`する。dirty、未push、open PR、未回答requestを含む対象の`purge`はbackupと完全一致確認tokenを必須とする。
@@ -430,9 +429,9 @@ sw_vers
 uname -m
 gh --version
 codex --version
-agent-loop status --repo /absolute/path/to/repository --json
-agent-loop doctor --repo /absolute/path/to/repository --json
-agent-loop logs --repo /absolute/path/to/repository --stderr
+agent-loopctl status --repo /absolute/path/to/repository --json
+agent-loopctl doctor --repo /absolute/path/to/repository --json
+agent-loopctl logs --repo /absolute/path/to/repository --stderr
 ```
 
 次の場合は推測で再試行せずescalationする。
@@ -629,10 +628,10 @@ gh api repos/OWNER/REPO/hooks --jq '.[] | {id, url: .config.url, active}'
 `ping`の結果は`gh api repos/OWNER/REPO/hooks/<id>/deliveries`でも確認でき、GitHub UIのRecent Deliveriesと同じstatusを返す。
 
 ```sh
-agent-loop register --repo /absolute/path/to/repository --json
-agent-loop doctor --repo /absolute/path/to/repository --json
-agent-loop start --repo /absolute/path/to/repository --json
-agent-loop status --repo /absolute/path/to/repository --json
+agent-loopctl register --repo /absolute/path/to/repository --json
+agent-loopctl doctor --repo /absolute/path/to/repository --json
+agent-loopctl start --repo /absolute/path/to/repository --json
+agent-loopctl status --repo /absolute/path/to/repository --json
 ```
 
 `status --json`の`broker`でmode、listener、last accepted delivery、queue depth、reject/duplicate countを確認し、`repository_safety_sweep`でlast successful、HTTP status、304/200 count、ETagを確認する。secret、signature、Authorization、payloadは表示されない。listenerへの直接疎通はGitHubのredeliveryまたは署名済みの管理fixtureだけで行い、secretをcommand lineへ展開しない。
@@ -655,11 +654,11 @@ proxy停止中のdeliveryは復旧後にGitHub UIからredeliveryできる。同
 proxyまたはWebhook設定を安全に復旧できない場合は、対象repositoryを停止し、`webhook.mode: polling`へ明示的に戻して再登録する。
 
 ```sh
-agent-loop stop --repo /absolute/path/to/repository --json
+agent-loopctl stop --repo /absolute/path/to/repository --json
 # .agent-loop.yaml の webhook.mode を polling へ変更
-agent-loop register --repo /absolute/path/to/repository --json
-agent-loop doctor --repo /absolute/path/to/repository --json
-agent-loop start --repo /absolute/path/to/repository --json
+agent-loopctl register --repo /absolute/path/to/repository --json
+agent-loopctl doctor --repo /absolute/path/to/repository --json
+agent-loopctl start --repo /absolute/path/to/repository --json
 ```
 
 他にWebhook repositoryが残っている間、共有brokerは停止しない。最後のWebhook repositoryを`unregister`した場合だけbroker LaunchAgentが削除される。rollbackはdurable inbox、repo state、worktreeを消さず、provider daemonやcredentialをagent-loopから変更しない。

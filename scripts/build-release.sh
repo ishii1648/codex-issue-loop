@@ -25,6 +25,8 @@ esac
 
 mkdir -p "$output_dir"
 artifact="$output_dir/agent-loop_Darwin_arm64"
+host_artifact="$output_dir/agent-loopctl_Darwin_arm64"
+host_manifest="$output_dir/host-release-manifest.json"
 monitor_artifact="$output_dir/agent-loop-monitor_Darwin_arm64"
 sbom="$output_dir/agent-loop_Darwin_arm64.spdx.json"
 checksums="$output_dir/checksums.txt"
@@ -36,6 +38,13 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
   -ldflags "-s -w -X github.com/ishii1648/codex-issue-loop/internal/application/app.Version=$version -X github.com/ishii1648/codex-issue-loop/internal/application/app.Commit=$commit" \
   -o "$artifact" \
   ./cmd/agent-loop
+
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+  -trimpath \
+  -buildvcs=false \
+  -ldflags "-s -w -X github.com/ishii1648/codex-issue-loop/internal/application/hostcli.Version=$version -X github.com/ishii1648/codex-issue-loop/internal/application/hostcli.Commit=$commit" \
+  -o "$host_artifact" \
+  ./cmd/agent-loopctl
 
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
   -trimpath \
@@ -63,11 +72,17 @@ run_releasegen manifest \
   --commit "$commit" \
   --output "$manifest"
 
+run_releasegen manifest \
+  --artifact "$host_artifact" \
+  --version "$version" \
+  --commit "$commit" \
+  --output "$host_manifest"
+
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$output_dir" && sha256sum agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json > checksums.txt)
+  (cd "$output_dir" && sha256sum agent-loop_Darwin_arm64 agent-loopctl_Darwin_arm64 host-release-manifest.json agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json > checksums.txt)
 else
-  (cd "$output_dir" && shasum -a 256 agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json > checksums.txt)
+  (cd "$output_dir" && shasum -a 256 agent-loop_Darwin_arm64 agent-loopctl_Darwin_arm64 host-release-manifest.json agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json > checksums.txt)
 fi
 
-chmod 0755 "$artifact" "$monitor_artifact"
-chmod 0644 "$sbom" "$manifest" "$checksums"
+chmod 0755 "$artifact" "$monitor_artifact" "$host_artifact"
+chmod 0644 "$sbom" "$manifest" "$checksums" "$host_manifest"

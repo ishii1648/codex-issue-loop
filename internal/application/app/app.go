@@ -45,17 +45,18 @@ var (
 )
 
 type versionInfo struct {
-	Version                  string `json:"version"`
-	Commit                   string `json:"commit"`
-	Target                   string `json:"target"`
-	DeliveryProtocol         int    `json:"delivery_protocol"`
-	AssignmentProtocol       int    `json:"assignment_protocol"`
-	StateSchemaCurrent       int    `json:"state_schema_current"`
-	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
-	SemanticContractCurrent  int    `json:"semantic_contract_current"`
-	SemanticContractMinimum  int    `json:"semantic_contract_minimum"`
-	IssueLifecycleAPICurrent string `json:"issue_lifecycle_api_current"`
-	IssueLifecycleAPIMinimum string `json:"issue_lifecycle_api_minimum"`
+	RepositoryCommandProtocol int    `json:"repository_command_protocol"`
+	Version                   string `json:"version"`
+	Commit                    string `json:"commit"`
+	Target                    string `json:"target"`
+	DeliveryProtocol          int    `json:"delivery_protocol"`
+	AssignmentProtocol        int    `json:"assignment_protocol"`
+	StateSchemaCurrent        int    `json:"state_schema_current"`
+	StateSchemaMigrationFrom  int    `json:"state_schema_migration_from"`
+	SemanticContractCurrent   int    `json:"semantic_contract_current"`
+	SemanticContractMinimum   int    `json:"semantic_contract_minimum"`
+	IssueLifecycleAPICurrent  string `json:"issue_lifecycle_api_current"`
+	IssueLifecycleAPIMinimum  string `json:"issue_lifecycle_api_minimum"`
 }
 
 type installManifest struct {
@@ -70,6 +71,7 @@ type installManifest struct {
 }
 
 type App struct {
+	assignmentLock          *delivery.Lock
 	In                      io.Reader
 	Out                     io.Writer
 	Err                     io.Writer
@@ -101,7 +103,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 	}
 	if args[0] == "--version" || args[0] == "version" {
 		if len(args) > 1 && args[1] == "--json" {
-			_ = json.NewEncoder(a.Out).Encode(versionInfo{Version: Version, Commit: Commit, Target: runtime.GOOS + "/" + runtime.GOARCH, DeliveryProtocol: delivery.ProtocolVersion, AssignmentProtocol: delivery.AssignmentProtocolVersion,
+			_ = json.NewEncoder(a.Out).Encode(versionInfo{RepositoryCommandProtocol: 1, Version: Version, Commit: Commit, Target: runtime.GOOS + "/" + runtime.GOARCH, DeliveryProtocol: delivery.ProtocolVersion, AssignmentProtocol: delivery.AssignmentProtocolVersion,
 				StateSchemaCurrent: schema.CurrentVersion, StateSchemaMigrationFrom: schemaversion.Previous,
 				SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,
 				IssueLifecycleAPICurrent: issuedomain.LifecycleAPICurrent, IssueLifecycleAPIMinimum: issuedomain.LifecycleAPIMinimum})
@@ -114,8 +116,12 @@ func (a App) Run(ctx context.Context, args []string) int {
 		a.usage()
 		return 0
 	}
-	// init is deliberately handled before Layout.Ensure so a preview does not
-	// create agent-loop directories or change user-owned files.
+	if args[0] == "bootstrap" {
+		return a.bootstrapDispatch(ctx, args[1:])
+	}
+	if args[0] == "dispatch" {
+		return a.dispatch(ctx, args[1:])
+	}
 	if args[0] == "init" {
 		err := a.initUserRules(args[1:])
 		if err == nil {
@@ -187,6 +193,14 @@ func (a App) Run(ctx context.Context, args []string) int {
 }
 
 func (a App) run(ctx context.Context, l layout.Layout, command string, args []string) error {
+	switch command {
+	case "install", "update", "rollback", "uninstall":
+		if _, err := os.Lstat(filepath.Join(l.Root, "host-install.json")); err == nil {
+			return fmt.Errorf("host installation is managed by agent-loopctl; use agent-loopctl %s", command)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	switch command {
 	case "install":
 		return a.install(ctx, l, args)

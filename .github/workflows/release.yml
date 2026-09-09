@@ -81,6 +81,8 @@ jobs:
         with:
           subject-path: |
             dist/candidate/agent-loop_Darwin_arm64
+            dist/candidate/agent-loopctl_Darwin_arm64
+            dist/candidate/host-release-manifest.json
             dist/candidate/agent-loop-monitor_Darwin_arm64
             dist/candidate/agent-loop_Darwin_arm64.spdx.json
             dist/candidate/release-manifest.json
@@ -115,7 +117,7 @@ jobs:
         run: |
           source_epoch=$(git show -s --format=%ct "${RELEASE_COMMIT}")
           scripts/build-release.sh "${RELEASE_TAG}" "${RELEASE_COMMIT}" "$source_epoch" dist/comparison
-          for asset in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
+          for asset in agent-loopctl_Darwin_arm64 host-release-manifest.json agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
             cmp "dist/candidate/$asset" "dist/comparison/$asset"
           done
 
@@ -486,10 +488,10 @@ jobs:
           mkdir -p dist/stable dist/prerelease
           gh release download "$RELEASE_TAG" --dir dist/stable
           gh release download "$candidate_tag" --dir dist/prerelease
-          for asset in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json; do
+          for asset in agent-loopctl_Darwin_arm64 host-release-manifest.json agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json; do
             cmp "dist/prerelease/$asset" "dist/stable/$asset"
           done
-          for asset in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
+          for asset in agent-loopctl_Darwin_arm64 host-release-manifest.json agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
             cmp "dist/candidate/$asset" "dist/stable/$asset"
           done
           gh attestation verify dist/stable/agent-loop_Darwin_arm64 --repo "$GITHUB_REPOSITORY"

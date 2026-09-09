@@ -9,7 +9,9 @@
 
 GitHub Releaseには次を公開する。
 
-- `agent-loop_Darwin_arm64`
+- `agent-loopctl_Darwin_arm64`（ホスト共通 CLI）
+- `host-release-manifest.json`（ホスト binary の version、commit、digest、委譲 protocol）
+- `agent-loop_Darwin_arm64`（repository runtime）
 - `agent-loop-monitor_Darwin_arm64`
 - `agent-loop_Darwin_arm64.spdx.json`（SPDX 2.3）
 - `checksums.txt`（SHA-256）
@@ -64,9 +66,9 @@ v0.9.0以降の通常経路はrepository別assignmentである。stable公開は
 ```sh
 agent-loop delivery assignment migrate --json
 agent-loop delivery assignment migrate --apply --json
-agent-loop delivery assignment preview --repo /absolute/path/to/repository --version v1.2.3 --json
-agent-loop delivery assignment apply --repo /absolute/path/to/repository --version v1.2.3 --expected-generation 1 --json
-agent-loop delivery assignment verify --repo /absolute/path/to/repository --json
+agent-loopctl delivery assignment preview --repo /absolute/path/to/repository --version v1.2.3 --json
+agent-loopctl delivery assignment apply --repo /absolute/path/to/repository --version v1.2.3 --expected-generation 1 --json
+agent-loopctl delivery assignment verify --repo /absolute/path/to/repository --json
 ```
 
 v2 configでは`auto_apply: never`とstable channelだけを許可し、host-wide `delivery apply`を拒否する。以下のhost-wide transaction説明はv0.8.5以前のbinaryによるv1 configのrollback/recovery互換境界に限る。v0.9.0以降のbinaryへv1 configを直接渡してhost-wide操作してはならない。
@@ -76,10 +78,10 @@ v2 configでは`auto_apply: never`とstable channelだけを許可し、host-wid
 初回installとdoctor完了後、Macごとに1つのcontrollerをpreviewしてから有効化する。
 
 ```sh
-agent-loop delivery configure --json
-agent-loop delivery configure --apply --json
-agent-loop delivery check --json
-agent-loop delivery status --json
+agent-loopctl delivery configure --json
+agent-loopctl delivery configure --apply --json
+agent-loopctl delivery check --json
+agent-loopctl delivery status --json
 ```
 
 設定は`$HOME/.agent-loop-delivery.yaml`だけに置き、regular file、現在userのowner、mode `0600`を必須とする。`--config`はtestまたは明示運用用のabsolute pathだけを受理する。credentialは保存せず既存の`gh`認証を使う。transaction、download cache、log、maintenance fenceは`$HOME/Library/Application Support/codex-issue-loop/delivery/`配下であり、設定fileや各repositoryへ展開しない。
@@ -89,8 +91,8 @@ agent-loop delivery status --json
 `com.codex-issue-loop.delivery`は`RunAtLoad`と`StartInterval`で短命な`delivery reconcile`を実行する。host lockで手動`apply`との多重実行を拒否し、永続phaseと固定backup pathから再開する。drain timeoutではworkerをkillせずfenceを解除してdeferする。apply後はfenceを維持したまま全repositoryを含む`doctor --json`を二度実行してsoakし、失敗時は通常Issue処理の再開前にrollbackする。rollbackも失敗した場合はfenceとbackupを保持してfail closedする。
 
 ```sh
-agent-loop delivery pause --json
-agent-loop delivery resume --json
+agent-loopctl delivery pause --json
+agent-loopctl delivery resume --json
 agent-loop delivery apply --version v1.2.3 --json
 ```
 
@@ -100,49 +102,36 @@ pause/resumeはactive maintenance transaction中には変更できない。schem
 
 retry時のaggregate validationがlegacy completed merged identityだけを理由にmaintenance snapshotを隔離した場合は、検証済みcandidateの`recover-quarantined-snapshot`をdry-runし、exact backupと全GitHub PR identityを確認した後だけ専用confirmで復元する。これは一般の破損stateや追加invariant違反を許容するcompatibility bypassではない。
 
-## 新規install
+## ホスト CLI の導入・切替
 
-loopが動いていないことを確認して、検証済みartifactから実行する。
-
-```sh
-./agent-loop_Darwin_arm64 install --json
-agent-loop doctor --json
-```
-
-installはbinary、Skill、Skill `VERSION`、`install.json`を原子的なfile replacementで配置する。同じartifactからの再実行は`changed: false`となる。
-
-## 安全なupdate
+ユーザー向けの入口は `agent-loopctl`、repository LaunchAgent の実行対象は immutable slot の `agent-loop` である。ホスト binary と `host-release-manifest.json` の checksum、GitHub attestation、version/commit を検証したうえで実行する。
 
 ```sh
-./agent-loop_Darwin_arm64 update --json
-agent-loop doctor --json
+gh attestation verify agent-loopctl_Darwin_arm64 --repo ishii1648/codex-issue-loop
+gh attestation verify host-release-manifest.json --repo ishii1648/codex-issue-loop
+chmod 0755 agent-loopctl_Darwin_arm64
+./agent-loopctl_Darwin_arm64 version --json
+./agent-loopctl_Darwin_arm64 install --json
 ```
 
-`update`は次の順序で動く。
+初回 install は同じ stable version/commit の runtime を既存の release verifier で取得・検証して immutable slot に配置する。新規登録の bootstrap と remote answer にこの runtime を使う。ホストの記録は `host-install.json`、binary は管理 root の `bin/agent-loopctl` に置く。既存の `install.json` と repository assignment は上書きしない。
 
-1. 同一version/checksumなら何も変更せず終了する。
-2. 現在のbinary、Skill、Skill version、manifestを`~/Library/Application Support/codex-issue-loop/backups/`へ保存する。
-3. 稼働中だったrepositoryのLaunchAgentだけを停止する。
-4. 新しいartifactをinstallし、全登録repositoryのplistを現行形式で再生成する。
-5. 元々稼働中だったLaunchAgentだけを再開する。
-6. 途中で失敗した場合は旧install一式を自動復元し、元のLaunchAgentを再開する。
+既存環境では、先に delivery config の v2 migration と repository LaunchAgent の immutable slot 化を済ませる。global binary を参照する repository が残る場合は install を拒否する。切替前に各 runtime が `version --json` の `repository_command_protocol: 1` に対応していることを確認する。非対応 runtime は通常操作の委譲を拒否するため、必要な runtime 更新はホスト切替とは別の明示操作として行う。
 
-state、event、worker log、worktree、registryは通常updateの対象ではなく保持される。schema migrationを伴うversionでは全loopを先に停止する。新artifactの`update`はbinary/Skillだけを配置して自動再開せず、`schema_migration_required: true`を返す。その後、installed binaryで`migrate --apply`を実行してからdoctorとstartへ進む。詳細は[永続schema migration runbook](migration.md)を正本とする。
+管理対象の旧 `bin/agent-loop` は `agent-loopctl` を案内して終了するスクリプトになる。既配布のコピーや管理外 PATH にある旧 binary は遡及修正できない。`type -a agent-loop agent-loopctl` で確認し、旧共通 binary の PATH 登録・alias を除き、管理 root の `bin` を PATH に登録する。slot 内の `agent-loop` は削除・置換しない。既存の共有 broker/delivery plist はホスト CLI を起動するように切り替えるが、repository plist は変更しない。
 
-storage versionが同じでもsemantic contract migrationが必要なら自動再開しない。`migrate --json`の`non_migratable`が空であることを確認し、apply、doctor、repositoryごとのstartの順を守る。rollback時はmigration backupを先にrestoreし、安全な旧artifactへ戻す。
-
-## rollback
-
-`update`結果の`backup`絶対pathを指定する。
+## ホストだけの update・rollback
 
 ```sh
-agent-loop rollback \
-  --backup '/Users/name/Library/Application Support/codex-issue-loop/backups/<backup>' \
-  --json
-agent-loop doctor --json
+./agent-loopctl_Darwin_arm64 update --json
+agent-loopctl rollback --json
 ```
 
-CLIは管理対象backups配下だけを受け付け、manifestとbinary/Skill checksumを検証する。rollbackも元々稼働していたLaunchAgentだけを停止・再開し、state/worktreeを変更しない。旧binaryが現在のconfig/state versionを読めない場合は、先に対応するmigration backupを`migrate --rollback`で復元し、その後にinstall backupを`rollback`する。逆順はCLIが拒否する。
+検証済みの新しいホスト artifact から update する。旧ホスト binary、Skill、manifest は `host-backups/<digest>/` に保存し、rollback は記録された直前のバックアップの digest を検証して復元する。初回切替より前の旧共通 CLI への rollback は提供しない。ホスト更新・rollback は repository の assignment、LaunchAgent、snapshot/event、migration を変更しない。bootstrap runtime も保持する。
+
+repository runtime の変更は `agent-loopctl delivery assignment preview/apply/rollback --repo <path>`、snapshot migration は `agent-loopctl migrate --repo <path>` を使用する。migration の判定と実行は選択された runtime が所有し、別 repository のファイルを読まない。共通 registry 自体の旧 schema migration はホスト切替前に従来の正式手順で完了させる。
+
+uninstall は登録済み repository が残っている間は拒否する。全 repository の unregister 後に `agent-loopctl uninstall --json` を実行すると、共有 LaunchAgent とホスト binary/Skill を除去する。immutable slots、snapshot、バックアップは削除しない。
 
 ## Homebrew・Apple署名・notarization
 

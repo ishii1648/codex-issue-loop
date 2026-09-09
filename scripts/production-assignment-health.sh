@@ -26,8 +26,7 @@ jq -e --arg tag "$release_tag" '
   .other_repository_unchanged.binary == true and .other_repository_unchanged.state_revision == true
 ' "$rollback_drill_file" >/dev/null
 
-actual_operator_digest=$(shasum -a 256 "$operator_binary" | awk '{print $1}')
-[ "$actual_operator_digest" = "$stable_digest" ]
+"$operator_binary" version --json | jq -e ' .repository_command_protocol == 1 ' >/dev/null
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-assignment-health.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
 mkdir -p "$artifact_dir"
