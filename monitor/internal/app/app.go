@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/platform/runtimemetadata"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/config"
 	gh "github.com/ishii1648/codex-issue-loop/monitor/internal/github"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
@@ -26,11 +27,12 @@ var (
 )
 
 type App struct {
-	In       io.Reader
-	Out      io.Writer
-	Err      io.Writer
-	Observer gh.Observer
-	Now      func() time.Time
+	In              io.Reader
+	Out             io.Writer
+	Err             io.Writer
+	RuntimeMetadata *runtimemetadata.Store
+	Observer        gh.Observer
+	Now             func() time.Time
 }
 
 func (a App) Run(ctx context.Context, args []string) int {

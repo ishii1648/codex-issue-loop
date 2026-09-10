@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/runtimemetadata"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/config"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/store"
@@ -95,6 +97,9 @@ func (a App) monitorHandler(cfg config.Config) http.Handler {
 			switch r.URL.Path {
 			case "/api/status", "/api/details":
 				err = reader.status(args)
+				if err == nil && r.URL.Path == "/api/status" {
+					err = a.addRuntimeMetadata(&out, cfg, now)
+				}
 				if err == nil && r.URL.Path == "/api/details" {
 					err = flattenDetails(&out)
 				}
@@ -289,4 +294,34 @@ func flattenDetails(data *bytes.Buffer) error {
 	}
 	data.Reset()
 	return json.NewEncoder(data).Encode(map[string]any{"rows": rows})
+}
+
+func (a App) addRuntimeMetadata(data *bytes.Buffer, cfg config.Config, now time.Time) error {
+	var result struct {
+		SchemaVersion int                          `json:"schema_version"`
+		Repositories  []map[string]json.RawMessage `json:"repositories"`
+	}
+	if err := json.Unmarshal(data.Bytes(), &result); err != nil {
+		return err
+	}
+	metadata := a.RuntimeMetadata
+	if metadata == nil {
+		if root, err := layout.New(); err == nil {
+			metadata = &runtimemetadata.Store{Root: root.Root}
+		}
+	}
+	for _, repository := range result.Repositories {
+		var runtime *runtimemetadata.Observation
+		var name string
+		if json.Unmarshal(repository["repository"], &name) == nil && metadata != nil {
+			runtime = metadata.Observe(name, now, cfg.ObservationTimeout.Duration)
+		}
+		encoded, err := json.Marshal(runtime)
+		if err != nil {
+			return err
+		}
+		repository["runtime"] = encoded
+	}
+	data.Reset()
+	return json.NewEncoder(data).Encode(result)
 }

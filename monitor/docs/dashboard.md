@@ -1,6 +1,6 @@
 # ローカルダッシュボード
 
-独立monitorの既存stateを読むGo API（自作ダッシュボードを配信）とPrometheusの2プロセスを使用します。supervisorやGitHubへの書き込みは行いません。GitHubをpollする既存の`com.codex-issue-loop.monitor`は引き続き必要です。
+独立monitorの既存stateと、runtime の専用公開メタデータを読むGo API（自作ダッシュボードを配信）とPrometheusの2プロセスを使用します。supervisorやGitHubへの書き込みは行いません。GitHubをpollする既存の`com.codex-issue-loop.monitor`は引き続き必要です。
 
 - Dashboard（失効監視付き）: <http://127.0.0.1:19110/>
 - Prometheus: <http://127.0.0.1:19090>
@@ -82,6 +82,10 @@ scrapeとdashboardは15秒更新です。monitor停止は既存の`observation_t
 
 `/api/timeline`は区間を選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。近似や間引きはしません。失効監視付きURLでは1h/24h/7d/30d（既定は24h）または日時指定（入力・表示は端末のtimezoneによらずJST、Asia/Tokyo・UTC+09:00）を選び、UTC/RFC3339に変換した同じfrom/toを`/api/report`と`/api/timeline`へ渡します。reportの未観測時間をUNKNOWNへ補完して全長100%のバーと秒数凡例を表示します。細い区間に文字は重ねずhoverで状態と開始・終了を確認でき、ピクセル未満の区間はJSONから確認できます。現在カードは`/api/status`の最新取得であり、過去の選択期間とは独立です。replayは選択期間に次回取得で反映します。
 
+repository 見出しの右端に中立色の `Runtime v…` バッジを表示します。狭い幅では見出しとバッジを折り返します。取得対象は同一 macOS ホスト・同一ユーザー・同一 `AGENT_LOOP_HOME` の実行中 runtime です。起動時の専用メタデータを持たない旧版、停止、照合不能、複数起動、失効時は `Runtime 不明` となります。割当版・共通 CLI・monitor 自体の版では補完しません。詳細な取得契約は [Architecture](architecture.md) を参照してください。
+
+バッジは期間選択から独立した最新の OS 照合結果です。`/api/status` の `runtime.expires_at` を既存の1秒タイマーで確認し、期限に達したらバッジを不明にします。画面全体の既存45秒失効も維持します。`runtime` は応答専用であり、CLI status と比較するときは除外します。
+
 ## CLIとの照合
 
 観測中のstateを直接変更せず、`repositories/`を隔離directoryにコピーし、`state_dir`だけコピー先にした設定を使います。commit途中の不整合が出たコピーは使わず、取り直します。APIを凍結コピーの設定で起動し、表示された選択期間の開始をF、終了をTとします。現在状態の照合には別途現在時刻を用います。`status --at`は最新観測より前を拒否します。
@@ -92,7 +96,9 @@ F=2026-09-05T12:00:00Z
 MONITOR_CONFIG=/absolute/path/to/frozen/config.yaml
 agent-loop-monitor status --config "$MONITOR_CONFIG" --at "$T" --json > /tmp/monitor-cli-status.json
 curl --fail --get --data-urlencode "at=$T" http://127.0.0.1:19110/api/status > /tmp/monitor-http-status.json
-diff -u /tmp/monitor-cli-status.json /tmp/monitor-http-status.json
+jq -S . /tmp/monitor-cli-status.json > /tmp/monitor-cli-status-sorted.json
+jq -S 'del(.repositories[].runtime)' /tmp/monitor-http-status.json > /tmp/monitor-http-status-sorted.json
+diff -u /tmp/monitor-cli-status-sorted.json /tmp/monitor-http-status-sorted.json
 agent-loop-monitor history --config "$MONITOR_CONFIG" --from "$F" --to "$T" --json > /tmp/monitor-cli-history.json
 curl --fail --get --data-urlencode "from=$F" --data-urlencode "to=$T" http://127.0.0.1:19110/api/history > /tmp/monitor-http-history.json
 diff -u /tmp/monitor-cli-history.json /tmp/monitor-http-history.json
