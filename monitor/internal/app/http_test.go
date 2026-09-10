@@ -68,7 +68,25 @@ func TestDashboardCLIParityAndReplay(t *testing.T) {
 			t.Fatal(stderr.String())
 		}
 		response := request(t, a.monitorHandler(cfg), "/api/"+command+query)
-		if response.Code != 200 || response.Body.String() != out.String() {
+		actual := response.Body.Bytes()
+		if command == "status" {
+			var body map[string]any
+			if err := json.Unmarshal(actual, &body); err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range body["repositories"].([]any) {
+				delete(row.(map[string]any), "runtime")
+			}
+			var expected map[string]any
+			if err := json.Unmarshal(out.Bytes(), &expected); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(body, expected) {
+				t.Fatalf("status differs: %v versus %v", body, expected)
+			}
+			actual = out.Bytes()
+		}
+		if response.Code != 200 || string(actual) != out.String() {
 			t.Fatalf("%s differs: %d %s versus %s", command, response.Code, response.Body.String(), out.String())
 		}
 	}

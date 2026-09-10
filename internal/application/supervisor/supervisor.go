@@ -29,6 +29,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/runtimemetadata"
 )
 
 type WorktreeManager interface {
@@ -69,6 +70,7 @@ type Loop struct {
 	DiskAvailable      func(string) (uint64, error)
 	IncidentSignals    incidentSignalRecorder
 	IncidentAutomation incidentAutomationRunner
+	RuntimeMetadata    runtimemetadata.Store
 	ReleaseVersion     string
 	ReleaseCommit      string
 	// Maintenance fences stop new lifecycle dispatch while allowing active jobs
@@ -168,6 +170,17 @@ func (l *Loop) Run(ctx context.Context) error {
 		}); err != nil {
 			l.Logger.Printf("record host diagnostic signal: %v", err)
 		}
+	}
+
+	cleanup, metadataErr := l.RuntimeMetadata.Publish(l.Config.GitHub.Repo, l.Store.RepoID, l.ReleaseVersion, l.now())
+	if metadataErr != nil {
+		l.Logger.Printf("publish runtime metadata: %v", metadataErr)
+	} else {
+		defer func() {
+			if err := cleanup(); err != nil {
+				l.Logger.Printf("remove runtime metadata: %v", err)
+			}
+		}()
 	}
 
 	return l.runWithIncidentAutomation(ctx, func(runCtx context.Context) error { return l.runScheduler(runCtx, watcher) })

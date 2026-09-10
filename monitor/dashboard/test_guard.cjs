@@ -9,12 +9,14 @@ function fixture() {
   const classes = new Set(['expired']);
   const nodes = Object.fromEntries(['freshness','error','repos','range','window','custom','selection','from','to'].map(id => [id,{addEventListener(name,fn){this[name]=fn;},classList:{toggle(){}}}]));
   let details = [];
+  let badges = [];
   let bars = [];
   const documentEvents = {}, windowEvents = {};
   let html = '';
   Object.defineProperty(nodes.repos, 'innerHTML', {
     get:()=>html,
     set:value=>{ html=value;
+      badges=[...value.matchAll(/class="runtime-badge"(?: data-observed="(\d+)" data-expires="(\d+)")?>(.*?)<\/span>/g)].map(match=>({dataset:{observed:match[1],expires:match[2]},textContent:match[3]}));
       bars=[...value.matchAll(/class="bar timeline" data-from="(\d+)" data-to="(\d+)"/g)].map(match=>({
         dataset:{from:match[1],to:match[2]},
         getBoundingClientRect:()=>({left:100,width:1000}),
@@ -23,7 +25,7 @@ function fixture() {
       }));
       details=[...value.matchAll(/<details data-repository="([^"]+)"/g)].map(match=>({dataset:{repository:match[1]},open:false})); },
   });
-  nodes.repos.querySelectorAll = selector => details.filter(detail => selector !== 'details[open]' || detail.open);
+  nodes.repos.querySelectorAll = selector => selector === '.runtime-badge' ? badges : details.filter(detail => selector !== 'details[open]' || detail.open);
   const context = vm.createContext({
     document:{createElement:()=>({style:{},remove(){this.removed=true;}}),body:{classList:{add:x=>classes.add(x),remove:x=>classes.delete(x)}},getElementById:x=>nodes[x],addEventListener(name,fn){documentEvents[name]=fn;}},
     window:{addEventListener(name,fn){windowEvents[name]=fn;}},Date:class extends Date {static now(){return f.now;}},
@@ -38,7 +40,7 @@ function fixture() {
       const durations = Object.fromEntries(states.map((s,i) => [s,(to-from)/1000*f.fractions[i]]));
       let payload;
       if (u.pathname === '/api/freshness') payload = {status:'success',data:{result:f.missing?[]:[{value:[f.now/1000,String(f.sample/1000)]}]}};
-      if (u.pathname === '/api/status') payload = {repositories:f.repositories.map(repository=>({repository,current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:f.lastObservationAt ?? new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue}))};
+      if (u.pathname === '/api/status') payload = {repositories:f.repositories.map(repository=>({repository,current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:f.lastObservationAt ?? new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue,runtime:f.runtime?.(repository)}))};
       if (u.pathname === '/api/report') payload = {reports:f.repositories.map((repository,index)=>({repository,from:new Date(from).toISOString(),to:new Date(to).toISOString(),durations_seconds:durations,demand_availability:durations.HEALTHY+durations.DOWN ? durations.HEALTHY/(durations.HEALTHY+durations.DOWN) : null,observation_coverage:f.fractions.slice(0,3).reduce((a,b)=>a+b,0),...(f.report ? f.report(from,to,index) : {})}))};
       if (u.pathname === '/api/timeline') {
         let cursor=from;
@@ -235,7 +237,7 @@ test('historical 100 second metrics use state durations and include unknown and 
     const articles=nodes.repos.innerHTML.split('<article>').slice(1);
     assert.equal(articles.length,2);
     articles.forEach((html,index)=>{
-      assert.ok(html.startsWith(`<h2>${f.repositories[index]}</h2>`));
+      assert.ok(html.startsWith(`<div class="repo-heading"><h2>${f.repositories[index]}</h2>`));
       assert.match(html,/稼働率（正常のみ）<strong>40%<\/strong>/);
       assert.match(html,/正常動作率（正常\+待機）<strong>70%<\/strong>/);
       assert.match(html,/未観測時間: 10秒/);
@@ -367,4 +369,44 @@ test('narrow sub-second range stays nonempty at input precision', async () => {
   pointer(nodes,bar,'pointerup',506);
   assert.ok(Date.parse(nodes.from.value+'+09:00')<Date.parse(nodes.to.value+'+09:00'));
   assert.match(page,/type="datetime-local" step="0.001"/);
+});
+
+
+test('runtime versions map to repositories, update independently of range, escape text and clear on missing data', async () => {
+  const {f,nodes,classes,refresh} = fixture();
+  f.repositories=['owner/one','owner/two'];
+  let versions={'owner/one':'1.8.2','owner/two':'v1.8.1'};
+  f.runtime=repo=>versions[repo] ? {version:versions[repo],observed_at:new Date(f.now).toISOString(),expires_at:new Date(f.now+180000).toISOString()} : null;
+  await refresh();
+  const articles=nodes.repos.innerHTML.split('<article>').slice(1);
+  assert.match(articles[0],/Runtime <code>v1.8.2<\/code>/);
+  assert.match(articles[1],/Runtime <code>v1.8.1<\/code>/);
+  nodes.from.value='2026-01-01T00:00'; nodes.to.value='2026-01-02T00:00';
+  nodes.selection.submit({preventDefault(){}}); await refresh();
+  versions['owner/one']='1.9.0'; f.now+=15000; f.sample=f.now;
+  await refresh();
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v1.9.0<\/code>/);
+  assert.ok(f.urls.filter(url=>url.startsWith('/api/status')).every(url=>url==='/api/status'));
+  delete versions['owner/one']; await refresh();
+  assert.match(nodes.repos.innerHTML.split('<article>')[1],/Runtime 不明/);
+  assert.match(nodes.repos.innerHTML.split('<article>')[2],/Runtime <code>v1.8.1/);
+  versions['owner/one']='<script>bad</script>'; await refresh();
+  assert.match(nodes.repos.innerHTML,/v&lt;script&gt;bad/);
+  assert.equal(classes.has('expired'),false);
+});
+
+test('runtime expiry clears only the badge at the deadline and never uses written_at as heartbeat', async () => {
+  const {f,nodes,context,classes,refresh} = fixture();
+  f.runtime=()=>({version:'1.8.2',written_at:'2020-01-01T00:00:00Z',observed_at:new Date(f.now).toISOString(),expires_at:new Date(f.now+5000).toISOString()});
+  await refresh();
+  const badge=nodes.repos.querySelectorAll('.runtime-badge')[0];
+  assert.match(badge.textContent,/v1.8.2/);
+  f.now+=4999; vm.runInContext('checkExpiry()',context); assert.match(badge.textContent,/v1.8.2/);
+  f.now++; vm.runInContext('checkExpiry()',context); assert.equal(badge.textContent,'Runtime 不明');
+  assert.equal(classes.has('expired'),false);
+  for (const runtime of [null,{}, {version:'1',observed_at:'bad',expires_at:'bad'}, {version:'1',observed_at:new Date(f.now+1).toISOString(),expires_at:new Date(f.now+100).toISOString()}]) {
+    f.runtime=()=>runtime; await refresh();
+    assert.match(nodes.repos.innerHTML,/Runtime 不明/);
+    assert.equal(classes.has('expired'),false);
+  }
 });

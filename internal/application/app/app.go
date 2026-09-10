@@ -35,6 +35,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/runtimemetadata"
 	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/userrules"
 )
@@ -446,6 +447,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 		MaintenanceFencePath:           filepath.Join(l.DeliveryDir(), "maintenance.json"),
 		RepositoryMaintenanceFencePath: l.DeliveryAssignmentFencePath(entry.RepoID),
 		OperatorMaintenanceFencePath:   l.OperatorMaintenanceFencePath(entry.RepoID),
+		RuntimeMetadata:                runtimemetadata.Store{Root: l.Root},
 		ReleaseVersion:                 Version,
 		ReleaseCommit:                  Commit,
 	}
