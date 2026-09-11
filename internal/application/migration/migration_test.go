@@ -101,6 +101,111 @@ func TestApplyMigratesV4FixturesAndRestoreRecoversOriginalBytes(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsStateProgressWithoutChangingArtifacts(t *testing.T) {
+	for _, prepared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prepared=%t", prepared), func(t *testing.T) {
+			l, repo, original := writeV4Fixture(t, false)
+			m := Migrator{Layout: l}
+			if prepared {
+				m.AfterWrite = func(path string) error {
+					if filepath.Base(path) == "events.jsonl" {
+						return errors.New("fault after final artifact")
+					}
+					return nil
+				}
+			}
+			_, err := m.Apply()
+			if (err != nil) != prepared {
+				t.Fatalf("apply: %v", err)
+			}
+			j, _, err := m.loadJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := state.Store{Dir: l.RepoDir("repo-1"), RepoID: "repo-1", RepoPath: repo}
+			before, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, err := store.Update("supervisor_stopped", 0, "", nil, func(snapshot *state.Snapshot) error {
+				snapshot.Supervisor.State = "stopped"
+				return nil
+			})
+			if err != nil || after.StateRevision != before.StateRevision+1 {
+				t.Fatalf("update: revision=%d err=%v", after.StateRevision, err)
+			}
+			for path := range original {
+				original[path], err = os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			original[m.journalPath()], err = os.ReadFile(m.journalPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.Restore(j.Backup); err == nil || !strings.Contains(err.Error(), "state revision") {
+				t.Fatalf("rollback with progress was accepted: %v", err)
+			}
+			for path, want := range original {
+				got, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("rejected rollback modified %s: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRestoreRejectsBackupWithoutStateRevision(t *testing.T) {
+	l, _, _ := writeV4Fixture(t, false)
+	m := Migrator{Layout: l}
+	result, err := m.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(result.Backup, "manifest.json")
+	manifest, err := readManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range manifest.Entries {
+		manifest.Entries[i].StateRevision = nil
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "no migration state revision") {
+		t.Fatalf("unverifiable backup was accepted: %v", err)
+	}
+}
+
+func TestRestoreRejectsOlderBackupWithSameRevision(t *testing.T) {
+	l, _, _ := writeV4Fixture(t, false)
+	m := Migrator{Layout: l}
+	first, err := m.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Restore(first.Backup); err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Restore(first.Backup); err == nil || !strings.Contains(err.Error(), "latest migration journal") {
+		t.Fatalf("older backup was accepted: %v", err)
+	}
+	if _, err := m.Restore(second.Backup); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestZeitreise442MissingWorkspaceMigratesToIsolatedQuarantine(t *testing.T) {
 	root := t.TempDir()
 	l := layout.Layout{Root: root, RegistryPath: filepath.Join(root, "registry.json"), ReposRoot: filepath.Join(root, "repos")}
@@ -212,31 +317,42 @@ func TestApplyMigratesV5SemanticV2CheckpointWithoutChangingEvidence(t *testing.T
 }
 
 func TestFaultMigrationCanRestorePreparedBackupWithoutTouchingWorktree(t *testing.T) {
-	l, repo, original := writeV4Fixture(t, false)
-	marker := filepath.Join(repo, "operator-owned-worktree-file")
-	if err := os.WriteFile(marker, []byte("unchanged\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	injected := errors.New("fault after durable artifact write")
-	_, err := (Migrator{Layout: l, AfterWrite: func(string) error { return injected }}).Apply()
-	if !errors.Is(err, injected) {
-		t.Fatalf("fault=%v", err)
-	}
-	j, exists, err := (Migrator{Layout: l}).loadJournal()
-	if err != nil || !exists || j.Status != "prepared" {
-		t.Fatalf("journal=%+v exists=%v err=%v", j, exists, err)
-	}
-	if _, err := (Migrator{Layout: l}).Restore(j.Backup); err != nil {
-		t.Fatal(err)
-	}
-	for path, want := range original {
-		got, readErr := os.ReadFile(path)
-		if readErr != nil || !bytes.Equal(got, want) {
-			t.Fatalf("fault rollback mismatch for %s: err=%v", path, readErr)
-		}
-	}
-	if got, err := os.ReadFile(marker); err != nil || string(got) != "unchanged\n" {
-		t.Fatalf("worktree marker changed: %q err=%v", got, err)
+	for stopAfter := 1; stopAfter <= 4; stopAfter++ {
+		t.Run(fmt.Sprintf("after_write_%d", stopAfter), func(t *testing.T) {
+			l, repo, original := writeV4Fixture(t, false)
+			marker := filepath.Join(repo, "operator-owned-worktree-file")
+			if err := os.WriteFile(marker, []byte("unchanged\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			injected := errors.New("fault after durable artifact write")
+			writes := 0
+			_, err := (Migrator{Layout: l, AfterWrite: func(string) error {
+				writes++
+				if writes == stopAfter {
+					return injected
+				}
+				return nil
+			}}).Apply()
+			if !errors.Is(err, injected) {
+				t.Fatalf("fault=%v", err)
+			}
+			j, exists, err := (Migrator{Layout: l}).loadJournal()
+			if err != nil || !exists || j.Status != "prepared" {
+				t.Fatalf("journal=%+v exists=%v err=%v", j, exists, err)
+			}
+			if _, err := (Migrator{Layout: l}).Restore(j.Backup); err != nil {
+				t.Fatal(err)
+			}
+			for path, want := range original {
+				got, readErr := os.ReadFile(path)
+				if readErr != nil || !bytes.Equal(got, want) {
+					t.Fatalf("fault rollback mismatch for %s: err=%v", path, readErr)
+				}
+			}
+			if got, err := os.ReadFile(marker); err != nil || string(got) != "unchanged\n" {
+				t.Fatalf("worktree marker changed: %q err=%v", got, err)
+			}
+		})
 	}
 }
 
@@ -368,13 +484,8 @@ func TestActiveExecutionAndContinuationBlockRollback(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := (Migrator{Layout: l}).Restore(result.Backup)
-	if err != nil || !restored.Restored || restored.To != 4 {
-		t.Fatalf("restore=%+v err=%v", restored, err)
-	}
-	after, err := os.ReadFile(statePath)
-	if err != nil || !bytes.Equal(after, []byte(v4)) {
-		t.Fatalf("v4 active state was not restored: %s err=%v", after, err)
+	if _, err := (Migrator{Layout: l}).Restore(result.Backup); err == nil || !strings.Contains(err.Error(), "state revision") {
+		t.Fatalf("rollback after continuation completion was accepted: %v", err)
 	}
 }
 
