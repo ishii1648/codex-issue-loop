@@ -97,10 +97,13 @@ wait_issue_status() {
   wanted=$2
   deadline=$(( $(date +%s) + 180 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    "$binary" status --repo "$repo_path" --json >"$temporary_root/status.json"
-    current=$(jq -r --arg key "$issue_number" '.state.issues[$key].status // ""' "$temporary_root/status.json")
-    if [ "$current" = "$wanted" ]; then
-      return
+    if "$binary" status --repo "$repo_path" --json >"$temporary_root/status.json"; then
+      current=$(jq -r --arg key "$issue_number" '.state.issues[$key].status // ""' "$temporary_root/status.json")
+      if [ "$current" = "$wanted" ]; then
+        return
+      fi
+    elif ! jq -e '.code == "STATE_UNCONFIRMED" and .ok == false' "$temporary_root/status.json" >/dev/null; then
+      exit 1
     fi
     if ! kill -0 "$supervisor_pid" 2>/dev/null; then
       tail -100 "$temporary_root/supervisor.err" >&2
@@ -116,12 +119,15 @@ wait_issue_status() {
 stop_idle_supervisor() {
   deadline=$(( $(date +%s) + 60 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    "$binary" status --repo "$repo_path" --json >"$temporary_root/status.json"
-    if [ "$(jq -r '.worker_pool.active' "$temporary_root/status.json")" = 0 ]; then
-      kill -TERM "$supervisor_pid"
-      wait "$supervisor_pid"
-      supervisor_pid=
-      return
+    if "$binary" status --repo "$repo_path" --json >"$temporary_root/status.json"; then
+      if [ "$(jq -r '.worker_pool.active' "$temporary_root/status.json")" = 0 ]; then
+        kill -TERM "$supervisor_pid"
+        wait "$supervisor_pid"
+        supervisor_pid=
+        return
+      fi
+    elif ! jq -e '.code == "STATE_UNCONFIRMED" and .ok == false' "$temporary_root/status.json" >/dev/null; then
+      exit 1
     fi
     sleep 1
   done
