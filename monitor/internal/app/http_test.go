@@ -663,3 +663,79 @@ func TestStatusAndHistoryJSONOmitUnsetTimes(t *testing.T) {
 		})
 	}
 }
+
+func TestUnknownRecoveryPersistsContinuousHistoryForDashboard(t *testing.T) {
+	cfg, storage, base := dashboardFixture(t)
+	obs := model.Observation{Repository: "owner/repo", ObservedAt: base, Cursor: 10, CursorInitialized: true, CurrentVerified: true, ProcessingTimeout: time.Hour,
+		Items: []model.QueueItem{{Number: 1, Phase: model.Running, PhaseSince: base, Deadline: base.Add(time.Hour)}}}
+	snapshot, _, err := model.Apply(nil, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := model.Interval{DecisionVersion: model.DecisionVersion, ID: "prior-idle", Repository: obs.Repository, Status: model.Idle, StartedAt: base.Add(-time.Minute), EndedAt: base}
+	if err := storage.Commit(snapshot, []model.Interval{prior}); err != nil {
+		t.Fatal(err)
+	}
+	for minute := 1; minute <= 5; minute++ {
+		obs.ObservedAt = base.Add(time.Duration(minute) * time.Minute)
+		obs.Error = ""
+		if minute == 2 {
+			obs.Error = "unavailable"
+		}
+		if minute == 5 {
+			obs.Cursor = 12
+			obs.Items = append(obs.Items, model.QueueItem{Number: 2, Phase: model.Running})
+			obs.Events = []model.QueueEvent{{ID: 11, IssueNumber: 2, Kind: model.ReadyLabeled, At: base.Add(3 * time.Minute)}, {ID: 12, IssueNumber: 2, Kind: model.RunningLabeled, At: base.Add(4 * time.Minute)}}
+		}
+		previous, err := storage.Load(obs.Repository)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, closed, err := model.Apply(previous, obs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Commit(next, closed); err != nil {
+			t.Fatal(err)
+		}
+		reloaded, err := storage.Load(obs.Repository)
+		if err != nil || !reflect.DeepEqual(reloaded, &next) {
+			t.Fatalf("reloaded=%+v next=%+v err=%v", reloaded, next, err)
+		}
+		history, err := storage.History(obs.Repository)
+		if err != nil || len(history) == 0 || !reflect.DeepEqual(history[0], prior) {
+			t.Fatalf("history=%+v err=%v", history, err)
+		}
+		boundary := prior.StartedAt
+		for _, interval := range append(history, reloaded.Current) {
+			if !interval.StartedAt.Equal(boundary) {
+				t.Fatalf("boundary=%v interval=%+v", boundary, interval)
+			}
+			boundary = interval.EndedAt
+		}
+		handler := (App{Now: func() time.Time { return obs.ObservedAt }}).monitorHandler(cfg)
+		query := "?from=" + prior.StartedAt.Format(time.RFC3339) + "&to=" + obs.ObservedAt.Format(time.RFC3339)
+		for _, path := range []string{"/api/report" + query, "/api/timeline" + query, "/metrics"} {
+			response := request(t, handler, path)
+			if response.Code != http.StatusOK {
+				t.Fatalf("minute=%d path=%s: %d %s", minute, path, response.Code, response.Body.String())
+			}
+			if strings.HasPrefix(path, "/api/report") {
+				var body struct {
+					Reports []model.Report `json:"reports"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || len(body.Reports) != 1 {
+					t.Fatalf("report=%s err=%v", response.Body.String(), err)
+				}
+				wantUnknown, wantHealthy := float64(minute*60), float64(0)
+				if minute == 5 {
+					wantUnknown, wantHealthy = 240, 60
+				}
+				want := map[model.Status]float64{model.Idle: 60, model.Unknown: wantUnknown, model.Healthy: wantHealthy, model.Down: 0}
+				if !reflect.DeepEqual(body.Reports[0].DurationsSeconds, want) {
+					t.Fatalf("durations=%v want=%v", body.Reports[0].DurationsSeconds, want)
+				}
+			}
+		}
+	}
+}
