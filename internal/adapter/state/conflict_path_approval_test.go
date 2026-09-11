@@ -65,11 +65,17 @@ func TestConflictPathApprovalCommitRejectsStaleEvidence(t *testing.T) {
 			case "empty":
 				observed.AllowedPaths = nil
 			}
-			before, _ := json.Marshal(snapshot)
+			before, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if err := ResolveOperatorSuspension(&snapshot, 287, issuedomain.ResolutionApproveConflictPaths, observed, time.Now().UTC()); err == nil {
 				t.Fatal("accepted inconsistent evidence")
 			}
-			after, _ := json.Marshal(snapshot)
+			after, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if string(before) != string(after) {
 				t.Fatal("rejected commit mutated state")
 			}
