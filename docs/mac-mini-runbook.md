@@ -172,6 +172,8 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
   --json
 ```
 
+新規Issueの受付は、先行IssueのPRマージ確認による内部完了、PR不要の正当な完了、または正式キャンセルまで待機する。CI・レビュー・回答待ちやfailed/blocked/quarantineでは後続はreadyのままになる。待ちの原因はstatusのIssue状態・エラーとsupervisor messageで確認し、既存の回答・復旧・キャンセル経路を使う。導入時に複数の既存Issueがある場合も、新規受付を止めたまま既存分を収束させる。
+
 記録後、同じrequest IDがansweredになったことをstatusで確認する。別Issueがroot `active_execution`を保持していれば、回答済みIssueはcontinuationを保持して待機し、実行枠が空いた後にschedulerが再開する。ready/running label、state、execution identityを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
 別端末から回答する場合は、AIがIssue本文と質問コメントを読み、表示されたrequest・選択肢を照合して `agent-loop answer --via github --repo owner/repo --issue N --request-id <id> --message-file - --json` へ標準入力で渡す。checkout・ローカル登録は不要で、`gh` はsupervisorと同一の人間アカウントで認証する。別ユーザーはadminでも受理されない。ホスト固有のsecret設定は遠隔へ公開せず、検出不能なsecretを回答へ含めない。

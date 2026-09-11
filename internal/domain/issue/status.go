@@ -172,3 +172,7 @@ func (s Status) DispatchesWorker() bool {
 func (s Status) DispatchesWorkerWhile(effectPending bool) bool {
 	return !effectPending && s.DispatchesWorker()
 }
+
+func (s Status) BlocksNewAdmission() bool {
+	return s != StatusUnset && s != StatusCompleted && s != StatusCanceled
+}
