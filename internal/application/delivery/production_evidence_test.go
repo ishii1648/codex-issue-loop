@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
@@ -755,4 +757,71 @@ func mapsEqual(left, right map[string]any) bool {
 	leftJSON, _ := json.Marshal(left)
 	rightJSON, _ := json.Marshal(right)
 	return string(leftJSON) == string(rightJSON)
+}
+
+func TestOfflineContractStatusPollingHandlesUnconfirmedState(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts", "offline-release-contract.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	start := strings.Index(text, "wait_issue_status() {")
+	end := strings.Index(text, "\nstart_supervisor\n")
+	if start < 0 || end <= start {
+		t.Fatal("offline contract polling functions are missing")
+	}
+	for _, operation := range []string{"wait_issue_status 1 completed", "stop_idle_supervisor"} {
+		for _, mode := range []string{"transient", "unconfirmed", "corrupt", "invalid"} {
+			t.Run(operation+"/"+mode, func(t *testing.T) {
+				root := t.TempDir()
+				binary := writeExecutable(t, root, "status", `#!/bin/sh
+count=$(cat "$COUNT_FILE" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s' "$count" >"$COUNT_FILE"
+case "$MODE" in
+  transient) if [ "$count" = 1 ]; then printf '%s\n' '{"code":"STATE_UNCONFIRMED","ok":false}'; exit 1; fi ;;
+  unconfirmed) printf '%s\n' '{"code":"STATE_UNCONFIRMED","ok":false}'; exit 1 ;;
+  corrupt) printf '%s\n' '{"code":"STATE_CORRUPT","ok":false}'; exit 1 ;;
+  invalid) printf '%s\n' '{'; exit 1 ;;
+esac
+printf '%s\n' '{"state":{"issues":{"1":{"status":"completed"}}},"worker_pool":{"active":0}}'
+`)
+				harness := text[start:end] + `
+date() {
+  tick=$(cat "$CLOCK_FILE" 2>/dev/null || printf 0)
+  tick=$((tick + 10))
+  printf '%s' "$tick" >"$CLOCK_FILE"
+  printf '%s\n' "$tick"
+}
+sleep() { :; }
+kill() { return 0; }
+wait() { return 0; }
+` + operation
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "sh", "-eu", "-c", harness)
+				cmd.Env = append(os.Environ(), "binary="+binary, "temporary_root="+root,
+					"repo_path="+root, "supervisor_pid=123", "COUNT_FILE="+filepath.Join(root, "count"),
+					"CLOCK_FILE="+filepath.Join(root, "clock"), "MODE="+mode)
+				output, runErr := cmd.CombinedOutput()
+				if ctx.Err() != nil {
+					t.Fatalf("polling exceeded its deadline: %s", output)
+				}
+				if (runErr == nil) != (mode == "transient") {
+					t.Fatalf("mode=%s err=%v output=%s", mode, runErr, output)
+				}
+				countData, err := os.ReadFile(filepath.Join(root, "count"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var count int
+				if _, err := fmt.Sscan(string(countData), &count); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "transient" && count != 2 || (mode == "corrupt" || mode == "invalid") && count != 1 || mode == "unconfirmed" && (count < 2 || count > 18) {
+					t.Fatalf("mode=%s unexpected status calls: %d", mode, count)
+				}
+			})
+		}
+	}
 }
