@@ -18,9 +18,18 @@ temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-offline-contract.XXXXXX")
 supervisor_pid=
 supervisor_starts=0
 cleanup() {
+  result=$?
   if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
     kill -TERM "$supervisor_pid" 2>/dev/null || true
     wait "$supervisor_pid" 2>/dev/null || true
+  fi
+  if [ "$result" -ne 0 ]; then
+    find "$temporary_root" -type f \( -name supervisor.log -o -name supervisor.err -o -name status.json \) -exec sh -c '
+      for diagnostic do
+        printf "\n%s\n" "$diagnostic" >&2
+        tail -100 "$diagnostic" >&2
+      done
+    ' sh {} + || true
   fi
   if [ "${OFFLINE_CONTRACT_KEEP_TMP:-false}" = true ]; then
     printf '%s\n' "offline contract retained at $temporary_root" >&2
