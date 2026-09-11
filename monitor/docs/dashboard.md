@@ -82,9 +82,9 @@ scrapeとdashboardは15秒更新です。monitor停止は既存の`observation_t
 
 `/api/timeline`は区間を選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。近似や間引きはしません。失効監視付きURLでは1h/24h/7d/30d（既定は24h）または日時指定（入力・表示は端末のtimezoneによらずJST、Asia/Tokyo・UTC+09:00）を選び、UTC/RFC3339に変換した同じfrom/toを`/api/report`と`/api/timeline`へ渡します。reportの未観測時間をUNKNOWNへ補完して全長100%のバーと秒数凡例を表示します。細い区間に文字は重ねずhoverで状態と開始・終了を確認でき、ピクセル未満の区間はJSONから確認できます。現在カードは`/api/status`の最新取得であり、過去の選択期間とは独立です。replayは選択期間に次回取得で反映します。
 
-repository 見出しの右端に中立色の `Runtime v…` バッジを表示します。狭い幅では見出しとバッジを折り返します。取得対象は同一 macOS ホスト・同一ユーザー・同一 `AGENT_LOOP_HOME` の実行中 runtime です。起動時の専用メタデータを持たない旧版、停止、照合不能、複数起動、失効時は `Runtime 不明` となります。割当版・共通 CLI・monitor 自体の版では補完しません。詳細な取得契約は [Architecture](architecture.md) を参照してください。
+repository 見出しの右端に中立色の `Runtime v…` バッジを表示します。狭い幅では見出しとバッジを折り返します。取得対象は同一 macOS ホスト・同一ユーザー・同一 `AGENT_LOOP_HOME` の実行中 runtime です。起動時の専用メタデータを持たない旧版、停止、照合不能、複数起動、情報欠損時は `Runtime 不明` となります。割当版・共通 CLI・monitor 自体の版では補完しません。詳細な取得契約は [Architecture](architecture.md) を参照してください。
 
-バッジは期間選択から独立した最新の OS 照合結果です。`/api/status` の `runtime.expires_at` を既存の1秒タイマーで確認し、期限に達したらバッジを不明にします。画面全体の既存45秒失効も維持します。`runtime` は応答専用であり、CLI status と比較するときは除外します。
+バッジは期間選択から独立した最新の OS 照合結果です。初回、既存の15秒更新、タブ復帰・ページ復元時に `/api/status` を取得し、有効な version または `Runtime 不明` を表示します。スリープ復帰後も既存の更新処理で再取得します。`runtime.observed_at` / `runtime.expires_at` は表示判定に使いません。画面全体の既存45秒失効も維持します。`runtime` は応答専用であり、CLI status と比較するときは除外します。
 
 ## CLIとの照合
 

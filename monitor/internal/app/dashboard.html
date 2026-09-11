@@ -40,21 +40,15 @@ function checkExpiry() {
     expire('45秒以内の取得を確認できません。現在正常表示を解除しました。');
     return false;
   }
-  node('repos').querySelectorAll('.runtime-badge').forEach(badge => {
-    if (Date.now() < Number(badge.dataset.observed) || Date.now() >= Number(badge.dataset.expires) || performance.now() - received >= Number(badge.dataset.expires) - Number(badge.dataset.observed)) {
-      badge.textContent = 'Runtime 不明';
-    }
-  });
   return true;
 }
-function runtimeBadge(runtime, now) {
-  const observed = Date.parse(runtime?.observed_at), expires = Date.parse(runtime?.expires_at);
+function runtimeBadge(runtime) {
   const version = runtime?.version;
-  if (typeof version !== 'string' || !version.trim() || !Number.isFinite(observed) || !Number.isFinite(expires) || observed > now || expires <= now || expires <= observed) {
+  if (typeof version !== 'string' || !version.trim()) {
     return '<span class="runtime-badge">Runtime 不明</span>';
   }
   const label = version.startsWith('v') ? version : 'v'+version;
-  return `<span class="runtime-badge" data-observed="${observed}" data-expires="${expires}">Runtime <code>${escapeHTML(label)}</code></span>`;
+  return `<span class="runtime-badge">Runtime <code>${escapeHTML(label)}</code></span>`;
 }
 async function read(url) {
   const response = await fetch(url, {cache:'no-store', signal:AbortSignal.timeout(10000)});
@@ -93,7 +87,7 @@ function renderRepository(snapshot, report, rows, from, to, now) {
   const since = Number.isFinite(started) && started > 0 ? duration(Math.max(0,(now-started)/1000))+'継続' : '開始未観測';
   const repo = escapeHTML(snapshot.repository);
   const query = new URLSearchParams({repo:snapshot.repository,from:new Date(from).toISOString(),to:new Date(to).toISOString()});
-  return `<article><div class="repo-heading"><h2>${repo}</h2>${runtimeBadge(snapshot.runtime,Date.now())}</div><div class="current${state === 'UNKNOWN' ? ' unconfirmed' : ''}" style="--state:var(--${state})"><small>現在 · 選択期間とは独立</small><div><strong>${state === 'UNKNOWN' ? '状態を確認できません' : labels[state]}</strong>${state === 'UNKNOWN' ? '' : `<b>${state}</b>`}</div><small>${since}</small></div>
+  return `<article><div class="repo-heading"><h2>${repo}</h2>${runtimeBadge(snapshot.runtime)}</div><div class="current${state === 'UNKNOWN' ? ' unconfirmed' : ''}" style="--state:var(--${state})"><small>現在 · 選択期間とは独立</small><div><strong>${state === 'UNKNOWN' ? '状態を確認できません' : labels[state]}</strong>${state === 'UNKNOWN' ? '' : `<b>${state}</b>`}</div><small>${since}</small></div>
   <h3>選択期間の指標</h3><div class="metrics"><div>稼働率（正常のみ）<strong>${percent(values.HEALTHY/total)}</strong></div><div>正常動作率（正常+待機）<strong>${percent((values.HEALTHY+values.IDLE)/total)}</strong></div></div><p class="muted">選択期間全体の時間に対する割合</p>
   <div class="facts">${values.UNKNOWN > 0 ? 'この期間には未観測の時間があります' : ''}</div>
   <h3>状態タイムライン <small>hoverで時刻 · ドラッグで期間を指定（Escで取消）</small></h3><div class="bar timeline" data-from="${from}" data-to="${to}" aria-label="選択期間の状態タイムライン">${timeline}</div><div class="axis"><span>${shortTime(from)} JST</span><span>${shortTime(to)} JST</span></div><div class="legend">${legend}</div>
@@ -201,7 +195,7 @@ node('selection').addEventListener('submit', event => {
   selected = {from,to}; expire('期間を更新中'); refresh();
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelDrag(); checkExpiry(); if (!document.hidden) refresh(); });
-window.addEventListener('pageshow', checkExpiry);
+window.addEventListener('pageshow', event => { checkExpiry(); if (event.persisted) refresh(); });
 setInterval(checkExpiry, 1000);
 setInterval(refresh, 15000);
 refresh();

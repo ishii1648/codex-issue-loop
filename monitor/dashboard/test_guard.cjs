@@ -4,19 +4,19 @@ const assert = require('node:assert/strict');
 const {test} = require('node:test');
 const page = readFileSync(__dirname + '/../internal/app/dashboard.html', 'utf8');
 const code = page.split('<script>')[1].split('</script>')[0];
-function fixture() {
-  const f = {now:1800000000000, sample:1800000000000, failure:'', missing:false, state:'HEALTHY', repositories:['owner/repo'], fractions:[0.25,0.25,0.25,0.25], urls:[]};
+function fixture(initial = {}) {
+  const f = {now:1800000000000, sample:1800000000000, failure:'', missing:false, state:'HEALTHY', repositories:['owner/repo'], fractions:[0.25,0.25,0.25,0.25], urls:[], ...initial};
   const classes = new Set(['expired']);
   const nodes = Object.fromEntries(['freshness','error','repos','range','window','custom','selection','from','to'].map(id => [id,{addEventListener(name,fn){this[name]=fn;},classList:{toggle(){}}}]));
   let details = [];
   let badges = [];
   let bars = [];
-  const documentEvents = {}, windowEvents = {};
+  const documentEvents = {}, windowEvents = {}, intervals = new Map();
   let html = '';
   Object.defineProperty(nodes.repos, 'innerHTML', {
     get:()=>html,
     set:value=>{ html=value;
-      badges=[...value.matchAll(/class="runtime-badge"(?: data-observed="(\d+)" data-expires="(\d+)")?>(.*?)<\/span>/g)].map(match=>({dataset:{observed:match[1],expires:match[2]},textContent:match[3]}));
+      badges=[...value.matchAll(/class="runtime-badge">(.*?)<\/span>/g)].map(match=>({textContent:match[1]}));
       bars=[...value.matchAll(/class="bar timeline" data-from="(\d+)" data-to="(\d+)"/g)].map(match=>({
         dataset:{from:match[1],to:match[2]},
         getBoundingClientRect:()=>({left:100,width:1000}),
@@ -29,7 +29,7 @@ function fixture() {
   const context = vm.createContext({
     document:{createElement:()=>({style:{},remove(){this.removed=true;}}),body:{classList:{add:x=>classes.add(x),remove:x=>classes.delete(x)}},getElementById:x=>nodes[x],addEventListener(name,fn){documentEvents[name]=fn;}},
     window:{addEventListener(name,fn){windowEvents[name]=fn;}},Date:class extends Date {static now(){return f.now;}},
-    performance:{now:()=>f.now},setInterval(){},AbortSignal,URLSearchParams,
+    performance:{now:()=>f.now},setInterval(fn,ms){intervals.set(ms,fn);},AbortSignal,URLSearchParams,
     fetch:async url => {
       f.urls.push(url);
       if (f.pause) await f.pause;
@@ -57,7 +57,7 @@ function fixture() {
     },
   });
   vm.runInContext(code, context);
-  return {f,classes,nodes,context,documentEvents,windowEvents,bars:()=>bars,refresh:()=>vm.runInContext('refresh()',context)};
+  return {f,classes,nodes,context,documentEvents,windowEvents,intervals,bars:()=>bars,refresh:()=>vm.runInContext('refresh()',context)};
 }
 test('transport failures, stale and missing scrape, sleep expire all displayed values and recover', async () => {
   const {f,classes,nodes,context,refresh} = fixture();
@@ -399,18 +399,67 @@ test('runtime versions map to repositories, update independently of range, escap
   assert.equal(classes.has('expired'),false);
 });
 
-test('runtime expiry clears only the badge at the deadline and never uses written_at as heartbeat', async () => {
+test('runtime timestamps never override a valid version while overall freshness remains enforced', async () => {
   const {f,nodes,context,classes,refresh} = fixture();
-  f.runtime=()=>({version:'1.8.2',written_at:'2020-01-01T00:00:00Z',observed_at:new Date(f.now).toISOString(),expires_at:new Date(f.now+5000).toISOString()});
-  await refresh();
-  const badge=nodes.repos.querySelectorAll('.runtime-badge')[0];
-  assert.match(badge.textContent,/v1.8.2/);
-  f.now+=4999; vm.runInContext('checkExpiry()',context); assert.match(badge.textContent,/v1.8.2/);
-  f.now++; vm.runInContext('checkExpiry()',context); assert.equal(badge.textContent,'Runtime 不明');
-  assert.equal(classes.has('expired'),false);
-  for (const runtime of [null,{}, {version:'1',observed_at:'bad',expires_at:'bad'}, {version:'1',observed_at:new Date(f.now+1).toISOString(),expires_at:new Date(f.now+100).toISOString()}]) {
-    f.runtime=()=>runtime; await refresh();
-    assert.match(nodes.repos.innerHTML,/Runtime 不明/);
+  for (const offset of [-180000,1800,180000]) {
+    f.runtime=()=>({version:'1.8.2',observed_at:new Date(f.now+offset).toISOString(),expires_at:new Date(f.now+offset+1000).toISOString()});
+    await refresh();
+    f.now+=5000;
+    vm.runInContext('checkExpiry()',context);
+    assert.match(nodes.repos.querySelectorAll('.runtime-badge')[0].textContent,/v1.8.2/);
     assert.equal(classes.has('expired'),false);
   }
+  for (const runtime of [{version:'1.8.2'}, {version:'1.8.2',observed_at:'bad',expires_at:'bad'}]) {
+    f.runtime=()=>runtime; await refresh();
+    assert.match(nodes.repos.innerHTML,/Runtime <code>v1.8.2/);
+  }
+  for (const runtime of [null,undefined,{}, {version:''}, {version:'  '}, {version:123}, {version:{}}]) {
+    f.runtime=()=>({version:'1.8.2'}); await refresh();
+    f.runtime=()=>runtime; await refresh();
+    assert.match(nodes.repos.innerHTML,/Runtime 不明/);
+    assert.doesNotMatch(nodes.repos.innerHTML,/v1.8.2/);
+    assert.match(nodes.repos.innerHTML,/<b>HEALTHY<\/b>/);
+    assert.equal(classes.has('expired'),false);
+  }
+});
+
+test('initial load, interval, tab return and page restoration fetch current runtime and recover after sleep or failure', async () => {
+  const {f,nodes,context,classes,intervals,documentEvents,windowEvents} = fixture({runtime:()=>({version:'1.8.2'})});
+  const settle = () => new Promise(resolve=>setImmediate(resolve));
+  const statusRequests = () => f.urls.filter(url=>url==='/api/status').length;
+  await settle();
+  assert.equal(statusRequests(),1);
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v1.8.2/);
+  assert.deepEqual([...intervals.keys()],[1000,15000]);
+  f.runtime=()=>({version:'1.9.0'});
+  f.now+=15000; f.sample=f.now;
+  await intervals.get(15000)();
+  assert.equal(statusRequests(),2);
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v1.9.0/);
+  vm.runInContext('document.hidden=true',context); documentEvents.visibilitychange();
+  assert.equal(statusRequests(),2);
+  f.runtime=()=>null;
+  vm.runInContext('document.hidden=false',context); documentEvents.visibilitychange(); await settle();
+  assert.equal(statusRequests(),3);
+  assert.match(nodes.repos.innerHTML,/Runtime 不明/);
+  f.runtime=()=>({version:'2.0.0'});
+  windowEvents.pageshow({persisted:true}); await settle();
+  assert.equal(statusRequests(),4);
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v2.0.0/);
+  f.now+=60000;
+  intervals.get(1000)();
+  assert.equal(classes.has('expired'),true);
+  f.sample=f.now;
+  f.runtime=()=>({version:'2.1.0'});
+  await intervals.get(15000)();
+  assert.equal(classes.has('expired'),false);
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v2.1.0/);
+  f.failure='/api/status';
+  await intervals.get(15000)();
+  assert.equal(classes.has('expired'),true);
+  f.failure=''; f.runtime=()=>null;
+  await intervals.get(15000)();
+  assert.equal(classes.has('expired'),false);
+  assert.match(nodes.repos.innerHTML,/Runtime 不明/);
+  assert.doesNotMatch(nodes.repos.innerHTML,/v2.1.0/);
 });
