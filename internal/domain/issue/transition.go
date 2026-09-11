@@ -140,10 +140,6 @@ func ResumeAfterAnswer(from, target Status) (Transition, error) {
 	}
 }
 
-func RetryConflict(from Status) (Transition, error) {
-	return newAllowedTransition("retry_conflict", from, StatusResolvingConflict, StatusBlocked)
-}
-
 func ConfirmClaim(from Status) (Transition, error) {
 	return newAllowedTransition("confirm_claim", from, StatusClaimed, StatusClaiming)
 }

@@ -21,10 +21,6 @@ var allEffectKinds = [...]EffectKind{
 	EffectRetryConflict, EffectApplyResolution,
 }
 
-func AllEffectKinds() []EffectKind {
-	return append([]EffectKind(nil), allEffectKinds[:]...)
-}
-
 func (kind EffectKind) Validate() error {
 	for _, candidate := range allEffectKinds {
 		if kind == candidate {
