@@ -53,11 +53,11 @@ type Report struct {
 	Result             string             `json:"result,omitempty"`
 	Reason             string             `json:"reason,omitempty"`
 	Plan               *CompatibilityPlan `json:"plan,omitempty"`
-	LastCheckAt        time.Time          `json:"last_check_at,omitempty"`
-	NextCheckAt        time.Time          `json:"next_check_at,omitempty"`
+	LastCheckAt        time.Time          `json:"last_check_at"`
+	NextCheckAt        time.Time          `json:"next_check_at"`
 	Drain              DrainProgress      `json:"drain"`
-	DrainStartedAt     time.Time          `json:"drain_started_at,omitempty"`
-	DrainDeadline      time.Time          `json:"drain_deadline,omitempty"`
+	DrainStartedAt     time.Time          `json:"drain_started_at"`
+	DrainDeadline      time.Time          `json:"drain_deadline"`
 	LoadedRepositories []string           `json:"loaded_repositories,omitempty"`
 	Backup             string             `json:"backup,omitempty"`
 	Transaction        string             `json:"transaction"`

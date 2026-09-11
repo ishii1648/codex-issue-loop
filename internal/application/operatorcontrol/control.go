@@ -38,7 +38,7 @@ type Transaction struct {
 	RequestedAt   time.Time `json:"requested_at"`
 	DrainDeadline time.Time `json:"drain_deadline"`
 	UpdatedAt     time.Time `json:"updated_at"`
-	CompletedAt   time.Time `json:"completed_at,omitempty"`
+	CompletedAt   time.Time `json:"completed_at"`
 	Reason        string    `json:"reason,omitempty"`
 	SupervisorPID int       `json:"supervisor_pid,omitempty"`
 	RestartBroker bool      `json:"restart_broker"`
