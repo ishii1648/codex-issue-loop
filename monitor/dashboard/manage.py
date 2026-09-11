@@ -9,11 +9,20 @@ import subprocess
 
 def main():
     parser = argparse.ArgumentParser(description='Independent monitor dashboard LaunchAgents')
-    parser.add_argument('action', choices=['prepare', 'start', 'stop', 'restart', 'status'])
+    parser.add_argument('action', choices=['prepare', 'start', 'stop', 'restart', 'status', 'deploy', 'rollback'])
     parser.add_argument('--root', type=Path, default=Path.home() / 'Library/Application Support/codex-issue-loop-monitor-dashboard')
     parser.add_argument('--config', type=Path, default=Path.home() / '.agent-loop-monitor.yaml')
     parser.add_argument('--binary', type=Path, default=Path.home() / 'Library/Application Support/codex-issue-loop-monitor/bin/agent-loop-monitor')
+    parser.add_argument('--tag', help='Explicit stable release tag for deploy/rollback')
+    parser.add_argument('--commit', help='Full release commit for deploy/rollback')
     args = parser.parse_args()
+    if args.action in ['deploy', 'rollback']:
+        import deploy
+        try:
+            deploy.main(args)
+        except Exception as error:
+            parser.exit(1, 'Deployment failed: ' + str(error) + '\n')
+        return
     root = args.root.resolve()
     labels = ['com.codex-issue-loop.monitor-dashboard.' + name for name in ['api', 'prometheus']]
     target = 'gui/' + str(os.getuid())
