@@ -358,9 +358,6 @@ func Load(repoPath string) (Config, error) {
 	if supplied.Version == nil {
 		return Config{}, fmt.Errorf("config version is required")
 	}
-	if cfg.GitHub.NeedsInputLabel == "codex-loop:needs-input" {
-		cfg.GitHub.NeedsInputLabel = "needs-human"
-	}
 	cfg.RepoPath = canonical
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -402,6 +399,9 @@ func (c Config) Validate() error {
 	}
 	if len(c.GitHub.ReadyLabels) == 0 {
 		return fmt.Errorf("github.ready_labels must not be empty")
+	}
+	if c.GitHub.NeedsInputLabel == "codex-loop:needs-input" {
+		return fmt.Errorf("needs_input_label codex-loop:needs-input is deprecated; use needs-human")
 	}
 	if c.Queue.Concurrency != 1 {
 		return fmt.Errorf("queue.concurrency must be 1")

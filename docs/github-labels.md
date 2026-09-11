@@ -4,6 +4,8 @@
 
 新規Issueには、対象repositoryの`.agent-loop.yaml`の`github.ready_labels`に設定されたready labelだけを付与し、`area:`ラベルは付けない。resource admissionは廃止されており、`area:`ラベルは着手判定に使用せず、resource definitionからのbootstrapも行わない。既存IssueのラベルやGitHub上のラベル定義は削除しない。
 
+`github.needs_input_label` の既定値は `needs-human`。廃止値 `codex-loop:needs-input` を指定すると、設定読み込みは `needs_input_label codex-loop:needs-input is deprecated; use needs-human` エラーになる。`.agent-loop.yaml` の値を `needs-human` に変更するか、指定を削除して既定値を使用する。カスタムラベルは指定した値をそのまま使用する。
+
 ## 標準手順
 
 最初に変更計画をpreviewする。この操作はGitHubを変更しない。
