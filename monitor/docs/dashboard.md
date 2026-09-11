@@ -44,7 +44,11 @@ python3 monitor/dashboard/manage.py restart
 
 `start`は登録済みサービスを保持します。`restart`は登録済みに`kickstart -k`、未登録に`bootstrap`を使います。plistのProgramArgumentsを変更した場合は`stop`後に`start`して再登録します。`stop`はデータを保持します。ログイン自動起動も止める場合は、この構成の2つのLaunchAgentsリンクだけを外します。
 
-更新時は`stop`、binaryの配置、`prepare`、`start`の順です。以前のbinary・設定を保存します。`prepare`はTSDB・観測stateや既存のGrafanaデータを削除しません。
+stable releaseからの更新は[runbookの配備操作](runbook.md#installと更新)を使用します。観測用runと表示用serveの実参照先を更新するため、毎回のbinary配置や`prepare`は不要です。配備はAPIと観測サービスだけを停止・再登録し、Prometheusを継続稼働させます。設定変更時の`prepare`はTSDB・観測stateや既存のGrafanaデータを削除しません。
+
+## 更新後の提供確認
+
+配備操作の`complete`を確認後、配信URLをブラウザで開きます。初回更新ではタイムラインをドラッグし、日時指定の開始・終了、画面上部の対象期間、両repositoryのtimelineと稼働率が同時に選択期間へ変わることを確認します。現在カードは最新statusのままで、15秒更新後も選択期間が維持され、freshnessの失効表示が出ないことを確認します。対象tag/commit、配備結果、ブラウザ確認結果を区別して記録し、Release公開やマージだけで提供完了とはしません。
 
 ## 既存のGrafana構成から移行
 
@@ -62,7 +66,7 @@ fi
 
 `bootout`が失敗した場合は原因を確認して停止・登録解除を完了してください。LaunchAgentsにリンクではなく同名plistを直接置いていた場合は、その内容がこのdashboardのGrafana用であることを確認してLaunchAgents外へ退避します。`launchctl print`で未登録となり、LaunchAgentsに同名plistが残っていないことを確認します。
 
-続いて上記の更新手順で新しいmonitor binaryと2プロセス用設定に切り替えます。ログイン自動起動の登録は上記の`api prometheus`を列挙した手順を使い、rootに残った旧Grafana plistを再登録しないでください。root内の旧Grafana plist、`grafana.ini`、`grafana/`、`plugins/`、`provisioning/`、`dashboards/`は使用されなくなりますが、削除は不要です。PrometheusのTSDBとmonitorの観測stateはそのまま使用します。
+続いて上記の準備・起動手順で2プロセス用設定に切り替え、runbookの配備操作で両monitor binaryを更新します。ログイン自動起動の登録は上記の`api prometheus`を列挙した手順を使い、rootに残った旧Grafana plistを再登録しないでください。root内の旧Grafana plist、`grafana.ini`、`grafana/`、`plugins/`、`provisioning/`、`dashboards/`は使用されなくなりますが、削除は不要です。PrometheusのTSDBとmonitorの観測stateはそのまま使用します。
 
 ## 表示と正確性
 
@@ -128,6 +132,7 @@ HEALTHY表示中にfixtureのAPI、Prometheusをそれぞれ`launchctl bootout g
 ```sh
 go test ./monitor/...
 python3 monitor/dashboard/test_dashboard.py
+python3 monitor/dashboard/test_deploy.py
 node --test monitor/dashboard/test_guard.cjs
 promtool check config /tmp/monitor-dashboard-fixture/prometheus.yml
 make ci
