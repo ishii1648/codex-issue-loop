@@ -248,6 +248,21 @@ func CanAdoptWorktree(item *Issue) bool {
 		len(item.Suspension.AllowedActions) == 1 && item.Suspension.AllowedActions[0] == issuedomain.ResolutionCancel
 }
 
+func CanApproveConflictPaths(item *Issue) bool {
+	if item == nil || item.Continuation == nil || item.Suspension == nil || item.ConflictRecovery == nil || item.Workspace == nil {
+		return false
+	}
+	c, s, r := item.Continuation, item.Suspension, item.ConflictRecovery
+	return issuedomain.ApproveConflictPaths(item.Status, s.Status, s.Recoverability, c.Stage, slices.Contains(s.AllowedActions, issuedomain.ResolutionRetryStage)) == nil &&
+		item.RunID != "" && c.RunID == item.RunID && c.Generation != 0 && c.Generation == item.Generation &&
+		s.ID != "" && c.ID != "" && s.CheckpointID == c.ID && len(s.MissingEvidence) == 0 &&
+		validSHA256(c.WorktreeSHA256) && c.HeadSHA != "" && c.HeadSHA == item.HeadSHA && r.OriginalHeadSHA == c.HeadSHA &&
+		r.TargetBaseSHA != "" && len(r.AllowedPaths) != 0 && c.BaseSHA != "" &&
+		item.PullRequestNumber > 0 && c.PullRequestNumber == item.PullRequestNumber && item.PullRequestURL != "" &&
+		c.PullRequestURL == item.PullRequestURL && r.PullRequestURL == item.PullRequestURL &&
+		reflect.DeepEqual(c.Workspace, item.Workspace) && item.WorkerPID == 0 && item.WorkerPGID == 0
+}
+
 type OperatorResolutionObservation struct {
 	HeadSHA               string
 	WorktreeSHA256        string
@@ -270,6 +285,24 @@ func ResolveOperatorSuspension(snapshot *Snapshot, number int, action issuedomai
 	}
 	if snapshot.ActiveExecution != nil && (action != issuedomain.ResolutionCancel && action != issuedomain.ResolutionAdoptPR || snapshot.ActiveExecution.IssueNumber == number) {
 		return fmt.Errorf("Issue #%d execution slot changed", number)
+	}
+	if action == issuedomain.ResolutionApproveConflictPaths {
+		if !CanApproveConflictPaths(item) || observed.HeadSHA != item.HeadSHA || observed.WorktreeSHA256 != item.Continuation.WorktreeSHA256 || len(observed.AllowedPaths) == 0 {
+			return fmt.Errorf("Issue #%d conflict path approval evidence is inconsistent", number)
+		}
+		for _, request := range snapshot.PendingRequests {
+			if request != nil && request.IssueNumber == number && request.Status == issuedomain.RequestStatusPending {
+				return fmt.Errorf("Issue #%d has a pending request", number)
+			}
+		}
+		if err := issuedomain.ValidateConflictApprovalPaths(observed.AllowedPaths); err != nil {
+			return err
+		}
+
+		item.ConflictRecovery.AllowedPaths = append(slices.Clone(item.ConflictRecovery.AllowedPaths), observed.AllowedPaths...)
+		slices.Sort(item.ConflictRecovery.AllowedPaths)
+		item.ConflictRecovery.AllowedPaths = slices.Compact(item.ConflictRecovery.AllowedPaths)
+		return nil
 	}
 	var adoptedStage issuedomain.ContinuationStage
 	if action == issuedomain.ResolutionAdoptHead || action == issuedomain.ResolutionAdoptWorktree {

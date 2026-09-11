@@ -247,6 +247,7 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 - `resume`は保存session/workspaceからworker境界を継続する。
 - `retry-stage`は保存済みpublish/checks/conflict stageへ戻る。completed resultがある場合はSHA-256を照合し、workerを再実行しない。
 - `adopt-worktree`はconflict recovery中に`worktree_sha256`だけを欠くquarantineで、保存済みhead、PR、`MERGE_HEAD`、base ancestry、変更path scopeが一致する場合だけ現在のdigestをcheckpointへ記録する。実行は開始しないため、再度planを確認してから`retry-stage`を実行する。
+- active suspensionに保存済みdigestがあり、承認済み追加pathがscopeへ未反映の場合は、`issue plan --repo PATH --issue N --allow-path FILE --json`でpreviewし、同じ個別pathを`issue resolve --repo PATH --issue N --action approve-conflict-paths --allow-path FILE --json`で指定する。複数pathは`--allow-path`を繰り返す。identityと差分の再検証後にscopeだけを記録するため、再度planを確認してから`retry-stage`を実行する。自由文の回答だけではscopeは拡大されない。
 - planの`adoption_unapproved_changed_paths`にpathがある場合は、operatorがその現在差分を許可するときだけplanとresolveの両方へ同じ`--allow-path <relative-path>`を指定する。指定pathと追加後scopeは`issue_worktree_adopted` eventへ記録される。
 - `adopt-pr`は保存branch/head/baseと一致するsame-repositoryの一意なmerged PRだけを採用する。commit、push、PR、mergeは作成しない。
 - `cancel`はworkerを起動せずIssueを`canceled`へ収束させる。
