@@ -1159,6 +1159,13 @@ esac
 	if _, err := controller.Apply(context.Background(), entries[0].RepoPath, "v1.2.3", 1); err == nil || !strings.Contains(err.Error(), "drain deadline") {
 		t.Fatalf("apply error=%v", err)
 	}
+	reports, err := controller.Status(context.Background(), entries[0].RepoPath)
+	if err != nil || len(reports) != 1 {
+		t.Fatalf("status=%+v err=%v", reports, err)
+	}
+	if reports[0].Result != "pending" || reports[0].Transaction == nil || reports[0].Transaction.Result != "deferred" || reports[0].FenceActive || reports[0].Assignment.Generation != 1 {
+		t.Fatalf("deferred status=%+v", reports[0])
+	}
 	commands, _ := os.ReadFile(commandLog)
 	if strings.Contains(string(commands), "bootout") || strings.Contains(string(commands), "bootstrap") {
 		t.Fatalf("active worker caused LaunchAgent mutation:\n%s", commands)
@@ -1166,6 +1173,114 @@ esac
 	snapshot, err := store.Load()
 	if err != nil || snapshot.Issues["1"].WorkerPID != 7101 || snapshot.Issues["1"].WorkerPGID != 7101 {
 		t.Fatalf("active worker changed: %+v err=%v", snapshot.Issues["1"], err)
+	}
+}
+
+func TestAssignmentDeferredCanBeReplaced(t *testing.T) {
+	for _, scenario := range []string{"apply", "rollback", "same target", "fence", "generation changed", "assignment changed", "stale request", "active"} {
+		t.Run(scenario, func(t *testing.T) {
+			l, configPath, entries, binary := assignmentFixture(t)
+			controller := AssignmentController{Layout: l, ConfigPath: configPath, Runner: &releaseRunner{}}
+			if _, err := controller.MigrateConfig(context.Background(), true); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := entries[0]
+			current := cfg.Assignments[entry.RepoID]
+			previous := SlotRef(l, "v1.2.1", current.Commit, current.ArtifactSHA256)
+			if err := StageSlot(l, previous, binary); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "rollback" {
+				if _, err := controller.Apply(context.Background(), entry.RepoPath, "v1.2.3", 1); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err = LoadConfig(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				current = cfg.Assignments[entry.RepoID]
+				previous = *current.Previous
+			}
+			current.Previous = &previous
+			cfg.Assignments[entry.RepoID] = current
+			if err := WriteConfig(configPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+			manager := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
+			if err := manager.WritePlist(entry, current.Slot); err != nil {
+				t.Fatal(err)
+			}
+			desired := SlotRef(l, "v1.2.4", current.Commit, current.ArtifactSHA256)
+			if err := StageSlot(l, desired, current.Slot); err != nil {
+				t.Fatal(err)
+			}
+			tx := AssignmentTransaction{RepositoryID: entry.RepoID, Operation: AssignmentOperationApply, Phase: AssignmentDraining, Result: "deferred", Reason: "drain deadline exceeded", ExpectedGeneration: current.Generation, TargetGeneration: current.Generation + 1, Current: current.AssignmentRef, Desired: desired, StartedAt: time.Now().UTC()}
+			expected := current.Generation
+			wantError := ""
+			switch scenario {
+			case "same target":
+				plan, err := controller.Preview(context.Background(), entry.RepoPath, "v1.2.3")
+				if err != nil {
+					t.Fatal(err)
+				}
+				tx.Desired = plan.Desired
+			case "fence":
+				if err := WriteMaintenance(l.DeliveryAssignmentFencePath(entry.RepoID), Maintenance{Generation: "assignment-2", Desired: VersionRef{Version: desired.Version, Commit: desired.Commit}, RequestedAt: time.Now().UTC()}); err != nil {
+					t.Fatal(err)
+				}
+				wantError = "still has a repository fence"
+			case "generation changed":
+				tx.ExpectedGeneration, tx.TargetGeneration = 2, 3
+				wantError = "no longer matches"
+			case "assignment changed":
+				tx.Current = previous
+				wantError = "no longer matches"
+			case "stale request":
+				expected = 2
+				wantError = "stale assignment preview"
+			case "active":
+				tx.Result = "draining"
+				wantError = "another assignment target"
+			}
+			txPath := l.DeliveryAssignmentTransactionPath(entry.RepoID)
+			if err := SaveAssignmentTransaction(txPath, tx); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(txPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var report AssignmentReport
+			if scenario == "rollback" {
+				report, err = controller.Rollback(context.Background(), entry.RepoPath, expected)
+			} else {
+				report, err = controller.Apply(context.Background(), entry.RepoPath, "v1.2.3", expected)
+			}
+			if wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), wantError) {
+					t.Fatalf("error=%v, want %q", err, wantError)
+				}
+				after, readErr := os.ReadFile(txPath)
+				if readErr != nil || string(after) != string(before) {
+					t.Fatalf("rejected operation changed transaction: %v", readErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantVersion := "v1.2.3"
+			if scenario == "rollback" {
+				wantVersion = "v1.2.2"
+			}
+			if report.Assignment.Generation != current.Generation+1 || report.Assignment.Version != wantVersion || report.FenceActive || report.Result != "succeeded" {
+				t.Fatalf("report=%+v", report)
+			}
+		})
 	}
 }
 
