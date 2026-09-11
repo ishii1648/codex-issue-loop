@@ -4,7 +4,7 @@
   "type": "object",
   "required": ["id", "repository", "status", "started_at"],
   "properties": {
-    "decision_version": {"type": "integer", "enum": [1, 2]},
+    "decision_version": {"type": "integer", "enum": [1, 2, 3]},
     "id": {"type": "string", "minLength": 1},
     "repository": {"type": "string"},
     "status": {"enum": ["IDLE", "HEALTHY", "DOWN", "UNKNOWN"]},

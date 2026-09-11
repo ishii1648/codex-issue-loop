@@ -34,4 +34,4 @@ GitHub失敗はrepositoryごとの`last_error`と`UNKNOWN`に記録されます�
 
 logはmonitor state rootの`launchd.stdout.log`と`launchd.stderr.log`です。supervisor logとは別です。
 
-判定version 2への更新では、最初のpollで旧履歴を保持したまま契約を切り替えます。旧区間は新契約の稼働率から除外され、reportの`legacy_seconds`に現れます。runningが残る初回・切替・再同期ではUNKNOWNから開始し、次の有効な受付・処理進捗で復旧します。詳細は[判定契約の切替と旧履歴](specification.md#判定契約の切替と旧履歴)を参照してください。
+判定version 3への更新では、最初のpollで旧履歴を保持したまま契約を切り替えます。旧区間は新契約の稼働率から除外され、reportの`legacy_seconds`に現れます。runningが残る初回・切替・再同期ではUNKNOWNから開始し、次の有効な受付・処理進捗で復旧します。詳細は[判定契約の切替と旧履歴](specification.md#判定契約の切替と旧履歴)を参照してください。

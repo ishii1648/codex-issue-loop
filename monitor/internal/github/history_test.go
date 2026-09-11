@@ -87,7 +87,7 @@ func TestReentryHistories(t *testing.T) {
 		{name: "ready to running replacement", labels: `["running"]`, history: [][2]string{{"labeled", "ready"}, {"unlabeled", "ready"}, {"labeled", "running"}}, want: []model.EventKind{model.RunningLabeled, model.ReadyLabeled}, since: 3},
 		{name: "running to ready replacement", labels: `["ready"]`, history: [][2]string{{"labeled", "running"}, {"unlabeled", "running"}, {"labeled", "ready"}}, want: []model.EventKind{model.ReadyLabeled, model.RunningLabeled}, since: 3},
 		{name: "280 reopened with ready", labels: `["ready"]`, history: [][2]string{{"labeled", "ready"}, {"closed", ""}, {"reopened", ""}}, want: []model.EventKind{model.ReadyLabeled, model.QueueExited, model.ReadyLabeled}, since: 3},
-		{name: "reopened with running", labels: `["running"]`, history: [][2]string{{"labeled", "running"}, {"closed", ""}, {"reopened", ""}}, want: []model.EventKind{model.RunningLabeled, model.QueueExited, model.RunningLabeled}, since: 3},
+		{name: "reopened with running", labels: `["running"]`, history: [][2]string{{"labeled", "running"}, {"closed", ""}, {"reopened", ""}}, want: []model.EventKind{model.RunningLabeled, model.ProcessingClosed, model.RunningLabeled}, since: 3},
 		{name: "459 blocked removed", labels: `["ready"]`, history: [][2]string{{"labeled", "ready"}, {"labeled", "blocked"}, {"unlabeled", "blocked"}}, want: []model.EventKind{model.ReadyLabeled, model.QueueExited, model.ReadyLabeled}, since: 3},
 		{name: "multiple exclusions", labels: `["ready","excluded"]`, history: [][2]string{{"labeled", "ready"}, {"labeled", "blocked"}, {"labeled", "excluded"}, {"unlabeled", "blocked"}}, want: []model.EventKind{model.QueueExited, model.ReadyLabeled}},
 		{name: "last exclusion removed", labels: `["ready"]`, history: [][2]string{{"labeled", "ready"}, {"labeled", "blocked"}, {"labeled", "done"}, {"unlabeled", "blocked"}, {"unlabeled", "done"}}, want: []model.EventKind{model.ReadyLabeled, model.QueueExited, model.ReadyLabeled}, since: 5},
@@ -411,6 +411,220 @@ func TestSamePhaseRelabelPreservesWindow(t *testing.T) {
 				}
 			} else if next.Current.Status != model.Unknown || !next.QueueDeadline.IsZero() || len(closed) != 0 {
 				t.Fatalf("next=%+v closed=%+v", next, closed)
+			}
+		})
+	}
+}
+
+func TestClosedProgressAcrossPollsAndRestart(t *testing.T) {
+	for _, mode := range []string{"split", "split labels", "failure", "close first", "same timestamp"} {
+		t.Run(mode, func(t *testing.T) {
+			base := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+			repo := config.Repository{Name: "owner/repo", ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done"}, AcceptanceTimeout: config.Duration{Duration: 10 * time.Minute}, ProcessingTimeout: config.Duration{Duration: time.Hour}}
+			dir := t.TempDir()
+			script := filepath.Join(dir, "gh")
+			if err := os.WriteFile(script, []byte(`#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+case "$*" in
+ *issues/events*) cat feed ;;
+ *issues/1/events*) cat history1 ;;
+ *issues/2/events*) cat history2 ;;
+ *issues/1) cat issue1 ;;
+ *issues\?*) cat issues ;;
+ *) exit 9 ;;
+esac
+`), 0700); err != nil {
+				t.Fatal(err)
+			}
+			write := func(name string, value any) {
+				t.Helper()
+				data, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var issues []rawIssue
+			if err := json.Unmarshal([]byte(`[{"number":1,"state":"open","labels":[{"name":"running"}]},{"number":2,"state":"open","labels":[{"name":"ready"}]}]`), &issues); err != nil {
+				t.Fatal(err)
+			}
+			histories := map[int][]rawEvent{}
+			var feed []rawEvent
+			add := func(number int, kind, label string, minute int) {
+				e := rawEvent{ID: int64(len(feed) + 1), Event: kind, CreatedAt: base.Add(time.Duration(minute) * time.Minute)}
+				e.Label.Name, e.Issue.Number = label, number
+				feed = append([]rawEvent{e}, feed...)
+				histories[number] = append(histories[number], e)
+			}
+			publish := func() {
+				write("feed", feed)
+				write("history1", [][]rawEvent{histories[1]})
+				write("history2", [][]rawEvent{histories[2]})
+				write("issue1", issues[0])
+				open := issues
+				if issues[0].State == "closed" {
+					open = issues[1:]
+				}
+				write("issues", [][]rawIssue{open})
+			}
+			add(1, "labeled", "running", 0)
+			add(2, "labeled", "ready", 0)
+			publish()
+			disk := store.Store{Root: filepath.Join(dir, "state")}
+			var previous *model.Snapshot
+			poll := func(minute int) model.Snapshot {
+				t.Helper()
+				cursor := int64(0)
+				if previous != nil {
+					cursor = previous.EventCursor
+				}
+				obs, err := (CLI{Path: script}).Observe(context.Background(), repo, cursor, previous != nil, base.Add(time.Duration(minute)*time.Minute))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if obs.Resynchronized {
+					t.Fatal("unexpected resynchronization")
+				}
+				next, closed, err := model.Apply(previous, obs)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := disk.Commit(next, closed); err != nil {
+					t.Fatal(err)
+				}
+				previous, err = (store.Store{Root: disk.Root}).Load(repo.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return next
+			}
+			if next := poll(1); next.Current.Status != model.Unknown {
+				t.Fatalf("bootstrap=%+v", next)
+			}
+			add(2, "unlabeled", "ready", 2)
+			add(2, "labeled", "running", 2)
+			issues[1].Labels[0].Name = "running"
+			if mode == "failure" {
+				failed, closed, err := model.Apply(previous, model.Observation{Repository: repo.Name, ObservedAt: base.Add(3 * time.Minute), Error: "unavailable"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := disk.Commit(failed, closed); err != nil {
+					t.Fatal(err)
+				}
+				previous, err = disk.Load(repo.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				publish()
+				if next := poll(3); !next.QueuePhaseSince.Equal(base.Add(2 * time.Minute)) {
+					t.Fatalf("admission=%+v", next)
+				}
+			}
+			closeMinute := 6
+			if mode == "close first" {
+				add(1, "closed", "", 4)
+				closeMinute = 4
+			}
+			add(1, "unlabeled", "running", 4)
+			if mode == "split labels" {
+				issues[0].Labels = nil
+				publish()
+				if next := poll(4); !next.QueuePhaseSince.Equal(base.Add(2 * time.Minute)) {
+					t.Fatalf("running removal extended progress=%+v", next)
+				}
+				issues[0].Labels = append(issues[0].Labels, issues[1].Labels[0])
+			}
+			add(1, "labeled", "done", 4)
+			issues[0].Labels[0].Name = "done"
+			if mode == "split" || mode == "split labels" {
+				publish()
+				if next := poll(5); !next.QueuePhaseSince.Equal(base.Add(2 * time.Minute)) {
+					t.Fatalf("labels extended progress=%+v", next)
+				}
+			}
+			if mode == "same timestamp" {
+				closeMinute = 4
+			}
+			if mode != "close first" {
+				add(1, "closed", "", closeMinute)
+			}
+			issues[0].State = "closed"
+			publish()
+			next := poll(7)
+			if next.Current.Status != model.Healthy || !next.QueuePhaseSince.Equal(base.Add(time.Duration(closeMinute)*time.Minute)) || !next.QueueDeadline.Equal(next.QueuePhaseSince.Add(time.Hour)) {
+				t.Fatalf("completion=%+v", next)
+			}
+			again := poll(8)
+			if !again.QueueDeadline.Equal(next.QueueDeadline) {
+				t.Fatalf("duplicate extended progress=%+v", again)
+			}
+		})
+	}
+}
+
+func TestCloseRequiresRunningHistoryInSameExecution(t *testing.T) {
+	base := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	repo := config.Repository{ReadyLabels: []string{"ready"}, RunningLabel: "running", TerminalLabels: []string{"done", "failed"}, ExcludeLabels: []string{"blocked"}}
+	for _, tc := range []struct {
+		name    string
+		history [][2]string
+		want    []int64
+		pr      bool
+	}{
+		{name: "removed running", history: [][2]string{{"labeled", "running"}, {"unlabeled", "running"}, {"labeled", "done"}, {"closed", ""}}, want: []int64{4}},
+		{name: "failed only", history: [][2]string{{"labeled", "running"}, {"labeled", "failed"}}},
+		{name: "excluded only", history: [][2]string{{"labeled", "running"}, {"labeled", "blocked"}}},
+		{name: "ready close", history: [][2]string{{"labeled", "ready"}, {"closed", ""}}},
+		{name: "returned to ready", history: [][2]string{{"labeled", "running"}, {"unlabeled", "running"}, {"labeled", "ready"}, {"unlabeled", "ready"}, {"closed", ""}}},
+		{name: "ready while excluded", history: [][2]string{{"labeled", "running"}, {"labeled", "blocked"}, {"unlabeled", "running"}, {"labeled", "ready"}, {"unlabeled", "ready"}, {"closed", ""}}},
+		{name: "reopened without running", history: [][2]string{{"labeled", "running"}, {"unlabeled", "running"}, {"closed", ""}, {"reopened", ""}, {"closed", ""}}, want: []int64{3}},
+		{name: "rerun", history: [][2]string{{"labeled", "running"}, {"unlabeled", "running"}, {"closed", ""}, {"reopened", ""}, {"labeled", "ready"}, {"unlabeled", "ready"}, {"labeled", "running"}, {"closed", ""}}, want: []int64{8, 3}},
+		{name: "no running evidence", history: [][2]string{{"labeled", "done"}, {"closed", ""}}},
+		{name: "PR", history: [][2]string{{"labeled", "running"}, {"closed", ""}}, pr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := rawIssue{Number: 1, State: "open"}
+			if tc.pr {
+				issue.PullRequest = &struct{}{}
+			}
+			labels := map[string]bool{}
+			var history []rawEvent
+			for i, entry := range tc.history {
+				e := rawEvent{ID: int64(i + 1), Event: entry[0], CreatedAt: base}
+				e.Label.Name = entry[1]
+				switch entry[0] {
+				case "labeled":
+					labels[entry[1]] = true
+				case "unlabeled":
+					delete(labels, entry[1])
+				case "closed":
+					issue.State = "closed"
+				case "reopened":
+					issue.State = "open"
+				}
+				history = append(history, e, e)
+			}
+			for label := range labels {
+				issue.Labels = append(issue.Labels, struct {
+					Name string `json:"name"`
+				}{label})
+			}
+			events, _, err := issueHistory(repo, issue, history, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var completed []int64
+			for _, e := range events {
+				if e.Kind == model.ProcessingClosed {
+					completed = append(completed, e.ID)
+				}
+			}
+			if !reflect.DeepEqual(completed, tc.want) {
+				t.Fatalf("completed=%v want=%v events=%+v", completed, tc.want, events)
 			}
 		})
 	}

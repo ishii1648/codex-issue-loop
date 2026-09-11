@@ -46,7 +46,7 @@ func replayEvents(previous Snapshot, observation Observation) ([]QueueEvent, err
 			continue
 		case QueueUnproven:
 			return nil, fmt.Errorf("queue reentry history is insufficient for issue %d", event.IssueNumber)
-		case QueueExited:
+		case QueueExited, ProcessingClosed:
 			exited[event.IssueNumber] = true
 			delete(pending, event.IssueNumber)
 			if index >= 0 {

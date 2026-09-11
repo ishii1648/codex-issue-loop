@@ -271,15 +271,14 @@ func (r *replayState) recoverAt(at time.Time) {
 func (r *replayState) applyEvent(event QueueEvent, acceptanceTimeout, processingTimeout time.Duration) error {
 	oldPhase := r.snapshot.QueuePhase
 	index := queueIndex(r.snapshot.Queue, event.IssueNumber)
-	progress := event.Kind == RunningLabeled && index >= 0 && r.snapshot.Queue[index].Phase == Ready
+	progress := event.Kind == ProcessingClosed || (event.Kind == RunningLabeled && index >= 0 && r.snapshot.Queue[index].Phase == Ready)
 	switch event.Kind {
 	case ReadyLabeled:
 		r.snapshot.Queue = upsertQueue(r.snapshot.Queue, index, QueueItem{Number: event.IssueNumber, Phase: Ready, PhaseSince: event.At, Deadline: event.At.Add(acceptanceTimeout)})
 	case RunningLabeled:
 		r.snapshot.Queue = upsertQueue(r.snapshot.Queue, index, QueueItem{Number: event.IssueNumber, Phase: Running, PhaseSince: event.At, Deadline: event.At.Add(processingTimeout)})
-	case QueueExited:
+	case QueueExited, ProcessingClosed:
 		if index >= 0 {
-			progress = r.snapshot.Queue[index].Phase == Running
 			r.snapshot.Queue = append(r.snapshot.Queue[:index], r.snapshot.Queue[index+1:]...)
 		}
 	default:
