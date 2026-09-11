@@ -58,7 +58,7 @@ func (c ClaudeCode) execute(parent context.Context, cfg config.Config, runID, se
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return Result{}, err
 	}
-	stdoutPath := filepath.Join(runDir, "claude-code.jsonl")
+	stdoutPath := filepath.Join(runDir, fmt.Sprintf("claude-code-%d.jsonl", time.Now().UnixNano()))
 	stderrPath := filepath.Join(runDir, "claude-code.stderr.log")
 	policy := retention.Policy{MaxBytes: cfg.Logs.RotateBytes, MaxAge: cfg.Logs.RotateInterval.Duration, Keep: cfg.Logs.Generations}
 	stdout, err := retention.OpenWriter(stdoutPath, policy)

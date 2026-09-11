@@ -80,6 +80,67 @@ printf '%%s\n' '{"type":"result","session_id":"claude-session","structured_outpu
 	}
 }
 
+func TestClaudeCodeResumeWithoutResultDoesNotReusePreviousResult(t *testing.T) {
+	for _, exitCode := range []int{0, 1} {
+		t.Run(fmt.Sprintf("exit_%d", exitCode), func(t *testing.T) {
+			dir := t.TempDir()
+			fake := filepath.Join(dir, "claude")
+			script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"result","session_id":"claude-session","structured_output":{"version":1,"status":"needs_input","execution_profile":"standard","summary":"waiting","question":{"text":"Continue?","reason":"approval","recommended_option":"yes","options":[{"id":"yes","label":"Yes"}],"allow_free_text":true},"tests":[],"git":null,"retry":null}}'
+printf '%s\n' '{"type":"system","session_id":"claude-session"}'
+`
+			if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := backendTestConfig(dir, "claude-code", fake, "sonnet", "")
+			cfg.Logs.RotateBytes = 1
+			adapter := ClaudeCode{StateDir: dir}
+			current := state.Issue{RunID: "run_resume", Attempts: 1}
+			result, err := adapter.Run(context.Background(), cfg, gh.Issue{Number: 1}, current, "", nil)
+			if err != nil || result.Status != "needs_input" {
+				t.Fatalf("initial result=%+v err=%v", result, err)
+			}
+			current.SessionID = result.SessionID
+			runDir := filepath.Join(dir, "runs", current.RunID)
+			previousLogs, err := filepath.Glob(filepath.Join(runDir, "claude-code*.jsonl"))
+			if err != nil || len(previousLogs) != 1 {
+				t.Fatalf("initial logs=%v err=%v", previousLogs, err)
+			}
+			previousResults, err := filepath.Glob(filepath.Join(runDir, "result-*.json"))
+			if err != nil || len(previousResults) != 1 {
+				t.Fatalf("initial result files=%v err=%v", previousResults, err)
+			}
+			if err := os.WriteFile(fake, []byte(fmt.Sprintf("#!/bin/sh\ncat >/dev/null\nexit %d\n", exitCode)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			result, err = adapter.Resume(context.Background(), cfg, gh.Issue{Number: 1}, current, "continue", nil)
+			if err == nil || result.Status != "" || result.SessionID != current.SessionID {
+				t.Fatalf("resume result=%+v err=%v", result, err)
+			}
+			if exitCode == 0 && !strings.Contains(err.Error(), "no schema-conforming result event") {
+				t.Fatalf("expected parse error, got %v", err)
+			}
+			results, err := filepath.Glob(filepath.Join(runDir, "result-*.json"))
+			if err != nil || len(results) != 1 || results[0] != previousResults[0] {
+				t.Fatalf("result files changed: %v err=%v", results, err)
+			}
+			logs, err := filepath.Glob(filepath.Join(runDir, "claude-code*.jsonl"))
+			if err != nil || len(logs) != 2 {
+				t.Fatalf("expected separate execution logs, got %v err=%v", logs, err)
+			}
+			for _, log := range logs {
+				if log == previousLogs[0] {
+					continue
+				}
+				if _, _, err := parseClaudeResult(log); err == nil {
+					t.Fatal("accepted previous execution result")
+				}
+			}
+		})
+	}
+}
+
 func TestClaudeCodeRejectsInvalidStructuredOutput(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "claude")
