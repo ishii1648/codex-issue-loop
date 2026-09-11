@@ -420,3 +420,40 @@ func TestInitialReadyDoesNotInferPastQueueFailure(t *testing.T) {
 		t.Fatalf("next=%+v err=%v", next, err)
 	}
 }
+
+func TestUnknownRecoveryPreservesIntervalBoundary(t *testing.T) {
+	base := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
+	obs := Observation{Repository: "owner/repo", ObservedAt: base, Cursor: 10, CursorInitialized: true, CurrentVerified: true, ProcessingTimeout: time.Hour,
+		Items: []QueueItem{{Number: 1, Phase: Running, PhaseSince: base, Deadline: base.Add(time.Hour)}}}
+	snapshot, _, err := Apply(nil, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := snapshot.Current
+	for minute := 1; minute <= 3; minute++ {
+		obs.ObservedAt = base.Add(time.Duration(minute) * time.Minute)
+		obs.Error = ""
+		if minute == 2 {
+			obs.Error = "unavailable"
+		}
+		next, closed, err := Apply(&snapshot, obs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next.Current.Status != Unknown || next.Current.ID != original.ID || !next.Current.StartedAt.Equal(base) || len(closed) != 0 {
+			t.Fatalf("minute=%d current=%+v closed=%+v", minute, next.Current, closed)
+		}
+		snapshot = next
+	}
+	obs.ObservedAt = base.Add(5 * time.Minute)
+	obs.Cursor = 12
+	obs.Items = append(obs.Items, QueueItem{Number: 2, Phase: Running})
+	obs.Events = []QueueEvent{{ID: 11, IssueNumber: 2, Kind: ReadyLabeled, At: base.Add(3 * time.Minute)}, {ID: 12, IssueNumber: 2, Kind: RunningLabeled, At: base.Add(4 * time.Minute)}}
+	next, closed, err := Apply(&snapshot, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Current.Status != Healthy || !next.Current.StartedAt.Equal(base.Add(4*time.Minute)) || len(closed) != 1 || closed[0].ID != original.ID || closed[0].Status != Unknown || !closed[0].StartedAt.Equal(base) || !closed[0].EndedAt.Equal(next.Current.StartedAt) {
+		t.Fatalf("current=%+v closed=%+v", next.Current, closed)
+	}
+}

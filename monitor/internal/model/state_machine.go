@@ -111,7 +111,9 @@ func Apply(previous *Snapshot, observation Observation) (Snapshot, []Interval, e
 		anchor.ensureQueuePhase()
 		anchor.snapshot.Current = newInterval(previous.Repository, Unknown, previous.LastSuccessAt, "queue history is insufficient")
 		anchor.recoverAt(previous.LastSuccessAt)
-		verified.Current = anchor.snapshot.Current
+		if anchor.snapshot.Current.Status != Unknown {
+			verified.Current = anchor.snapshot.Current
+		}
 		verified.LastObservationAt = previous.LastSuccessAt
 	}
 	events, err := replayEvents(verified, observation)
