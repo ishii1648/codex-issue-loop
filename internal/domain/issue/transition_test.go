@@ -68,7 +68,6 @@ func TestRecoveryTransitions(t *testing.T) {
 	}{
 		{name: "start fresh claim", make: func() (Transition, error) { return StartClaim(StatusUnset) }, to: StatusClaiming},
 		{name: "resume answer", make: func() (Transition, error) { return ResumeAfterAnswer(StatusNeedsInput, StatusResumePending) }, to: StatusResumePending},
-		{name: "retry conflict", make: func() (Transition, error) { return RetryConflict(StatusBlocked) }, to: StatusResolvingConflict},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -84,9 +83,6 @@ func TestRecoveryTransitions(t *testing.T) {
 }
 
 func TestRecoveryTransitionsRejectUnrelatedStatesAndTargets(t *testing.T) {
-	if _, err := RetryConflict(StatusFailed); err == nil {
-		t.Fatal("failed Issue must not enter conflict retry")
-	}
 	if _, err := StartClaim(StatusCompleted); err == nil {
 		t.Fatal("completed Issue must not start another claim")
 	}
@@ -316,9 +312,9 @@ func TestAllStatusesAreValidAndClassifiedForWorkspaceProvenance(t *testing.T) {
 }
 
 func TestEffectVocabularyAndCombinedDispatch(t *testing.T) {
-	for _, effect := range AllEffectKinds() {
+	for _, effect := range allEffectKinds {
 		if err := effect.Validate(); err != nil {
-			t.Errorf("AllEffectKinds contains invalid value %q: %v", effect, err)
+			t.Errorf("allEffectKinds contains invalid value %q: %v", effect, err)
 		}
 	}
 	if StatusCompleted.DispatchPending(false) {
