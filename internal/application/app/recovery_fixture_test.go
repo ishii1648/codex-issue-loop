@@ -62,6 +62,7 @@ fi
 printf '%%s\n' "$*" >> %q
 case "$1 $2" in
   "issue view") printf '%%s\n' '{"number":166,"title":"private title","body":"private body","url":"https://example.test/issues/166","state":"OPEN","labels":[{"name":"blocked"}],"assignees":[],"milestone":null,"comments":[{"body":"private note"}]}' ;;
+  "api --method") printf '%%s\n' '[{"body":"private note"}]' ;;
   "pr list") printf '%%s\n' '[]' ;;
   *) exit 91 ;;
 esac

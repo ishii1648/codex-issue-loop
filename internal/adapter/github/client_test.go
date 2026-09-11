@@ -125,6 +125,7 @@ case "$1 $2" in
   "issue view")
     printf '%s\n' '{"number":7,"title":"Test","body":"Body","url":"https://example.test/issues/7","state":"CLOSED","stateReason":"NOT_PLANNED","labels":[{"name":"codex-loop:running"}],"assignees":[],"milestone":null,"comments":[{"body":"claim"}]}'
     ;;
+  "api --method") echo '[{"body":"claim"}]' ;;
   "pr list")
     case " $* " in
       *" --limit 2 "*) ;;
@@ -547,16 +548,16 @@ func assertIssueNumbers(t *testing.T, issues []Issue, want []int) {
 	}
 }
 
-func TestIssueInputIsBoundedAndControlCharactersAreRemoved(t *testing.T) {
+func TestIssueNormalizationPreservesCommentsAndRemovesControlCharacters(t *testing.T) {
 	comments := make([]string, 25)
 	for index := range comments {
-		comments[index] = fmt.Sprintf("comment-%02d\x00", index) + strings.Repeat("x", maxCommentBytes)
+		comments[index] = fmt.Sprintf("comment-%02d\x00", index) + strings.Repeat("x", 9*1024)
 	}
 	issue := NormalizeIssue(Issue{Title: "bad\x00title" + strings.Repeat("t", maxIssueTitleBytes), Body: strings.Repeat("b", maxIssueBodyBytes+10), Comments: comments})
 	if strings.ContainsRune(issue.Title, '\x00') || len(issue.Title) > maxIssueTitleBytes+len("\n[TRUNCATED]") {
 		t.Fatalf("unsafe title length=%d value=%q", len(issue.Title), issue.Title)
 	}
-	if len(issue.Body) > maxIssueBodyBytes+len("\n[TRUNCATED]") || len(issue.Comments) != maxIssueComments || !strings.HasPrefix(issue.Comments[0], "comment-05") {
+	if len(issue.Body) > maxIssueBodyBytes+len("\n[TRUNCATED]") || len(issue.Comments) != 25 || issue.Comments[0] != "comment-00"+strings.Repeat("x", 9*1024) {
 		t.Fatalf("input limits not enforced: body=%d comments=%d first=%q", len(issue.Body), len(issue.Comments), issue.Comments[0][:10])
 	}
 }
@@ -685,6 +686,95 @@ func TestCLIPrimaryRateLimitProbeFailureAndSecondaryClassification(t *testing.T)
 				}
 			} else if ok || !os.IsNotExist(readErr) {
 				t.Fatalf("secondary error=%v primary=%v probe error=%v", err, ok, readErr)
+			}
+		})
+	}
+}
+
+func TestIssueCommentRetrievalPreservesAllPages(t *testing.T) {
+	for _, failSecondPage := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failSecondPage=%t", failSecondPage), func(t *testing.T) {
+			dir := t.TempDir()
+			fake := filepath.Join(dir, "gh")
+			bodies := make([]string, 125)
+			batch := make([]map[string]string, len(bodies))
+			for index := range bodies {
+				bodies[index] = fmt.Sprintf("comment-%03d", index)
+			}
+			bodies[0] = strings.Repeat("あ", 4*1024) + "<!-- marker -->"
+			bodies[124] = "<!-- marker -->"
+			for index, body := range bodies {
+				batch[index] = map[string]string{"body": "\x00" + body + "\x7f"}
+			}
+			first, _ := json.Marshal(batch[:100])
+			second, _ := json.Marshal(batch[100:])
+			secondCommand := "cat <<'JSON'\n" + string(second) + "\nJSON"
+			if failSecondPage {
+				secondCommand = "exit 1"
+			}
+			script := `#!/bin/sh
+if [ "$1 $2" = "issue view" ]; then
+  echo '{"number":7,"state":"open"}'
+  exit 0
+fi
+for endpoint do :; done
+case "$endpoint" in
+  /repos/owner/repo/issues/7) echo '{"number":7,"state":"open"}' ;;
+  '/repos/owner/repo/issues/7/comments?per_page=100&page=1')
+cat <<'JSON'
+` + string(first) + `
+JSON
+    ;;
+  '/repos/owner/repo/issues/7/comments?per_page=100&page=2')
+` + secondCommand + `
+    ;;
+  /repos/owner/repo/pulls/11) echo '{"number":11,"state":"open"}' ;;
+  '/repos/owner/repo/pulls/11/reviews?per_page=100&page=1') echo '[]' ;;
+  *) exit 2 ;;
+esac
+`
+			if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cli := CLI{Path: fake}
+			cfg := config.Defaults()
+			cfg.GitHub.Repo = "owner/repo"
+			for _, route := range []string{"Get", "GetREST", "Inspect", "InspectPullRequestREST"} {
+				t.Run(route, func(t *testing.T) {
+					var issue Issue
+					var err error
+					switch route {
+					case "Get":
+						issue, err = cli.Get(context.Background(), cfg, 7)
+					case "GetREST":
+						issue, err = cli.GetREST(context.Background(), cfg, 7)
+					default:
+						var remote RemoteState
+						if route == "Inspect" {
+							remote, err = cli.Inspect(context.Background(), cfg, 7, "")
+						} else {
+							remote, err = cli.InspectPullRequestREST(context.Background(), cfg, 7, 11, "")
+						}
+						issue = remote.Issue
+					}
+					if failSecondPage {
+						if err == nil || len(issue.Comments) != 0 {
+							t.Fatalf("partial comments returned: count=%d err=%v", len(issue.Comments), err)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if issue.State != "OPEN" || len(issue.Comments) != len(bodies) {
+						t.Fatalf("state=%s comments=%d", issue.State, len(issue.Comments))
+					}
+					for index, body := range bodies {
+						if issue.Comments[index] != body {
+							t.Fatalf("comment %d changed", index)
+						}
+					}
+				})
 			}
 		})
 	}

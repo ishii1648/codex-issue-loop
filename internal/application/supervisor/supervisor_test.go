@@ -2864,8 +2864,18 @@ func TestIssueResolutionSyncRevalidatesContinuationAuthority(t *testing.T) {
 	answeredRemote := gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.FailedLabel}, Comments: []string{
 		"<!-- codex-issue-loop:request:req_1 -->", "<!-- codex-issue-loop:failed:1 -->", fmt.Sprintf("<!-- codex-issue-loop:failure:%x -->", digest[:8]),
 	}}}
+	for index := 0; index < 125; index++ {
+		answeredRemote.Issue.Comments = append(answeredRemote.Issue.Comments, fmt.Sprintf("discussion %d", index))
+	}
+	answeredRemote.Issue.Comments[2] = strings.Repeat("x", 9*1024) + answeredRemote.Issue.Comments[2]
+	answeredRemote.Issue = gh.NormalizeIssue(answeredRemote.Issue)
 	if err := loop.validateIssueResolutionSync(answered, answeredRemote); err != nil {
 		t.Fatal(err)
+	}
+	duplicate := answeredRemote
+	duplicate.Issue.Comments = append(append([]string(nil), answeredRemote.Issue.Comments...), answeredRemote.Issue.Comments[0])
+	if err := loop.validateIssueResolutionSync(answered, duplicate); err == nil {
+		t.Fatal("duplicate request marker was accepted")
 	}
 	answeredRemote.Issue.Comments = answeredRemote.Issue.Comments[:2]
 	if err := loop.validateIssueResolutionSync(answered, answeredRemote); err == nil {

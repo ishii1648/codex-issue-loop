@@ -94,6 +94,7 @@ case "$1 $2" in
   if [ -f "$PROJECTION_FIXTURE/closed" ]; then cat "$PROJECTION_FIXTURE/final.json"
   elif [ -f "$PROJECTION_FIXTURE/edited" ]; then cat "$PROJECTION_FIXTURE/partial.json"
   else cat "$PROJECTION_FIXTURE/initial.json"; fi ;;
+ "api --method") echo '[{"body":"<!-- codex-issue-loop:done -->"}]' ;;
  "issue edit") touch "$PROJECTION_FIXTURE/edited" ;;
  "api repos/owner/repo/issues/7")
   if [ ! -f "$PROJECTION_FIXTURE/tried" ]; then
