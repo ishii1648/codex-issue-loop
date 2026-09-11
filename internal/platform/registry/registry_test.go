@@ -294,6 +294,72 @@ func TestRegistryKeepsSelfContainedCommandWhenDiscoveredPathNeedsOperatorEnviron
 	}
 }
 
+func TestRegistryRejectsExplicitWorkerCommandWithoutFallback(t *testing.T) {
+	for _, backend := range []string{"codex", "opencode"} {
+		for _, source := range []string{"registry", "aqua"} {
+			t.Run(backend+"/"+source, func(t *testing.T) {
+				root := t.TempDir()
+				binDir := filepath.Join(root, "bin")
+				if err := os.Mkdir(binDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"git", "gh", backend, "launchctl"} {
+					if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Setenv("PATH", binDir)
+				t.Setenv("OPERATOR_ONLY", "enabled")
+				store := Store{Path: filepath.Join(root, "registry.json")}
+				firstRepo := filepath.Join(root, "first")
+				secondRepo := filepath.Join(root, "second")
+				for _, repo := range []string{firstRepo, secondRepo} {
+					if err := os.Mkdir(repo, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cfg := testRegistryConfig(t, firstRepo, "owner/first")
+				cfg.Worker.Backend = backend
+				first, err := store.Add(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if source == "aqua" {
+					if err := store.Remove(first.RepoID); err != nil {
+						t.Fatal(err)
+					}
+					aqua := fmt.Sprintf("#!/bin/sh\ntest \"$1 $2\" = \"which %s\" || exit 1\nprintf '%%s\\n' '%s'\n", backend, first.Commands[backend])
+					if err := os.WriteFile(filepath.Join(binDir, "aqua"), []byte(aqua), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := os.ReadFile(store.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wrapper := filepath.Join(binDir, "worker-wrapper")
+				body := "#!/bin/sh\nif [ \"$OPERATOR_ONLY\" != enabled ]; then echo 'operator environment required'; exit 1; fi\n"
+				if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				cfg = testRegistryConfig(t, secondRepo, "owner/second")
+				cfg.Worker.Backend = backend
+				cfg.Worker.Command = wrapper
+				if _, err := store.Add(cfg); err == nil || !strings.Contains(err.Error(), "operator environment required") {
+					t.Fatalf("explicit environment-dependent worker command was accepted or lost probe error: %v", err)
+				}
+				after, err := os.ReadFile(store.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(after) != string(before) {
+					t.Fatal("failed registration changed registry")
+				}
+			})
+		}
+	}
+}
+
 func TestRegistryPinsAquaManagedCommandToResolvedExecutable(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")

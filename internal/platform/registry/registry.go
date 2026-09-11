@@ -110,7 +110,8 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 			}
 		} else {
 			commandCtx, cancelCommand := context.WithTimeout(context.Background(), 5*time.Second)
-			absolute, resolveErr = resolveServiceCommand(commandCtx, name, path, entry.EnvironmentPath, r)
+			allowFallback := name != entry.WorkerBackend || cfg.Worker.Command == ""
+			absolute, resolveErr = resolveServiceCommand(commandCtx, name, path, entry.EnvironmentPath, r, allowFallback)
 			cancelCommand()
 			if resolveErr != nil {
 				return Entry{}, fmt.Errorf("verify %s command: %w", name, resolveErr)
@@ -136,7 +137,7 @@ func (s Store) Add(cfg config.Config) (Entry, error) {
 	return entry, nil
 }
 
-func resolveServiceCommand(ctx context.Context, name, discovered, environmentPath string, existing Registry) (string, error) {
+func resolveServiceCommand(ctx context.Context, name, discovered, environmentPath string, existing Registry, allowFallback bool) (string, error) {
 	candidate, candidateErr := canonicalExecutable(discovered)
 	if candidateErr == nil {
 		candidateErr = probeServiceCommand(ctx, name, candidate, environmentPath)
@@ -148,7 +149,12 @@ func resolveServiceCommand(ctx context.Context, name, discovered, environmentPat
 	if absoluteErr == nil && absolute != candidate {
 		if err := probeServiceCommand(ctx, name, absolute, environmentPath); err == nil {
 			return absolute, nil
+		} else {
+			candidateErr = err
 		}
+	}
+	if !allowFallback {
+		return "", fmt.Errorf("explicit worker command %q is not self-contained in the LaunchAgent environment: %w", discovered, candidateErr)
 	}
 	if managed, err := resolveAquaCommand(ctx, name, environmentPath); err == nil {
 		return managed, nil
