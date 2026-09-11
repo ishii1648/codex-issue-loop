@@ -57,7 +57,7 @@ func TestReplayRestoresDeadlineRecoveryAndTerminalIntervalsInOnePoll(t *testing.
 	}
 }
 
-func TestRunningTerminalStartsNextAdmissionWindowAtEvent(t *testing.T) {
+func TestRunningCloseStartsNextAdmissionWindowAtEvent(t *testing.T) {
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	initial, _, err := Apply(nil, Observation{
 		Repository: "owner/repo", ObservedAt: base.Add(6 * time.Minute), Cursor: 200, CursorInitialized: true,
@@ -73,7 +73,7 @@ func TestRunningTerminalStartsNextAdmissionWindowAtEvent(t *testing.T) {
 	next, _, err := Apply(&initial, Observation{
 		Repository: "owner/repo", ObservedAt: base.Add(25 * time.Minute), Cursor: 201, CursorInitialized: true,
 		Items:             []QueueItem{{Number: 2, Phase: Ready}},
-		Events:            []QueueEvent{{ID: 201, IssueNumber: 1, Kind: QueueExited, At: terminalAt}},
+		Events:            []QueueEvent{{ID: 201, IssueNumber: 1, Kind: ProcessingClosed, At: terminalAt}},
 		AcceptanceTimeout: 10 * time.Minute, ProcessingTimeout: time.Hour,
 	})
 	if err != nil {
@@ -81,6 +81,41 @@ func TestRunningTerminalStartsNextAdmissionWindowAtEvent(t *testing.T) {
 	}
 	if next.Current.Status != Healthy || next.QueuePhase != Ready || !next.QueuePhaseSince.Equal(terminalAt) || !next.QueueDeadline.Equal(terminalAt.Add(10*time.Minute)) {
 		t.Fatalf("next admission window = %+v", next)
+	}
+}
+
+func TestQueueExitDoesNotExtendProcessingDeadline(t *testing.T) {
+	base := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	previous, _, err := Apply(nil, Observation{
+		Repository: "owner/repo", ObservedAt: base, Cursor: 1, CursorInitialized: true,
+		Items: []QueueItem{
+			{Number: 1, Phase: Ready, PhaseSince: base, Deadline: base.Add(10 * time.Minute)},
+			{Number: 2, Phase: Running, PhaseSince: base, Deadline: base.Add(time.Hour)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, _, err = Apply(&previous, Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(time.Minute), Cursor: 2, CursorInitialized: true,
+		Items:             []QueueItem{{Number: 1, Phase: Running}, {Number: 2, Phase: Running}},
+		Events:            []QueueEvent{{ID: 2, IssueNumber: 1, Kind: RunningLabeled, At: base.Add(time.Minute)}},
+		ProcessingTimeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _, err := Apply(&previous, Observation{
+		Repository: "owner/repo", ObservedAt: base.Add(61 * time.Minute), Cursor: 3, CursorInitialized: true,
+		Items:             []QueueItem{{Number: 2, Phase: Running}},
+		Events:            []QueueEvent{{ID: 3, IssueNumber: 1, Kind: QueueExited, At: base.Add(60 * time.Minute)}},
+		ProcessingTimeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Current.Status != Unknown || !next.QueueDeadline.Equal(previous.QueueDeadline) || !next.Current.StartedAt.Equal(previous.QueueDeadline) {
+		t.Fatalf("exit extended processing window: %+v", next)
 	}
 }
 
@@ -285,7 +320,7 @@ func TestQueueProgressAcrossTwentyNineCompletions(t *testing.T) {
 	obs := Observation{Repository: initial.Repository, ObservedAt: base.Add(10 * time.Hour), Items: []QueueItem{old}, Cursor: 88, CursorInitialized: true, AcceptanceTimeout: 10 * time.Minute, ProcessingTimeout: 2 * time.Hour}
 	for i := 0; i < 29; i++ {
 		at := base.Add(time.Duration(i*20+1) * time.Minute)
-		for j, kind := range []EventKind{ReadyLabeled, RunningLabeled, QueueExited} {
+		for j, kind := range []EventKind{ReadyLabeled, RunningLabeled, ProcessingClosed} {
 			obs.Events = append(obs.Events, QueueEvent{ID: int64(i*3 + j + 2), IssueNumber: 500 + i, Kind: kind, At: at.Add(time.Duration(j) * time.Minute)})
 		}
 	}
@@ -301,7 +336,7 @@ func TestQueueProgressAcrossTwentyNineCompletions(t *testing.T) {
 	for _, event := range obs.Events {
 		queue := append([]QueueItem(nil), stepped.Queue...)
 		index := queueIndex(queue, event.IssueNumber)
-		if event.Kind == QueueExited {
+		if event.Kind == ProcessingClosed {
 			queue = append(queue[:index], queue[index+1:]...)
 		} else {
 			phase := Ready

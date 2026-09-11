@@ -6,7 +6,7 @@ import (
 )
 
 const SchemaVersion = 1
-const DecisionVersion = 2
+const DecisionVersion = 3
 
 type Status string
 
@@ -33,6 +33,9 @@ const (
 	RunningUnlabeled EventKind = "running_unlabeled"
 	QueueUnproven    EventKind = "queue_unproven"
 	QueueExited      EventKind = "queue_exited"
+	// ProcessingClosed requires same-execution running evidence from Issue history,
+	// including when the Issue has already left the queue. It does not prove success.
+	ProcessingClosed EventKind = "processing_closed"
 )
 
 type QueueEvent struct {
