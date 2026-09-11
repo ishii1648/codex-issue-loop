@@ -310,6 +310,8 @@ drain完了後に旧repository LaunchAgentをunloadする。`restart`では共�
 
 `status --json`は従来の`launchd`と`state`に加え、`worker_pool`へ`active`、固定値`limit: 1`、`available`、active Issueを返す。active Issueは`issue_number`、`run_id`、`generation`、`phase`、PID/PGIDを持つ。未回答requestは`pending_requests`へrequest ID順で返す。stop/restart履歴と再開点は`operator_control`、現在のadmission fenceは`operator_maintenance_fence`で返す。
 
+`operator_control`が存在する場合、`completed_at`は常に出力し、未設定時は`"0001-01-01T00:00:00Z"`で表す。永続化された`operator-control.json`も同じ契約とする。consumerはキーの有無ではなく時刻のゼロ値で未設定を判定する。
+
 Issue snapshotは最後にauthoritative readしたGitHub `state_reason`を`github_state_reason`へ保存する。`canceled`ではさらに、source、旧status、GitHub state reason、execution release結果、時刻を`cancellation`へ保存する。これはworktree、branch、dirty changes、session、answers、attempt/continuation、Pull Request identityを変更する根拠にはしない。
 
 ### 6.4 watch
