@@ -46,9 +46,9 @@ current v5入力に旧lease、resource park、scenario別status/sync/substateが
 | 決定的build、manifest、checksum、SBOM | `scripts/check-release.sh` |
 | CLI surfaceとcredential不使用 | `scripts/cli-surface-contract.sh` |
 | lifecycle fixture replayと再起動 | `scripts/offline-release-contract.sh` |
-| production state非変更 | `scripts/production-state-isolation.sh` |
+| 実機調査時のproduction state非変更（通常release条件外） | `scripts/production-state-isolation.sh` |
 | candidate/stable同一artifact | release workflow candidate integrity・promotion evidence |
-| repository別assignment、doctor、rollback drill | `scripts/production-assignment-health.sh` |
+| repository別assignment、doctor、変更内容に応じたrollback drill | `scripts/production-assignment-health.sh` |
 | active executionとworker上限 | production state/release/assignment health tests |
 
 production確認では両repositoryに検証Issueを投入し、正常完了、needs-input中の後続進行、Issue-local failure中の後続進行、PR/check待ち中の後続進行を実測する。未trusted authorのskipと旧generation拒否は追加credentialを使わずfixture/fake serverで検証する。

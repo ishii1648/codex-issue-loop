@@ -318,6 +318,7 @@ case "$1 $2 $3" in
     printf '%s\n' '{"version":1,"verified":true,"assignment":{"result":"verified"}}' ;;
   *)
     if [ "$1" = doctor ]; then
+      [ "${BAD_DOCTOR:-false}" != true ] || exit 1
       printf '%s\n' '{"schema_version":1,"ok":true,"diagnostics":[]}'
     elif [ "$1" = status ]; then
       printf '%s\n' '{"worker_pool":{"active":1,"limit":1},"pending_requests":[],"state":{"state_revision":19,"supervisor":{"state":"polling"},"active_execution":{"issue_number":7,"run_id":"run_7","generation":1},"issues":{"7":{"generation":1,"run_id":"run_7","status":"running"}}}}'
@@ -339,38 +340,82 @@ esac
 	if err := os.WriteFile(rollback, []byte(rollbackJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	artifactDir := filepath.Join(root, "artifacts")
-	cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-assignment-health.sh"))
-	cmd.Dir = repositoryRoot(t)
-	cmd.Env = append(os.Environ(),
-		"PRODUCTION_AGENT_LOOP_BINARY="+operator,
-		"PRODUCTION_REPOSITORIES_FILE="+repositories,
-		"ROLLBACK_DRILL_FILE="+rollback,
-		"HEALTH_ARTIFACT_DIR="+artifactDir,
-		"RELEASE_TAG=v0.9.0",
-		"RELEASE_COMMIT="+evidenceCommit,
-		"STABLE_BINARY_SHA256="+digest,
-		"HEALTH_SOAK_SECONDS=0",
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("assignment health failed: %v\n%s", err, output)
-	}
-	data, err := os.ReadFile(filepath.Join(artifactDir, "production-health-report.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var report struct {
-		SchemaVersion int  `json:"schema_version"`
-		Healthy       bool `json:"healthy"`
-		Repositories  []struct {
-			Status struct {
-				ActiveExecutions int `json:"active_executions"`
-			} `json:"status"`
-		} `json:"repositories"`
-	}
-	if err := json.Unmarshal(data, &report); err != nil || report.SchemaVersion != 2 || !report.Healthy || len(report.Repositories) != 1 || report.Repositories[0].Status.ActiveExecutions != 1 {
-		t.Fatalf("report=%+v err=%v", report, err)
+	for _, tc := range []struct {
+		name      string
+		rollback  string
+		contents  string
+		badDoctor bool
+		badDigest bool
+		wantError bool
+	}{
+		{name: "with drill", rollback: rollback},
+		{name: "routine without drill"},
+		{name: "missing drill", rollback: filepath.Join(root, "missing.json"), wantError: true},
+		{name: "invalid drill", contents: "{}", wantError: true},
+		{name: "malformed drill", contents: "{", wantError: true},
+		{name: "failed drill", contents: strings.Replace(rollbackJSON, `"succeeded"`, `"failed"`, 1), wantError: true},
+		{name: "no drill still checks doctor", badDoctor: true, wantError: true},
+		{name: "no drill still checks digest", badDigest: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			artifactDir := t.TempDir()
+			if tc.contents != "" {
+				tc.rollback = filepath.Join(artifactDir, "rollback.json")
+				if err := os.WriteFile(tc.rollback, []byte(tc.contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			expectedDigest := digest
+			if tc.badDigest {
+				expectedDigest = strings.Repeat("0", 64)
+			}
+			cmd := exec.Command("sh", filepath.Join(repositoryRoot(t), "scripts", "production-assignment-health.sh"))
+			cmd.Dir = repositoryRoot(t)
+			cmd.Env = append(os.Environ(),
+				"PRODUCTION_AGENT_LOOP_BINARY="+operator,
+				"PRODUCTION_REPOSITORIES_FILE="+repositories,
+				"ROLLBACK_DRILL_FILE="+tc.rollback,
+				"HEALTH_ARTIFACT_DIR="+artifactDir,
+				"RELEASE_TAG=v0.9.0",
+				"RELEASE_COMMIT="+evidenceCommit,
+				"STABLE_BINARY_SHA256="+expectedDigest,
+				"HEALTH_SOAK_SECONDS=0",
+				fmt.Sprintf("BAD_DOCTOR=%t", tc.badDoctor),
+			)
+			output, err := cmd.CombinedOutput()
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("invalid health succeeded: %s", output)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("assignment health failed: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(filepath.Join(artifactDir, "production-health-report.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var report struct {
+				SchemaVersion int             `json:"schema_version"`
+				Healthy       bool            `json:"healthy"`
+				RollbackDrill json.RawMessage `json:"rollback_drill"`
+				Soak          struct {
+					Samples []json.RawMessage `json:"samples"`
+				} `json:"soak"`
+				Repositories []struct {
+					Status struct {
+						ActiveExecutions int `json:"active_executions"`
+					} `json:"status"`
+				} `json:"repositories"`
+			}
+			if err := json.Unmarshal(data, &report); err != nil || report.SchemaVersion != 2 || !report.Healthy || len(report.Repositories) != 1 || report.Repositories[0].Status.ActiveExecutions != 1 || len(report.Soak.Samples) != 3 {
+				t.Fatalf("report=%+v err=%v", report, err)
+			}
+			if (string(report.RollbackDrill) == "null") != (tc.rollback == "") {
+				t.Fatalf("drill evidence misrepresented: %s", report.RollbackDrill)
+			}
+		})
 	}
 }
 
@@ -396,16 +441,16 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string][]string{
+		"release-quality":                 nil,
 		"build-candidate":                 nil,
 		"verify-reproducibility":          {"build-candidate"},
-		"verify-attestation-and-manifest": {"verify-reproducibility"},
-		"replay-production-fixtures":      {"verify-attestation-and-manifest"},
-		"lifecycle-conformance":           {"replay-production-fixtures"},
-		"cli-surface-contract":            {"lifecycle-conformance"},
+		"verify-attestation-and-manifest": {"build-candidate"},
+		"replay-production-fixtures":      nil,
+		"lifecycle-conformance":           nil,
+		"cli-surface-contract":            nil,
 		"isolated-canary":                 {"build-candidate", "cli-surface-contract"},
-		"production-state-isolation":      {"build-candidate", "isolated-canary"},
-		"candidate-integrity":             {"production-state-isolation"},
-		"promotion-evidence":              {"candidate-integrity"},
+		"candidate-integrity":             {"isolated-canary"},
+		"promotion-evidence":              {"release-quality", "verify-reproducibility", "verify-attestation-and-manifest", "replay-production-fixtures", "lifecycle-conformance", "candidate-integrity"},
 		"promote-stable":                  {"build-candidate", "promotion-evidence"},
 		"verify-stable-release":           {"promote-stable"},
 	}
@@ -427,6 +472,15 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		}
 	}
 	text := string(data)
+	for _, forbidden := range []string{"production-state", "production-isolation", "sleep ", "make ci", "make release-check"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("release workflow retains redundant or production-host gate %q", forbidden)
+		}
+	}
+	if !strings.Contains(text, "make workflow-shell-check fmt-check schema-check tidy-check test test-race vet staticcheck errcheck vuln-check") {
+		t.Fatal("release quality no longer covers source checks")
+	}
+
 	if strings.Contains(text, "continue-on-error: true") {
 		t.Fatal("release gate permits continue-on-error")
 	}
@@ -476,15 +530,12 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		`gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY"`,
 		`candidate-integrity/report.json`,
 		`cmp "dist/prerelease/$asset" "dist/stable/$asset"`,
-		`agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json`,
+		`agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json`,
 		`mode:"machine-verifiable"`,
 		`.candidate_sha256 == $digest`,
-		`required_evidence:["cli-surface","offline-contract","production-isolation","candidate-integrity"]`,
+		`required_evidence:["cli-surface","offline-contract","candidate-integrity"]`,
 		`subject-path: promotion-evidence.json`,
 		`.assignment_protocol == 1`,
-		`.public_payload == "redacted-summary"`,
-		`.production_health.doctor_safe == true`,
-		`def exact_keys($expected)`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow is missing byte-promotion evidence %q", required)
@@ -493,7 +544,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	if strings.Contains(text, "sleep 900") || strings.Contains(text, "minute-30") {
 		t.Fatal("release workflow contains a time-only artifact soak")
 	}
-	if workflow.Jobs["production-state-isolation"].Environment != "" || workflow.Jobs["promotion-evidence"].Environment != "" || workflow.Jobs["promote-stable"].Environment != "production" {
+	if workflow.Jobs["promotion-evidence"].Environment != "" || workflow.Jobs["promote-stable"].Environment != "production" {
 		t.Fatal("only stable publication may use the protected production environment")
 	}
 	if strings.Count(text, "environment: production") != 1 {
@@ -504,60 +555,10 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	}
 }
 
-func TestRepositoryRolloutHealthIsAnIndependentWorkflow(t *testing.T) {
-	path := filepath.Join(repositoryRoot(t), ".github", "workflows", "rollout.yml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workflow struct {
-		Jobs map[string]struct {
-			Steps []struct {
-				Run  string `yaml:"run"`
-				Uses string `yaml:"uses"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(data, &workflow); err != nil {
-		t.Fatal(err)
-	}
-	job, ok := workflow.Jobs["verify-rollout-health"]
-	if !ok || len(job.Steps) == 0 {
-		t.Fatal("rollout workflow has no verify-rollout-health job")
-	}
-	for index, step := range job.Steps {
-		if (step.Run == "") == (step.Uses == "") {
-			t.Fatalf("rollout workflow step %d must contain exactly one of run or uses", index+1)
-		}
-	}
-	text := string(data)
-	for _, required := range []string{
-		`workflow_dispatch:`,
-		`Existing stable release tag to verify after repository rollout`,
-		`verify-rollout-health`,
-		`production-health-report.json`,
-		`.rollout_mode == "per-repository-stable-assignment"`,
-		`.rollback_drill.typed_rollback == true`,
-		`.rollback_drill.preserved.execution == true`,
-		`.soak.duration_seconds == 300`,
-		`subject-path: dist/stable/production-health-report.json`,
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("rollout workflow is missing %q", required)
-		}
-	}
-	for _, forbidden := range []string{"gh release create", "promote-stable", "sleep 30", "environment: production", "preserved.leases", "active_leases"} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("rollout workflow contains release coupling %q", forbidden)
-		}
-	}
-}
-
 func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 	for _, path := range []string{
 		".github/workflows/contracts.yml",
 		".github/workflows/release.yml",
-		".github/workflows/rollout.yml",
 		"scripts/cli-surface-contract.sh",
 		"scripts/offline-release-contract.sh",
 		"scripts/production-assignment-health.sh",
@@ -604,7 +605,7 @@ func TestContractWorkflowsRequireNoLongLivedSecrets(t *testing.T) {
 			t.Fatalf("%s does not consume the canonical active_execution status field", path)
 		}
 	}
-	for _, path := range []string{".github/workflows/release.yml", ".github/workflows/rollout.yml"} {
+	for _, path := range []string{".github/workflows/release.yml"} {
 		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), path))
 		if err != nil {
 			t.Fatal(err)
