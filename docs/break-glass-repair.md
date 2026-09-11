@@ -13,6 +13,8 @@ agent-loop doctor --repo /absolute/path/to/codex-issue-loop --json
 git -C /absolute/path/to/codex-issue-loop status --short
 ```
 
+runtime停止が修復に必要な場合だけ以下を行う。workflowや手順の変更だけなら稼働状態を維持し、release公開・取得・検証のために停止しない。正常にdrainできるruntimeへの配備は`delivery assignment apply`の切替直前drainを使う。
+
 ## 2. 通常のtyped stop
 
 delivery controllerを停止してから対象repositoryだけを停止する。通常の`agent-loop stop`はdeliveryと共通のdurable drain契約を使い、active workerへsignalを送らずcheckpointまで待つ。期限切れ時は通常運転へ戻るため、transactionやfenceを削除しない。
@@ -35,7 +37,7 @@ scripts/break-glass-stop.sh --repo-id '<exact-repository-id>'
 ## 4. PatchとRelease
 
 1. cleanな`codex/*` branchで原因と再現testを確定する。
-2. `go test ./...`、race、fault、conformance、snapshot invariant、`go vet ./...`、`make ci`、release checkを通す。
+2. focused testで修正を確認し、同じcommitのCIで全量検証を確認する。CIを使えない場合は`make ci`を1回実行する（全体test、race、fault、conformance、snapshot invariant、vet、release checkを含む）。各suiteを別途重複実行しない。
 3. PRをmergeし、annotated stable patch tagを作る。
 4. candidateとstableのSHA-256 byte一致、attestation、manifestを確認する。
 5. `delivery assignment preview/apply`で`codex-issue-loop`だけをpatchへ更新する。
