@@ -131,6 +131,21 @@ func TestDryRunPersistsExactIssueDraftWithoutGitHub(t *testing.T) {
 	if err := json.Unmarshal(data, &drafts); err != nil || len(drafts) != 1 || drafts[0].Fingerprint != report.IssueDrafts[0].Fingerprint || !strings.Contains(drafts[0].Body, "## 期待値") {
 		t.Fatalf("persisted dry-run=%s err=%v", data, err)
 	}
+	now = now.Add(time.Minute)
+	secondReport, err := testPipeline(store, &fakeAnalyzer{issue: true}, nil, &now, true).RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondReport.IssueDrafts) != 1 || len(secondReport.Decisions) != 1 || secondReport.Decisions[0].ReasonCode != "eligible_dry_run" {
+		t.Fatalf("second dry-run report=%+v", secondReport)
+	}
+	metrics, err := store.LoadMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := uint64(len(report.IssueDrafts) + len(secondReport.IssueDrafts)); metrics.Issues["dry_run"] != want {
+		t.Fatalf("dry-run count=%d, want %d", metrics.Issues["dry_run"], want)
+	}
 	issues := &fakeIssues{byFingerprint: map[string]IssueRef{}}
 	liveReport, err := testPipeline(store, &fakeAnalyzer{issue: true}, issues, &now, false).RunOnce(context.Background())
 	if err != nil {
@@ -143,7 +158,7 @@ func TestDryRunPersistsExactIssueDraftWithoutGitHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(decisions) != 2 || decisions[0].Outcome != "dry_run" || decisions[1].Outcome != "created" {
+	if len(decisions) != 3 || decisions[0].Outcome != "dry_run" || decisions[1].Outcome != "dry_run" || decisions[2].Outcome != "created" {
 		t.Fatalf("persisted decisions=%+v", decisions)
 	}
 }
