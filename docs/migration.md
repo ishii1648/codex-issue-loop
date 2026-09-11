@@ -70,6 +70,6 @@ agent-loop rollback --backup '/absolute/install-backup' --json
 agent-loop doctor --json
 ```
 
-rollbackは管理対象backup、restore先、全SHA-256を検証して全artifactを復元する。migrationが新規作成した空state用event logは削除する。active executionまたは未完了continuationがあれば拒否する。storage versionを跨ぐ場合はschema backupを先、install backupを後に戻す。途中失敗、backup不足、version不一致では片方だけを推測で戻さず停止を維持する。
+rollbackは管理対象backup、restore先、全SHA-256を検証して全artifactを復元する。migrationが新規作成した空state用event logは削除する。active executionまたは未完了continuationがあれば拒否する。最新journalと異なるbackup、移行直後のstate revisionを記録していないbackup、現在のstate revisionが記録値と異なる場合も拒否する。prepared journalからの障害復旧では、backupと同一byteの未移行stateも復元できる。運用再開後にstateが更新された場合の強制rollbackは提供しない。storage versionを跨ぐ場合はschema backupを先、install backupを後に戻す。途中失敗、backup不足、version不一致では片方だけを推測で戻さず停止を維持する。
 
 旧外部配送用`notification-token`はmigration/backup/rollback対象外であり、暗黙削除しない。

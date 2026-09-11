@@ -104,11 +104,12 @@ type backupManifest struct {
 }
 
 type backupEntry struct {
-	Source  string      `json:"source"`
-	Backup  string      `json:"backup"`
-	Mode    os.FileMode `json:"mode"`
-	SHA256  string      `json:"sha256"`
-	Existed bool        `json:"existed"`
+	Source        string      `json:"source"`
+	Backup        string      `json:"backup"`
+	Mode          os.FileMode `json:"mode"`
+	SHA256        string      `json:"sha256"`
+	Existed       bool        `json:"existed"`
+	StateRevision *uint64     `json:"state_revision,omitempty"`
 }
 
 func RegisteredRepositories(l layout.Layout) ([]registry.Entry, error) {
@@ -455,6 +456,9 @@ func (m Migrator) Restore(backup string) (Result, error) {
 	if err := ensureRollbackHasNoActiveLeases(manifest); err != nil {
 		return Result{}, err
 	}
+	if err := m.ensureRollbackHasNoProgress(resolved, manifest); err != nil {
+		return Result{}, err
+	}
 	for _, entry := range manifest.Entries {
 		if !backupEntryExisted(entry) {
 			if err := os.Remove(entry.Source); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -570,7 +574,20 @@ func (m Migrator) createBackup(report Report, from int) (string, error) {
 		if err := fsutil.WriteFile(filepath.Join(backup, name), data, 0o600); err != nil {
 			return "", err
 		}
-		manifest.Entries = append(manifest.Entries, backupEntry{Source: artifact.Path, Backup: name, Mode: info.Mode().Perm(), SHA256: hashBytes(data), Existed: true})
+		entry := backupEntry{Source: artifact.Path, Backup: name, Mode: info.Mode().Perm(), SHA256: hashBytes(data), Existed: true}
+		if artifact.Kind == "state" {
+			var snapshot struct {
+				StateRevision uint64 `json:"state_revision"`
+			}
+			if err := json.Unmarshal(data, &snapshot); err != nil {
+				return "", err
+			}
+			if artifact.Version == schemaversion.Previous || artifact.SemanticMigration {
+				snapshot.StateRevision++
+			}
+			entry.StateRevision = &snapshot.StateRevision
+		}
+		manifest.Entries = append(manifest.Entries, entry)
 	}
 	if err := fsutil.WriteJSON(filepath.Join(backup, "manifest.json"), manifest, 0o600); err != nil {
 		return "", err
@@ -867,6 +884,49 @@ func normalizeMigratedSessions(object map[string]json.RawMessage) error {
 		return err
 	}
 	object["issues"] = encoded
+	return nil
+}
+
+func (m Migrator) ensureRollbackHasNoProgress(backup string, manifest backupManifest) error {
+	j, exists, err := m.loadJournal()
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("rollback blocked: migration journal is missing")
+	}
+	latest, err := m.validateBackup(j.Backup)
+	if err != nil {
+		return err
+	}
+	if latest != backup {
+		return fmt.Errorf("rollback blocked: backup does not match the latest migration journal")
+	}
+	for _, entry := range manifest.Entries {
+		if filepath.Base(entry.Source) != "state.json" {
+			continue
+		}
+		data, err := os.ReadFile(entry.Source)
+		if err != nil {
+			return fmt.Errorf("verify rollback state %s: %w", entry.Source, err)
+		}
+		// A prepared migration may have stopped before replacing this state.
+		if j.Status == "prepared" && hashBytes(data) == entry.SHA256 {
+			continue
+		}
+		if entry.StateRevision == nil {
+			return fmt.Errorf("rollback blocked: backup has no migration state revision for %s", entry.Source)
+		}
+		var snapshot struct {
+			StateRevision *uint64 `json:"state_revision"`
+		}
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return fmt.Errorf("verify rollback state %s: %w", entry.Source, err)
+		}
+		if snapshot.StateRevision == nil || *snapshot.StateRevision != *entry.StateRevision {
+			return fmt.Errorf("rollback blocked: state revision differs from migration revision %d in %s", *entry.StateRevision, entry.Source)
+		}
+	}
 	return nil
 }
 
