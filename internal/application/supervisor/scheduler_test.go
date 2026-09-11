@@ -108,7 +108,7 @@ func TestSelectReadySkipsUntrustedAuthorAndContinues(t *testing.T) {
 	}
 }
 
-func TestSelectReadySkipsQuarantinedIssueAndContinues(t *testing.T) {
+func TestSelectReadyWaitsForQuarantinedIssue(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	loop.Logger = log.New(io.Discard, "", 0)
 	s := &scheduler{loop: loop, active: map[int]activeJob{}}
@@ -126,7 +126,7 @@ func TestSelectReadySkipsQuarantinedIssueAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || selected.Number != 2 {
+	if ok {
 		t.Fatalf("selected=%+v ok=%v", selected, ok)
 	}
 }
@@ -1867,40 +1867,24 @@ func TestSchedulerCancellationStopsAllWorkers(t *testing.T) {
 	}
 }
 
-func TestSchedulerContinuesAfterNeedsInputWhenConfigured(t *testing.T) {
-	loop, github := testLoop(t, worker.Result{})
-	loop.Config.Queue.Concurrency = 2
-	loop.Config.Queue.ContinueAfterNeedsInput = true
-	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
-	loop.Random = fixedRandom(0.5)
-	loop.Logger = log.New(io.Discard, "", 0)
+func TestSchedulerWaitsAfterNeedsInput(t *testing.T) {
+	question := worker.Result{Version: 1, Status: "needs_input", ExecutionProfile: "standard", Summary: "decision", SessionID: "session", Question: &worker.Question{Text: "Choose?", AllowFreeText: true}}
+	loop, github := testLoop(t, question)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	github.issue = gh.Issue{Number: 2, Title: "Next", Labels: loop.Config.GitHub.ReadyLabels}
 	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
-	pool := &blockingPoolWorker{started: make(chan int, 1), release: make(chan struct{}, 1)}
-	loop.Worker = pool
-	_, err := loop.Store.Update("needs_input_fixture", 1, "run_waiting", nil, func(snapshot *state.Snapshot) error {
-		snapshot.Issues["1"] = &state.Issue{Number: 1, Status: issuedomain.StatusNeedsInput, RunID: "run_waiting", UpdatedAt: loop.now()}
-		snapshot.PendingRequests["req_1"] = &state.Request{
-			ID: "req_1", IssueNumber: 1, Question: "Choose?", Status: issuedomain.RequestStatusPending, CreatedAt: loop.now(),
-		}
-		return nil
-	})
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &scheduler{
-		loop: loop, events: make(chan schedulerEvent, 3), active: map[int]activeJob{},
-		issueRetry: map[int]time.Time{}, issueFails: map[int]int{},
+	if snapshot.Issues["2"] != nil || snapshot.ActiveExecution != nil || snapshot.Issues["1"].Status != issuedomain.StatusNeedsInput {
+		t.Fatalf("input wait did not retain ordering: %+v", snapshot)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if result, err := s.schedule(ctx, true); err != nil || !result.dispatched {
-		t.Fatalf("result=%+v err=%v", result, err)
-	}
-	if number := <-pool.started; number != 2 {
-		t.Fatalf("started Issue=%d, want 2", number)
-	}
-	s.cancelAndDrain()
 }
 
 func TestFaultSchedulerReconcilesTerminalIssueWithoutStoppingRunningWorker(t *testing.T) {
@@ -2022,7 +2006,7 @@ func TestSchedulerWorkerCompletionPollsImmediately(t *testing.T) {
 	}
 }
 
-func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
+func TestSchedulerBoundsWorkersAndWaitsAfterRetry(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Config.Queue.Concurrency = 1
 	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
@@ -2071,13 +2055,25 @@ func TestSchedulerBoundsWorkersAndAdmitsAfterSlotRelease(t *testing.T) {
 	default:
 	}
 	pool.release <- struct{}{}
-	select {
-	case second := <-pool.started:
-		if second != 2 {
-			t.Fatalf("next admitted Issue=%d, want 2", second)
+	deadline := time.After(5 * time.Second)
+	for {
+		snapshot, err := loop.Store.Load()
+		if err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("worker completion did not admit the next Issue")
+		if snapshot.Issues["1"].Status == issuedomain.StatusRetryWait && snapshot.ActiveExecution == nil {
+			if snapshot.Issues["2"] != nil {
+				t.Fatal("retry admitted the next Issue")
+			}
+			break
+		}
+		select {
+		case second := <-pool.started:
+			t.Fatalf("retry admitted Issue %d", second)
+		case <-deadline:
+			t.Fatal("worker did not return to retry wait")
+		case <-time.After(time.Millisecond):
+		}
 	}
 	pool.mu.Lock()
 	maximum := pool.maximum
@@ -2217,7 +2213,7 @@ func TestFaultSchedulerSingleExecutionResultBoundary(t *testing.T) {
 	}
 }
 
-func TestSchedulerIssueFailureReleasesExecutionForNextIssue(t *testing.T) {
+func TestSchedulerIssueFailureReleasesWorkerExecution(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	loop.Clock = fixedClock{value: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
 	loop.Random = fixedRandom(0.5)
@@ -2347,7 +2343,7 @@ func TestSchedulerSkipsReadyIssueWithRetainedLifecycle(t *testing.T) {
 				github.issue,
 				{Number: 2, State: "OPEN", Labels: loop.Config.GitHub.ReadyLabels},
 			}, before)
-			if err != nil || !ok || selected.Number != 2 {
+			if err != nil || ok {
 				t.Fatalf("selected=%+v ok=%v err=%v", selected, ok, err)
 			}
 			cause := loop.startIssue(ctx, github.issue, "new_run")
@@ -2842,5 +2838,134 @@ func TestSchedulerResumesRecordedAnswerOnStateWake(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestSchedulerAdmissionAcrossRetainedLifecycles(t *testing.T) {
+	for _, status := range issuedomain.AllStatuses() {
+		t.Run(status.String(), func(t *testing.T) {
+			loop, _ := testLoop(t, worker.Result{})
+			s := &scheduler{loop: loop, active: map[int]activeJob{}}
+			snapshot := state.Snapshot{Issues: map[string]*state.Issue{
+				"1": {Number: 1, Status: status},
+			}}
+			candidate := gh.Issue{Number: 2, State: "OPEN", Labels: loop.Config.GitHub.ReadyLabels}
+			_, ok, err := s.selectReady(context.Background(), []gh.Issue{candidate}, snapshot)
+			want := status == issuedomain.StatusUnset || status == issuedomain.StatusCompleted || status == issuedomain.StatusCanceled
+			if err != nil || ok != want {
+				t.Fatalf("admitted=%v want=%v err=%v", ok, want, err)
+			}
+			if !want && !strings.Contains(admissionWait(snapshot), "Issue #1 ("+status.String()+")") {
+				t.Fatalf("missing wait reason: %s", admissionWait(snapshot))
+			}
+			if status.PendingDispatch() && len(pendingIssues(snapshot, loop.now(), 1)) != 1 {
+				t.Fatal("admission gate blocked existing lifecycle dispatch")
+			}
+		})
+	}
+}
+
+func TestSchedulerWaitsForVerifiedMergeAcrossCycles(t *testing.T) {
+	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
+	loop, github := testLoop(t, result)
+	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
+	ctx := context.Background()
+	if _, err := loop.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	github.issue = gh.Issue{Number: 2, Title: "Next", State: "OPEN", Labels: loop.Config.GitHub.ReadyLabels}
+	github.remote = &gh.RemoteState{
+		Issue:        gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.RunningLabel}},
+		PullRequests: []gh.PullRequest{{Number: 1, URL: "https://example.test/pr/1", State: "OPEN", HeadRefName: "codex/issue-1-test", ChecksStatus: "pending"}},
+	}
+	for _, checks := range []string{"pending", "failure", "success", "success"} {
+		github.remote.PullRequests[0].ChecksStatus = checks
+		if _, err := loop.Store.Update("test_due", 1, "", nil, func(snapshot *state.Snapshot) error {
+			snapshot.Issues["1"].RetryAfter = nil
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loop.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := loop.Store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Issues["2"] != nil || snapshot.ActiveExecution != nil || snapshot.Issues["1"].Status == issuedomain.StatusCompleted {
+			t.Fatalf("premature admission/completion: %+v", snapshot)
+		}
+	}
+	github.remote.PullRequests[0].State = "MERGED"
+	github.remote.PullRequests[0].HeadSHA = "head-1"
+	mergedAt := loop.now()
+	github.remote.PullRequests[0].MergedAt = &mergedAt
+	if _, err := loop.Store.Update("test_due", 1, "", nil, func(snapshot *state.Snapshot) error {
+		snapshot.Issues["1"].RetryAfter = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loop.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := loop.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Issues["1"].Status != issuedomain.StatusCompleted {
+		t.Fatalf("merge not completed: %+v", snapshot.Issues["1"])
+	}
+	s := &scheduler{loop: loop, active: map[int]activeJob{}}
+	if _, ok, err := s.selectReady(ctx, []gh.Issue{github.issue}, snapshot); err != nil || !ok {
+		t.Fatalf("next Issue not admitted after merge: ok=%v err=%v", ok, err)
+	}
+	github.remote = nil
+	loop.Worker = fakeWorker{result: worker.Result{Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "no changes", Git: &worker.GitResult{}}}
+	loop.Publisher = &fakePublisher{}
+	if _, err := loop.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = loop.Store.Load()
+	if err != nil || snapshot.Issues["2"] == nil || snapshot.Issues["2"].Status != issuedomain.StatusCompleted {
+		t.Fatalf("next worker did not complete: snapshot=%+v err=%v", snapshot, err)
+	}
+}
+
+func TestWebhookAdmissionRetainsIntentUntilAllExistingIssuesFinish(t *testing.T) {
+	loop, base := testLoop(t, worker.Result{})
+	loop.Config.Webhook.Mode = "webhook"
+	loop.GitHub = &webhookFakeGitHub{fakeGitHub: base}
+	delivery := webhook.Delivery{Version: webhook.InboxVersion, DeliveryID: "next", Event: "issues", Action: "reconciled", RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 1, AcceptedAt: loop.now()}
+	if err := webhook.EnqueueMailbox(loop.Store.Dir, delivery); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := state.Snapshot{Issues: map[string]*state.Issue{
+		"2": {Number: 2, Status: issuedomain.StatusAwaitingChecks},
+		"3": {Number: 3, Status: issuedomain.StatusAwaitingMerge},
+	}}
+	for step := range 3 {
+		s := &scheduler{loop: loop, active: map[int]activeJob{}}
+		candidates, acknowledged, err := s.processMailbox(context.Background(), snapshot)
+		if err != nil || len(candidates) != 1 || len(acknowledged) != 0 {
+			t.Fatalf("candidates=%v acknowledged=%v err=%v", candidates, acknowledged, err)
+		}
+		_, ok, err := s.selectReady(context.Background(), candidates, snapshot)
+		if err != nil || ok != (step == 2) {
+			t.Fatalf("step=%d admitted=%v err=%v", step, ok, err)
+		}
+		if step == 0 {
+			if len(pendingIssues(snapshot, loop.now(), 1)) != 2 {
+				t.Fatal("existing PR observation was blocked")
+			}
+			snapshot.Issues["2"].Status = issuedomain.StatusCompleted
+		} else {
+			snapshot.Issues["3"].Status = issuedomain.StatusCanceled
+		}
+	}
+	remaining, err := webhook.ReadMailbox(loop.Store.Dir)
+	if err != nil || len(remaining) != 1 {
+		t.Fatalf("lost unadmitted intent: remaining=%v err=%v", remaining, err)
 	}
 }

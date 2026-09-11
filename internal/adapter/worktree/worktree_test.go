@@ -37,6 +37,27 @@ func TestFaultWorktreeCreateReuseAndPartialCreation(t *testing.T) {
 	cfg.RepoPath = repo
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Git.WorktreeRoot = filepath.Join(root, "worktrees")
+	t.Run("next Issue includes merged base changes", func(t *testing.T) {
+		writer := filepath.Join(root, "writer")
+		gitRun(t, "clone", "-q", "-b", "main", remote, writer)
+		gitRun(t, "-C", writer, "config", "user.name", "Test")
+		gitRun(t, "-C", writer, "config", "user.email", "test@example.test")
+		gitRun(t, "-C", writer, "config", "commit.gpgsign", "false")
+		if err := os.WriteFile(filepath.Join(writer, "merged.txt"), []byte("prior Issue\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitRun(t, "-C", writer, "add", "merged.txt")
+		gitRun(t, "-C", writer, "commit", "-q", "-m", "merge prior Issue")
+		gitRun(t, "-C", writer, "push", "-q", "origin", "main")
+		next, err := (Manager{StateRoot: root}).Ensure(context.Background(), cfg, "repo-id", 16, "Next Issue", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, err := os.ReadFile(filepath.Join(next.Path, "merged.txt"))
+		if err != nil || string(content) != "prior Issue\n" {
+			t.Fatalf("next base content=%q err=%v", content, err)
+		}
+	})
 	t.Run("symbolic link root", func(t *testing.T) {
 		target := filepath.Join(root, "linked-worktrees-target")
 		if err := os.MkdirAll(target, 0o700); err != nil {

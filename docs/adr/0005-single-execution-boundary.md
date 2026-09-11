@@ -7,7 +7,7 @@
 
 ## Context
 
-このsystemの目的は、GitHub Issueを1件ずつcoding workerへ渡し、個別Issueが失敗しても次のIssueを処理し続けることである。productionのworker concurrencyは1であり、同時に複数Issueを実行する要求はない。
+このsystemの目的は、GitHub Issueを1件ずつcoding workerへ渡し、先行Issueの完了または正式キャンセル後に次のIssueを処理することである。productionのworker concurrencyは1であり、同時に複数Issueを実行する要求はない。
 
 従来設計は、将来の単一host並列化とmulti-hostを見越してresource definition、path claim、dependency metadata、worker slot、resource lease、parkを現行lifecycleへ導入した。その結果、入力待ちや復旧時にも複数の所有状態を同期する必要が生じ、個別Issueの不整合がrepository全体を停止させる経路を増やした。
 
@@ -50,7 +50,11 @@ worker processが存在しない状態はactive executionを保持しない。
 - `blocked`
 - quarantined Issue
 
-これらは作業成果とprovenanceをIssue aggregateへ保持するが、repositoryのworker実行枠を解放する。supervisorは別Issueの選択を継続する。
+これらは作業成果とprovenanceをIssue aggregateへ保持するが、repositoryのworker実行枠を解放する。新規受付は実行枠とは別に制限する。`completed`または`canceled`以外の受付済みIssue、またはquarantineがあれば、後続の未受付Issueはreadyのまま待機する。CI・レビュー・手動マージ待ち、retry、質問、失敗・停止ではこの待ちを解除しない。
+
+PRがある場合はマージを観測して内部完了を確定するまで順序を維持する。PR不要の正当な完了と正式キャンセルでは解除する。既存Issue自身の観測・回答・復旧・worker再開・マージ処理は維持する。導入時に複数の既存Issueがある場合も、新規受付を止めて既存分を収束させ、workerを強制停止しない。
+
+この判断はdurable Issue statusとquarantineから導出する。新しい永続状態やlabelによる所有権は導入せず、active executionのrun/generation fencingを維持する。次の新規worktreeはfetchした最新のbase branchから作成する。
 
 ### 4. Issue-local failure boundary
 
@@ -66,21 +70,21 @@ workerはGitHubへ公開しない。publisherはrepositoryごとに一つの論�
 
 旧resource lease、park、slot、resource metadataはmigration decoderの入力としてだけ解釈する。現行aggregateへ変換した後のruntime判断には使用しない。
 
-変換根拠が十分なIssueはrun、generation、workspace、request、publication identityを保持して移行する。変換できないIssueは個別にquarantineし、他Issueの処理を継続する。
+変換根拠が十分なIssueはrun、generation、workspace、request、publication identityを保持して移行する。変換できないIssueは個別にquarantineし、既存Issueの処理を継続する。quarantineの正式復旧またはキャンセルまでは新規受付を停止する。
 
 ## Consequences
 
 ### Positive
 
-- queueの中心不変条件が「active executionは最大1件」に縮小する。
-- 入力待ちや個別障害がresource leaseを通じて後続Issueを止めなくなる。
+- workerの中心不変条件は「active executionは最大1件」を維持する。
+- 未マージの先行変更を取り込んでから後続の実装を開始できる。
 - recoveryはscenario別state変更ではなく、共通lifecycleとreconciliationへ集約できる。
 - 個別Issueの不整合とrepository全体の破損を構造的に分離できる。
 - 古いworker結果を拒否する安全性はrun IDとgenerationで維持できる。
 
 ### Negative
 
-- 複数Issueのworker実行時間を重ねるthroughput改善は得られない。
+- CI・レビュー・入力待ちや個別障害の間は新規受付が止まり、throughputより実装順序の安定性を優先する。
 - 既存のresource admission実装とstateを移行・撤去する必要がある。
 - 将来並列化する場合は、現行設計の設定値を変えるだけでは導入できない。
 
