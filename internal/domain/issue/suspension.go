@@ -1,23 +1,28 @@
 package issue
 
-import "fmt"
+import (
+	"fmt"
+	"path"
+	"strings"
+)
 
 type ResolutionAction string
 
 const (
-	ResolutionNone          ResolutionAction = ""
-	ResolutionResume        ResolutionAction = "resume"
-	ResolutionRetryStage    ResolutionAction = "retry-stage"
-	ResolutionAdoptWorktree ResolutionAction = "adopt-worktree"
-	ResolutionAdoptHead     ResolutionAction = "adopt-head"
-	ResolutionAdoptInput    ResolutionAction = "adopt-input"
-	ResolutionAdoptPR       ResolutionAction = "adopt-pr"
-	ResolutionCancel        ResolutionAction = "cancel"
+	ResolutionApproveConflictPaths ResolutionAction = "approve-conflict-paths"
+	ResolutionNone                 ResolutionAction = ""
+	ResolutionResume               ResolutionAction = "resume"
+	ResolutionRetryStage           ResolutionAction = "retry-stage"
+	ResolutionAdoptWorktree        ResolutionAction = "adopt-worktree"
+	ResolutionAdoptHead            ResolutionAction = "adopt-head"
+	ResolutionAdoptInput           ResolutionAction = "adopt-input"
+	ResolutionAdoptPR              ResolutionAction = "adopt-pr"
+	ResolutionCancel               ResolutionAction = "cancel"
 )
 
 func (a ResolutionAction) Validate() error {
 	switch a {
-	case ResolutionResume, ResolutionRetryStage, ResolutionAdoptHead, ResolutionAdoptInput, ResolutionAdoptWorktree, ResolutionAdoptPR, ResolutionCancel:
+	case ResolutionApproveConflictPaths, ResolutionResume, ResolutionRetryStage, ResolutionAdoptHead, ResolutionAdoptInput, ResolutionAdoptWorktree, ResolutionAdoptPR, ResolutionCancel:
 		return nil
 	default:
 		return fmt.Errorf("unknown Issue resolution action %q", a)
@@ -87,4 +92,24 @@ func AdoptCheckpoint(from Status, suspension SuspensionStatus, stage Continuatio
 		}
 	}
 	return ContinuationStageNone, fmt.Errorf("cannot adopt checkpoint stage %q with suspension %q using %q", stage, suspension, action)
+}
+
+func ApproveConflictPaths(from Status, suspension SuspensionStatus, recoverability Recoverability, stage ContinuationStage, retryAllowed bool) error {
+	if (from != StatusBlocked && from != StatusFailed) || suspension != SuspensionActive || recoverability != RecoverabilityOperator || !retryAllowed ||
+		(stage != ContinuationStageResume && stage != ContinuationStageConflict) {
+		return fmt.Errorf("conflict paths require an active retryable conflict checkpoint")
+	}
+	return nil
+}
+
+func ValidateConflictApprovalPaths(paths []string) error {
+	if len(paths) == 0 {
+		return fmt.Errorf("at least one explicit conflict path is required")
+	}
+	for _, value := range paths {
+		if value == "" || value == "." || value == ".." || path.IsAbs(value) || path.Clean(value) != value || strings.HasPrefix(value, "../") || strings.ContainsAny(value, "\\\x00\r\n") {
+			return fmt.Errorf("invalid conflict approval path %q", value)
+		}
+	}
+	return nil
 }

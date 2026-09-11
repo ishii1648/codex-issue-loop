@@ -23,7 +23,7 @@ func (a App) parseIssueResolveArgs(args []string) (*issueResolveOptions, error) 
 	fs.SetOutput(a.Err)
 	repo := fs.String("repo", "", "repository path")
 	number := fs.Int("issue", 0, "Issue number")
-	actionText := fs.String("action", "", "resume, retry-stage, adopt-head, adopt-input, adopt-worktree, adopt-pr, or cancel")
+	actionText := fs.String("action", "", "resume, retry-stage, adopt-head, adopt-input, adopt-worktree, approve-conflict-paths, adopt-pr, or cancel")
 	expectedHead := fs.String("expected-head", "", "exact current HEAD approved for adopt-head or adopt-input")
 	var allowPaths pathListFlag
 	fs.Var(&allowPaths, "allow-path", "explicit changed path to add to conflict recovery scope; repeatable")
@@ -42,8 +42,8 @@ func (a App) parseIssueResolveArgs(args []string) (*issueResolveOptions, error) 
 	if err != nil {
 		return nil, exitError{2, err}
 	}
-	if len(normalizedAllowPaths) > 0 && action != issuedomain.ResolutionAdoptWorktree {
-		return nil, exitError{2, fmt.Errorf("--allow-path is valid only with --action adopt-worktree")}
+	if len(normalizedAllowPaths) > 0 && action != issuedomain.ResolutionAdoptWorktree && action != issuedomain.ResolutionApproveConflictPaths {
+		return nil, exitError{2, fmt.Errorf("--allow-path is valid only with --action adopt-worktree or approve-conflict-paths")}
 	}
 	return &issueResolveOptions{*repo, *number, action, *expectedHead, normalizedAllowPaths, *jsonOut}, nil
 }
@@ -60,7 +60,7 @@ func (a App) issueCommand(ctx context.Context, l layout.Layout, args []string) e
 	case "resolve":
 		return a.issueResolve(ctx, l, args[1:])
 	case "help", "--help", "-h":
-		fmt.Fprintln(a.Out, "Usage: agent-loop issue ask --repo PATH --issue N --json < question.json\n       agent-loop issue plan --repo PATH --issue N [--allow-path PATH] --json\n       agent-loop issue resolve --repo PATH --issue N --action resume|retry-stage|adopt-head|adopt-input|adopt-worktree|adopt-pr|cancel [--expected-head SHA] [--allow-path PATH] --json")
+		fmt.Fprintln(a.Out, "Usage: agent-loop issue ask --repo PATH --issue N --json < question.json\n       agent-loop issue plan --repo PATH --issue N [--allow-path PATH] --json\n       agent-loop issue resolve --repo PATH --issue N --action resume|retry-stage|adopt-head|adopt-input|adopt-worktree|approve-conflict-paths|adopt-pr|cancel [--expected-head SHA] [--allow-path PATH] --json")
 		return nil
 	default:
 		return exitError{2, fmt.Errorf("unknown issue command %q", args[0])}

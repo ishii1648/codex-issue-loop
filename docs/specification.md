@@ -269,7 +269,7 @@ agent-loop <command> [options]
 | `watch` | イベントを追跡する |
 | `answer` | 未回答requestへ回答を登録する |
 | `issue plan` | canonical snapshotと現在のprocess/git/GitHub観測から全resolution actionをread-only評価する |
-| `issue resolve --action resume\|retry-stage\|adopt-head\|adopt-worktree\|adopt-pr\|cancel` | revisionとsuspensionをfenceして単一の型付きresolutionを適用する |
+| `issue resolve --action resume\|retry-stage\|adopt-head\|adopt-worktree\|approve-conflict-paths\|adopt-pr\|cancel` | revisionとsuspensionをfenceして単一の型付きresolutionを適用する |
 | `export-recovery-fixture` | 対象Issueのstate/event/worktree/GitHub recovery evidenceをread-only取得し決定的にsanitizationする |
 | `verify-recovery-fixture` | fixtureのscope、completeness metadata、record shape/value、hashをfail closedで検証する |
 | `logs` | supervisorまたはIssue別ログを表示する |
@@ -391,6 +391,8 @@ agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --actio
 `issue plan`はcanonical snapshotのrevision、`ContinuationCheckpoint`、`Suspension`またはIssue-local quarantine envelopeと、現在のprocess、managed worktree、content SHA-256、Git local/remote HEAD、dirty/unpushed状態、GitHub Issue/PRをread-onlyで観測する。event logの件数、順序、文言は判定authorityにしない。全actionについて可否と全拒否理由を返し、plan前後でstate bytesが一致することを確認する。`resume`とpublicationの`retry-stage`は保存時と現在のworktree HEAD・content SHA-256・base ancestryが一致しなければ拒否し、checksの`retry-stage`はcleanかつfully pushedなlocal/remote/PR HEAD一致を要求する。conflict recovery中に`worktree_sha256`だけを欠くquarantineは、保存済みhead、remote branch、open PR、`MERGE_HEAD`、base ancestry、変更path scopeの一致時だけ`adopt-worktree`でdigestを採用できる。記録済みscope外の現在変更pathは、planとresolveへ同じ`--allow-path`を指定した場合だけ追加できる。指定pathが現在の未承認変更でない場合や、未指定のscope外変更が残る場合は拒否する。この操作は実行枠を取得せず、続く`retry-stage`を別transactionで要求する。それ以外の quarantine は、以下の `adopt-input` と回答後 checks 再試行の限定ケースを除いて `cancel` だけを許可する。
 
 `adopt-head --expected-head SHA`はactiveなworker resume checkpointの`head_sha`だけが欠落し、保存済みcontent digest・workspace/session/run identity・base ancestryが一致する場合に限定する。実行中worker・execution・request・remote branch・PRがある場合は拒否する。指定HEADとplan観測値を再照合し、HEADと監査イベントだけを保存する。suspension・generation・実行枠は保持し、別途`resume`を要求する。停止時はIssueの未設定HEADをコピーせず、worktreeで観測したHEADをcheckpointへ保存する。
+
+`approve-conflict-paths`は保存済みdigestと競合復旧情報を持つblocked/failedのactive・operator-recoverable suspensionで、`retry-stage`が許可されたresume/conflict checkpointに限定する。`issue plan --allow-path PATH`でpreviewし、`issue resolve --action approve-conflict-paths --allow-path PATH`で現在の変更に存在する個別pathを明示承認する。自由文の回答は解釈しない。run/generation、suspension/checkpoint、workspace、保存HEAD、単一open PR、`MERGE_HEAD`、差分とdigestを再照合し、実行枠占有、worker、pending request、未指定のscope外変更、並行変更を拒否する。既存transaction境界でscopeと`issue_conflict_paths_approved`イベントだけを記録し、checkpoint、回答、競合履歴、worktreeを保持する。同一scopeの再承認は再検証後に書き込みなしで成功する。再開は別途`retry-stage`を実行する。
 
 `issue resolve`はplan時のrevisionとsuspensionをtransaction内で再照合する。`resume`と`retry-stage`はrepositoryの実行枠が空であることを再検査し、generationを一度だけ進めて現在の実行として記録する。`adopt-worktree`は再検証したcontent SHA-256と明示的な`--allow-path`をcheckpoint、conflict recovery scope、audit eventへ記録してsuspensionをoperator-recoverableへ戻すが、generationと実行枠を変更しない。`adopt-pr`は同一repository/base/branchの単一merged PRとclean・fully pushedな同一HEAD、base ancestryが揃う場合だけcompletedへ遷移する。`cancel`はIssueを実行せずIssueを`canceled`へ、pending requestをrequest-level `canceled`へ収束させる。各操作は観測値とactionをaudit eventへ保存し、GitHub同期失敗後の再実行も同じgeneration/revisionへ収束する。
 

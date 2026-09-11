@@ -1,0 +1,20 @@
+{
+  "status": "blocked",
+  "stage": "resume",
+  "suspension_status": "active",
+  "recoverability": "operator",
+  "allowed_actions": ["cancel", "retry-stage"],
+  "reason": "resolved merge changes path outside the recorded scope: internal/adapter/state/diagnosis.go",
+  "additional_paths": ["internal/adapter/state/diagnosis.go", "internal/adapter/state/diagnosis_test.go"],
+  "request": {
+    "id": "req_anonymized_conflict_paths",
+    "issue_number": 287,
+    "question": "診断関連の2ファイルを競合復旧の変更範囲へ追加してよいですか？",
+    "allow_free_text": true,
+    "run_id": "run_287",
+    "status": "answered",
+    "answer": "internal/adapter/state/diagnosis.go と internal/adapter/state/diagnosis_test.go の追加を承認します。",
+    "created_at": "2026-09-11T00:00:00Z",
+    "answered_at": "2026-09-11T00:01:00Z"
+  }
+}

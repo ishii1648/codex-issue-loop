@@ -52,10 +52,25 @@ func worktreeAdoptionReasons(cfg config.Config, item *state.Issue, launch worktr
 	baseOK bool, baseErr error, remote gh.RemoteState, remoteErr error,
 	adoption worktreeAdoptionObservation, adoptionErr error, adoptionAllowPaths []string,
 ) []string {
-	reasons := []string{}
+	reasons := conflictWorktreeReasons(cfg, item, launch, launchErr, inspection, inspectErr, worktreeSHA256, worktreeDigestErr, baseOK, baseErr, remote, remoteErr, adoption, adoptionErr, adoptionAllowPaths)
 	if !state.CanAdoptWorktree(item) {
 		reasons = append(reasons, "only a quarantined conflict continuation missing worktree_sha256 can be adopted")
 	}
+	currentUnapproved := adoptionUnapprovedPaths(item, adoption, nil)
+	for _, path := range adoptionAllowPaths {
+		if !containsPath(currentUnapproved, path) {
+			reasons = append(reasons, fmt.Sprintf("explicitly allowed path is not a current unapproved change: %s", path))
+		}
+	}
+	return reasons
+}
+
+func conflictWorktreeReasons(cfg config.Config, item *state.Issue, launch worktree.LaunchValidation, launchErr error,
+	inspection worktree.Inspection, inspectErr error, worktreeSHA256 string, worktreeDigestErr error,
+	baseOK bool, baseErr error, remote gh.RemoteState, remoteErr error,
+	adoption worktreeAdoptionObservation, adoptionErr error, adoptionAllowPaths []string,
+) []string {
+	reasons := []string{}
 	if item.WorkerPID != 0 || item.WorkerPGID != 0 {
 		reasons = append(reasons, "worker identity is still recorded")
 	}
@@ -92,12 +107,6 @@ func worktreeAdoptionReasons(cfg config.Config, item *state.Issue, launch worktr
 		unapproved := adoptionUnapprovedPaths(item, adoption, adoptionAllowPaths)
 		if len(unapproved) > 0 || !pathsWithinRecordedScope(adoption.UnmergedPaths, mergeAdoptionPaths(recovery.AllowedPaths, adoptionAllowPaths)) {
 			reasons = append(reasons, "conflict worktree contains paths outside the recorded scope")
-		}
-		currentUnapproved := adoptionUnapprovedPaths(item, adoption, nil)
-		for _, path := range adoptionAllowPaths {
-			if !containsPath(currentUnapproved, path) {
-				reasons = append(reasons, fmt.Sprintf("explicitly allowed path is not a current unapproved change: %s", path))
-			}
 		}
 	}
 	return reasons
@@ -136,34 +145,38 @@ func inspectWorktreeAdoption(ctx context.Context, gitPath string, item *state.Is
 		if err != nil {
 			return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 		}
-		return strings.TrimSpace(string(output)), nil
+		return string(output), nil
 	}
 	mergeHead, err := run("rev-parse", "--verify", "MERGE_HEAD")
 	if err != nil {
 		return worktreeAdoptionObservation{}, err
 	}
-	changed, err := run("diff", "--name-only", item.ConflictRecovery.TargetBaseSHA, "--")
+	changed, err := run("diff", "--no-renames", "--name-only", "-z", item.ConflictRecovery.TargetBaseSHA, "--")
 	if err != nil {
 		return worktreeAdoptionObservation{}, err
 	}
-	untracked, err := run("ls-files", "--others", "--exclude-standard")
+	staged, err := run("diff", "--cached", "--no-renames", "--name-only", "-z", item.ConflictRecovery.TargetBaseSHA, "--")
 	if err != nil {
 		return worktreeAdoptionObservation{}, err
 	}
-	unmerged, err := run("diff", "--name-only", "--diff-filter=U", "--")
+	untracked, err := run("ls-files", "-z", "--others", "--exclude-standard")
+	if err != nil {
+		return worktreeAdoptionObservation{}, err
+	}
+	unmerged, err := run("diff", "--name-only", "-z", "--diff-filter=U", "--")
 	if err != nil {
 		return worktreeAdoptionObservation{}, err
 	}
 	return worktreeAdoptionObservation{
-		MergeHead: mergeHead, ChangedPaths: uniqueSortedLines(changed, untracked), UnmergedPaths: uniqueSortedLines(unmerged),
+		MergeHead: strings.TrimSpace(mergeHead), ChangedPaths: uniqueSortedPaths(changed, staged, untracked), UnmergedPaths: uniqueSortedPaths(unmerged),
 	}, nil
 }
 
-func uniqueSortedLines(values ...string) []string {
+func uniqueSortedPaths(values ...string) []string {
 	seen := map[string]bool{}
 	for _, value := range values {
-		for _, line := range strings.Split(value, "\n") {
-			if line = strings.TrimSpace(line); line != "" {
+		for _, line := range strings.Split(value, "\x00") {
+			if line != "" {
 				seen[line] = true
 			}
 		}
