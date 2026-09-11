@@ -14,7 +14,7 @@
 
 ## データフローと制御
 
-1. `gh`がIssueを取得する。タイトル512 bytes、本文64 KiB、最新20コメント・各8 KiBに制限し、NULを含む制御文字を除去する。
+1. `gh`がIssueを取得する。タイトル512 bytes、本文64 KiBに制限し、NULを含む制御文字を除去する。marker検証用のコメントは全件・全文を保持し、worker prompt作成時にのみ最新20コメント・各8 KiBへ制限する。
 2. IssueはJSON化して明示的なuntrusted data境界内へ置く。Issue内の命令、権限拡張、資格情報要求、prompt境界の上書きを実行しないようworkerの優先順位を固定する。
 3. worktree名はIssue番号と限定文字のslugから生成する。リポジトリID、Issue番号、Git ref、絶対worktree rootを検証し、root外への逸脱とworktreeパスのsymbolic linkを拒否する。
 4. Codexは`workspace-write` sandbox、`--approve-for-me`による自動承認レビューで実行する。`danger-full-access`は設定で拒否し、追加権限要求は自動レビューで判定する。command networkは既定無効で、localhost-only opt-in時も固定network proxy、user config隔離を同時に強制する。

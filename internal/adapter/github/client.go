@@ -63,8 +63,11 @@ type RemoteState struct {
 
 type Client interface {
 	ListReady(context.Context, config.Config) ([]Issue, error)
+	// Get returns all comments in chronological order, with control characters removed
+	// and no count or body-length truncation. ListReady does not fetch comments.
 	Get(context.Context, config.Config, int) (Issue, error)
 	VerifyIssueAuthor(context.Context, config.Config, Issue) (AuthorVerification, error)
+	// Inspect returns Issue comments with the same contract as Get.
 	Inspect(context.Context, config.Config, int, string) (RemoteState, error)
 	Claim(context.Context, config.Config, Issue, string) error
 	MarkNeedsInput(context.Context, config.Config, int, string, string) error
@@ -86,8 +89,6 @@ type CLI struct {
 const (
 	maxIssueTitleBytes = 512
 	maxIssueBodyBytes  = 64 * 1024
-	maxIssueComments   = 20
-	maxCommentBytes    = 8 * 1024
 )
 
 type rawIssue struct {
@@ -175,7 +176,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,stateReason,labels,assignees,milestone,comments,author").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,stateReason,labels,assignees,milestone,author").CombinedOutput()
 	if err != nil {
 		return Issue{}, c.commandError(ctx, path, fmt.Sprintf("get GitHub Issue #%d", number), err, out)
 	}
@@ -195,9 +196,9 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	if item.Milestone != nil {
 		milestone = item.Milestone.Title
 	}
-	comments := make([]string, 0, len(item.Comments))
-	for _, comment := range item.Comments {
-		comments = append(comments, comment.Body)
+	comments, err := c.issueComments(ctx, cfg, number)
+	if err != nil {
+		return Issue{}, err
 	}
 	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State, StateReason: item.StateReason, AuthorLogin: item.Author.Login, AuthorType: authorType(item.Author.IsBot)}), nil
 }
@@ -591,11 +592,12 @@ func NormalizeIssue(issue Issue) Issue {
 	issue.Title = safeText(issue.Title, maxIssueTitleBytes)
 	issue.Body = safeText(issue.Body, maxIssueBodyBytes)
 	issue.URL = safeText(issue.URL, 2048)
-	if len(issue.Comments) > maxIssueComments {
-		issue.Comments = issue.Comments[len(issue.Comments)-maxIssueComments:]
+	comments := make([]string, len(issue.Comments))
+	for index, comment := range issue.Comments {
+		comments[index] = safeText(comment, len(comment))
 	}
-	for index := range issue.Comments {
-		issue.Comments[index] = safeText(issue.Comments[index], maxCommentBytes)
+	if issue.Comments != nil {
+		issue.Comments = comments
 	}
 	return issue
 }
