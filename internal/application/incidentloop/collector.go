@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
 )
 
@@ -20,11 +24,38 @@ type StateEventCollector struct {
 }
 
 func (c StateEventCollector) Collect() (int, error) {
+	if err := c.Target.Ensure(); err != nil {
+		return 0, err
+	}
+	lock, err := c.Target.lock("data.lock", true)
+	if err != nil {
+		return 0, err
+	}
+	defer unlockFile(lock)
+	cursorPath := filepath.Join(c.Target.Dir, "state-event-cursor.json")
+	var sequence uint64
+	data, err := os.ReadFile(cursorPath)
+	if err == nil {
+		if err := json.Unmarshal(data, &sequence); err != nil {
+			return 0, fmt.Errorf("decode state event cursor: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
 	events, err := readStateEvents(c.Source.EventsPath())
 	if err != nil {
 		return 0, err
 	}
-	incidentState, err := c.Target.LoadState()
+	latestSequence := sequence
+	for _, event := range events {
+		if event.Sequence > latestSequence {
+			latestSequence = event.Sequence
+		}
+	}
+	if latestSequence == sequence {
+		return 0, nil
+	}
+	incidentState, err := c.Target.loadStateUnlocked()
 	if err != nil {
 		return 0, err
 	}
@@ -36,6 +67,9 @@ func (c StateEventCollector) Collect() (int, error) {
 	}
 	batch := []Signal{}
 	for _, event := range events {
+		if event.Sequence <= sequence {
+			continue
+		}
 		batch = append(batch, signalsFromStateEvent(c.Repository, event, issueFingerprints[event.IssueNumber], c.CloseIssue)...)
 	}
 	if len(events) > 0 {
@@ -49,7 +83,11 @@ func (c StateEventCollector) Collect() (int, error) {
 		}
 		batch = append(batch, coverage)
 	}
-	return c.Target.RecordBatch(batch)
+	written, err := c.Target.recordBatchUnlocked(batch)
+	if err != nil {
+		return written, err
+	}
+	return written, fsutil.WriteJSON(cursorPath, latestSequence, 0o600)
 }
 
 func signalsFromStateEvent(repository string, event state.Event, incidentFingerprint string, closeIssue bool) []Signal {
