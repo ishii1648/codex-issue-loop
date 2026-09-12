@@ -806,7 +806,7 @@ func (s *scheduler) dispatchManagedReconciliation(ctx context.Context, snapshot 
 	now := s.loop.now()
 	candidates := make([]state.Issue, 0)
 	for _, issue := range snapshot.Issues {
-		if issue == nil {
+		if issue == nil || issue.Status == issuedomain.StatusCompleted || issue.Status == issuedomain.StatusCanceled {
 			continue
 		}
 		if s.retryPending(issue.Number) {

@@ -70,7 +70,7 @@ func TestProjectionRejectsConcurrentCanonicalChangeAndConvergesNextTime(t *testi
 	}
 }
 
-func TestManagedSweepIncludesCompletedCanceledAndQuarantine(t *testing.T) {
+func TestManagedSweepSkipsCompletedCanceledAndIncludesQuarantine(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
 	loop.Clock = fixedClock{value: time.Now().UTC()}
 	before, err := loop.Store.Update("fixtures", 0, "", nil, func(s *state.Snapshot) error {
@@ -86,7 +86,10 @@ func TestManagedSweepIncludesCompletedCanceledAndQuarantine(t *testing.T) {
 	github.projectionHook = func(number int, status issuedomain.Status) error { seen[number] = status; return nil }
 	s := &scheduler{loop: loop, active: map[int]activeJob{}, events: make(chan schedulerEvent, 1), issueRetry: map[int]time.Time{}, issueFails: map[int]int{}}
 	defer s.cancelAndDrain()
-	for range 3 {
+	for round := range 2 {
+		if round > 0 {
+			loop.Clock = fixedClock{value: loop.now().Add(10 * time.Minute)}
+		}
 		s.lifecycleMu.Lock()
 		dispatched, err := s.dispatchManagedReconciliation(context.Background(), before)
 		s.lifecycleMu.Unlock()
@@ -101,10 +104,12 @@ func TestManagedSweepIncludesCompletedCanceledAndQuarantine(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("projection did not finish")
 		}
-	}
-	want := map[int]issuedomain.Status{1: issuedomain.StatusCompleted, 2: issuedomain.StatusCanceled, 3: issuedomain.StatusBlocked}
-	if !reflect.DeepEqual(seen, want) {
-		t.Fatalf("seen=%v", seen)
+		if !reflect.DeepEqual(seen, map[int]issuedomain.Status{3: issuedomain.StatusBlocked}) {
+			t.Fatalf("unexpected Issue polled: %v", seen)
+		}
+		if len(s.terminalPoll) != 1 {
+			t.Fatalf("completed/canceled Issue scheduled: %v", s.terminalPoll)
+		}
 	}
 	after, err := loop.Store.Load()
 	if err != nil || !reflect.DeepEqual(before, after) {
