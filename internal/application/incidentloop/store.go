@@ -58,6 +58,15 @@ func (s Store) RecordBatch(signals []Signal) (int, error) {
 	if err := s.Ensure(); err != nil {
 		return 0, err
 	}
+	lock, err := s.lock("data.lock", true)
+	if err != nil {
+		return 0, err
+	}
+	defer unlockFile(lock)
+	return s.recordBatchUnlocked(signals)
+}
+
+func (s Store) recordBatchUnlocked(signals []Signal) (int, error) {
 	safeSignals := make([]Signal, len(signals))
 	for index, signal := range signals {
 		safe, err := sanitizeSignal(signal, s.Secrets)
@@ -66,12 +75,6 @@ func (s Store) RecordBatch(signals []Signal) (int, error) {
 		}
 		safeSignals[index] = safe
 	}
-	lock, err := s.lock("data.lock", true)
-	if err != nil {
-		return 0, err
-	}
-	defer unlockFile(lock)
-
 	existing, err := s.readSignalsUnlocked()
 	if err != nil {
 		return 0, err

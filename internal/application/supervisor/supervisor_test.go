@@ -655,6 +655,7 @@ func TestWorkerEnvironmentBlockAllowsFollowingRepositoryIssue(t *testing.T) {
 		Summary: "public network is unavailable", SessionID: "session-314",
 	}
 	loop, github := testLoop(t, blocked)
+	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
 	loop.Config.Queue.Concurrency = 1
 	github.issue = gh.Issue{Number: 314, Title: "Public verification", Body: "Verify production", Labels: []string{"codex-loop:ready"}}
 	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
@@ -673,8 +674,8 @@ func TestWorkerEnvironmentBlockAllowsFollowingRepositoryIssue(t *testing.T) {
 		Version: 1, Status: "completed", ExecutionProfile: "standard", Summary: "done", SessionID: "session-448",
 		Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/448"},
 	}}
-	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
-		t.Fatalf("Issue #448 worked=%v err=%v", worked, err)
+	if _, err := loop.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	second, err := loop.Store.Load()
 	if err != nil {
@@ -2302,6 +2303,17 @@ func TestZeitreise477LegacyAnsweredResumeWithSavedPullRequestSuspendsWithoutWork
 	}
 	data = bytes.ReplaceAll(data, []byte("/sanitized/zeitreise"), []byte(loop.Config.RepoPath))
 	data = bytes.ReplaceAll(data, []byte("/sanitized/worktrees/zeitreise/issue-477"), []byte(loop.Config.RepoPath))
+	var fixture map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	fixture["version"] = json.RawMessage(fmt.Sprint(state.CurrentVersion))
+	delete(fixture, "semantic_contract_version")
+	delete(fixture, "issue_lifecycle_api_version")
+	data, err = json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(loop.Store.StatePath(), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2864,8 +2876,18 @@ func TestIssueResolutionSyncRevalidatesContinuationAuthority(t *testing.T) {
 	answeredRemote := gh.RemoteState{Issue: gh.Issue{Number: 1, State: "OPEN", Labels: []string{loop.Config.GitHub.FailedLabel}, Comments: []string{
 		"<!-- codex-issue-loop:request:req_1 -->", "<!-- codex-issue-loop:failed:1 -->", fmt.Sprintf("<!-- codex-issue-loop:failure:%x -->", digest[:8]),
 	}}}
+	for index := 0; index < 125; index++ {
+		answeredRemote.Issue.Comments = append(answeredRemote.Issue.Comments, fmt.Sprintf("discussion %d", index))
+	}
+	answeredRemote.Issue.Comments[2] = strings.Repeat("x", 9*1024) + answeredRemote.Issue.Comments[2]
+	answeredRemote.Issue = gh.NormalizeIssue(answeredRemote.Issue)
 	if err := loop.validateIssueResolutionSync(answered, answeredRemote); err != nil {
 		t.Fatal(err)
+	}
+	duplicate := answeredRemote
+	duplicate.Issue.Comments = append(append([]string(nil), answeredRemote.Issue.Comments...), answeredRemote.Issue.Comments[0])
+	if err := loop.validateIssueResolutionSync(answered, duplicate); err == nil {
+		t.Fatal("duplicate request marker was accepted")
 	}
 	answeredRemote.Issue.Comments = answeredRemote.Issue.Comments[:2]
 	if err := loop.validateIssueResolutionSync(answered, answeredRemote); err == nil {

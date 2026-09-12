@@ -104,7 +104,7 @@ func TestHostHasNoSnapshotDependency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dependency graph: %v: %s", err, out)
 	}
-	for _, name := range []string{"/adapter/state", "/domain/issue", "/domain/statecontract", "/application/app", "/application/migration", "/application/supervisor", "/application/delivery"} {
+	for _, name := range []string{"/adapter/state", "/domain/snapshot", "/domain/issue", "/domain/statecontract", "/application/app", "/application/migration", "/application/supervisor", "/application/delivery"} {
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.HasSuffix(line, name) {
 				t.Fatalf("host CLI depends on %s", line)

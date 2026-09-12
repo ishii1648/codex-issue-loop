@@ -1,11 +1,37 @@
 package operatorcontrol
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestTransactionJSONCompletedAt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{name: "unset", want: `"0001-01-01T00:00:00Z"`},
+		{name: "set", at: time.Date(2026, 9, 11, 12, 30, 0, 0, time.UTC), want: `"2026-09-11T12:30:00Z"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(Transaction{CompletedAt: tc.at})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(fields["completed_at"]); got != tc.want {
+				t.Errorf("completed_at = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestTransactionAndFenceRoundTrip(t *testing.T) {
 	root := t.TempDir()

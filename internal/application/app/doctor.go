@@ -25,7 +25,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
-	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/userrules"
 )
 
@@ -293,12 +292,12 @@ func diagnoseInstallation(l layout.Layout) []diagnostic {
 	if manifestSchema == 0 {
 		manifestSchema = 1
 	}
-	if manifestSchema != schema.CurrentVersion {
-		return []diagnostic{failedDiagnostic("INSTALL_SCHEMA_INCOMPATIBLE", "host", "", "installed binaryと永続schemaの対応versionが一致しません", fmt.Sprintf("install_schema=%d binary_schema=%d", manifestSchema, schema.CurrentVersion), instruction("全loopを停止し、release手順に従ってbinary updateとschema migrationを組で実行してください"))}
+	if manifestSchema != state.CurrentVersion {
+		return []diagnostic{failedDiagnostic("INSTALL_SCHEMA_INCOMPATIBLE", "host", "", "installed binaryと永続schemaの対応versionが一致しません", fmt.Sprintf("install_schema=%d binary_schema=%d", manifestSchema, state.CurrentVersion), instruction("全loopを停止し、release手順に従ってbinary updateとschema migrationを組で実行してください"))}
 	}
-	if manifest.SchemaMigrationFrom != schemaversion.Previous || manifest.SemanticContractVersion != statecontract.CurrentVersion {
+	if manifest.SchemaMigrationFrom != statecontract.MigrationFromSchema || manifest.SemanticContractVersion != statecontract.CurrentVersion {
 		return []diagnostic{failedDiagnostic("INSTALL_SEMANTIC_CONTRACT_INCOMPATIBLE", "host", "", "installed artifactのstate互換範囲がcurrent binaryと一致しません",
-			fmt.Sprintf("manifest_migration_from=%d manifest_semantic=%d binary_migration_from=%d binary_semantic=%d", manifest.SchemaMigrationFrom, manifest.SemanticContractVersion, schemaversion.Previous, statecontract.CurrentVersion),
+			fmt.Sprintf("manifest_migration_from=%d manifest_semantic=%d binary_migration_from=%d binary_semantic=%d", manifest.SchemaMigrationFrom, manifest.SemanticContractVersion, statecontract.MigrationFromSchema, statecontract.CurrentVersion),
 			instruction("全loopを停止し、検証済みreleaseからupdateしてsemantic migrationをpreviewしてください"))}
 	}
 	binaryHash, binaryErr := fileSHA256(filepath.Join(l.BinDir, "agent-loop"))

@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/runtimemetadata"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/config"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/model"
 	"github.com/ishii1648/codex-issue-loop/monitor/internal/store"
@@ -63,21 +65,13 @@ func (a App) monitorHandler(cfg config.Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		host, _, err := net.SplitHostPort(r.Host)
-		if err != nil {
-			host = r.Host
-		}
-		ip := net.ParseIP(host)
-		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-			http.Error(w, "loopback Host required", http.StatusForbidden)
-			return
-		}
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
 			http.Error(w, "read-only endpoint", http.StatusMethodNotAllowed)
 			return
 		}
 		now := a.now()
+		var err error
 		var out bytes.Buffer
 		reader := a
 		reader.Out = &out
@@ -103,6 +97,9 @@ func (a App) monitorHandler(cfg config.Config) http.Handler {
 			switch r.URL.Path {
 			case "/api/status", "/api/details":
 				err = reader.status(args)
+				if err == nil && r.URL.Path == "/api/status" {
+					err = a.addRuntimeMetadata(&out, cfg, now)
+				}
 				if err == nil && r.URL.Path == "/api/details" {
 					err = flattenDetails(&out)
 				}
@@ -230,6 +227,10 @@ func normalizeTimeline(data *bytes.Buffer, repositories []config.Repository) err
 		rows := []model.Interval{}
 		cursor := history.From
 		for _, interval := range intervals {
+			if interval.DecisionVersion != model.DecisionVersion {
+				interval.Reason = fmt.Sprintf("legacy decision contract (status=%s): %s", interval.Status, interval.Reason)
+				interval.Status = model.Unknown
+			}
 			if interval.StartedAt.Before(cursor) {
 				interval.StartedAt = cursor
 			}
@@ -237,7 +238,7 @@ func normalizeTimeline(data *bytes.Buffer, repositories []config.Repository) err
 				interval.EndedAt = history.To
 			}
 			if interval.StartedAt.After(cursor) {
-				rows = append(rows, model.Interval{Repository: repo.Name, Status: model.Unknown, StartedAt: cursor, EndedAt: interval.StartedAt, Reason: "no observations recorded"})
+				rows = append(rows, model.Interval{DecisionVersion: model.DecisionVersion, Repository: repo.Name, Status: model.Unknown, StartedAt: cursor, EndedAt: interval.StartedAt, Reason: "no observations recorded"})
 			}
 			if interval.EndedAt.After(interval.StartedAt) {
 				rows = append(rows, interval)
@@ -245,7 +246,7 @@ func normalizeTimeline(data *bytes.Buffer, repositories []config.Repository) err
 			}
 		}
 		if cursor.Before(history.To) {
-			rows = append(rows, model.Interval{Repository: repo.Name, Status: model.Unknown, StartedAt: cursor, EndedAt: history.To, Reason: "no observations recorded"})
+			rows = append(rows, model.Interval{DecisionVersion: model.DecisionVersion, Repository: repo.Name, Status: model.Unknown, StartedAt: cursor, EndedAt: history.To, Reason: "no observations recorded"})
 		}
 		history.Repositories[repo.Name] = rows
 	}
@@ -293,4 +294,34 @@ func flattenDetails(data *bytes.Buffer) error {
 	}
 	data.Reset()
 	return json.NewEncoder(data).Encode(map[string]any{"rows": rows})
+}
+
+func (a App) addRuntimeMetadata(data *bytes.Buffer, cfg config.Config, now time.Time) error {
+	var result struct {
+		SchemaVersion int                          `json:"schema_version"`
+		Repositories  []map[string]json.RawMessage `json:"repositories"`
+	}
+	if err := json.Unmarshal(data.Bytes(), &result); err != nil {
+		return err
+	}
+	metadata := a.RuntimeMetadata
+	if metadata == nil {
+		if root, err := layout.New(); err == nil {
+			metadata = &runtimemetadata.Store{Root: root.Root}
+		}
+	}
+	for _, repository := range result.Repositories {
+		var runtime *runtimemetadata.Observation
+		var name string
+		if json.Unmarshal(repository["repository"], &name) == nil && metadata != nil {
+			runtime = metadata.Observe(name, now, cfg.ObservationTimeout.Duration)
+		}
+		encoded, err := json.Marshal(runtime)
+		if err != nil {
+			return err
+		}
+		repository["runtime"] = encoded
+	}
+	data.Reset()
+	return json.NewEncoder(data).Encode(result)
 }

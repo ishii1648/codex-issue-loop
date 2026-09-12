@@ -56,6 +56,7 @@ live作成を許可するときだけ`dry_run: false`へ変更する。設定変
 既定のmanaged root配下にある`repos/<repo-id>/incidents/`へ次を保存する。directoryは`0700`、fileは`0600`で作る。
 
 - `signals.jsonl`: schema version、時刻、repository、correlation ID、outcome、reason codeを持つsanitized signal
+- `state-event-cursor.json`: collectorが取り込み済みのevent sequence。signalの世代落ち後も再追記・再計上を防ぐため、rotationせず保持する。
 - `decisions.jsonl`: episodeごとの起票可否、結果（`created`、`reused`、`dry_run`、`skipped`、`failed`）とbounded reason codeを持つ監査記録
 - `state.json`: episode、classification、AI結果、Issue identity、retry/circuit、fix lifecycle
 - `metrics.json`: signal/outcome/classification/Issue/analysis回数、duration、open episode、open circuitのbounded aggregate

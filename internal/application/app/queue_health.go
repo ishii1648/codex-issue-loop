@@ -57,10 +57,30 @@ func assessQueueHealth(now time.Time, interval time.Duration, snapshot state.Sna
 		OK: true, Code: "ready", MailboxDepth: len(deliveries), DistinctTargets: len(targets),
 		OldestIntentAt: oldestAny, StallThresholdMS: threshold.Milliseconds(),
 	}
+	releasedAt := snapshot.LastExecutionReleasedAt
+	if releasedAt.IsZero() {
+		for _, issue := range snapshot.Issues {
+			if issue == nil || issue.Continuation == nil {
+				continue
+			}
+			checkpoint := issue.Continuation
+			if checkpoint.ID != "" && checkpoint.RunID != "" && checkpoint.RunID == issue.RunID &&
+				checkpoint.Generation > 0 && checkpoint.Generation == issue.Generation && checkpoint.CreatedAt.After(releasedAt) {
+				releasedAt = checkpoint.CreatedAt
+			}
+		}
+	}
 	for number := range readySet {
 		result.ReadyIssues = append(result.ReadyIssues, number)
 		local := snapshot.Issues[intKey(number)]
-		if snapshot.ActiveExecution != nil || local != nil || oldest[number].IsZero() || now.Sub(oldest[number]) <= threshold {
+		if snapshot.ActiveExecution != nil || local != nil || oldest[number].IsZero() {
+			continue
+		}
+		eligibleAt := oldest[number]
+		if releasedAt.After(eligibleAt) {
+			eligibleAt = releasedAt
+		}
+		if now.Sub(eligibleAt) <= threshold {
 			continue
 		}
 		result.StalledIssues = append(result.StalledIssues, number)

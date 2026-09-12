@@ -79,11 +79,12 @@ func NormalizeIssue(issue Issue) Issue {
 	issue.Title = SafeText(issue.Title, MaxIssueTitleBytes)
 	issue.Body = SafeText(issue.Body, MaxIssueBodyBytes)
 	issue.URL = SafeText(issue.URL, 2048)
-	if len(issue.Comments) > MaxIssueComments {
-		issue.Comments = issue.Comments[len(issue.Comments)-MaxIssueComments:]
+	comments := make([]string, len(issue.Comments))
+	for index, comment := range issue.Comments {
+		comments[index] = SafeText(comment, len(comment))
 	}
-	for index := range issue.Comments {
-		issue.Comments[index] = SafeText(issue.Comments[index], MaxCommentBytes)
+	if issue.Comments != nil {
+		issue.Comments = comments
 	}
 	return issue
 }

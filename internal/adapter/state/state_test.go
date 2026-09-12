@@ -1080,23 +1080,21 @@ func TestDurableStateRejectsUnknownIssueStatus(t *testing.T) {
 	}
 }
 
-func TestLifecycleAPIPreviousMinorNormalizesCompatibly(t *testing.T) {
+func TestV6DoesNotNormalizeLegacyLifecycleVersion(t *testing.T) {
 	store := newStore(t)
 	snapshot, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshot.IssueLifecycleAPIVersion = issuedomain.LifecycleAPIPreviousMinor
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := strings.Replace(string(encoded), `"issue_lifecycle_api_version":"`+issuedomain.LifecycleAPICurrent+`"`, `"issue_lifecycle_api_version":"`+issuedomain.LifecycleAPIPreviousMinor+`"`, 1)
 	var decoded Snapshot
-	if err := json.Unmarshal([]byte(legacy), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.IssueLifecycleAPIVersion != issuedomain.LifecycleAPICurrent || decoded.Validate() != nil {
-		t.Fatalf("version=%q validation=%v", decoded.IssueLifecycleAPIVersion, decoded.Validate())
+	var versionErr LifecycleAPIVersionError
+	if err := json.Unmarshal(encoded, &decoded); !errors.As(err, &versionErr) {
+		t.Fatalf("legacy marker accepted: %v", err)
 	}
 }
 
@@ -1560,7 +1558,7 @@ func TestUnsupportedLifecycleAPIVersionIsRejectedWithoutQuarantine(t *testing.T)
 		t.Fatal("unsupported lifecycle API was accepted")
 	} else {
 		var versionErr LifecycleAPIVersionError
-		if !errors.As(err, &versionErr) || versionErr.Version != "99.0" || versionErr.Current != issuedomain.LifecycleAPICurrent {
+		if !errors.As(err, &versionErr) || versionErr.Version != "99.0" || versionErr.Current != "" {
 			t.Fatalf("error=%T %v", err, err)
 		}
 	}

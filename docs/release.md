@@ -24,15 +24,15 @@ release jobは同じtag、commit、`SOURCE_DATE_EPOCH`から2回buildし、binar
 
 GitHub Actionsのartifact downloadとGitHub Release downloadでは実行modeが保持されないため、isolated canaryとstable readbackはdownload後にbinaryを`0755`へ戻してから実行する。これはfile bytesを変更しない。mode復元後もmanifestのSHA-256とattestationを正本とし、不一致時はcandidate公開またはstable公開を停止する。
 
-candidate integrityは待機を挟まず、candidate prereleaseから取得したbinaryとcanonical artifactのbyte一致およびGitHub attestationを即時検証する。production hostのraw snapshotはowner-onlyのprivate evidenceに限定し、公開Releaseにはcandidate digest、非変更結果、安全条件、private evidence digestだけのredacted summaryを添付する。Release workflowはstable公開後のartifact readbackで完了する。repository rolloutは独立workflowで検証し、5分間のhealth soakとして開始時・1分後・5分後に対象repositoryのassignment、doctor、statusを採取する。
+candidate integrityは待機を挟まず、candidate prereleaseから取得したbinaryとcanonical artifactのbyte一致およびGitHub attestationを即時検証する。通常releaseは本番snapshotの採取・比較を要求しない。Release workflowはstable公開後のartifact readbackで完了する。repository rolloutはproduction hostで検証し、5分間のhealth soakとして開始時・1分後・5分後に対象repositoryのassignment、doctor、statusを採取する。
 
-Pull Requestとmainの通常CIでも`scripts/check-release.sh`を実行し、固定test versionから2回作成したartifactのbyte一致と埋め込みversion/commitを確認する。
+通常CIはsourceの品質検証を行い、Release workflowは同じcommitのmain push CI成功をAPIで確認し、配布artifactの再現性・metadataを検証する。全体品質検証はReleaseで再実行しない。ローカルの`scripts/check-release.sh`はCIを使えない場合やrelease script変更時の検証に使い、同じcommitの成功済みCIとローカル全量検証を重複させない。
 
-release artifactの`version --json`とinstall manifestはstorage schemaのcurrent/migration-from、およびsemantic contractのcurrent/minimumを明示する。release checkはこの範囲とversioned state contractを検査し、execution-required provenance追加にmigration/compatibility ruleがないbuildを拒否する。release前にはsupported旧versionのactive、blocked、needs-input、retry、publication recovery fixtureへcurrent validatorを適用する。
+release artifact の `version --json` と manifest は snapshot の単一 version=6 を報告する。既存名 `state_schema_current` / `semantic_contract_current` は同じ契約値を参照する。既存 migration の移行先はまだ v5 であるため、#536/#537 統合まで [配布保留境界](release-gates.md) を維持する。release check は build の契約整合性を検証するが、通常配布の解除を意味しない。
 
 ## Release作成
 
-1. `main`のCIとIssue/milestoneを確認する。
+1. `main`の対象commitのCIとIssue/milestoneを確認する。同じcommitのCI成功後にローカル全量検証を追加で待たない。
 2. releaseするcommitへannotated tagを作る。
 3. tagをpushし、`verify-stable-release`までのRelease workflow成功を確認する。
 
@@ -57,7 +57,7 @@ chmod 0755 agent-loop_Darwin_arm64
 
 checksum、attestation、version/commitのいずれかが一致しなければ実行・installしない。
 
-stable公開後のassignment、rollback drill、health reportはRelease workflowの完了条件ではない。rollout成功後に`production-health-report.json`をstable Releaseへ追加し、独立した`Repository rollout health` workflowを起動する。rollout失敗時は対象repositoryだけをpreviousへ戻し、artifact自体の修正が必要と確認できた場合に限って新しいpatch releaseを作る。
+stable公開後のassignment、変更内容に応じたrollback drill、health reportはRelease workflowの完了条件ではない。production hostで対象version/commit/digestへのassignment、必要なキュー処理再開、5分間のhealth soakと必要なrollback drillを検証し、`production-health-report.json`等の証拠をローカルに保存した時点でrollout完了とする。処理再開の確認方法と公開の扱いは[Release gates](release-gates.md)に従う。reportの公開用整形・安全審査・GitHub Releaseへのアップロードは通常の必須手順にも完了条件にも含めず、公開しないことや任意の公開の拒否・失敗でrolloutを未完了・失敗へ戻したりrollbackしたりしない。ローカルのrollout検証失敗時は対象repositoryだけをpreviousへ戻し、artifact自体の修正が必要と確認できた場合に限って新しいpatch releaseを作る。
 
 ## Mac側pull型delivery
 
@@ -85,6 +85,8 @@ agent-loopctl delivery status --json
 ```
 
 設定は`$HOME/.agent-loop-delivery.yaml`だけに置き、regular file、現在userのowner、mode `0600`を必須とする。`--config`はtestまたは明示運用用のabsolute pathだけを受理する。credentialは保存せず既存の`gh`認証を使う。transaction、download cache、log、maintenance fenceは`$HOME/Library/Application Support/codex-issue-loop/delivery/`配下であり、設定fileや各repositoryへ展開しない。
+
+v1 host-wideの`delivery status --json`では、`last_check_at`、`next_check_at`、`drain_started_at`、`drain_deadline`を常に出力する。`delivery/transaction.json`では、これらに加えて`started_at`と`updated_at`も常に出力する。未設定時刻は`"0001-01-01T00:00:00Z"`で表し、consumerはキーの有無ではなく時刻のゼロ値で未設定を判定する。
 
 `check`/`reconcile`はdraft/prereleaseを除く最新production Releaseのannotated SemVer tagをcommitへpeelし、`release-manifest.json`、`checksums.txt`、binaryとmanifest双方のGitHub attestation、`darwin/arm64` target、binary埋め込みmetadataを照合する。checksumとtrusted release workflow attestationの完了前にcandidate binaryを実行しない。download中にRelease/tagが変化した場合はfresh candidateでやり直す。major、schema migration、downgrade、同一version異commit、未知manifest/protocolは自動適用しない。
 

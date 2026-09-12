@@ -43,8 +43,8 @@ func request(t *testing.T, handler http.Handler, path string) *httptest.Response
 
 func TestDashboardCLIParityAndReplay(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "issue 42"}}
-	closed := []model.Interval{{ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-3 * time.Hour), EndedAt: at.Add(-time.Hour)}}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "issue 42"}}
+	closed := []model.Interval{{DecisionVersion: model.DecisionVersion, ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-3 * time.Hour), EndedAt: at.Add(-time.Hour)}}
 	if err := storage.Commit(snapshot, closed); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,25 @@ func TestDashboardCLIParityAndReplay(t *testing.T) {
 			t.Fatal(stderr.String())
 		}
 		response := request(t, a.monitorHandler(cfg), "/api/"+command+query)
-		if response.Code != 200 || response.Body.String() != out.String() {
+		actual := response.Body.Bytes()
+		if command == "status" {
+			var body map[string]any
+			if err := json.Unmarshal(actual, &body); err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range body["repositories"].([]any) {
+				delete(row.(map[string]any), "runtime")
+			}
+			var expected map[string]any
+			if err := json.Unmarshal(out.Bytes(), &expected); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(body, expected) {
+				t.Fatalf("status differs: %v versus %v", body, expected)
+			}
+			actual = out.Bytes()
+		}
+		if response.Code != 200 || string(actual) != out.String() {
 			t.Fatalf("%s differs: %d %s versus %s", command, response.Code, response.Body.String(), out.String())
 		}
 	}
@@ -109,7 +127,7 @@ func TestDashboardStatesAndMissingData(t *testing.T) {
 			if state == "stale" {
 				observed = at.Add(-10 * time.Minute)
 			}
-			snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: current, StartedAt: observed.Add(-time.Hour)}}
+			snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: current, StartedAt: observed.Add(-time.Hour)}}
 			if state != "missing" {
 				if err := storage.Commit(snapshot, nil); err != nil {
 					t.Fatal(err)
@@ -166,6 +184,35 @@ func TestDashboardStatesAndMissingData(t *testing.T) {
 	}
 }
 
+func TestDashboardAcceptsHosts(t *testing.T) {
+	cfg, storage, at := dashboardFixture(t)
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at}}
+	if err := storage.Commit(snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := (App{Now: func() time.Time { return at }}).monitorHandler(cfg)
+	for _, path := range []string{"/", "/api/status", "/api/details", "/api/history", "/api/report", "/api/timeline", "/metrics"} {
+		if path == "/api/history" || path == "/api/report" || path == "/api/timeline" {
+			path += "?from=" + at.Add(-time.Hour).Format(time.RFC3339) + "&to=" + at.Format(time.RFC3339)
+		}
+		want := request(t, handler, path)
+		if want.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, want.Code, want.Body.String())
+		}
+		for _, host := range []string{"localhost:19110", "127.0.0.1:19110", "[::1]:19110", "machine.tailnet.ts.net", "machine.tailnet.ts.net:443", "monitor.example"} {
+			t.Run(host+path, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:19110"+path, nil)
+				req.Host = host
+				got := httptest.NewRecorder()
+				handler.ServeHTTP(got, req)
+				if got.Code != want.Code || got.Body.String() != want.Body.String() || !reflect.DeepEqual(got.Header(), want.Header()) {
+					t.Fatalf("response differs: %d %s headers=%v", got.Code, got.Body.String(), got.Header())
+				}
+			})
+		}
+	}
+}
+
 func TestDashboardReadOnlyBoundary(t *testing.T) {
 	cfg, _, at := dashboardFixture(t)
 	a := App{Now: func() time.Time { return at }}
@@ -176,10 +223,11 @@ func TestDashboardReadOnlyBoundary(t *testing.T) {
 	}{
 		{"POST", "http://127.0.0.1:19110/api/status", 405},
 		{"POST", "http://127.0.0.1:19110/api/details", 405},
-		{"GET", "http://attacker.example/api/details", 403},
+		{"POST", "http://machine.tailnet.ts.net/api/details", 405},
+		{"POST", "http://machine.tailnet.ts.net/api/status", 405},
+		{"POST", "http://machine.tailnet.ts.net/", 405},
 		{"GET", "http://127.0.0.1:19110/api/details?config=/etc/passwd", 400},
 		{"GET", "http://127.0.0.1:19110/api/details?repo=unknown/repo", 503},
-		{"GET", "http://attacker.example/api/status", 403},
 		{"GET", "http://127.0.0.1:19110/api/status?config=/etc/passwd", 400},
 		{"GET", "http://127.0.0.1:19110/api/status?at=invalid", 503},
 		{"GET", "http://127.0.0.1:19110/api/report?from=2026-09-07T00:00:00Z&to=2026-09-06T00:00:00Z", 503},
@@ -190,17 +238,23 @@ func TestDashboardReadOnlyBoundary(t *testing.T) {
 		if r.Code != tc.code {
 			t.Fatalf("%s: %d", tc.url, r.Code)
 		}
+		if r.Header().Get("Cache-Control") != "no-store" || r.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("%s: headers=%v", tc.url, r.Header())
+		}
+		if tc.code == 405 && r.Header().Get("Allow") != "GET" {
+			t.Fatalf("%s: Allow=%q", tc.url, r.Header().Get("Allow"))
+		}
 	}
 	for _, addr := range []string{"0.0.0.0:19110", "localhost:19110", "192.168.1.2:19110", "[::]:19110"} {
-		if err := a.serve(context.Background(), []string{"--listen", addr, "--config", cfg.Path}); err == nil {
-			t.Fatalf("allowed %s", addr)
+		if err := a.serve(context.Background(), []string{"--listen", addr, "--config", cfg.Path}); err == nil || err.Error() != "--listen must use a loopback IP address" {
+			t.Fatalf("%s: %v", addr, err)
 		}
 	}
 }
 
 func TestStatusReferenceMustNotPrecedeObservation(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at}}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at}}
 	if err := storage.Commit(snapshot, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +267,7 @@ func TestStatusReferenceMustNotPrecedeObservation(t *testing.T) {
 
 func TestDashboardRejectsPartiallyCommittedIntervals(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
 	closed := snapshot.Current
 	closed.EndedAt = at
 	if err := storage.Commit(snapshot, []model.Interval{closed}); err != nil {
@@ -230,8 +284,8 @@ func TestDashboardRejectsPartiallyCommittedIntervals(t *testing.T) {
 
 func TestDashboardRejectsGapDuringReplayCommit(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Unknown, StartedAt: at.Add(-time.Hour + 3*time.Minute)}}
-	closed := model.Interval{ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-2 * time.Hour), EndedAt: at.Add(-time.Hour)}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Unknown, StartedAt: at.Add(-time.Hour + 3*time.Minute)}}
+	closed := model.Interval{DecisionVersion: model.DecisionVersion, ID: "healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-2 * time.Hour), EndedAt: at.Add(-time.Hour)}
 	if err := storage.Commit(snapshot, []model.Interval{closed}); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +302,7 @@ func TestDashboardRejectsGapDuringReplayCommit(t *testing.T) {
 
 func TestMetricsUsesExactWholeSecondReference(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour)}}
 	if err := storage.Commit(snapshot, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -271,8 +325,8 @@ func TestMetricsUsesExactWholeSecondReference(t *testing.T) {
 
 func TestHistoryRejectsMissingCurrentDuringCommit(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
-	snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", Current: model.Interval{ID: "current", Repository: "owner/repo", Status: model.Down, StartedAt: at}}
-	if err := storage.Commit(snapshot, []model.Interval{{ID: "closed", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour), EndedAt: at}}); err != nil {
+	snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: model.Down, StartedAt: at}}
+	if err := storage.Commit(snapshot, []model.Interval{{DecisionVersion: model.DecisionVersion, ID: "closed", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-time.Hour), EndedAt: at}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(storage.Root, "repositories/owner--repo/current.json")); err != nil {
@@ -345,7 +399,7 @@ func TestDashboardDetails(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: repo, LastObservationAt: at, Current: model.Interval{ID: "current", Repository: repo, Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "queue progress deadline exceeded"}}
+				snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: repo, LastObservationAt: at, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: repo, Status: model.Down, StartedAt: at.Add(-time.Hour), Reason: "queue progress deadline exceeded"}}
 				wantStatus, wantDetail := "DOWN", snapshot.Current.Reason
 				numbers := []int{}
 				switch scenario {
@@ -432,9 +486,9 @@ func TestSelectedPeriodTimelineMatchesCLIReport(t *testing.T) {
 			var intervals []model.Interval
 			for i, state := range states {
 				start := observed.Add(time.Duration(i-4) * time.Hour)
-				intervals = append(intervals, model.Interval{ID: fmt.Sprint(i), Repository: "owner/repo", Status: state, StartedAt: start, EndedAt: start.Add(time.Hour)})
+				intervals = append(intervals, model.Interval{DecisionVersion: model.DecisionVersion, ID: fmt.Sprint(i), Repository: "owner/repo", Status: state, StartedAt: start, EndedAt: start.Add(time.Hour)})
 			}
-			snapshot := model.Snapshot{SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{ID: "current", Repository: "owner/repo", Status: states[3], StartedAt: observed}}
+			snapshot := model.Snapshot{DecisionVersion: model.DecisionVersion, SchemaVersion: model.SchemaVersion, Repository: "owner/repo", LastObservationAt: observed, Current: model.Interval{DecisionVersion: model.DecisionVersion, ID: "current", Repository: "owner/repo", Status: states[3], StartedAt: observed}}
 			if scenario != "missing" {
 				if err := storage.Commit(snapshot, intervals); err != nil {
 					t.Fatal(err)
@@ -472,6 +526,81 @@ func TestSelectedPeriodTimelineMatchesCLIReport(t *testing.T) {
 	}
 }
 
+func TestLegacyContractIsSeparatedAcrossDashboardAndCLI(t *testing.T) {
+	cfg, storage, at := dashboardFixture(t)
+	legacy := model.Snapshot{SchemaVersion: 1, Repository: "owner/repo", LastObservationAt: at.Add(-time.Hour),
+		Current: model.Interval{ID: "legacy", Repository: "owner/repo", Status: model.Healthy, StartedAt: at.Add(-3 * time.Hour)}}
+	if err := storage.Commit(legacy, nil); err != nil {
+		t.Fatal(err)
+	}
+	a := App{Now: func() time.Time { return at }}
+	response := request(t, a.monitorHandler(cfg), "/api/status")
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"status":"UNKNOWN"`) || !strings.Contains(response.Body.String(), "legacy decision contract") {
+		t.Fatal(response.Body.String())
+	}
+	obs := model.Observation{Repository: legacy.Repository, ObservedAt: at.Add(-30 * time.Minute), Cursor: 1, CursorInitialized: true, Items: []model.QueueItem{{Number: 1, Phase: model.Ready, PhaseSince: at.Add(-time.Hour), Deadline: at.Add(-40 * time.Minute)}}}
+	next, closed, err := model.Apply(&legacy, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs.ObservedAt = at
+	var subsequent []model.Interval
+	next, subsequent, err = model.Apply(&next, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed = append(closed, subsequent...)
+	if err := storage.Commit(next, closed); err != nil {
+		t.Fatal(err)
+	}
+	from := at.Add(-3 * time.Hour)
+	query := "?from=" + from.Format(time.RFC3339) + "&to=" + at.Format(time.RFC3339)
+	var output, stderr bytes.Buffer
+	cli := a
+	cli.Out, cli.Err = &output, &stderr
+	if code := cli.Run(context.Background(), []string{"report", "--config", cfg.Path, "--json", "--from", from.Format(time.RFC3339), "--to", at.Format(time.RFC3339)}); code != 0 {
+		t.Fatal(stderr.String())
+	}
+	response = request(t, a.monitorHandler(cfg), "/api/report"+query)
+	if response.Code != 200 || response.Body.String() != output.String() {
+		t.Fatalf("API=%s CLI=%s", response.Body.String(), output.String())
+	}
+	var reports struct {
+		Reports []model.Report `json:"reports"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &reports); err != nil {
+		t.Fatal(err)
+	}
+	report := reports.Reports[0]
+	if report.LegacySeconds != 9000 || report.DurationsSeconds[model.Unknown] != 9000 || report.DurationsSeconds[model.Down] != 600 || report.DurationsSeconds[model.Healthy] != 1200 || report.DemandAvailability == nil || *report.DemandAvailability != float64(2)/3 {
+		t.Fatalf("report=%+v", report)
+	}
+	response = request(t, a.monitorHandler(cfg), "/api/timeline"+query)
+	var timeline struct {
+		Repositories map[string][]model.Interval `json:"repositories"`
+	}
+	if response.Code != 200 {
+		t.Fatal(response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &timeline); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(model.BuildReport(legacy.Repository, timeline.Repositories[legacy.Repository], from, at), report) {
+		t.Fatalf("timeline=%s report=%+v", response.Body.String(), report)
+	}
+	if !strings.Contains(response.Body.String(), "status=HEALTHY") {
+		t.Fatal(response.Body.String())
+	}
+	history := request(t, a.monitorHandler(cfg), "/api/history"+query)
+	if !strings.Contains(history.Body.String(), `"status":"HEALTHY"`) {
+		t.Fatal(history.Body.String())
+	}
+	metrics := request(t, a.monitorHandler(cfg), "/metrics")
+	if metrics.Code != 200 || !strings.Contains(metrics.Body.String(), `agent_loop_monitor_state{repository="owner/repo"} 2`) || !strings.Contains(metrics.Body.String(), `agent_loop_monitor_demand_availability{repository="owner/repo",window="1d"} 0.6666666666666666`) {
+		t.Fatal(metrics.Body.String())
+	}
+}
+
 func TestStatusAndHistoryJSONOmitUnsetTimes(t *testing.T) {
 	cfg, storage, at := dashboardFixture(t)
 	snapshot := model.Snapshot{
@@ -501,7 +630,7 @@ func TestStatusAndHistoryJSONOmitUnsetTimes(t *testing.T) {
 				if len(snapshots) != 1 {
 					t.Fatalf("snapshots = %s", payload["repositories"])
 				}
-				for _, key := range []string{"queue_phase_since", "queue_deadline", "last_success_at"} {
+				for _, key := range []string{"decision_since", "queue_phase_since", "queue_deadline", "last_success_at"} {
 					if _, ok := snapshots[0][key]; ok {
 						t.Errorf("unset %s present: %s", key, out.String())
 					}
@@ -532,5 +661,81 @@ func TestStatusAndHistoryJSONOmitUnsetTimes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUnknownRecoveryPersistsContinuousHistoryForDashboard(t *testing.T) {
+	cfg, storage, base := dashboardFixture(t)
+	obs := model.Observation{Repository: "owner/repo", ObservedAt: base, Cursor: 10, CursorInitialized: true, CurrentVerified: true, ProcessingTimeout: time.Hour,
+		Items: []model.QueueItem{{Number: 1, Phase: model.Running, PhaseSince: base, Deadline: base.Add(time.Hour)}}}
+	snapshot, _, err := model.Apply(nil, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := model.Interval{DecisionVersion: model.DecisionVersion, ID: "prior-idle", Repository: obs.Repository, Status: model.Idle, StartedAt: base.Add(-time.Minute), EndedAt: base}
+	if err := storage.Commit(snapshot, []model.Interval{prior}); err != nil {
+		t.Fatal(err)
+	}
+	for minute := 1; minute <= 5; minute++ {
+		obs.ObservedAt = base.Add(time.Duration(minute) * time.Minute)
+		obs.Error = ""
+		if minute == 2 {
+			obs.Error = "unavailable"
+		}
+		if minute == 5 {
+			obs.Cursor = 12
+			obs.Items = append(obs.Items, model.QueueItem{Number: 2, Phase: model.Running})
+			obs.Events = []model.QueueEvent{{ID: 11, IssueNumber: 2, Kind: model.ReadyLabeled, At: base.Add(3 * time.Minute)}, {ID: 12, IssueNumber: 2, Kind: model.RunningLabeled, At: base.Add(4 * time.Minute)}}
+		}
+		previous, err := storage.Load(obs.Repository)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, closed, err := model.Apply(previous, obs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := storage.Commit(next, closed); err != nil {
+			t.Fatal(err)
+		}
+		reloaded, err := storage.Load(obs.Repository)
+		if err != nil || !reflect.DeepEqual(reloaded, &next) {
+			t.Fatalf("reloaded=%+v next=%+v err=%v", reloaded, next, err)
+		}
+		history, err := storage.History(obs.Repository)
+		if err != nil || len(history) == 0 || !reflect.DeepEqual(history[0], prior) {
+			t.Fatalf("history=%+v err=%v", history, err)
+		}
+		boundary := prior.StartedAt
+		for _, interval := range append(history, reloaded.Current) {
+			if !interval.StartedAt.Equal(boundary) {
+				t.Fatalf("boundary=%v interval=%+v", boundary, interval)
+			}
+			boundary = interval.EndedAt
+		}
+		handler := (App{Now: func() time.Time { return obs.ObservedAt }}).monitorHandler(cfg)
+		query := "?from=" + prior.StartedAt.Format(time.RFC3339) + "&to=" + obs.ObservedAt.Format(time.RFC3339)
+		for _, path := range []string{"/api/report" + query, "/api/timeline" + query, "/metrics"} {
+			response := request(t, handler, path)
+			if response.Code != http.StatusOK {
+				t.Fatalf("minute=%d path=%s: %d %s", minute, path, response.Code, response.Body.String())
+			}
+			if strings.HasPrefix(path, "/api/report") {
+				var body struct {
+					Reports []model.Report `json:"reports"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || len(body.Reports) != 1 {
+					t.Fatalf("report=%s err=%v", response.Body.String(), err)
+				}
+				wantUnknown, wantHealthy := float64(minute*60), float64(0)
+				if minute == 5 {
+					wantUnknown, wantHealthy = 240, 60
+				}
+				want := map[model.Status]float64{model.Idle: 60, model.Unknown: wantUnknown, model.Healthy: wantHealthy, model.Down: 0}
+				if !reflect.DeepEqual(body.Reports[0].DurationsSeconds, want) {
+					t.Fatalf("durations=%v want=%v", body.Reports[0].DurationsSeconds, want)
+				}
+			}
+		}
 	}
 }

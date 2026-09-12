@@ -2,12 +2,12 @@
 
 ## 1. 目的と設計原則
 
-`codex-issue-loop`は、信頼できるGitHub Issueを決定的な順序で選び、1件ずつcoding workerへ渡し、個別Issueの結果にかかわらず次のIssueを処理し続けるsupervisorである。
+`codex-issue-loop`は、信頼できるGitHub Issueを決定的な順序で選び、1件ずつcoding workerへ渡し、進行中Issueの順序を保ち、個別の停止・隔離・回答待ちでは後続Issueの処理を継続するsupervisorである。
 
 設計上の優先順位は次のとおりとする。
 
 1. repository全体の正本と実行authorityを壊さない
-2. 個別Issueの障害をそのIssueへ閉じ込め、queueの進行を維持する
+2. 個別Issueの障害をそのIssueへ閉じ込め、queueの進行と正式復旧を維持する
 3. worker、回答、公開の重複と古い実行世代からの更新を防ぐ
 4. 作業成果、質問、公開identity、判断根拠を失わない
 
@@ -84,7 +84,7 @@ repositoryの正本は概念上、次の要素だけを持つ。
 RepositoryState
 ├── identity
 ├── mode: running | stopped | blocked
-├── lifecycle_api_version
+├── version
 ├── active_execution: none | (issue, run_id, generation)
 ├── issues: IssueEnvelope[]
 ├── pending_effects
@@ -108,7 +108,7 @@ IssueEnvelope = Managed(IssueAggregate) | Quarantined(QuarantineRecord)
 Issue aggregateは少なくとも次を一体として保持する。
 
 - Issue identityとauthor verification evidence
-- 公開lifecycle状態とそのAPI version
+- 公開lifecycle状態（互換性はsnapshot全体のversionで識別）
 - run IDとgeneration
 - workspace、branch、base commit
 - continuation checkpointとsuspension
@@ -147,7 +147,7 @@ queue処理は次の順序に固定する。
 1. GitHubから候補とactor事実を観測する
 2. author policyで信頼できる候補だけを残す
 3. snapshot上で処理可能な候補を決定的にsortする
-4. repositoryの実行枠が空であることを確認する
+4. repositoryの実行枠が空で、順序待ちを必要とする進行中Issueがないことを確認する
 5. 選択したIssueのactor事実を再取得して信頼性を再検証する
 6. 新しいrun IDとgenerationを含むactive executionをatomicに保存する
 7. workerを起動する
@@ -156,7 +156,11 @@ queue処理は次の順序に固定する。
 
 同時workerはrepositoryごとに最大1つとする。Issue間resource、path claim、dependency metadata、worker pool、slot assignmentは現行設計に含めない。
 
-`needs_input`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、terminal、quarantineはworkerを実行していないため実行枠を消費しない。これらのIssueはdurableに追跡しつつ、supervisorは別Issueを選択する。publisherとGitHub mutationはrepository単位で直列化するが、外部checkやmergeの待機によってworker枠を占有しない。
+`needs_input`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、terminal、quarantineはworkerを実行していないため実行枠を消費しない。worker枠の解放と新規受付は別であり、`claiming`、`claimed`、`launching`、`running`、`resume_pending`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、`resolving_conflict`では後続の未受付Issueはreadyのまま待機する。`needs_input`、`failed`、`blocked`、quarantineは対象Issueだけを保留し、後続の新規受付を妨げない。publisherとGitHub mutationはrepository単位で直列化するが、外部checkやmergeの待機によってworker枠を占有しない。
+
+PRがある場合、worker終了・CI成功・auto-merge設定ではなく、マージの観測と内部完了の確定で順序待ちを解除する。PR不要の正当な完了経路も維持する。次の新規worktreeは既存のfetch処理により最新のbase branchから作成する。待機理由はstatusのIssue状態・エラーとsupervisor messageで確認できる。
+
+過去の停止・隔離・回答待ちIssueにも同じ受付判定を適用し、一括キャンセルを要求しない。保留Issueの回答・復旧後も別Issueの実行権を奪わず、既存schedulerで再開する。既存workerを強制停止せず、最大1 workerのfencingを維持して収束させる。受付待ちの判断は毎cycleのdurable snapshotから導出し、labelや追加の永続状態に依存しない。
 
 同一repositoryを処理するsupervisorは1つ、hostも1つとする。worker並列化とmulti-hostは現行設計の拡張点ではなく対象外であり、必要になった時点で別要件とADRを作成する。[ADR-0005](adr/0005-single-execution-boundary.md)を正本とする。
 
@@ -173,7 +177,7 @@ author policyはGitHub observerが取得した次の事実だけを入力にす�
 
 既定ではownerと`write`以上のcollaboratorを信頼し、botまたはGitHub Appはexact allowlistを必要とする。Issue本文、コメント、labelによる自己申告は信頼根拠にしない。
 
-候補取得時の検証結果はqueueの効率化に利用できるが、worker開始直前に必ず再検証する。検証不能または不一致は対象Issueを非着手として記録し、後続候補の選択を続ける。author検証APIの一時障害はその候補の一時的な不適格であり、既に検証できた別Issueを止めない。
+候補取得時の検証結果はqueueの効率化に利用できるが、worker開始直前に必ず再検証する。検証不能または不一致は対象Issueを非着手として記録する。受付済みIssueの停止はそのIssueだけで正式復旧またはキャンセルを待ち、後続候補の選択を妨げない。author検証APIの一時障害はその候補の一時的な不適格であり、既に検証できた別Issueを止めない。
 
 ## 8. Continuationとreconciliation
 
@@ -216,27 +220,29 @@ worker起動前には、GitHubへの投影を同期・再取得して確認し�
 
 Issue番号、run ID、generation、Issue lifecycle intentを持つerrorは、分類不能でもIssue-local境界で処理する。未分類errorを自動的にrepository-wideへ昇格させない。
 
-GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠解放を妨げない。未完了effectと定期的な表示同期で再試行し、別Issueのworker起動を継続する。
+GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠解放を妨げない。未完了effectと定期的な表示同期で再試行する。個別の停止・隔離・回答待ちは新規受付を妨げない。予算内の自動retryは順序を維持し、上限到達後の停止は対象Issueだけに閉じ込める。
 
 ## 10. Issue lifecycle APIと互換性
 
 公開lifecycle contractは、状態ごとの意味、許可遷移、terminal判定、実行枠消費、自動継続可否、人間操作要否を一つのversioned sourceとして定義する。CLI JSON、event、GitHub表示、migration、validatorはこのcontractから同じ意味へprojectする。
 
-内部storage schemaとIssue lifecycle APIを分離する。
+snapshot の永続化契約は単一整数 `version=6` で識別する。構造・JSON名・必須条件・相互不変条件は `internal/domain/snapshot`、フィールドの意味と実行要件は同層と `internal/domain/statecontract`、許可遷移は既存の `internal/domain/issue` が正本である。`state_revision` は transaction の更新番号であり、互換性識別には使わない。snapshot は直接編集用の公開 API ではなく、更新は正式操作と Store transaction を通す。
 
-- storage変更を決定的に移行でき、公開上の意味が変わらない場合はAPI majorを維持する。
-- 同一majorの旧minor fixtureは新minorで読み、同じ意味で継続できなければならない。
-- 公開状態の削除・改名・意味変更、terminal判定、実行枠消費、許可遷移の非互換変更ではAPI majorを更新する。
-- major更新でも、根拠が十分なIssueは決定的に移行する。
-- 移行不能なIssueは`Quarantined`へ変換し、他Issueを継続する。
+契約変更の検出対象は `internal/domain/snapshot/**`、`internal/domain/statecontract/**`、`internal/domain/issue/**`、埋め込む型の依存先である `internal/domain/publication/**`、`internal/domain/queue/**`。型だけでなく validator の受理条件、JSON decode、正規化、遷移 decision も対象とする。#536 はこのパス集合を基準に CI を実装する。
 
-migration decoderは旧形式を読む境界に限定する。旧scenario別runtime経路を互換性のために残さず、変換後は現行aggregateと共通lifecycleだけを使用する。
+同じ version を維持できるのは、新旧 reader が既存の正常 snapshot を同じ意味で受理できる変更だけである。必須条件・状態の意味・許可遷移・validator の受理集合の変更、旧 reader が拒否する optional field の追加でも version を更新する。非互換変更は version 更新と明示的 migration を対にする。CLI 出力自身の schema、config/registry、monitor、delivery protocol の version はこの識別子へ統合しない。release metadata の旧名 `state_schema_current` / `semantic_contract_current` は同じ単一 version を表示し、別々に更新しない。lifecycle API metadata は旧契約の情報であり snapshot reader の互換判定には使用しない。
+
+Store の load・保存直前の transaction・診断は domain の version/aggregate 判定を通す。`issue_transition.go` は domain decision の commit fence を確認して status を変更する既存境界を維持する。ファイル I/O、lock、atomic 保存、redaction、外部の process/Git/GitHub 観測は adapter/application に残す。観測結果は値として domain に渡し、domain から外部へ依存しない。
+
+旧入力 `(version, semantic_contract_version, issue_lifecycle_api_version)=(5,4,2.0/2.1)` は v6 とは別の移行元である。v6 reader は旧版、未知版、v6 に旧2項目が残る入力を拒否する。旧 reader は version=6 を拒否するため、旧 binary で直接開かない。既存 v4→v5 migration 専用の `ValidateLegacy` は domain の共通不変条件を検証するが、runtime load/commit の許可には使わない。v6 への起動前 migration は #537 で統合し、移行不能状態があれば原本を変更せず移行全体を中止する。配布保留・解除条件は [release gates](release-gates.md)、停止下の backup/binary を対にした rollback は [migration runbook](migration.md) を参照する。
 
 ## 11. Package境界
 
 ```text
 internal/
 ├── domain/
+│   ├── snapshot/    # 永続構造、version、validator、transaction契約
+│   ├── statecontract/ # フィールド意味・実行要件
 │   ├── issue/       # aggregate、lifecycle contract、decision、invariant
 │   └── queue/       # author policy、eligibility、deterministic ordering
 ├── application/

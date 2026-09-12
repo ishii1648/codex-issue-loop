@@ -111,6 +111,64 @@ func TestBackfillReplacesOverlappingHistoryIdempotently(t *testing.T) {
 	}
 }
 
+func TestDecisionMigrationPreservesLegacyHistoryAndRestartBoundary(t *testing.T) {
+	for _, version := range []int{0, 1, 2} {
+		for _, phase := range []model.Phase{model.Ready, model.Running, ""} {
+			t.Run(string(phase), func(t *testing.T) {
+				base := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
+				disk := Store{Root: t.TempDir()}
+				oldClosed := model.Interval{DecisionVersion: version, ID: "old-healthy", Repository: "owner/repo", Status: model.Healthy, StartedAt: base, EndedAt: base.Add(time.Hour)}
+				legacy := model.Snapshot{DecisionVersion: version, SchemaVersion: 1, Repository: "owner/repo", LastObservationAt: base.Add(2 * time.Hour), EventCursor: 1, EventCursorInitialized: true,
+					Current: model.Interval{DecisionVersion: version, ID: "old-down", Repository: "owner/repo", Status: model.Down, StartedAt: base.Add(time.Hour)}}
+				if err := disk.Commit(legacy, []model.Interval{oldClosed}); err != nil {
+					t.Fatal(err)
+				}
+				obs := model.Observation{Repository: legacy.Repository, ObservedAt: base.Add(3 * time.Hour), Cursor: 2, CursorInitialized: true, CurrentVerified: true}
+				want := model.Idle
+				if phase != "" {
+					obs.Items = []model.QueueItem{{Number: 1, Phase: phase, PhaseSince: base, Deadline: base.Add(time.Hour)}}
+					want = model.Healthy
+					if phase == model.Running {
+						want = model.Unknown
+					}
+				}
+				loaded, err := disk.Load(legacy.Repository)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next, closed, err := model.Apply(loaded, obs)
+				if err != nil || next.DecisionVersion != model.DecisionVersion || !next.DecisionSince.Equal(obs.ObservedAt) || next.Current.Status != want || !next.Current.StartedAt.Equal(obs.ObservedAt) {
+					t.Fatalf("next=%+v err=%v", next, err)
+				}
+				for i := 0; i < 2; i++ {
+					if err := disk.Commit(next, closed); err != nil {
+						t.Fatal(err)
+					}
+				}
+				history, err := disk.AllIntervals(legacy.Repository)
+				if err != nil || len(history) != 4 || history[0] != oldClosed || history[1].Status != model.Down || history[1].DecisionVersion != version || history[2].Status != model.Unknown || !history[2].EndedAt.Equal(next.DecisionSince) {
+					t.Fatalf("history=%+v err=%v", history, err)
+				}
+				report := model.BuildReport(legacy.Repository, history, base, base.Add(4*time.Hour))
+				if report.LegacySeconds != 10800 {
+					t.Fatalf("report=%+v", report)
+				}
+				if phase == model.Ready && (report.DemandAvailability == nil || *report.DemandAvailability != 1 || report.DurationsSeconds[model.Healthy] != 3600) {
+					t.Fatalf("report=%+v", report)
+				}
+				loaded, err = disk.Load(legacy.Repository)
+				if err != nil {
+					t.Fatal(err)
+				}
+				again, duplicate, err := model.Apply(loaded, obs)
+				if err != nil || len(duplicate) != 0 || again.Current.ID != next.Current.ID || !again.DecisionSince.Equal(next.DecisionSince) {
+					t.Fatalf("again=%+v duplicate=%+v err=%v", again, duplicate, err)
+				}
+			})
+		}
+	}
+}
+
 func TestRepositoryCaseChangeAcrossRestart(t *testing.T) {
 	for _, names := range [][2]string{{"Owner/Repo", "owner/repo"}, {"owner/repo", "Owner/Repo"}} {
 		t.Run(names[0], func(t *testing.T) {

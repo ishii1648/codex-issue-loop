@@ -1,12 +1,12 @@
 # ローカルダッシュボード
 
-独立monitorの既存stateを読むGo API（自作ダッシュボードを配信）とPrometheusの2プロセスを使用します。supervisorやGitHubへの書き込みは行いません。GitHubをpollする既存の`com.codex-issue-loop.monitor`は引き続き必要です。
+独立monitorの既存stateと、runtime の専用公開メタデータを読むGo API（自作ダッシュボードを配信）とPrometheusの2プロセスを使用します。supervisorやGitHubへの書き込みは行いません。GitHubをpollする既存の`com.codex-issue-loop.monitor`は引き続き必要です。
 
 - Dashboard（失効監視付き）: <http://127.0.0.1:19110/>
 - Prometheus: <http://127.0.0.1:19090>
 - read-only API: <http://127.0.0.1:19110/api/status>
 
-すべてloopbackのみです。ローカルの他ユーザーも閲覧可能です。外部公開、reverse proxy、通知、Alertmanagerは構成しません。
+listen先はすべてloopbackのみです。monitor webはHTTP Hostを制限しないため、Tailscale ServeなどからHostを保持したまま転送できます。ローカルの他ユーザーも閲覧可能です。この手順では外部公開、reverse proxy、通知、Alertmanagerは構成しません。
 
 ## 準備・起動
 
@@ -44,7 +44,11 @@ python3 monitor/dashboard/manage.py restart
 
 `start`は登録済みサービスを保持します。`restart`は登録済みに`kickstart -k`、未登録に`bootstrap`を使います。plistのProgramArgumentsを変更した場合は`stop`後に`start`して再登録します。`stop`はデータを保持します。ログイン自動起動も止める場合は、この構成の2つのLaunchAgentsリンクだけを外します。
 
-更新時は`stop`、binaryの配置、`prepare`、`start`の順です。以前のbinary・設定を保存します。`prepare`はTSDB・観測stateや既存のGrafanaデータを削除しません。
+stable releaseからの更新は[runbookの配備操作](runbook.md#installと更新)を使用します。観測用runと表示用serveの実参照先を更新するため、毎回のbinary配置や`prepare`は不要です。配備はAPIと観測サービスだけを停止・再登録し、Prometheusを継続稼働させます。設定変更時の`prepare`はTSDB・観測stateや既存のGrafanaデータを削除しません。
+
+## 更新後の提供確認
+
+配備操作の`complete`を確認後、配信URLをブラウザで開きます。初回更新ではタイムラインをドラッグし、日時指定の開始・終了、画面上部の対象期間、両repositoryのtimelineと稼働率が同時に選択期間へ変わることを確認します。現在カードは最新statusのままで、15秒更新後も選択期間が維持され、freshnessの失効表示が出ないことを確認します。対象tag/commit、配備結果、ブラウザ確認結果を区別して記録し、Release公開やマージだけで提供完了とはしません。
 
 ## 既存のGrafana構成から移行
 
@@ -62,11 +66,13 @@ fi
 
 `bootout`が失敗した場合は原因を確認して停止・登録解除を完了してください。LaunchAgentsにリンクではなく同名plistを直接置いていた場合は、その内容がこのdashboardのGrafana用であることを確認してLaunchAgents外へ退避します。`launchctl print`で未登録となり、LaunchAgentsに同名plistが残っていないことを確認します。
 
-続いて上記の更新手順で新しいmonitor binaryと2プロセス用設定に切り替えます。ログイン自動起動の登録は上記の`api prometheus`を列挙した手順を使い、rootに残った旧Grafana plistを再登録しないでください。root内の旧Grafana plist、`grafana.ini`、`grafana/`、`plugins/`、`provisioning/`、`dashboards/`は使用されなくなりますが、削除は不要です。PrometheusのTSDBとmonitorの観測stateはそのまま使用します。
+続いて上記の準備・起動手順で2プロセス用設定に切り替え、runbookの配備操作で両monitor binaryを更新します。ログイン自動起動の登録は上記の`api prometheus`を列挙した手順を使い、rootに残った旧Grafana plistを再登録しないでください。root内の旧Grafana plist、`grafana.ini`、`grafana/`、`plugins/`、`provisioning/`、`dashboards/`は使用されなくなりますが、削除は不要です。PrometheusのTSDBとmonitorの観測stateはそのまま使用します。
 
 ## 表示と正確性
 
 失効監視付きURLはAPIから直接描画し、repositoryを左右に比較します。現在状態は正常 HEALTHY=緑、異常 DOWN=赤、待機 IDLE=青で大きく表示し、UNKNOWNは「状態を確認できません」と表示します。選択期間は稼働率（正常のみ）と正常動作率（正常+待機）を数値で、正確なtimelineをバーで表示します。UNKNOWNと未観測の区間は斜線と「観測できない区間」の凡例で示し、hoverで時刻を確認できます。状態開始・最終観測・理由・観測エラー・現在queueのIssue番号と期限は折り畳み詳細です。選択期間の観測率と未観測時間も詳細内で確認でき、開閉状態は自動更新後も保持します。Issue番号からGitHubへ進めます。queue-level期限と各Issue期限を区別します。履歴に当時のqueue一覧はないため、過去の対象Issueは復元しません。
+
+異常と稼働率はrepositoryキュー全体の受付・処理進行を示し、個別Issueの処理時間達成率ではありません。readyのみの受付期限超過はDOWN、runningが残る進捗証拠の期限切れはUNKNOWNです。個別Issue期限は滞留の参考情報であり、全体判定・稼働率には直接使いません。旧契約の区間は新契約の集計・timelineではUNKNOWNとして区別し、詳細の`legacy_seconds`と旧状態付きreasonで確認できます。元の旧区間は`/api/history`に保持します。
 
 稼働率（正常のみ）は`HEALTHY秒 / 選択期間全体秒`、正常動作率（正常+待機）は`(HEALTHY + IDLE)秒 / 選択期間全体秒`です。画面では「選択期間全体の時間に対する割合」と説明します。UNKNOWNのみ・全期間未観測の場合はどちらも0%です。観測率は0であり、需要がなかったとは断定できません。観測率は`(HEALTHY + DOWN + IDLE)秒 / 全期間秒`です。選択期間にUNKNOWNや未観測時間がある場合のみ「この期間には未観測の時間があります」と添え、混在期間への単一の正常性判定は行いません。UNKNOWN・未観測時間は正常時間にも待機時間にも加算しません。
 
@@ -80,6 +86,10 @@ scrapeとdashboardは15秒更新です。monitor停止は既存の`observation_t
 
 `/api/timeline`は区間を選択期間へclipし、未観測部分をUNKNOWNで埋め、開区間の終了を期間終端にします。近似や間引きはしません。失効監視付きURLでは1h/24h/7d/30d（既定は24h）または日時指定（入力・表示は端末のtimezoneによらずJST、Asia/Tokyo・UTC+09:00）を選び、UTC/RFC3339に変換した同じfrom/toを`/api/report`と`/api/timeline`へ渡します。reportの未観測時間をUNKNOWNへ補完して全長100%のバーと秒数凡例を表示します。細い区間に文字は重ねずhoverで状態と開始・終了を確認でき、ピクセル未満の区間はJSONから確認できます。現在カードは`/api/status`の最新取得であり、過去の選択期間とは独立です。replayは選択期間に次回取得で反映します。
 
+repository 見出しの右端に中立色の `Runtime v…` バッジを表示します。狭い幅では見出しとバッジを折り返します。取得対象は同一 macOS ホスト・同一ユーザー・同一 `AGENT_LOOP_HOME` の実行中 runtime です。起動時の専用メタデータを持たない旧版、停止、照合不能、複数起動、情報欠損時は `Runtime 不明` となります。割当版・共通 CLI・monitor 自体の版では補完しません。詳細な取得契約は [Architecture](architecture.md) を参照してください。
+
+バッジは期間選択から独立した最新の OS 照合結果です。初回、既存の15秒更新、タブ復帰・ページ復元時に `/api/status` を取得し、有効な version または `Runtime 不明` を表示します。スリープ復帰後も既存の更新処理で再取得します。`runtime.observed_at` / `runtime.expires_at` は表示判定に使いません。画面全体の既存45秒失効も維持します。`runtime` は応答専用であり、CLI status と比較するときは除外します。
+
 ## CLIとの照合
 
 観測中のstateを直接変更せず、`repositories/`を隔離directoryにコピーし、`state_dir`だけコピー先にした設定を使います。commit途中の不整合が出たコピーは使わず、取り直します。APIを凍結コピーの設定で起動し、表示された選択期間の開始をF、終了をTとします。現在状態の照合には別途現在時刻を用います。`status --at`は最新観測より前を拒否します。
@@ -90,7 +100,9 @@ F=2026-09-05T12:00:00Z
 MONITOR_CONFIG=/absolute/path/to/frozen/config.yaml
 agent-loop-monitor status --config "$MONITOR_CONFIG" --at "$T" --json > /tmp/monitor-cli-status.json
 curl --fail --get --data-urlencode "at=$T" http://127.0.0.1:19110/api/status > /tmp/monitor-http-status.json
-diff -u /tmp/monitor-cli-status.json /tmp/monitor-http-status.json
+jq -S . /tmp/monitor-cli-status.json > /tmp/monitor-cli-status-sorted.json
+jq -S 'del(.repositories[].runtime)' /tmp/monitor-http-status.json > /tmp/monitor-http-status-sorted.json
+diff -u /tmp/monitor-cli-status-sorted.json /tmp/monitor-http-status-sorted.json
 agent-loop-monitor history --config "$MONITOR_CONFIG" --from "$F" --to "$T" --json > /tmp/monitor-cli-history.json
 curl --fail --get --data-urlencode "from=$F" --data-urlencode "to=$T" http://127.0.0.1:19110/api/history > /tmp/monitor-http-history.json
 diff -u /tmp/monitor-cli-history.json /tmp/monitor-http-history.json
@@ -120,6 +132,7 @@ HEALTHY表示中にfixtureのAPI、Prometheusをそれぞれ`launchctl bootout g
 ```sh
 go test ./monitor/...
 python3 monitor/dashboard/test_dashboard.py
+python3 monitor/dashboard/test_deploy.py
 node --test monitor/dashboard/test_guard.cjs
 promtool check config /tmp/monitor-dashboard-fixture/prometheus.yml
 make ci

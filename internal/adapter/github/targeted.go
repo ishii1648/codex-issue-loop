@@ -10,6 +10,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 )
 
+// TargetedRESTClient returns Issue comments with the same contract as Client.Get.
 type TargetedRESTClient interface {
 	GetREST(context.Context, config.Config, int) (Issue, error)
 	InspectPullRequestREST(context.Context, config.Config, int, int, string) (RemoteState, error)
@@ -43,7 +44,32 @@ func (c CLI) GetREST(ctx context.Context, cfg config.Config, number int) (Issue,
 	if err := c.apiJSON(ctx, "/repos/"+cfg.GitHub.Repo+"/issues/"+fmt.Sprint(number), &item); err != nil {
 		return Issue{}, fmt.Errorf("get GitHub Issue #%d with REST: %w", number, err)
 	}
-	return normalizeRESTIssue(item), nil
+	comments, err := c.issueComments(ctx, cfg, number)
+	if err != nil {
+		return Issue{}, err
+	}
+	issue := normalizeRESTIssue(item)
+	issue.Comments = comments
+	return NormalizeIssue(issue), nil
+}
+
+func (c CLI) issueComments(ctx context.Context, cfg config.Config, number int) ([]string, error) {
+	var comments []string
+	for page := 1; ; page++ {
+		var batch []struct {
+			Body string `json:"body"`
+		}
+		endpoint := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100&page=%d", cfg.GitHub.Repo, number, page)
+		if err := c.apiJSON(ctx, endpoint, &batch); err != nil {
+			return nil, fmt.Errorf("get GitHub Issue #%d comments with REST: %w", number, err)
+		}
+		for _, comment := range batch {
+			comments = append(comments, comment.Body)
+		}
+		if len(batch) < 100 {
+			return comments, nil
+		}
+	}
 }
 
 func normalizeRESTIssue(item restIssue) Issue {
@@ -70,15 +96,6 @@ func (c CLI) InspectPullRequestREST(ctx context.Context, cfg config.Config, issu
 	issue, err := c.GetREST(ctx, cfg, issueNumber)
 	if err != nil {
 		return RemoteState{}, err
-	}
-	var comments []struct {
-		Body string `json:"body"`
-	}
-	if err := c.apiJSON(ctx, fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", cfg.GitHub.Repo, issueNumber), &comments); err != nil {
-		return RemoteState{}, fmt.Errorf("get GitHub Issue #%d comments with REST: %w", issueNumber, err)
-	}
-	for _, comment := range comments {
-		issue.Comments = append(issue.Comments, comment.Body)
 	}
 	var raw struct {
 		Number             int               `json:"number"`

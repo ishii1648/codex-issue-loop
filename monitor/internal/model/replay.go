@@ -46,17 +46,13 @@ func replayEvents(previous Snapshot, observation Observation) ([]QueueEvent, err
 			continue
 		case QueueUnproven:
 			return nil, fmt.Errorf("queue reentry history is insufficient for issue %d", event.IssueNumber)
-		case QueueExited:
+		case QueueExited, ProcessingClosed:
 			exited[event.IssueNumber] = true
 			delete(pending, event.IssueNumber)
 			if index >= 0 {
 				queue = append(queue[:index], queue[index+1:]...)
 			}
 		case ReadyLabeled, RunningLabeled:
-			if removed, ok := pending[event.IssueNumber]; ok && ((removed.Kind == ReadyUnlabeled && event.Kind == ReadyLabeled) || (removed.Kind == RunningUnlabeled && event.Kind == RunningLabeled)) {
-				removed.Kind = QueueExited
-				result = append(result, removed)
-			}
 			delete(exited, event.IssueNumber)
 			delete(pending, event.IssueNumber)
 			item := QueueItem{Number: event.IssueNumber, Phase: Ready, PhaseSince: event.At, Deadline: event.At.Add(observation.AcceptanceTimeout)}

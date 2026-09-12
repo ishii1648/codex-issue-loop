@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -804,5 +805,33 @@ func TestCodexBrowserMCPExplicitOptIn(t *testing.T) {
 		if !strings.Contains(args, required) {
 			t.Fatalf("missing %s: %s", required, args)
 		}
+	}
+}
+
+func TestPromptLimitsCommentsWithoutChangingEvidence(t *testing.T) {
+	comments := make([]string, 25)
+	for index := range comments {
+		comments[index] = fmt.Sprintf("comment-%02d\x00", index) + strings.Repeat("あ", 4*1024)
+	}
+	original := append([]string(nil), comments...)
+	prompt := BuildPrompt(config.Defaults(), gh.Issue{Comments: comments}, state.Issue{}, "")
+	start := strings.Index(prompt, "<untrusted_github_data_json>\n") + len("<untrusted_github_data_json>\n")
+	end := strings.Index(prompt[start:], "\n</untrusted_github_data_json>") + start
+	var data struct {
+		Comments []string `json:"comments"`
+	}
+	if err := json.Unmarshal([]byte(prompt[start:end]), &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Comments) != 20 || !strings.HasPrefix(data.Comments[0], "comment-05") {
+		t.Fatalf("unexpected prompt comment window: %d", len(data.Comments))
+	}
+	for _, comment := range data.Comments {
+		if len(comment) > 8*1024+len("\n[TRUNCATED]") || strings.ContainsRune(comment, '\x00') || !strings.HasSuffix(comment, "\n[TRUNCATED]") || strings.ContainsRune(comment, '\ufffd') {
+			t.Fatal("comment was not safely bounded")
+		}
+	}
+	if !reflect.DeepEqual(comments, original) {
+		t.Fatal("prompt preparation modified evidence comments")
 	}
 }

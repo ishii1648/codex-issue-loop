@@ -28,6 +28,37 @@ func TestLoadRequiresVersion(t *testing.T) {
 	}
 }
 
+func TestLoadNeedsInputLabel(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		field   string
+		want    string
+		wantErr string
+	}{
+		{name: "default", want: "needs-human"},
+		{name: "current", field: "  needs_input_label: needs-human\n", want: "needs-human"},
+		{name: "custom", field: "  needs_input_label: custom-input\n", want: "custom-input"},
+		{name: "deprecated", field: "  needs_input_label: codex-loop:needs-input\n", wantErr: "needs_input_label codex-loop:needs-input is deprecated; use needs-human"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := writeConfig(t, "version: 4\ngithub:\n  repo: owner/repo\n"+tt.field)
+			cfg, err := Load(dir)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.GitHub.NeedsInputLabel != tt.want {
+				t.Fatalf("needs_input_label = %q, want %q", cfg.GitHub.NeedsInputLabel, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadSparseConfigUsesOperationalDefaults(t *testing.T) {
 	dir := writeConfig(t, `version: 4
 github:

@@ -77,12 +77,12 @@ type Transaction struct {
 	LastResult            string        `json:"last_result,omitempty"`
 	Reason                string        `json:"reason,omitempty"`
 	Drain                 DrainProgress `json:"drain"`
-	DrainStartedAt        time.Time     `json:"drain_started_at,omitempty"`
-	DrainDeadline         time.Time     `json:"drain_deadline,omitempty"`
-	StartedAt             time.Time     `json:"started_at,omitempty"`
+	DrainStartedAt        time.Time     `json:"drain_started_at"`
+	DrainDeadline         time.Time     `json:"drain_deadline"`
+	StartedAt             time.Time     `json:"started_at"`
 	UpdatedAt             time.Time     `json:"updated_at"`
-	LastCheckAt           time.Time     `json:"last_check_at,omitempty"`
-	NextCheckAt           time.Time     `json:"next_check_at,omitempty"`
+	LastCheckAt           time.Time     `json:"last_check_at"`
+	NextCheckAt           time.Time     `json:"next_check_at"`
 }
 
 type Maintenance struct {

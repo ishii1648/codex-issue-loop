@@ -1,12 +1,62 @@
 package delivery
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestTransactionAndReportJSONTimestamps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{name: "unset", want: `"0001-01-01T00:00:00Z"`},
+		{name: "set", at: time.Date(2026, 9, 11, 12, 30, 0, 0, time.UTC), want: `"2026-09-11T12:30:00Z"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, payload := range []struct {
+				name   string
+				value  any
+				fields []string
+			}{
+				{
+					name: "transaction",
+					value: Transaction{DrainStartedAt: tc.at, DrainDeadline: tc.at, StartedAt: tc.at,
+						UpdatedAt: tc.at, LastCheckAt: tc.at, NextCheckAt: tc.at},
+					fields: []string{"drain_started_at", "drain_deadline", "started_at", "updated_at", "last_check_at", "next_check_at"},
+				},
+				{
+					name: "report",
+					value: Report{DrainStartedAt: tc.at, DrainDeadline: tc.at,
+						LastCheckAt: tc.at, NextCheckAt: tc.at},
+					fields: []string{"drain_started_at", "drain_deadline", "last_check_at", "next_check_at"},
+				},
+			} {
+				t.Run(payload.name, func(t *testing.T) {
+					data, err := json.Marshal(payload.value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var fields map[string]json.RawMessage
+					if err := json.Unmarshal(data, &fields); err != nil {
+						t.Fatal(err)
+					}
+					for _, key := range payload.fields {
+						if got := string(fields[key]); got != tc.want {
+							t.Errorf("%s = %s, want %s", key, got, tc.want)
+						}
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestConfigSecureAtomicWriteAndValidation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "delivery.yaml")

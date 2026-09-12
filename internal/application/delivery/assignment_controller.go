@@ -576,6 +576,18 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 		return AssignmentReport{}, err
 	}
 	active := tx.RepositoryID != "" && tx.Phase != AssignmentSucceeded && tx.Phase != AssignmentRolledBack
+	if tx.Phase == AssignmentDraining && tx.Result == "deferred" {
+		if tx.RepositoryID != entry.RepoID || tx.ExpectedGeneration != current.Generation || tx.Current != current.AssignmentRef {
+			return AssignmentReport{}, errors.New("deferred assignment transaction no longer matches the committed assignment")
+		}
+		if _, err := os.Lstat(c.Layout.DeliveryAssignmentFencePath(entry.RepoID)); !errors.Is(err, os.ErrNotExist) {
+			if err != nil {
+				return AssignmentReport{}, fmt.Errorf("inspect deferred assignment fence: %w", err)
+			}
+			return AssignmentReport{}, errors.New("deferred assignment transaction still has a repository fence")
+		}
+		active = false
+	}
 	operation := AssignmentOperationApply
 	if rollback {
 		operation = AssignmentOperationRollback
@@ -634,7 +646,7 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 			return AssignmentReport{}, errors.New("retained assignment fence does not match the failed transaction")
 		}
 	}
-	if tx.RepositoryID != "" && tx.Phase != AssignmentSucceeded && tx.Phase != AssignmentRolledBack && tx.Desired != desired {
+	if active && tx.Desired != desired {
 		return AssignmentReport{}, errors.New("another assignment target is already in progress")
 	}
 	if tx.Phase == AssignmentRollingBack {
@@ -701,7 +713,7 @@ func (c AssignmentController) switchTo(ctx context.Context, repoPath string, des
 		}
 		legacyRuntime = protocol == 0
 	}
-	if tx.RepositoryID == "" || tx.Phase == AssignmentSucceeded || tx.Phase == AssignmentRolledBack {
+	if !active {
 		tx = AssignmentTransaction{RepositoryID: entry.RepoID, Operation: operation, Phase: AssignmentPlanned, ExpectedGeneration: current.Generation, TargetGeneration: current.Generation + 1, Current: current.AssignmentRef, Desired: desired, WasLoaded: status.Loaded, StartedAt: c.now()}
 		if err := SaveAssignmentTransaction(txPath, tx); err != nil {
 			return AssignmentReport{}, err
@@ -1087,6 +1099,10 @@ func (c AssignmentController) assignmentReport(ctx context.Context, entry regist
 	}
 	if tx.RepositoryID != "" {
 		report.Transaction = &tx
+		if tx.Phase == AssignmentDraining && tx.Result == "deferred" {
+			report.Result = "pending"
+			report.Reason = tx.Reason
+		}
 	}
 	if _, fenceErr := os.Lstat(c.Layout.DeliveryAssignmentFencePath(entry.RepoID)); fenceErr == nil {
 		report.FenceActive = true

@@ -172,3 +172,13 @@ func (s Status) DispatchesWorker() bool {
 func (s Status) DispatchesWorkerWhile(effectPending bool) bool {
 	return !effectPending && s.DispatchesWorker()
 }
+
+func (s Status) BlocksNewAdmission() bool {
+	switch s {
+	case StatusClaiming, StatusClaimed, StatusLaunching, StatusRunning, StatusResumePending,
+		StatusRetryWait, StatusAwaitingChecks, StatusAwaitingMerge, StatusResolvingConflict:
+		return true
+	default:
+		return false
+	}
+}

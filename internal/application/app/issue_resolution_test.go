@@ -966,6 +966,15 @@ func (f *issueResolutionFixture) writeGH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var issue struct {
+		Comments json.RawMessage `json:"comments"`
+	}
+	if err := json.Unmarshal([]byte(f.issueJSON), &issue); err != nil {
+		t.Fatal(err)
+	}
+	if len(issue.Comments) == 0 {
+		issue.Comments = json.RawMessage(`[]`)
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 projection_dir="$(dirname "$0")/projection"
 mkdir -p "$projection_dir"
@@ -988,6 +997,7 @@ case "$1 $2" in
       issue=$(printf '%%s' "$issue" | sed "s/\"state\":\"[^\"]*\"/\"state\":\"$state\"/;s/^{/{\"stateReason\":\"$reason\",/")
     fi
     printf '%%s\n' "$issue" ;;
+  "api --method") printf '%%s\n' '%s' ;;
   "pr list") printf '%%s\n' '%s' ;;
   "issue edit")
     if test -n "$AGENT_LOOP_TEST_FAIL_EDIT_ONCE" && test -f "$AGENT_LOOP_TEST_FAIL_EDIT_ONCE"; then
@@ -1013,7 +1023,7 @@ case "$1 $2" in
     test -f "$projection_dir/reason" || : > "$projection_dir/reason" ;;
   *) exit 2 ;;
 esac
-`, f.issueJSON, string(pullJSON))
+`, f.issueJSON, string(issue.Comments), string(pullJSON))
 	if err := os.WriteFile(f.ghPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

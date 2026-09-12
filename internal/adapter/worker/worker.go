@@ -651,7 +651,17 @@ func requireObjectFields(data json.RawMessage, name string, required ...string) 
 }
 
 func BuildPrompt(cfg config.Config, issue gh.Issue, current state.Issue, suffix string) string {
+	const maxComments = 20
+	const maxCommentBytes = 8 * 1024
+	if len(issue.Comments) > maxComments {
+		issue.Comments = issue.Comments[len(issue.Comments)-maxComments:]
+	}
 	issue = gh.NormalizeIssue(issue)
+	for index, comment := range issue.Comments {
+		if len(comment) > maxCommentBytes {
+			issue.Comments[index] = strings.ToValidUTF8(comment[:maxCommentBytes], "") + "\n[TRUNCATED]"
+		}
+	}
 	untrusted, _ := json.Marshal(struct {
 		Number   int      `json:"number"`
 		Title    string   `json:"title"`

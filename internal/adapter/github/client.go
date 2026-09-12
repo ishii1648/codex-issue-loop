@@ -49,8 +49,11 @@ type RemoteState struct {
 
 type Client interface {
 	ListReady(context.Context, config.Config) ([]Issue, error)
+	// Get returns all comments in chronological order, with control characters removed
+	// and no count or body-length truncation. ListReady does not fetch comments.
 	Get(context.Context, config.Config, int) (Issue, error)
 	VerifyIssueAuthor(context.Context, config.Config, Issue) (AuthorVerification, error)
+	// Inspect returns Issue comments with the same contract as Get.
 	Inspect(context.Context, config.Config, int, string) (RemoteState, error)
 	Claim(context.Context, config.Config, Issue, string) error
 	MarkNeedsInput(context.Context, config.Config, int, string, string) error
@@ -154,7 +157,7 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	if path == "" {
 		path = "gh"
 	}
-	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,stateReason,labels,assignees,milestone,comments,author").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "issue", "view", fmt.Sprint(number), "--repo", cfg.GitHub.Repo, "--json", "number,title,body,url,createdAt,state,stateReason,labels,assignees,milestone,author").CombinedOutput()
 	if err != nil {
 		return Issue{}, c.commandError(ctx, path, fmt.Sprintf("get GitHub Issue #%d", number), err, out)
 	}
@@ -174,9 +177,9 @@ func (c CLI) Get(ctx context.Context, cfg config.Config, number int) (Issue, err
 	if item.Milestone != nil {
 		milestone = item.Milestone.Title
 	}
-	comments := make([]string, 0, len(item.Comments))
-	for _, comment := range item.Comments {
-		comments = append(comments, comment.Body)
+	comments, err := c.issueComments(ctx, cfg, number)
+	if err != nil {
+		return Issue{}, err
 	}
 	return NormalizeIssue(Issue{Number: item.Number, Title: item.Title, Body: item.Body, URL: item.URL, CreatedAt: item.CreatedAt, Labels: labels, Assignees: assignees, Milestone: milestone, Comments: comments, State: item.State, StateReason: item.StateReason, AuthorLogin: item.Author.Login, AuthorType: authorType(item.Author.IsBot)}), nil
 }

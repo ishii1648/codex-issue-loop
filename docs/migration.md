@@ -1,8 +1,10 @@
 # 永続state schema / semantic migration runbook
 
-現行artifactのstorage schemaはv5、semantic contractはv4、Issue lifecycle APIはv2.1である。v2.1 runtimeは同一majorのv2.0 snapshotとprepared transactionを読み取り時に互換正規化し、次のstate更新でv2.1として保存する。storageはv4からv5へのforward migrationをサポートし、v5に旧runtime fieldまたは旧statusが残る入力は拒否する。binaryの`version --json`、install manifest、`migrate --json`はstorage schema、semantic contract、Issue lifecycle APIのcurrent/minimumを表示する。
+開発中の snapshot 永続化契約は単一 `version=6`。旧 `(5,4,2.0/2.1)` を v6 として自動受理・読み替えしない。v6 に `semantic_contract_version` または `issue_lifecycle_api_version` が残る入力も拒否する。config/registry は v5、CLI/monitor の schema は従来どおりである。契約本体と version 更新規則は [architecture §10](architecture.md#10-issue-lifecycle-apiと互換性) を参照する。
 
-contract v4はfieldを`optional`、`observational`、`execution_required_provenance`へ分類する。実行statusではroot `active_execution`、Issue `generation`、`workspace`の一致を要求し、待機時の再開材料をIssue-localな`continuation`、`continuation.evidence`、`suspension`へ分離する。宣言、対象status、validator、migration ruleは`internal/domain/statecontract`を単一のversioned sourceとする。execution-required fieldにruleを付けない変更はCIとrelease checkが失敗する。
+**#575→#536→#537 の統合・検証が完了するまで v6 のタグ発行・通常配布は禁止する。** 現在の migration は既存 v4→v5 および v5 semantic v4 までの経路を維持する。以下はその旧経路の手順であり、v6 への移行完了や v6 runtime の起動許可を意味しない。`ValidateLegacy` はこの旧出力専用であり、v6 の Store は拒否する。release metadata の migration-from=5 は v6 の移行元を識別し、移行済みの保証ではない。v6 向け起動前 migration と旧 cancel 正規化は #537 で実装する。
+
+v6 移行では、旧3項目を照合し、全 snapshot と prepared transaction を共通契約で検証する。移行不能状態が1件でもあれば、原本を変更せず移行全体を中止する。停止下で移行前 backup と対応 binary を対で保全し、rollback は停止したままその対へ戻す。旧 binary に v6 を直接読ませない。この文書の更新は、本番停止・migration・配布・rollback の実行承認ではない。
 
 ## Read-only preview
 
@@ -59,7 +61,7 @@ applyは全登録LaunchAgentと共有webhook brokerの停止を確認し、対�
 
 fileごとの置換はatomicで、同じprepared journalを使う再実行は同じmigration ID/event IDへ収束する。completed後の再applyは`changed:false`である。process crash後は同じartifactでpreviewしてからapplyを再実行し、別backupや別identityを作らない。fault後に旧versionへ戻す場合は下記rollbackを使う。
 
-v4→v5 migrationは11 Issue・14 legacy recovery substateのproduction由来matrixで、Issue、request/answer、execution generation、session、publication/PR auditの件数とidentityを保存する。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、current aggregate validatorを通す。
+v4→v5 migrationは11 Issue・14 legacy recovery substateのproduction由来matrixで、Issue、request/answer、execution generation、session、publication/PR auditの件数とidentityを保存する。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、domain の旧 v5 専用 aggregate validatorを通す。
 
 ## Paired rollback
 
@@ -70,6 +72,6 @@ agent-loop rollback --backup '/absolute/install-backup' --json
 agent-loop doctor --json
 ```
 
-rollbackは管理対象backup、restore先、全SHA-256を検証して全artifactを復元する。migrationが新規作成した空state用event logは削除する。active executionまたは未完了continuationがあれば拒否する。storage versionを跨ぐ場合はschema backupを先、install backupを後に戻す。途中失敗、backup不足、version不一致では片方だけを推測で戻さず停止を維持する。
+rollbackは管理対象backup、restore先、全SHA-256を検証して全artifactを復元する。migrationが新規作成した空state用event logは削除する。active executionまたは未完了continuationがあれば拒否する。最新journalと異なるbackup、移行直後のstate revisionを記録していないbackup、現在のstate revisionが記録値と異なる場合も拒否する。prepared journalからの障害復旧では、backupと同一byteの未移行stateも復元できる。運用再開後にstateが更新された場合の強制rollbackは提供しない。storage versionを跨ぐ場合はschema backupを先、install backupを後に戻す。途中失敗、backup不足、version不一致では片方だけを推測で戻さず停止を維持する。
 
 旧外部配送用`notification-token`はmigration/backup/rollback対象外であり、暗黙削除しない。

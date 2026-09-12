@@ -261,8 +261,6 @@ func (l *Loop) runSchedulerEvents(ctx context.Context, watchEvents <-chan fsnoti
 						return fatal
 					}
 				}
-				// A freed slot immediately admits the next candidate instead of
-				// waiting for the regular GitHub poll interval.
 				if !l.Config.Webhook.Enabled() && active && job.runID == event.RunID && job.slot >= 0 {
 					s.pollAt = l.now()
 					pollCandidates = true
@@ -877,7 +875,7 @@ func hasPendingRequests(snapshot state.Snapshot) bool {
 }
 
 func (s *scheduler) selectReady(ctx context.Context, issues []gh.Issue, snapshot state.Snapshot) (gh.Issue, bool, error) {
-	if s.workerCount() != 0 || snapshot.ActiveExecution != nil {
+	if s.workerCount() != 0 || snapshot.ActiveExecution != nil || admissionWait(snapshot) != "" {
 		return gh.Issue{}, false, nil
 	}
 	candidates := append([]gh.Issue(nil), issues...)
@@ -1105,7 +1103,24 @@ func (s *scheduler) nextRetryDelay() (time.Duration, bool) {
 	return until(now, deadline), true
 }
 
+func admissionWait(snapshot state.Snapshot) string {
+	var waiting []string
+	for _, current := range snapshot.Issues {
+		if current != nil && current.Status.BlocksNewAdmission() {
+			waiting = append(waiting, fmt.Sprintf("Issue #%d (%s)", current.Number, current.Status))
+		}
+	}
+	sort.Strings(waiting)
+	if len(waiting) == 0 {
+		return ""
+	}
+	return "new Issue admission waits for in-progress lifecycle: " + strings.Join(waiting, ", ")
+}
+
 func (s *scheduler) markPollingIfIdle(snapshot state.Snapshot, message string) error {
+	if waiting := admissionWait(snapshot); waiting != "" {
+		message = waiting
+	}
 	if len(s.active) != 0 || (snapshot.Supervisor.State == state.SupervisorStatePolling && snapshot.Supervisor.Message == message) {
 		return nil
 	}

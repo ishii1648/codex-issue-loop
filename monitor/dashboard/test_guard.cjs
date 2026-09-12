@@ -4,17 +4,19 @@ const assert = require('node:assert/strict');
 const {test} = require('node:test');
 const page = readFileSync(__dirname + '/../internal/app/dashboard.html', 'utf8');
 const code = page.split('<script>')[1].split('</script>')[0];
-function fixture() {
-  const f = {now:1800000000000, sample:1800000000000, failure:'', missing:false, state:'HEALTHY', repositories:['owner/repo'], fractions:[0.25,0.25,0.25,0.25], urls:[]};
+function fixture(initial = {}) {
+  const f = {now:1800000000000, sample:1800000000000, failure:'', missing:false, state:'HEALTHY', repositories:['owner/repo'], fractions:[0.25,0.25,0.25,0.25], urls:[], ...initial};
   const classes = new Set(['expired']);
   const nodes = Object.fromEntries(['freshness','error','repos','range','window','custom','selection','from','to'].map(id => [id,{addEventListener(name,fn){this[name]=fn;},classList:{toggle(){}}}]));
   let details = [];
+  let badges = [];
   let bars = [];
-  const documentEvents = {}, windowEvents = {};
+  const documentEvents = {}, windowEvents = {}, intervals = new Map();
   let html = '';
   Object.defineProperty(nodes.repos, 'innerHTML', {
     get:()=>html,
     set:value=>{ html=value;
+      badges=[...value.matchAll(/class="runtime-badge">(.*?)<\/span>/g)].map(match=>({textContent:match[1]}));
       bars=[...value.matchAll(/class="bar timeline" data-from="(\d+)" data-to="(\d+)"/g)].map(match=>({
         dataset:{from:match[1],to:match[2]},
         getBoundingClientRect:()=>({left:100,width:1000}),
@@ -23,11 +25,11 @@ function fixture() {
       }));
       details=[...value.matchAll(/<details data-repository="([^"]+)"/g)].map(match=>({dataset:{repository:match[1]},open:false})); },
   });
-  nodes.repos.querySelectorAll = selector => details.filter(detail => selector !== 'details[open]' || detail.open);
+  nodes.repos.querySelectorAll = selector => selector === '.runtime-badge' ? badges : details.filter(detail => selector !== 'details[open]' || detail.open);
   const context = vm.createContext({
     document:{createElement:()=>({style:{},remove(){this.removed=true;}}),body:{classList:{add:x=>classes.add(x),remove:x=>classes.delete(x)}},getElementById:x=>nodes[x],addEventListener(name,fn){documentEvents[name]=fn;}},
     window:{addEventListener(name,fn){windowEvents[name]=fn;}},Date:class extends Date {static now(){return f.now;}},
-    performance:{now:()=>f.now},setInterval(){},AbortSignal,URLSearchParams,
+    performance:{now:()=>f.now},setInterval(fn,ms){intervals.set(ms,fn);},AbortSignal,URLSearchParams,
     fetch:async url => {
       f.urls.push(url);
       if (f.pause) await f.pause;
@@ -38,7 +40,7 @@ function fixture() {
       const durations = Object.fromEntries(states.map((s,i) => [s,(to-from)/1000*f.fractions[i]]));
       let payload;
       if (u.pathname === '/api/freshness') payload = {status:'success',data:{result:f.missing?[]:[{value:[f.now/1000,String(f.sample/1000)]}]}};
-      if (u.pathname === '/api/status') payload = {repositories:f.repositories.map(repository=>({repository,current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:f.lastObservationAt ?? new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue}))};
+      if (u.pathname === '/api/status') payload = {repositories:f.repositories.map(repository=>({repository,current:{status:f.state,started_at:new Date(f.now-10000).toISOString(),reason:'<script>unsafe</script>'},last_observation_at:f.lastObservationAt ?? new Date(f.now).toISOString(),queue_deadline:f.queueDeadline,queue:f.queue,runtime:f.runtime?.(repository)}))};
       if (u.pathname === '/api/report') payload = {reports:f.repositories.map((repository,index)=>({repository,from:new Date(from).toISOString(),to:new Date(to).toISOString(),durations_seconds:durations,demand_availability:durations.HEALTHY+durations.DOWN ? durations.HEALTHY/(durations.HEALTHY+durations.DOWN) : null,observation_coverage:f.fractions.slice(0,3).reduce((a,b)=>a+b,0),...(f.report ? f.report(from,to,index) : {})}))};
       if (u.pathname === '/api/timeline') {
         let cursor=from;
@@ -55,7 +57,7 @@ function fixture() {
     },
   });
   vm.runInContext(code, context);
-  return {f,classes,nodes,context,documentEvents,windowEvents,bars:()=>bars,refresh:()=>vm.runInContext('refresh()',context)};
+  return {f,classes,nodes,context,documentEvents,windowEvents,intervals,bars:()=>bars,refresh:()=>vm.runInContext('refresh()',context)};
 }
 test('transport failures, stale and missing scrape, sleep expire all displayed values and recover', async () => {
   const {f,classes,nodes,context,refresh} = fixture();
@@ -169,7 +171,7 @@ test('JST dates, details and custom bounds are independent of the browser timezo
       assert.match(html,/状態開始: 2026-09-06 23:59:50 JST/);
       assert.match(html,/最終観測: 2026-09-07 00:00:00 JST/);
       assert.match(html,/queue期限: 2026-09-07 00:30:00 JST/);
-      assert.match(html,/期限 2026-09-07 01:00:00 JST/);
+      assert.match(html,/個別参考期限（全体判定には不使用） 2026-09-07 01:00:00 JST/);
       assert.match(html,/title="正常 · 2026-09-06 00:00:00 JST → 2026-09-06 06:00:00 JST"/);
       assert.match(html,/<span>09-06 00:00 JST<\/span><span>09-07 00:00 JST<\/span>/);
       nodes.window.value='custom'; nodes.window.change();
@@ -181,6 +183,10 @@ test('JST dates, details and custom bounds are independent of the browser timezo
       assert.equal(query.get('to'),'2026-09-06T15:00:00.000Z');
       assert.ok(f.urls.includes(timeline.replace('/api/timeline','/api/report')));
       assert.equal(classes.has('expired'),false);
+      f.state = 'UNKNOWN'; f.queueDeadline = '0001-01-01T00:00:00Z';
+      await refresh();
+      assert.match(nodes.repos.innerHTML,/queue期限: —/);
+      assert.doesNotMatch(nodes.repos.innerHTML,/0001-01-01/);
     }
   } finally {
     if (previousTZ === undefined) delete process.env.TZ;
@@ -235,7 +241,7 @@ test('historical 100 second metrics use state durations and include unknown and 
     const articles=nodes.repos.innerHTML.split('<article>').slice(1);
     assert.equal(articles.length,2);
     articles.forEach((html,index)=>{
-      assert.ok(html.startsWith(`<h2>${f.repositories[index]}</h2>`));
+      assert.ok(html.startsWith(`<div class="repo-heading"><h2>${f.repositories[index]}</h2>`));
       assert.match(html,/稼働率（正常のみ）<strong>40%<\/strong>/);
       assert.match(html,/正常動作率（正常\+待機）<strong>70%<\/strong>/);
       assert.match(html,/未観測時間: 10秒/);
@@ -265,7 +271,7 @@ test('unset and zero dates display dashes for IDLE snapshots and unproven queue 
     f.queue=[{number:1,phase:'ready',deadline:value}];
     await refresh();
     assert.equal(classes.has('expired'),false);
-    assert.match(nodes.repos.innerHTML,/期限 —/);
+    assert.match(nodes.repos.innerHTML,/個別参考期限（全体判定には不使用） —/);
     assert.doesNotMatch(nodes.repos.innerHTML,/0001-/);
     f.state='IDLE';
   }
@@ -367,4 +373,93 @@ test('narrow sub-second range stays nonempty at input precision', async () => {
   pointer(nodes,bar,'pointerup',506);
   assert.ok(Date.parse(nodes.from.value+'+09:00')<Date.parse(nodes.to.value+'+09:00'));
   assert.match(page,/type="datetime-local" step="0.001"/);
+});
+
+
+test('runtime versions map to repositories, update independently of range, escape text and clear on missing data', async () => {
+  const {f,nodes,classes,refresh} = fixture();
+  f.repositories=['owner/one','owner/two'];
+  let versions={'owner/one':'1.8.2','owner/two':'v1.8.1'};
+  f.runtime=repo=>versions[repo] ? {version:versions[repo],observed_at:new Date(f.now).toISOString(),expires_at:new Date(f.now+180000).toISOString()} : null;
+  await refresh();
+  const articles=nodes.repos.innerHTML.split('<article>').slice(1);
+  assert.match(articles[0],/Runtime <code>v1.8.2<\/code>/);
+  assert.match(articles[1],/Runtime <code>v1.8.1<\/code>/);
+  nodes.from.value='2026-01-01T00:00'; nodes.to.value='2026-01-02T00:00';
+  nodes.selection.submit({preventDefault(){}}); await refresh();
+  versions['owner/one']='1.9.0'; f.now+=15000; f.sample=f.now;
+  await refresh();
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v1.9.0<\/code>/);
+  assert.ok(f.urls.filter(url=>url.startsWith('/api/status')).every(url=>url==='/api/status'));
+  delete versions['owner/one']; await refresh();
+  assert.match(nodes.repos.innerHTML.split('<article>')[1],/Runtime 不明/);
+  assert.match(nodes.repos.innerHTML.split('<article>')[2],/Runtime <code>v1.8.1/);
+  versions['owner/one']='<script>bad</script>'; await refresh();
+  assert.match(nodes.repos.innerHTML,/v&lt;script&gt;bad/);
+  assert.equal(classes.has('expired'),false);
+});
+
+test('runtime timestamps never override a valid version while overall freshness remains enforced', async () => {
+  const {f,nodes,context,classes,refresh} = fixture();
+  for (const offset of [-180000,1800,180000]) {
+    f.runtime=()=>({version:'1.8.2',observed_at:new Date(f.now+offset).toISOString(),expires_at:new Date(f.now+offset+1000).toISOString()});
+    await refresh();
+    f.now+=5000;
+    vm.runInContext('checkExpiry()',context);
+    assert.match(nodes.repos.querySelectorAll('.runtime-badge')[0].textContent,/v1.8.2/);
+    assert.equal(classes.has('expired'),false);
+  }
+  for (const runtime of [{version:'1.8.2'}, {version:'1.8.2',observed_at:'bad',expires_at:'bad'}]) {
+    f.runtime=()=>runtime; await refresh();
+    assert.match(nodes.repos.innerHTML,/Runtime <code>v1.8.2/);
+  }
+  for (const runtime of [null,undefined,{}, {version:''}, {version:'  '}, {version:123}, {version:{}}]) {
+    f.runtime=()=>({version:'1.8.2'}); await refresh();
+    f.runtime=()=>runtime; await refresh();
+    assert.match(nodes.repos.innerHTML,/Runtime 不明/);
+    assert.doesNotMatch(nodes.repos.innerHTML,/v1.8.2/);
+    assert.match(nodes.repos.innerHTML,/<b>HEALTHY<\/b>/);
+    assert.equal(classes.has('expired'),false);
+  }
+});
+
+test('initial load, interval, tab return and page restoration fetch current runtime and recover after sleep or failure', async () => {
+  const {f,nodes,context,classes,intervals,documentEvents,windowEvents} = fixture({runtime:()=>({version:'1.8.2'})});
+  const settle = () => new Promise(resolve=>setImmediate(resolve));
+  const statusRequests = () => f.urls.filter(url=>url==='/api/status').length;
+  await settle();
+  assert.equal(statusRequests(),1);
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v1.8.2/);
+  assert.deepEqual([...intervals.keys()],[1000,15000]);
+  f.runtime=()=>({version:'1.9.0'});
+  f.now+=15000; f.sample=f.now;
+  await intervals.get(15000)();
+  assert.equal(statusRequests(),2);
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v1.9.0/);
+  vm.runInContext('document.hidden=true',context); documentEvents.visibilitychange();
+  assert.equal(statusRequests(),2);
+  f.runtime=()=>null;
+  vm.runInContext('document.hidden=false',context); documentEvents.visibilitychange(); await settle();
+  assert.equal(statusRequests(),3);
+  assert.match(nodes.repos.innerHTML,/Runtime 不明/);
+  f.runtime=()=>({version:'2.0.0'});
+  windowEvents.pageshow({persisted:true}); await settle();
+  assert.equal(statusRequests(),4);
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v2.0.0/);
+  f.now+=60000;
+  intervals.get(1000)();
+  assert.equal(classes.has('expired'),true);
+  f.sample=f.now;
+  f.runtime=()=>({version:'2.1.0'});
+  await intervals.get(15000)();
+  assert.equal(classes.has('expired'),false);
+  assert.match(nodes.repos.innerHTML,/Runtime <code>v2.1.0/);
+  f.failure='/api/status';
+  await intervals.get(15000)();
+  assert.equal(classes.has('expired'),true);
+  f.failure=''; f.runtime=()=>null;
+  await intervals.get(15000)();
+  assert.equal(classes.has('expired'),false);
+  assert.match(nodes.repos.innerHTML,/Runtime 不明/);
+  assert.doesNotMatch(nodes.repos.innerHTML,/v2.1.0/);
 });

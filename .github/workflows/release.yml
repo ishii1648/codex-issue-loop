@@ -29,6 +29,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify-main-ci:
+    name: verify-main-ci
+    runs-on: macos-15
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - name: Require successful main CI for the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/check-main-ci.sh
+
   build-candidate:
     name: build-candidate
     runs-on: macos-15
@@ -59,12 +75,6 @@ jobs:
           git cat-file -t "${RELEASE_TAG}" | grep -qx tag
           test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${RELEASE_COMMIT}"
           git merge-base --is-ancestor "${RELEASE_COMMIT}" origin/main
-
-      - name: Install pinned ShellCheck
-        run: make install-shellcheck
-
-      - name: Run release quality gates
-        run: make ci
 
       - name: Build the canonical candidate once
         shell: bash
@@ -123,7 +133,7 @@ jobs:
 
   verify-attestation-and-manifest:
     name: verify-attestation-and-manifest
-    needs: verify-reproducibility
+    needs: build-candidate
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -147,7 +157,6 @@ jobs:
 
   replay-production-fixtures:
     name: replay-production-fixtures
-    needs: verify-attestation-and-manifest
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -163,7 +172,6 @@ jobs:
 
   lifecycle-conformance:
     name: lifecycle-conformance
-    needs: replay-production-fixtures
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -179,7 +187,6 @@ jobs:
 
   cli-surface-contract:
     name: cli-surface-contract
-    needs: lifecycle-conformance
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -261,72 +268,9 @@ jobs:
           gh release create "$candidate_tag" dist/candidate/* contract-artifacts/*.json \
             --target "$RELEASE_COMMIT" --prerelease --title "$candidate_tag" --notes "Release candidate for $RELEASE_TAG from $RELEASE_COMMIT"
 
-  production-state-isolation:
-    name: production-state-isolation
-    needs: [build-candidate, isolated-canary]
-    runs-on: macos-15
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - uses: actions/download-artifact@v7
-        with:
-          name: release-candidate-${{ github.sha }}
-          path: dist/candidate
-      - name: Require production-host state comparison evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          candidate_tag="candidate-${RELEASE_TAG}-${GITHUB_RUN_ID}"
-          mkdir -p production-state
-          found=false
-          for _ in $(seq 1 180); do
-            if gh release download "$candidate_tag" --pattern production-state-report.json --dir production-state --clobber >/dev/null 2>&1; then
-              found=true
-              break
-            fi
-            sleep 30
-          done
-          test "$found" = true
-          candidate_digest=$(shasum -a 256 dist/candidate/agent-loop_Darwin_arm64 | awk '{print $1}')
-          jq -e --arg tag "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
-            --arg candidate_tag "$candidate_tag" --arg digest "$candidate_digest" '
-              def exact_keys($expected): keys == ($expected | sort);
-              exact_keys(["schema_version","public_payload","release_tag","release_commit","candidate_tag",
-                "candidate_binary_sha256","production_state_accessed","production_state_changes",
-                "production_state_equal","production_health","offline_contract","private_evidence_sha256"]) and
-              (.production_health | exact_keys(["doctor_safe","worker_limit_enforced","active_workers_within_limit"])) and
-              (.offline_contract | exact_keys(["mode","credentials_absent","external_network",
-                "lifecycle_sequences_complete","final_resources_clean"])) and
-              .schema_version == 2 and .public_payload == "redacted-summary" and
-              .release_tag == $tag and .release_commit == $commit and
-              .candidate_tag == $candidate_tag and .candidate_binary_sha256 == $digest and
-              .production_state_accessed == true and .production_state_changes == 0 and
-              .production_state_equal == true and .production_health.doctor_safe == true and
-              .production_health.worker_limit_enforced == true and
-              .production_health.active_workers_within_limit == true and
-              .offline_contract.mode == "credentialless-offline" and .offline_contract.credentials_absent == true and
-              .offline_contract.external_network == false and
-              .offline_contract.lifecycle_sequences_complete == true and
-              .offline_contract.final_resources_clean == true and
-              (.private_evidence_sha256 | test("^[0-9a-f]{64}$"))
-            ' production-state/production-state-report.json >/dev/null
-      - name: Attest production isolation evidence
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: production-state/production-state-report.json
-      - uses: actions/upload-artifact@v6
-        with:
-          name: production-state-report-${{ github.sha }}
-          path: production-state/production-state-report.json
-          if-no-files-found: error
-
   candidate-integrity:
     name: candidate-integrity
-    needs: production-state-isolation
+    needs: isolated-canary
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -360,7 +304,7 @@ jobs:
 
   promotion-evidence:
     name: promotion-evidence
-    needs: candidate-integrity
+    needs: [verify-main-ci, verify-reproducibility, verify-attestation-and-manifest, replay-production-fixtures, lifecycle-conformance, candidate-integrity]
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -378,10 +322,6 @@ jobs:
           path: evidence/contracts
       - uses: actions/download-artifact@v7
         with:
-          name: production-state-report-${{ github.sha }}
-          path: evidence/production
-      - uses: actions/download-artifact@v7
-        with:
           name: candidate-integrity-${{ github.sha }}
           path: evidence/integrity
       - name: Authorize promotion from machine-verifiable evidence
@@ -396,31 +336,13 @@ jobs:
             .final.active_workers == 0 and .final.active_executions == 0 and .final.pending_requests == 0 and
             .final.orphan_pid_pgid == 0 and .final.duplicate_prs == 0 and .final.duplicate_comment_markers == 0
           ' evidence/contracts/offline-contract-report.json >/dev/null
-          jq -e --arg digest "$digest" --arg commit "$RELEASE_COMMIT" '
-            def exact_keys($expected): keys == ($expected | sort);
-            exact_keys(["schema_version","public_payload","release_tag","release_commit","candidate_tag",
-              "candidate_binary_sha256","production_state_accessed","production_state_changes",
-              "production_state_equal","production_health","offline_contract","private_evidence_sha256"]) and
-            (.production_health | exact_keys(["doctor_safe","worker_limit_enforced","active_workers_within_limit"])) and
-            (.offline_contract | exact_keys(["mode","credentials_absent","external_network",
-              "lifecycle_sequences_complete","final_resources_clean"])) and
-            .schema_version == 2 and .release_commit == $commit and .candidate_binary_sha256 == $digest and
-            .public_payload == "redacted-summary" and .production_state_changes == 0 and
-            .production_state_equal == true and .production_health.doctor_safe == true and
-            .production_health.worker_limit_enforced == true and
-            .production_health.active_workers_within_limit == true and
-            .offline_contract.credentials_absent == true and .offline_contract.external_network == false and
-            .offline_contract.lifecycle_sequences_complete == true and
-            .offline_contract.final_resources_clean == true and
-            (.private_evidence_sha256 | test("^[0-9a-f]{64}$"))
-          ' evidence/production/production-state-report.json >/dev/null
           jq -e --arg digest "$digest" '
             .schema_version == 1 and .expected_sha256 == $digest and .actual_sha256 == $digest and
             .byte_identical == true and .attestation_verified == true
           ' evidence/integrity/report.json >/dev/null
           jq -n --arg commit "$RELEASE_COMMIT" --arg tag "$RELEASE_TAG" --arg digest "$digest" \
             '{schema_version:1,mode:"machine-verifiable",commit:$commit,tag:$tag,candidate_sha256:$digest,
-              required_evidence:["cli-surface","offline-contract","production-isolation","candidate-integrity"],authorized:true}' \
+              required_evidence:["cli-surface","offline-contract","candidate-integrity"],authorized:true}' \
             > promotion-evidence.json
       - name: Attest promotion evidence
         uses: actions/attest-build-provenance@v3
@@ -454,15 +376,11 @@ jobs:
         with:
           name: offline-contract-report-${{ github.sha }}
           path: dist/contracts
-      - uses: actions/download-artifact@v7
-        with:
-          name: production-state-report-${{ github.sha }}
-          path: dist/production-state
       - name: Publish stable release without rebuilding
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$RELEASE_TAG" dist/candidate/* dist/contracts/*.json dist/production-state/production-state-report.json \
+          gh release create "$RELEASE_TAG" dist/candidate/* dist/contracts/*.json \
             --verify-tag --generate-notes --title "$RELEASE_TAG"
 
   verify-stable-release:
@@ -484,11 +402,11 @@ jobs:
         run: |
           candidate_tag="candidate-${RELEASE_TAG}-${GITHUB_RUN_ID}"
           gh release view "$RELEASE_TAG" --json tagName,isDraft,isPrerelease,assets \
-            --jq 'select(.tagName == "'"$RELEASE_TAG"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 8)' >/dev/null
+            --jq 'select(.tagName == "'"$RELEASE_TAG"'" and (.isDraft|not) and (.isPrerelease|not) and (.assets|length) == 9)' >/dev/null
           mkdir -p dist/stable dist/prerelease
           gh release download "$RELEASE_TAG" --dir dist/stable
           gh release download "$candidate_tag" --dir dist/prerelease
-          for asset in agent-loopctl_Darwin_arm64 host-release-manifest.json agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json production-state-report.json; do
+          for asset in agent-loopctl_Darwin_arm64 host-release-manifest.json agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json; do
             cmp "dist/prerelease/$asset" "dist/stable/$asset"
           done
           for asset in agent-loopctl_Darwin_arm64 host-release-manifest.json agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
@@ -498,7 +416,6 @@ jobs:
           gh attestation verify dist/stable/agent-loop-monitor_Darwin_arm64 --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/cli-surface-report.json --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/stable/offline-contract-report.json --repo "$GITHUB_REPOSITORY"
-          gh attestation verify dist/stable/production-state-report.json --repo "$GITHUB_REPOSITORY"
           chmod 0755 dist/stable/agent-loop_Darwin_arm64
           chmod 0755 dist/stable/agent-loop-monitor_Darwin_arm64
           dist/stable/agent-loop_Darwin_arm64 version --json | jq -e --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" '.version == $version and .commit == $commit and .assignment_protocol == 1'

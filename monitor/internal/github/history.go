@@ -19,13 +19,16 @@ var errHistoryIncomplete = errors.New("issue history is incomplete")
 // Reverse replay is anchored in the current snapshot; a retained label alone
 // does not prove that an issue was open or eligible before a reentry.
 func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, boundary time.Time) ([]model.QueueEvent, time.Time, error) {
+	if issue.PullRequest != nil {
+		return nil, time.Time{}, nil
+	}
 	labels := map[string]bool{}
 	for _, label := range issue.Labels {
 		labels[strings.ToLower(label.Name)] = true
 	}
 	open := issue.State != "closed"
 	phase := func() model.Phase {
-		if !open || issue.PullRequest != nil {
+		if !open {
 			return ""
 		}
 		for _, label := range append(append([]string{}, repo.TerminalLabels...), repo.ExcludeLabels...) {
@@ -47,6 +50,9 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 	sort.Slice(events, func(i, j int) bool { return events[i].ID > events[j].ID })
 	var result []model.QueueEvent
 	var since time.Time
+	var pendingClose int64
+	completed := map[int64]bool{}
+	emptyClose := map[int64]bool{}
 	current := phase()
 	var later time.Time
 	var laterEntry model.Phase
@@ -97,11 +103,38 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 			continue
 		}
 		before := phase()
+		if event.Event == "closed" {
+			pendingClose = event.ID
+			emptyClose[event.ID] = before == ""
+		}
+		if event.Event == "reopened" || (event.Event == "labeled" && stringSet(repo.ReadyLabels)[label]) {
+			pendingClose = 0
+		}
+		if pendingClose != 0 && before == model.Running {
+			completed[pendingClose] = true
+			pendingClose = 0
+		}
+		if before == model.Ready {
+			pendingClose = 0
+		}
+		if event.Event == "closed" {
+			result = append(result, model.QueueEvent{ID: event.ID, IssueNumber: issue.Number, Kind: model.QueueExited, At: event.CreatedAt.UTC()})
+			continue
+		}
 		if before == after {
 			continue
 		}
 		if since.IsZero() && after == current {
 			since = event.CreatedAt.UTC()
+		}
+		if after == "" && event.Event == "unlabeled" && before == laterEntry && len(result) > 0 {
+			entry := result[len(result)-1]
+			if since.Equal(entry.At) {
+				since = time.Time{}
+			}
+			result = result[:len(result)-1]
+			laterEntry = ""
+			continue
 		}
 		// A label replacement keeps the admission window until the next phase.
 		if after == "" && event.Event == "unlabeled" && laterEntry != "" && before != laterEntry {
@@ -110,6 +143,12 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 		}
 		laterEntry = after
 		kind := model.QueueExited
+		if after == "" && event.Event == "unlabeled" {
+			kind = model.ReadyUnlabeled
+			if before == model.Running {
+				kind = model.RunningUnlabeled
+			}
+		}
 		if after == model.Ready {
 			kind = model.ReadyLabeled
 		}
@@ -118,7 +157,18 @@ func issueHistory(repo config.Repository, issue rawIssue, events []rawEvent, bou
 		}
 		result = append(result, model.QueueEvent{ID: event.ID, IssueNumber: issue.Number, Kind: kind, At: event.CreatedAt.UTC()})
 	}
-	return result, since, nil
+	filtered := result[:0]
+	for i := range result {
+		if completed[result[i].ID] {
+			result[i].Kind = model.ProcessingClosed
+		} else if result[i].Kind == model.ReadyUnlabeled || result[i].Kind == model.RunningUnlabeled {
+			result[i].Kind = model.QueueExited
+		}
+		if !emptyClose[result[i].ID] || completed[result[i].ID] {
+			filtered = append(filtered, result[i])
+		}
+	}
+	return filtered, since, nil
 }
 
 func (c CLI) resolveEvents(ctx context.Context, repo config.Repository, batch []model.QueueEvent, issues []rawIssue, cursor, head int64, at time.Time) ([]model.QueueEvent, error) {

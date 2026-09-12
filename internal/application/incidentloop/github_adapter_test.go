@@ -16,6 +16,7 @@ func TestGitHubIssueAdapterSearchCreateAndReadbackAreExact(t *testing.T) {
 case "$1 $2" in
   "issue list") printf '%s' "$INCIDENT_GH_LIST" ;;
   "issue create") printf '%s\n' 'https://github.com/owner/repo/issues/42' ;;
+  "api --method") echo '[]' ;;
   "issue view") printf '%s' "$INCIDENT_GH_VIEW" ;;
   *) exit 2 ;;
 esac

@@ -2,6 +2,8 @@
 
 ホスト CLI は `agent-loopctl`、repository runtime は immutable slot の `agent-loop` を使う。既存環境の切替・PATH・旧 binary の扱いは [release の導入手順](release.md#ホスト-cli-の導入切替) に従う。ホストだけの更新で repository assignment を変更しない。
 
+Snapshot v6 は #575/#536/#537 の統合・検証完了まで配布保留。既存 migrate は v5 までの経路であり、v6 の起動許可にはならない。旧 snapshot/隔離 backup は対応する旧 binary と停止下で扱い、v6 への移行不能状態は原本を変更せず全体中止する。詳細は [migration runbook](migration.md) を参照する。
+
 最終確認日: 2026-08-16
 
 repositoryごとのversion更新は[Repository別stable delivery](per-repository-delivery.md)を、`codex-issue-loop`自身が壊れて通常loopを利用できない場合は[break-glass repair](break-glass-repair.md)を正本とする。stable Release公開だけでは登録repositoryを自動更新しない。
@@ -171,6 +173,8 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loopctl answer \
   --json
 ```
 
+新規Issueの受付は、正常に進行する先行IssueのPRマージ確認による内部完了、PR不要の正当な完了、または正式キャンセルまで待機する。予算内の自動retry・競合解消でも順序を維持する。回答待ちやfailed/blocked/quarantineでは対象Issueの成果と復旧経路を保持して後続を進める。過去の停止Issueを一括キャンセルする必要はない。全体の順序待ちはsupervisor message、個別attentionはIssue状態・エラーで確認する。保留Issueの回答・復旧後も、別Issueの実行枠を奪わず既存schedulerを通して再開する。
+
 記録後、同じrequest IDがansweredになったことをstatusで確認する。別Issueがroot `active_execution`を保持していれば、回答済みIssueはcontinuationを保持して待機し、実行枠が空いた後にschedulerが再開する。ready/running label、state、execution identityを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 
 別端末から回答する場合は、AIがIssue本文と質問コメントを読み、表示されたrequest・選択肢を照合して `agent-loopctl answer --via github --repo owner/repo --issue N --request-id <id> --message-file - --json` へ標準入力で渡す。checkout・ローカル登録は不要で、`gh` はsupervisorと同一の人間アカウントで認証する。別ユーザーはadminでも受理されない。ホスト固有のsecret設定は遠隔へ公開せず、検出不能なsecretを回答へ含めない。
@@ -246,6 +250,7 @@ agent-loopctl issue resolve --repo /absolute/path/to/repository --issue 123 --ac
 - `resume`は保存session/workspaceからworker境界を継続する。
 - `retry-stage`は保存済みpublish/checks/conflict stageへ戻る。completed resultがある場合はSHA-256を照合し、workerを再実行しない。
 - `adopt-worktree`はconflict recovery中に`worktree_sha256`だけを欠くquarantineで、保存済みhead、PR、`MERGE_HEAD`、base ancestry、変更path scopeが一致する場合だけ現在のdigestをcheckpointへ記録する。実行は開始しないため、再度planを確認してから`retry-stage`を実行する。
+- active suspensionに保存済みdigestがあり、承認済み追加pathがscopeへ未反映の場合は、`issue plan --repo PATH --issue N --allow-path FILE --json`でpreviewし、同じ個別pathを`issue resolve --repo PATH --issue N --action approve-conflict-paths --allow-path FILE --json`で指定する。複数pathは`--allow-path`を繰り返す。identityと差分の再検証後にscopeだけを記録するため、再度planを確認してから`retry-stage`を実行する。自由文の回答だけではscopeは拡大されない。
 - planの`adoption_unapproved_changed_paths`にpathがある場合は、operatorがその現在差分を許可するときだけplanとresolveの両方へ同じ`--allow-path <relative-path>`を指定する。指定pathと追加後scopeは`issue_worktree_adopted` eventへ記録される。
 - `adopt-pr`は保存branch/head/baseと一致するsame-repositoryの一意なmerged PRだけを採用する。commit、push、PR、mergeは作成しない。
 - `cancel`はworkerを起動せずIssueを`canceled`へ収束させる。

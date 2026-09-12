@@ -3,7 +3,7 @@ set -eu
 
 operator_binary=${PRODUCTION_AGENT_LOOP_BINARY:?PRODUCTION_AGENT_LOOP_BINARY is required}
 repositories_file=${PRODUCTION_REPOSITORIES_FILE:?PRODUCTION_REPOSITORIES_FILE is required}
-rollback_drill_file=${ROLLBACK_DRILL_FILE:?ROLLBACK_DRILL_FILE is required}
+rollback_drill_file=${ROLLBACK_DRILL_FILE:-}
 artifact_dir=${HEALTH_ARTIFACT_DIR:?HEALTH_ARTIFACT_DIR is required}
 release_tag=${RELEASE_TAG:?RELEASE_TAG is required}
 release_commit=${RELEASE_COMMIT:?RELEASE_COMMIT is required}
@@ -12,19 +12,23 @@ health_soak_seconds=${HEALTH_SOAK_SECONDS:-300}
 
 [ -x "$operator_binary" ]
 [ -f "$repositories_file" ]
-[ -f "$rollback_drill_file" ]
 case "$health_soak_seconds" in
   ''|*[!0-9]*) echo "HEALTH_SOAK_SECONDS must be a non-negative integer" >&2; exit 2 ;;
 esac
 jq -e 'type == "array" and length >= 1 and all(.[]; (.repo_id | type == "string" and length > 0) and (.path | type == "string" and startswith("/")))' "$repositories_file" >/dev/null
-jq -e --arg tag "$release_tag" '
-  .schema_version == 1 and .typed_rollback == true and .same_artifact_reapplied == true and
-  .before.version == $tag and .rollback.result == "succeeded" and .reapplied.version == $tag and
-  .preserved.state == true and .preserved.issues == true and .preserved.execution == true and
-  .preserved.worktrees == true and
-  .other_repository_unchanged.assignment == true and .other_repository_unchanged.pid == true and
-  .other_repository_unchanged.binary == true and .other_repository_unchanged.state_revision == true
-' "$rollback_drill_file" >/dev/null
+rollback_json=null
+if [ -n "$rollback_drill_file" ]; then
+  [ -f "$rollback_drill_file" ]
+  jq -e --arg tag "$release_tag" '
+    .schema_version == 1 and .typed_rollback == true and .same_artifact_reapplied == true and
+    .before.version == $tag and .rollback.result == "succeeded" and .reapplied.version == $tag and
+    .preserved.state == true and .preserved.issues == true and .preserved.execution == true and
+    .preserved.worktrees == true and
+    .other_repository_unchanged.assignment == true and .other_repository_unchanged.pid == true and
+    .other_repository_unchanged.binary == true and .other_repository_unchanged.state_revision == true
+  ' "$rollback_drill_file" >/dev/null
+  rollback_json=$(cat "$rollback_drill_file")
+fi
 
 "$operator_binary" version --json | jq -e ' .repository_command_protocol == 1 ' >/dev/null
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-assignment-health.XXXXXX")
@@ -98,10 +102,10 @@ capture_sample final "$health_soak_seconds"
 jq -s '.' "$temporary_root/start.json" "$temporary_root/intermediate.json" "$temporary_root/final.json" >"$temporary_root/samples.json"
 jq -n --arg tag "$release_tag" --arg commit "$release_commit" --arg digest "$stable_digest" \
   --argjson duration "$health_soak_seconds" --argjson middle "$middle_offset" \
-  --slurpfile samples "$temporary_root/samples.json" --slurpfile rollback "$rollback_drill_file" '
+  --slurpfile samples "$temporary_root/samples.json" --argjson rollback "$rollback_json" '
   {
     schema_version:2,release_tag:$tag,release_commit:$commit,stable_binary_sha256:$digest,
-    rollout_mode:"per-repository-stable-assignment",rollback_drill:$rollback[0],
+    rollout_mode:"per-repository-stable-assignment",rollback_drill:$rollback,
     soak:{duration_seconds:$duration,sample_offsets_seconds:[0,$middle,$duration],samples:$samples[0]},
     repositories:$samples[0][-1].repositories,
     healthy:all($samples[0][];.healthy == true)
@@ -111,7 +115,7 @@ jq -n --arg tag "$release_tag" --arg commit "$release_commit" --arg digest "$sta
 jq -e --arg tag "$release_tag" --arg commit "$release_commit" --arg digest "$stable_digest" '
   .schema_version == 2 and .release_tag == $tag and .release_commit == $commit and
   .stable_binary_sha256 == $digest and .rollout_mode == "per-repository-stable-assignment" and
-  .rollback_drill.typed_rollback == true and .rollback_drill.same_artifact_reapplied == true and
+  (.rollback_drill == null or (.rollback_drill.typed_rollback == true and .rollback_drill.same_artifact_reapplied == true)) and
   (.soak.samples | length) == 3 and all(.soak.samples[];.healthy == true) and
   (.repositories | length) >= 1 and all(.repositories[];
     .assignment.version == $tag and .assignment.commit == $commit and .assignment.artifact_sha256 == $digest and

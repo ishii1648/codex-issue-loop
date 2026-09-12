@@ -1,4 +1,4 @@
-package state
+package snapshot
 
 import (
 	"errors"
@@ -11,7 +11,7 @@ import (
 
 func TestEveryExecutionRequiredFieldHasRuntimeValidator(t *testing.T) {
 	for _, field := range statecontract.Current().Fields {
-		if field.Class == statecontract.ExecutionRequiredProvenance && !supportsExecutionRequiredField(field.Path) {
+		if field.Class == statecontract.ExecutionRequiredProvenance && !SupportsExecutionRequiredField(field.Path) {
 			t.Fatalf("execution-required field %s has no runtime validator", field.Path)
 		}
 	}

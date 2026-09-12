@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -214,6 +215,33 @@ func runGH(args []string) error {
 		fmt.Println(`{"resources":{"graphql":{"remaining":1000,"reset":4102444800}}}`)
 		return nil
 	default:
+		if args[0] == "api" && option(args, "--method") == "GET" {
+			for _, argument := range args[1:] {
+				endpoint, err := url.Parse(argument)
+				if err != nil || !strings.HasPrefix(endpoint.Path, "/repos/offline/repository/issues/") || !strings.HasSuffix(endpoint.Path, "/comments") {
+					continue
+				}
+				number := strings.TrimSuffix(strings.TrimPrefix(endpoint.Path, "/repos/offline/repository/issues/"), "/comments")
+				item, err := findIssue(state, number)
+				if err != nil {
+					return err
+				}
+				perPage, err := strconv.Atoi(endpoint.Query().Get("per_page"))
+				if err != nil || perPage < 1 || perPage > 100 {
+					return errors.New("offline comments require per_page between 1 and 100")
+				}
+				page, err := strconv.Atoi(endpoint.Query().Get("page"))
+				if err != nil || page < 1 {
+					return errors.New("offline comments require a positive page")
+				}
+				if page-1 > len(item.Comments)/perPage {
+					return json.NewEncoder(os.Stdout).Encode(comments(nil))
+				}
+				start := (page - 1) * perPage
+				end := min(start+perPage, len(item.Comments))
+				return json.NewEncoder(os.Stdout).Encode(comments(item.Comments[start:end]))
+			}
+		}
 		if args[0] == "api" && strings.HasPrefix(args[1], "repos/offline/repository/issues/") && option(args, "--method") == "PATCH" {
 			item, err := findIssue(state, strings.TrimPrefix(args[1], "repos/offline/repository/issues/"))
 			if err != nil {
