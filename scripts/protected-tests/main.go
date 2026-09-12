@@ -69,11 +69,10 @@ func readRules(data []byte) ([]rule, error) {
 }
 
 func inspect(repo, base, head string) (r report) {
-	r = report{Base: base, Head: head, DedicatedPRRequired: true, Changes: []change{}}
+	r = report{Base: base, Head: head, Changes: []change{}}
 	err := classify(repo, &r)
 	if err != nil {
 		r.Error = err.Error()
-		r.DedicatedPRRequired = true
 	}
 	return r
 }
@@ -153,7 +152,6 @@ func classify(repo string, r *report) error {
 			break
 		}
 	}
-	r.DedicatedPRRequired = len(r.Changes) != 0
 	return nil
 }
 
@@ -163,7 +161,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if r.DedicatedPRRequired || r.Error != "" {
+	if r.Error != "" {
 		os.Exit(1)
 	}
 }

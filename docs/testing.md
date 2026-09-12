@@ -57,14 +57,16 @@ current v5入力に旧lease、resource park、scenario別status/sync/substateが
 
 Issue本文による権限拡張、secret永続化、path traversal、symlink、別repository worktree、stale generation、未知lifecycle API major、旧v5 runtime fieldを拒否する。通常suiteはmodel呼び出し、外部network、新規tokenを必要としない。
 
-## 保護された契約テストの差分ゲート
+## 契約テストの変更レポート
 
-`.github/protected-tests.tsv` は、種別（`test` / `control`）、リポジトリ相対の完全パス（末尾 `/` はディレクトリ）、理由をタブで区切る固定登録である。schedulerの隔離後の後続起動・取消、stateの単一実行権・fencing・永続transactionを初期対象とする。`supervisor_test.go` の `testLoop`、`execution_test.go` の `newStore`、`validator_test.go` のsnapshot生成helperとsupervisorのtestdataも含む。大きな既存ファイルを保護するため、同じファイル内の無関係なテスト整理も検出する。
+`.github/protected-tests.tsv` は、種別（`test` / `control`）、リポジトリ相対の完全パス（末尾 `/` はディレクトリ）、理由をタブで区切る固定登録である。schedulerの隔離後の後続起動・取消、stateの単一実行権・fencing・永続transaction、共有fixture/helperと検査基盤を対象にする。これはレビューの注目箇所を検出する範囲であり、保護外の変更を安全と認定するものではない。
 
-`Protected contract tests` workflowは `pull_request_target` の固定baseをcheckoutし、headを実行せずGit objectとしてfetchする。検査処理と登録はbase版を使う。`BASE_SHA` / `HEAD_SHA` は完全commit SHAを必須とし、checkoutとbase、fetch結果とheadの一致を確認する。差分は一意なmerge-baseからheadまでの `git diff --no-renames --name-status -z`。移動は旧パスの削除と新パスの追加として記録し、類似度やGitのrename設定に依存しない。head更新・base branch変更で再実行し、mainへのpushでもそのbaseを対象にopen PRを再検査する。
+`Contract test changes` workflowは `pull_request_target` の固定baseをcheckoutし、headを実行せずGit objectとしてfetchする。検査処理と登録はbase版を使う。`BASE_SHA` / `HEAD_SHA` は完全commit SHAを必須とし、checkoutとbase、fetch結果とheadの一致を確認する。差分は一意なmerge-baseからheadまでの `git diff --no-renames --name-status -z`。移動は旧パスの削除と新パスの追加として記録する。head更新・base branch変更で再実行し、mainへのpushでもそのbaseを対象にopen PRを再検査する。
 
-`review-artifacts/protected-tests.json` にbase/head/merge-base、`dedicated_pr_required`、検出した変更種別・旧新パス・理由を出力する。参照不能・不正定義・差分取得失敗はerrorと失敗終了になり、workflowの取得・同一性確認失敗やartifact欠落もpassにしない。`test` の独立した新規 `_test.go` 追加だけは免除する。既存ファイルの編集・削除・mode/type変更、移動元の削除は免除しない。`control` の保護定義・検査処理・workflow・Makefile・依存固定・実行スクリプト・fixtureは追加も検出する。
+`review-artifacts/protected-tests.json` にbase/head/merge-baseと検出した変更種別・旧新パス・理由を出力する。既存consumer向けの `dedicated_pr_required` は常に `false` とし、専用PRを要求しない。検出した変更の有無は `changes`、検査失敗は `error` で区別する。参照不能・不正定義・差分取得失敗・artifact欠落は失敗になる。変更を検出しただけでは失敗しない。正常終了は検査完了を表し、仕様・保証の変更が妥当という判定ではない。
 
-専用PRが必要な場合、ゲートは現段階では常に失敗する。labelや本文で解除する入力はない。#581ではこのbase/headに紐付いた判定を受け、専用PRの説明・独立レビュー（#341）の対象版・承認済みテスト差分と関連実装PRの一致を検証してから統合を許可する必要がある。承認済み差分の統合による免除はまだ実装していない。古いbase/headの結果を流用せず、統合時の再検証も必要である。
+`test` の独立した新規 `_test.go` 追加だけはレポート対象から除外する。既存ファイルの編集・削除・mode/type変更、移動元の削除は検出する。`control` の保護定義・検査処理・workflow・Makefile・依存固定・実行スクリプト・fixtureは追加も検出する。
 
-これは検出とfail-closedなCI接続であり、専用PRの承認・統合やマージ防止の完成ではない。特にbase pushの再検査結果を各PRの最新の必須判定へ結び付ける手続き、trusted workflowの初回導入、本番ruleset・権限の設定は残る統合依存である。workflow自体の信頼はGitHub側のbase版実行に依存する。保護外のproductionコード・他のtest helper・build tag・`TestMain` 等からテストを弱体化する変更や、実行環境・外部action/toolchainの変更は、このパス検査では意味を判定しない。保護外の変更を仕様不変と認定せず、独立レビューと既存品質・実行証拠ゲートを維持する。
+仕様・実装・テストは同じPRで変更・検証する。既存PRテンプレートの「仕様・保証への影響」に、必要な場合だけ変更前後の動作、要求・承認根拠、失われる保証、維持する保証と代替検証を記載する。テスト単独の先行マージや専用PRへの分離は要求しない。検査基盤自身の変更も信頼済みbaseで検出し、レビュー対象とする。
+
+意味上の妥当性は元要求・変更前仕様・テスト・実装差分を合わせてレビューする。#341の独立レビューと#593の対象HEADの実行証拠検証は未完成であり、このレポートはそれらを代替しない。Quality gatesとHigh-risk reviewの既存チェックを維持し、レポートの成功を仕様承認・テスト実行成功として扱わない。必須レビューの本番有効化は、正当な変更の承認経路と古い結果・欠損・失敗の拒否を検証してから行う。

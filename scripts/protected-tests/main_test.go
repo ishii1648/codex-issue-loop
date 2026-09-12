@@ -68,25 +68,25 @@ func TestProtectedChanges(t *testing.T) {
 	cases := []struct {
 		name, p, target, content, status string
 		remove                           bool
-		required                         bool
+		detected                         bool
 	}{
-		{name: "edit", p: scheduler, content: "edited", status: "M", required: true},
-		{name: "expectation inversion", p: scheduler, status: "M", required: true},
-		{name: "skip", p: scheduler, content: "t.Skip()", status: "M", required: true},
-		{name: "format", p: scheduler, content: "\n", status: "M", required: true},
-		{name: "delete", p: scheduler, remove: true, status: "D", required: true},
-		{name: "rename outside", p: scheduler, target: "unprotected/moved_test.go", status: "D", required: true},
-		{name: "delete plus replacement", p: scheduler, target: "new_test.go", content: "replacement", status: "D", required: true},
-		{name: "definition delete", p: definition, remove: true, status: "D", required: true},
-		{name: "definition shrink", p: definition, content: "", status: "M", required: true},
-		{name: "checker delete", p: "scripts/protected-tests/fixture", remove: true, status: "D", required: true},
-		{name: "new checker", p: "scripts/protected-tests/bypass.go", content: "bypass", status: "A", required: true},
-		{name: "execution setting", p: "Makefile", content: "skip", status: "M", required: true},
-		{name: "new workflow", p: ".github/workflows/bypass.yml", content: "skip", status: "A", required: true},
-		{name: "helper", p: "fixture helpers/input data", content: "weakened", status: "M", required: true},
-		{name: "new helper", p: "fixture helpers/new data", content: "new", status: "A", required: true},
-		{name: "spaces", p: "tests with spaces/original_test.go", content: "change", status: "M", required: true},
-		{name: "newline path", p: "fixture helpers/a\nb\t_test.go", content: "new", status: "A", required: true},
+		{name: "edit", p: scheduler, content: "edited", status: "M", detected: true},
+		{name: "expectation inversion", p: scheduler, status: "M", detected: true},
+		{name: "skip", p: scheduler, content: "t.Skip()", status: "M", detected: true},
+		{name: "format", p: scheduler, content: "\n", status: "M", detected: true},
+		{name: "delete", p: scheduler, remove: true, status: "D", detected: true},
+		{name: "rename outside", p: scheduler, target: "unprotected/moved_test.go", status: "D", detected: true},
+		{name: "delete plus replacement", p: scheduler, target: "new_test.go", content: "replacement", status: "D", detected: true},
+		{name: "definition delete", p: definition, remove: true, status: "D", detected: true},
+		{name: "definition shrink", p: definition, content: "", status: "M", detected: true},
+		{name: "checker delete", p: "scripts/protected-tests/fixture", remove: true, status: "D", detected: true},
+		{name: "new checker", p: "scripts/protected-tests/bypass.go", content: "bypass", status: "A", detected: true},
+		{name: "execution setting", p: "Makefile", content: "skip", status: "M", detected: true},
+		{name: "new workflow", p: ".github/workflows/bypass.yml", content: "skip", status: "A", detected: true},
+		{name: "helper", p: "fixture helpers/input data", content: "weakened", status: "M", detected: true},
+		{name: "new helper", p: "fixture helpers/new data", content: "new", status: "A", detected: true},
+		{name: "spaces", p: "tests with spaces/original_test.go", content: "change", status: "M", detected: true},
+		{name: "newline path", p: "fixture helpers/a\nb\t_test.go", content: "new", status: "A", detected: true},
 		{name: "independent addition", p: "tests with spaces/new_test.go", content: "new"},
 		{name: "unprotected", p: "other_test.go", content: "change"},
 	}
@@ -127,10 +127,10 @@ func TestProtectedChanges(t *testing.T) {
 			head := runGit(t, repo, "rev-parse", "HEAD")
 			runGit(t, repo, "checkout", "--detach", base)
 			got := inspect(repo, base, head)
-			if got.Error != "" || got.DedicatedPRRequired != tc.required {
+			if got.Error != "" || got.DedicatedPRRequired || (len(got.Changes) > 0) != tc.detected {
 				t.Fatalf("%+v", got)
 			}
-			if tc.required && (len(got.Changes) != 1 || got.Changes[0].Status != tc.status) {
+			if tc.detected && (len(got.Changes) != 1 || got.Changes[0].Status != tc.status) {
 				t.Fatalf("%+v", got)
 			}
 			first, _ := json.Marshal(got)
@@ -147,7 +147,7 @@ func TestFailClosed(t *testing.T) {
 	repo, base := fixture(t)
 	for _, tc := range []struct{ base, head string }{{"main", base}, {base, "missing"}, {base, strings.Repeat("0", 40)}} {
 		got := inspect(repo, tc.base, tc.head)
-		if got.Error == "" || !got.DedicatedPRRequired {
+		if got.Error == "" || got.DedicatedPRRequired {
 			t.Fatalf("%+v", got)
 		}
 	}
@@ -157,12 +157,12 @@ func TestFailClosed(t *testing.T) {
 	head := runGit(t, repo, "rev-parse", "HEAD")
 	for _, pair := range [][2]string{{base, head}, {head, head}} {
 		got := inspect(repo, pair[0], pair[1])
-		if got.Error == "" || !got.DedicatedPRRequired {
+		if got.Error == "" || got.DedicatedPRRequired {
 			t.Fatalf("%+v", got)
 		}
 	}
 	got := inspect(t.TempDir(), base, base)
-	if got.Error == "" || !got.DedicatedPRRequired {
+	if got.Error == "" || got.DedicatedPRRequired {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -208,7 +208,7 @@ func TestDiffFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := inspect(repo, base, head)
-	if !strings.Contains(got.Error, "git diff failed") || !got.DedicatedPRRequired {
+	if !strings.Contains(got.Error, "git diff failed") || got.DedicatedPRRequired {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -226,7 +226,47 @@ func TestAdditionAlreadyPresentInUpdatedBase(t *testing.T) {
 	runGit(t, repo, "commit", "-qm", "base update")
 	updated := runGit(t, repo, "rev-parse", "HEAD")
 	got := inspect(repo, updated, head)
-	if got.Error != "" || !got.DedicatedPRRequired || len(got.Changes) != 1 {
+	if got.Error != "" || got.DedicatedPRRequired || len(got.Changes) != 1 {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestCommandExitStatus(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "protected-tests")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	repo, base := fixture(t)
+	put(t, repo, "internal/application/supervisor/scheduler_test.go", "changed contract")
+	runGit(t, repo, "add", ".")
+	runGit(t, repo, "commit", "-qm", "head")
+	head := runGit(t, repo, "rev-parse", "HEAD")
+	runGit(t, repo, "checkout", "--detach", base)
+	for _, tc := range []struct {
+		name, head string
+		failed     bool
+	}{
+		{"unchanged", base, false}, {"protected change", head, false}, {"invalid head", "missing", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(binary)
+			cmd.Dir = repo
+			cmd.Env = append(os.Environ(), "BASE_SHA="+base, "HEAD_SHA="+tc.head)
+			out, err := cmd.Output()
+			if (err != nil) != tc.failed {
+				t.Fatalf("exit: %v, output: %s", err, out)
+			}
+			var got report
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.DedicatedPRRequired || (got.Error != "") != tc.failed {
+				t.Fatalf("report: %+v", got)
+			}
+			if tc.head == head && len(got.Changes) != 1 {
+				t.Fatalf("missing changes: %+v", got)
+			}
+		})
 	}
 }
