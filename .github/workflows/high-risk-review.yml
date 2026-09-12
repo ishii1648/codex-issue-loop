@@ -11,12 +11,16 @@ jobs:
   high-risk-review-gate:
     name: High-risk review gate
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/head
           fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
       - name: Run automated high-risk review
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -25,9 +29,23 @@ jobs:
         run: |
           scripts/high-risk-review.sh
           jq -e --arg base "$BASE_SHA" --arg head "$HEAD_SHA" '
-            .schema_version == 1 and .base == $base and .head == $head and
+            . as $report |
+            .schema_version == 2 and .base == $base and .head == $head and
             .finding_count == 0 and (.findings | length) == 0 and
-            (.checks | all(.[]; . == true))
+            (.checks | keys == ["fault_tests", "invariants", "migration", "release_compatibility", "rollback", "secret_exposure", "specification_mapping", "target_revision"]) and
+            (.checks.target_revision.status == "passed" and .checks.target_revision.required == true and
+             .checks.target_revision.evidence.base == $base and .checks.target_revision.evidence.head == $head) and
+            (.checks.specification_mapping.required == false) and
+            (.checks.rollback.required == false) and
+            (.high_risk | type == "boolean") and
+            (if .high_risk then
+              .checks.specification_mapping.status == "unverified" and .checks.rollback.status == "unverified" and
+              all(["invariants", "migration", "fault_tests", "release_compatibility"][];
+                . as $key | $report.checks[$key].evidence |
+                .base == $base and .head == $head and .exit_code == 0 and (.tests | length > 0)) and
+              all(["invariants", "migration", "fault_tests", "release_compatibility", "secret_exposure"][];
+                . as $key | $report.checks[$key].required == true and $report.checks[$key].status == "passed")
+             else all(.checks | to_entries[] | select(.key != "target_revision"); .value.status == "not_applicable") end)
           ' review-artifacts/high-risk-review.json >/dev/null
       - uses: actions/upload-artifact@v6
         if: always()
