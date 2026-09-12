@@ -414,8 +414,9 @@ func (c CLI) Claim(ctx context.Context, cfg config.Config, issue Issue, runID st
 		}
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:claim:%s -->", runID)
-	body := fmt.Sprintf("%s\nSupervisor picked up this issue. Preparing the workspace before starting the worker (run `%s`).", marker, runID)
-	return c.ensureComment(ctx, cfg.GitHub.Repo, issue.Number, marker, body)
+	body := marker + "\nこのIssueの処理を開始しました。作業用ブランチとworktreeを準備し、実装に進みます。"
+	_ = c.ensureComment(ctx, cfg.GitHub.Repo, issue.Number, marker, body)
+	return nil
 }
 
 func (c CLI) MarkNeedsInput(ctx context.Context, cfg config.Config, number int, requestID, question string) error {
@@ -423,7 +424,7 @@ func (c CLI) MarkNeedsInput(ctx context.Context, cfg config.Config, number int, 
 		return err
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:request:%s -->", requestID)
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, marker+"\nInput required: "+redact.StringWithSecrets(question, c.Secrets))
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, marker+"\n判断が必要なため、処理を一時停止しています。\n\n**質問：** "+redact.StringWithSecrets(question, c.Secrets))
 }
 
 func (c CLI) MarkDone(ctx context.Context, cfg config.Config, number int, prURL string) error {
@@ -437,13 +438,11 @@ func (c CLI) MarkDone(ctx context.Context, cfg config.Config, number int, prURL 
 		return err
 	}
 	marker := "<!-- codex-issue-loop:done -->"
-	body := marker + "\nCompleted by `codex-issue-loop`."
+	body := marker + "\nこのIssueの処理が完了しました。"
 	if prURL != "" {
-		body += "\n\nPull request: " + prURL
+		body = marker + "\nPRのマージを確認しました：" + redact.StringWithSecrets(prURL, c.Secrets) + "\nこのIssueの処理は完了です。"
 	}
-	if err := c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body); err != nil {
-		return err
-	}
+	_ = c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
 	if cfg.Completion.CloseIssue {
 		path := c.Path
 		if path == "" {
@@ -473,8 +472,23 @@ func (c CLI) MarkFailed(ctx context.Context, cfg config.Config, number int, reas
 	baseMarker := fmt.Sprintf("<!-- codex-issue-loop:failed:%d -->", number)
 	digest := sha256.Sum256([]byte(reason))
 	idempotencyMarker := fmt.Sprintf("<!-- codex-issue-loop:failure:%x -->", digest[:8])
-	body := baseMarker + "\n" + idempotencyMarker + "\nAutomation stopped: " + redact.StringWithSecrets(reason, c.Secrets)
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, idempotencyMarker, body)
+	stage := "実装・検証"
+	switch {
+	case strings.Contains(reason, "publish"), strings.Contains(reason, "publication"):
+		stage = "PR公開"
+	case strings.Contains(reason, "conflict"):
+		stage = "競合解消"
+	case strings.Contains(reason, "checks"):
+		stage = "CI確認"
+	case strings.Contains(reason, "Pull Request"):
+		stage = "PR確認"
+	case strings.Contains(reason, "worktree"), strings.Contains(reason, "workspace"):
+		stage = "作業環境の確認"
+	}
+	body := fmt.Sprintf("%s\n%s\n%sで自動処理を停止しました。\n理由：%s\n\n必要な対応：上記の原因を確認し、`agent-loop issue plan --repo %q --issue %d` で提示される復旧操作・判断を確認してください。",
+		baseMarker, idempotencyMarker, stage, reason, cfg.RepoPath, number)
+	_ = c.ensureComment(ctx, cfg.GitHub.Repo, number, idempotencyMarker, redact.StringWithSecrets(body, c.Secrets))
+	return nil
 }
 
 func (c CLI) MarkRunning(ctx context.Context, cfg config.Config, number int) error {
@@ -498,8 +512,9 @@ func (c CLI) MarkConflictRetry(ctx context.Context, cfg config.Config, number in
 		return err
 	}
 	marker := fmt.Sprintf("<!-- codex-issue-loop:conflict-retry:%s -->", recoveryID)
-	body := marker + "\nPull Request conflict recovery was explicitly resumed using durable state."
-	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
+	body := marker + "\n競合解消の再試行を受け付けました。再開前の確認を行います。"
+	_ = c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, body)
+	return nil
 }
 
 func (c CLI) ReadyPullRequest(ctx context.Context, cfg config.Config, prURL string) error {
@@ -571,15 +586,20 @@ func (c CLI) ensureComment(ctx context.Context, repo string, number int, marker,
 		return nil
 	}
 	if err != nil {
-		if _, _, _, limited := primaryRateLimit(view); limited {
-			return c.commandError(ctx, path, fmt.Sprintf("inspect comments on Issue #%d", number), err, view)
-		}
+		return c.commandError(ctx, path, fmt.Sprintf("inspect comments on Issue #%d", number), err, view)
 	}
 	out, err := exec.CommandContext(ctx, path, "issue", "comment", fmt.Sprint(number), "--repo", repo, "--body", body).CombinedOutput()
 	if err != nil {
 		return c.commandError(ctx, path, fmt.Sprintf("comment on Issue #%d", number), err, out)
 	}
 	return nil
+}
+
+// CommentProgress checks the marker once and never retries an ambiguous post.
+func (c CLI) CommentProgress(ctx context.Context, cfg config.Config, number int, key, body string) error {
+	digest := sha256.Sum256([]byte(key))
+	marker := fmt.Sprintf("<!-- codex-issue-loop:progress:%x -->", digest[:])
+	return c.ensureComment(ctx, cfg.GitHub.Repo, number, marker, marker+"\n"+redact.StringWithSecrets(body, c.Secrets))
 }
 
 func (c CLI) safe(data []byte) string {
