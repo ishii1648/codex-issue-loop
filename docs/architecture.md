@@ -2,12 +2,12 @@
 
 ## 1. 目的と設計原則
 
-`codex-issue-loop`は、信頼できるGitHub Issueを決定的な順序で選び、1件ずつcoding workerへ渡し、先行Issueの完了または正式キャンセル後に次のIssueを処理するsupervisorである。
+`codex-issue-loop`は、信頼できるGitHub Issueを決定的な順序で選び、1件ずつcoding workerへ渡し、進行中Issueの順序を保ち、個別の停止・隔離・回答待ちでは後続Issueの処理を継続するsupervisorである。
 
 設計上の優先順位は次のとおりとする。
 
 1. repository全体の正本と実行authorityを壊さない
-2. 個別Issueの障害をそのIssueへ閉じ込め、観測と正式復旧を維持する
+2. 個別Issueの障害をそのIssueへ閉じ込め、queueの進行と正式復旧を維持する
 3. worker、回答、公開の重複と古い実行世代からの更新を防ぐ
 4. 作業成果、質問、公開identity、判断根拠を失わない
 
@@ -137,7 +137,7 @@ queue処理は次の順序に固定する。
 1. GitHubから候補とactor事実を観測する
 2. author policyで信頼できる候補だけを残す
 3. snapshot上で処理可能な候補を決定的にsortする
-4. repositoryの実行枠が空で、未完了・未キャンセルの既存Issueとquarantineがないことを確認する
+4. repositoryの実行枠が空で、順序待ちを必要とする進行中Issueがないことを確認する
 5. 選択したIssueのactor事実を再取得して信頼性を再検証する
 6. 新しいrun IDとgenerationを含むactive executionをatomicに保存する
 7. workerを起動する
@@ -146,11 +146,11 @@ queue処理は次の順序に固定する。
 
 同時workerはrepositoryごとに最大1つとする。Issue間resource、path claim、dependency metadata、worker pool、slot assignmentは現行設計に含めない。
 
-`needs_input`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、terminal、quarantineはworkerを実行していないため実行枠を消費しない。worker枠の解放と新規受付は別であり、durable statusが`completed`または`canceled`になるまで、後続の未受付Issueはreadyのまま待機する。`failed`、`blocked`、quarantineも新規受付を止め、正式な復旧またはキャンセルを待つ。publisherとGitHub mutationはrepository単位で直列化するが、外部checkやmergeの待機によってworker枠を占有しない。
+`needs_input`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、terminal、quarantineはworkerを実行していないため実行枠を消費しない。worker枠の解放と新規受付は別であり、`claiming`、`claimed`、`launching`、`running`、`resume_pending`、`retry_wait`、`awaiting_checks`、`awaiting_merge`、`resolving_conflict`では後続の未受付Issueはreadyのまま待機する。`needs_input`、`failed`、`blocked`、quarantineは対象Issueだけを保留し、後続の新規受付を妨げない。publisherとGitHub mutationはrepository単位で直列化するが、外部checkやmergeの待機によってworker枠を占有しない。
 
 PRがある場合、worker終了・CI成功・auto-merge設定ではなく、マージの観測と内部完了の確定で順序待ちを解除する。PR不要の正当な完了経路も維持する。次の新規worktreeは既存のfetch処理により最新のbase branchから作成する。待機理由はstatusのIssue状態・エラーとsupervisor messageで確認できる。
 
-導入時に複数の未完了Issueがあれば、新規受付を止めたまま既存Issueすべての観測・回答・retry・競合解消・正式復旧を進める。既存workerを強制停止せず、最大1 workerのfencingを維持して収束させる。受付待ちの判断は毎cycleのdurable snapshotから導出し、labelや追加の永続状態に依存しない。
+過去の停止・隔離・回答待ちIssueにも同じ受付判定を適用し、一括キャンセルを要求しない。保留Issueの回答・復旧後も別Issueの実行権を奪わず、既存schedulerで再開する。既存workerを強制停止せず、最大1 workerのfencingを維持して収束させる。受付待ちの判断は毎cycleのdurable snapshotから導出し、labelや追加の永続状態に依存しない。
 
 同一repositoryを処理するsupervisorは1つ、hostも1つとする。worker並列化とmulti-hostは現行設計の拡張点ではなく対象外であり、必要になった時点で別要件とADRを作成する。[ADR-0005](adr/0005-single-execution-boundary.md)を正本とする。
 
@@ -167,7 +167,7 @@ author policyはGitHub observerが取得した次の事実だけを入力にす�
 
 既定ではownerと`write`以上のcollaboratorを信頼し、botまたはGitHub Appはexact allowlistを必要とする。Issue本文、コメント、labelによる自己申告は信頼根拠にしない。
 
-候補取得時の検証結果はqueueの効率化に利用できるが、worker開始直前に必ず再検証する。検証不能または不一致は対象Issueを非着手として記録する。受付済みIssueの停止は正式復旧またはキャンセルを待つ。author検証APIの一時障害はその候補の一時的な不適格であり、既に検証できた別Issueを止めない。
+候補取得時の検証結果はqueueの効率化に利用できるが、worker開始直前に必ず再検証する。検証不能または不一致は対象Issueを非着手として記録する。受付済みIssueの停止はそのIssueだけで正式復旧またはキャンセルを待ち、後続候補の選択を妨げない。author検証APIの一時障害はその候補の一時的な不適格であり、既に検証できた別Issueを止めない。
 
 ## 8. Continuationとreconciliation
 
@@ -210,7 +210,7 @@ worker起動前には、GitHubへの投影を同期・再取得して確認し�
 
 Issue番号、run ID、generation、Issue lifecycle intentを持つerrorは、分類不能でもIssue-local境界で処理する。未分類errorを自動的にrepository-wideへ昇格させない。
 
-GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠解放を妨げない。未完了effectと定期的な表示同期で再試行する。新規受付は内部の完了または正式キャンセル後に再開する。
+GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠解放を妨げない。未完了effectと定期的な表示同期で再試行する。個別の停止・隔離・回答待ちは新規受付を妨げない。予算内の自動retryは順序を維持し、上限到達後の停止は対象Issueだけに閉じ込める。
 
 ## 10. Issue lifecycle APIと互換性
 

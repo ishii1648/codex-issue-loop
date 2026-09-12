@@ -174,5 +174,11 @@ func (s Status) DispatchesWorkerWhile(effectPending bool) bool {
 }
 
 func (s Status) BlocksNewAdmission() bool {
-	return s != StatusUnset && s != StatusCompleted && s != StatusCanceled
+	switch s {
+	case StatusClaiming, StatusClaimed, StatusLaunching, StatusRunning, StatusResumePending,
+		StatusRetryWait, StatusAwaitingChecks, StatusAwaitingMerge, StatusResolvingConflict:
+		return true
+	default:
+		return false
+	}
 }

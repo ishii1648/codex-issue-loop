@@ -649,7 +649,7 @@ func TestWorkerEnvironmentBlockReleasesExecutionAndPreservesContinuation(t *test
 	}
 }
 
-func TestWorkerEnvironmentBlockWaitsBeforeFollowingRepositoryIssue(t *testing.T) {
+func TestWorkerEnvironmentBlockAllowsFollowingRepositoryIssue(t *testing.T) {
 	blocked := worker.Result{
 		Version: 1, Status: "blocked", ExecutionProfile: "extended",
 		Summary: "public network is unavailable", SessionID: "session-314",
@@ -680,8 +680,8 @@ func TestWorkerEnvironmentBlockWaitsBeforeFollowingRepositoryIssue(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue := second.Issues["448"]; issue != nil {
-		t.Fatalf("following Issue was admitted while blocked: %+v", issue)
+	if issue := second.Issues["448"]; issue == nil || issue.Status != issuedomain.StatusAwaitingChecks || issue.Continuation == nil {
+		t.Fatalf("following Issue was not admitted: %+v", issue)
 	}
 	if issue := second.Issues["314"]; issue.Continuation == nil || issue.SessionID != "session-314" {
 		t.Fatalf("following Issue changed parked continuation: %+v", issue)
