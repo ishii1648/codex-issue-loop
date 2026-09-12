@@ -51,7 +51,7 @@ current v5入力に旧lease、resource park、scenario別status/sync/substateが
 | repository別assignment、doctor、変更内容に応じたrollback drill | `scripts/production-assignment-health.sh` |
 | active executionとworker上限 | production state/release/assignment health tests |
 
-production確認では両repositoryに検証Issueを投入し、正常完了、needs-input中の後続進行、Issue-local failure中の後続進行、PR/check待ち中の後続進行を実測する。未trusted authorのskipと旧generation拒否は追加credentialを使わずfixture/fake serverで検証する。
+通常のproduction rolloutは[Release gates](release-gates.md)のローカル検証・証拠保存で完了し、キューが空なら検証Issueの投入や仕事の到着待ちを要求しない。別途productionでlifecycleの実測を行う場合は両repositoryに検証Issueを投入し、正常完了、needs-input中の後続進行、Issue-local failure中の後続進行、PR/check待ち中の後続進行を実測する。未trusted authorのskipと旧generation拒否は追加credentialを使わずfixture/fake serverで検証する。
 
 ## セキュリティ負テスト
 

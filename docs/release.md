@@ -55,7 +55,7 @@ chmod 0755 agent-loop_Darwin_arm64
 
 checksum、attestation、version/commitのいずれかが一致しなければ実行・installしない。
 
-stable公開後のassignment、変更内容に応じたrollback drill、health reportはRelease workflowの完了条件ではない。production hostでのrollout検証が成功し、`production-health-report.json`をstable Releaseへ追加した時点でrollout完了とする。rollout失敗時は対象repositoryだけをpreviousへ戻し、artifact自体の修正が必要と確認できた場合に限って新しいpatch releaseを作る。
+stable公開後のassignment、変更内容に応じたrollback drill、health reportはRelease workflowの完了条件ではない。production hostで対象version/commit/digestへのassignment、必要なキュー処理再開、5分間のhealth soakと必要なrollback drillを検証し、`production-health-report.json`等の証拠をローカルに保存した時点でrollout完了とする。処理再開の確認方法と公開の扱いは[Release gates](release-gates.md)に従う。reportの公開用整形・安全審査・GitHub Releaseへのアップロードは通常の必須手順にも完了条件にも含めず、公開しないことや任意の公開の拒否・失敗でrolloutを未完了・失敗へ戻したりrollbackしたりしない。ローカルのrollout検証失敗時は対象repositoryだけをpreviousへ戻し、artifact自体の修正が必要と確認できた場合に限って新しいpatch releaseを作る。
 
 ## Mac側pull型delivery
 
