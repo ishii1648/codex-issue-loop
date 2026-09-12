@@ -4,44 +4,93 @@ set -eu
 base=${BASE_SHA:?BASE_SHA is required}
 head=${HEAD_SHA:?HEAD_SHA is required}
 output=${REVIEW_OUTPUT:?REVIEW_OUTPUT is required}
-merge_base=$(git merge-base "$base" "$head")
-changed=$(git diff --name-only "$merge_base" "$head")
-high_risk=$(printf '%s\n' "$changed" | grep -E '^(internal/adapter/state/|internal/application/supervisor/|internal/domain/issue/|internal/domain/statecontract/|internal/application/migration/|internal/application/delivery/|\.github/workflows/|scripts/check-release\.sh$|\.agent-loop.*\.yaml$)' || true)
-findings=
+mkdir -p "$(dirname "$output")"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+jq -n --arg base "$base" --arg head "$head" '{schema_version:2,base:$base,head:$head,high_risk:false,checks:{},findings:[],finding_count:0}' >"$work/report"
 
-add_finding() {
-  if [ -z "$findings" ]; then findings=$1; else findings="$findings,$1"; fi
+check() {
+  name=$1 status=$2 required=$3 evidence=$4
+  if [ "$evidence" != "$work/evidence" ]; then printf '%s\n' "$evidence" >"$work/evidence"; fi
+  jq --arg name "$name" --arg status "$status" --argjson required "$required" --slurpfile evidence "$work/evidence" '
+    .checks[$name] = {status:$status,required:$required,evidence:$evidence[0]} |
+    if $required and $status != "passed" then .findings += [$name + ":" + $status] else . end
+  ' "$work/report" >"$work/next"
+  mv "$work/next" "$work/report"
 }
 
-if [ -n "$high_risk" ]; then
-  production_go=$(printf '%s\n' "$high_risk" | grep -E '\.go$' | grep -Ev '_test\.go$' || true)
-  tests=$(printf '%s\n' "$changed" | grep -E '(_test\.go$|internal/application/conformance/)' || true)
-  [ -z "$production_go" ] || [ -n "$tests" ] || add_finding missing_fault_or_regression_test
+finish() {
+  jq '.finding_count = (.findings | length)' "$work/report" >"$output"
+  jq -e '.finding_count == 0' "$output" >/dev/null
+}
 
-  state_changes=$(printf '%s\n' "$high_risk" | grep -E '^(internal/adapter/state/|internal/domain/statecontract/)' || true)
-  invariant_tests=$(printf '%s\n' "$changed" | grep -E 'internal/adapter/state/.*_test\.go$' || true)
-  [ -z "$state_changes" ] || [ -n "$invariant_tests" ] || add_finding missing_invariant_test
+for name in specification_mapping invariants migration fault_tests release_compatibility rollback secret_exposure; do
+  check "$name" unverified false '{"reason":"Target revision has not been verified"}'
+done
+if ! git rev-parse --verify "$base^{commit}" >"$work/base" 2>/dev/null ||
+   ! git rev-parse --verify "$head^{commit}" >"$work/head" 2>/dev/null ||
+   [ "$(cat "$work/base")" != "$base" ] || [ "$(cat "$work/head")" != "$head" ] ||
+   [ "$(git rev-parse HEAD)" != "$head" ] ||
+   ! git diff --quiet HEAD || ! git diff --cached --quiet ||
+   [ -n "$(git ls-files --others --exclude-standard)" ] ||
+   ! git merge-base "$base" "$head" >"$work/merge-base"; then
+  check target_revision unverified true '{}'
+  finish
+  exit 1
+fi
+merge_base=$(cat "$work/merge-base")
+check target_revision passed true "$(jq -n --arg base "$base" --arg head "$head" --arg merge_base "$merge_base" '{base:$base,head:$head,merge_base:$merge_base}')"
+git diff --name-only "$merge_base" "$head" >"$work/changed"
+if ! grep -E '^(internal/adapter/state/|internal/application/supervisor/|internal/domain/issue/|internal/domain/statecontract/|internal/platform/schema/|internal/application/migration/|internal/application/delivery/|\.github/workflows/|scripts/(high-risk-review|check-release)\.sh$|\.agent-loop.*\.yaml$)' "$work/changed" >"$work/risk"; then
+  for name in specification_mapping invariants migration fault_tests release_compatibility rollback secret_exposure; do
+    check "$name" not_applicable false '{}'
+  done
+  finish
+  exit 0
+fi
+jq --rawfile paths "$work/risk" '.high_risk = true | .changed_paths = ($paths | split("\n") | map(select(length > 0)))' "$work/report" >"$work/next"
+mv "$work/next" "$work/report"
+check specification_mapping unverified false '{"reason":"Requires independent review of requirements, base specification and diff"}'
+check rollback unverified false '{"reason":"Requires human judgment of rollback feasibility"}'
 
-  schema_changes=$(git diff "$merge_base" "$head" -- internal/platform/schema internal/domain/statecontract | grep -E '^\+.*(Current|Version|version)' || true)
-  migration_changes=$(printf '%s\n' "$changed" | grep -E '^internal/application/migration/' || true)
-  [ -z "$schema_changes" ] || [ -n "$migration_changes" ] || add_finding missing_migration_change
-
-  release_changes=$(printf '%s\n' "$high_risk" | grep -E '^(\.github/workflows/|scripts/check-release\.sh$|\.agent-loop)' || true)
-  rollback_evidence=$(printf '%s\n' "$changed" | grep -E '^(docs/|README\.md$|scripts/check-release\.sh$)' || true)
-  [ -z "$release_changes" ] || [ -n "$rollback_evidence" ] || add_finding missing_release_rollback_evidence
-
-  if git diff "$merge_base" "$head" -- . ':!**/*_test.go' | grep -E '^\+.*(gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' >/dev/null; then
-    add_finding possible_secret_exposure
+suite() {
+  suite_name=$1 pattern=$2
+  shift 2
+  result=0
+  go test -json -count=1 -run "$pattern" "$@" >"$work/events" 2>"$work/stderr" || result=$?
+  status=unverified
+  if [ "$result" -ne 0 ] && [ "$result" -ne 126 ] && [ "$result" -ne 127 ]; then
+    status=failed
   fi
-fi
+  # A package-level pass without an executed test (including an empty suite) is insufficient.
+  if [ "$result" -eq 0 ]; then
+    packages=$(printf '%s\n' "$@" | sed 's|^\./|github.com/ishii1648/codex-issue-loop/|' | jq -R . | jq -s .)
+    if jq -se --argjson packages "$packages" '
+      . as $events | length > 0 and
+      all(.[]; type == "object" and (.Action | type == "string") and .Action != "fail") and
+      ([.[] | select(.Test == null and .Action == "pass") | .Package] | sort) == ($packages | sort) and
+      all($packages[]; . as $pkg | any($events[]; .Package == $pkg and (.Test | type == "string" and length > 0) and .Action == "pass" and
+        (.Test as $test | any($events[]; .Package == $pkg and .Test == $test and .Action == "run"))))
+    ' "$work/events" >/dev/null 2>&1; then status=passed; else status=unverified; fi
+  fi
+  printf '[]\n' >"$work/executed"
+  if jq -se 'all(.[]; type == "object")' "$work/events" >/dev/null 2>&1; then
+    jq -s '[.[] | select(.Test != null and (.Action == "pass" or .Action == "fail" or .Action == "skip")) | {package:.Package,test:.Test,result:.Action}]' "$work/events" >"$work/executed"
+  fi
+  jq -n --slurpfile executed "$work/executed" --arg base "$base" --arg head "$head" --arg pattern "$pattern" --argjson exit_code "$result" --args '{base:$base,head:$head,command:(["go","test","-json","-count=1","-run",$pattern]+$ARGS.positional),exit_code:$exit_code,tests:$executed[0]}' -- "$@" >"$work/evidence"
+  check "$suite_name" "$status" true "$work/evidence"
+}
 
-mkdir -p "$(dirname "$output")"
-if [ -n "$findings" ]; then
-  json_findings=$(printf '%s' "$findings" | awk -F, '{printf "["; for(i=1;i<=NF;i++){if(i>1)printf ","; printf "\"%s\"",$i}; printf "]"}')
+suite invariants '^Test' ./internal/adapter/state ./internal/domain/issue ./internal/domain/statecontract ./internal/application/conformance
+suite migration '^Test' ./internal/application/migration
+suite fault_tests '^TestFault' ./internal/adapter/state ./internal/application/supervisor ./internal/application/migration ./internal/application/delivery ./internal/application/conformance
+suite release_compatibility '^Test' ./internal/application/delivery
+if git diff "$merge_base" "$head" -- . | grep -E '^\+.*(gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' >/dev/null; then
+  check secret_exposure failed true '{"method":"added-line credential pattern scan"}'
 else
-  json_findings='[]'
+  check secret_exposure passed true '{"method":"added-line credential pattern scan; not a complete secret audit"}'
 fi
-jq -n --arg base "$base" --arg head "$head" --argjson high_risk "$([ -n "$high_risk" ] && printf true || printf false)" \
-  --argjson findings "$json_findings" \
-  '{schema_version:1,base:$base,head:$head,high_risk:$high_risk,checks:{specification_mapping:true,invariants:true,migration:true,fault_tests:true,release_compatibility:true,rollback:true,secret_exposure:true},findings:$findings,finding_count:($findings|length)}' >"$output"
-[ -z "$findings" ]
+if [ "$(git rev-parse HEAD)" != "$head" ] || ! git diff --quiet HEAD || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  check target_revision unverified true '{}'
+fi
+finish
