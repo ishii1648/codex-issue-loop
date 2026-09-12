@@ -41,7 +41,7 @@ manifestのsemantic contract predicateを変更する場合は、tag作成前な
 
 失敗したcandidateをstableへ昇格しない。candidate prereleaseは監査証拠として残し、修正は新しいcommitと新しいcandidateで全gateを再実行する。production rollout failure時は対象repositoryをprevious versionへrollbackし、state、active execution、continuation、request、worktreeを手編集しない。rollout failureだけを理由にRelease workflowを失敗へ戻したり、新patchを作成したりしない。
 
-stable公開後はrepository別assignmentによる段階展開の後、production hostで5分間のhealth soakを行う。開始時、1分後、5分後に今回更新したrepositoryのassignment、scoped doctor、statusを採取し、全sampleが成功してから同じstable Releaseへreportを追加する。定期LaunchAgentの実行やEnvironment timerを待つ必要はない。
+stable公開後はrepository別assignmentによる段階展開の後、production hostで5分間のhealth soakを行う。開始時、1分後、5分後に今回更新したrepositoryのassignment、scoped doctor、statusを採取し、全sampleの検証結果をreportとしてローカルに保存する。定期LaunchAgentの実行やEnvironment timerを待つ必要はない。
 
 ```sh
 PRODUCTION_AGENT_LOOP_BINARY='/absolute/verified/stable/agent-loop' \
@@ -51,10 +51,13 @@ RELEASE_TAG='v0.9.0' \
 RELEASE_COMMIT='<40-character-merge-commit>' \
 STABLE_BINARY_SHA256='<stable-binary-sha256>' \
 scripts/production-assignment-health.sh
-gh release upload 'v0.9.0' '/absolute/evidence-directory/production-health-report.json'
 ```
 
-privateな`repositories.json`には今回同じstableへ更新したrepositoryのIDとlocal pathを入力する。別versionを維持するrepositoryは含めず、公開reportへpathを出力しない。`rollback-drill.json`は先行repositoryのstable→previous→同じstableというtyped操作と、state、Issue、execution identity、worktree、対象外repositoryのassignment/PID/binary/state revision保全を記録する。`scripts/production-assignment-health.sh`は1件以上のrepositoryについてexact version/commit/digest、terminal transaction、fence不在、doctor成功、worker limit 1、active worker 1以下を各sampleで検証してreportを生成する。この検証が成功し、reportをstable Releaseへ追加した時点でrollout完了とする。検証失敗は対象assignmentの失敗として扱い、完了済みRelease workflowの結果を変更しない。
+privateな`repositories.json`には今回同じstableへ更新したrepositoryのIDとlocal pathを入力する。別versionを維持するrepositoryは含めない。`rollback-drill.json`は先行repositoryのstable→previous→同じstableというtyped操作と、state、Issue、execution identity、worktree、対象外repositoryのassignment/PID/binary/state revision保全を記録する。`scripts/production-assignment-health.sh`は1件以上のrepositoryについてexact version/commit/digest、terminal transaction、fence不在、doctor成功、worker limit 1、active worker 1以下を各sampleで検証してreportを生成する。この検証と必要なキュー処理再開の確認が成功し、`production-health-report.json`と処理再開の確認証拠をローカルに保存した時点でrollout完了とする。assignment不一致、health失敗、証拠保存失敗、必要な処理再開の未確認では完了扱いにしない。ローカル検証失敗は対象assignmentの失敗として扱い、完了済みRelease workflowの結果を変更しない。
+
+キュー処理再開はoperatorが対象repositoryの`status --repo <path> --json`とworker log等で確認する。処理可能な待機Issueがある場合は、そのIssueのexecution開始または進行を確認し、Issue番号・run IDと観測結果をローカルに保存する。runtimeの起動やhealth scriptの成功だけでは処理再開確認としない。キューが空の場合はその状態を記録し、検証用Issueの作成や仕事の到着待ちを要求しない。
+
+公開用整形・安全審査・GitHub Releaseへのアップロードは通常の必須手順にもrollout完了条件にも含めない。上の手順はuploadを実行せず、公開権限や公開審査待ちを前提としない。証拠はprivateにローカル保存し、別途任意で公開する場合だけ公開用に整形してlocal path等を除き、必要な安全審査を受ける。安全審査を無効化・迂回しない。非公開のままにすることや任意の公開の拒否・失敗はローカル検証失敗と区別し、配備を未完了・失敗へ戻したりrollbackしたりしない。自動公開retry、公開待ちキュー、背景upload処理は設けない。
 
 rollback drillは、前回割当commitから対象release commitまでの差分が次のいずれかに該当するとき、先行repositoryで実施する。
 
