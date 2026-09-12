@@ -29,20 +29,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release-quality:
-    name: release-quality
+  verify-main-ci:
+    name: verify-main-ci
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.RELEASE_TAG }}
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "1.25.13"
-          cache: true
-      - run: make install-shellcheck
-      - run: make workflow-shell-check fmt-check schema-check tidy-check test test-race vet staticcheck errcheck vuln-check
+          ref: ${{ github.sha }}
+      - name: Require successful main CI for the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/check-main-ci.sh
 
   build-candidate:
     name: build-candidate
@@ -301,7 +302,7 @@ jobs:
 
   promotion-evidence:
     name: promotion-evidence
-    needs: [release-quality, verify-reproducibility, verify-attestation-and-manifest, replay-production-fixtures, lifecycle-conformance, candidate-integrity]
+    needs: [verify-main-ci, verify-reproducibility, verify-attestation-and-manifest, replay-production-fixtures, lifecycle-conformance, candidate-integrity]
     runs-on: macos-15
     timeout-minutes: 10
     steps:

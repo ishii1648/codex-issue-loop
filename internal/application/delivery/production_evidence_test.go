@@ -427,6 +427,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	}
 	type job struct {
 		Needs       any    `yaml:"needs"`
+		If          string `yaml:"if"`
 		Environment string `yaml:"environment"`
 		Steps       []step `yaml:"steps"`
 	}
@@ -442,7 +443,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"release-quality":                 nil,
+		"verify-main-ci":                  nil,
 		"build-candidate":                 nil,
 		"verify-reproducibility":          {"build-candidate"},
 		"verify-attestation-and-manifest": {"build-candidate"},
@@ -451,7 +452,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		"cli-surface-contract":            nil,
 		"isolated-canary":                 {"build-candidate", "cli-surface-contract"},
 		"candidate-integrity":             {"isolated-canary"},
-		"promotion-evidence":              {"release-quality", "verify-reproducibility", "verify-attestation-and-manifest", "replay-production-fixtures", "lifecycle-conformance", "candidate-integrity"},
+		"promotion-evidence":              {"verify-main-ci", "verify-reproducibility", "verify-attestation-and-manifest", "replay-production-fixtures", "lifecycle-conformance", "candidate-integrity"},
 		"promote-stable":                  {"build-candidate", "promotion-evidence"},
 		"verify-stable-release":           {"promote-stable"},
 	}
@@ -462,6 +463,9 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		}
 		if got := normalizedNeeds(current.Needs); !reflect.DeepEqual(got, dependencies) {
 			t.Fatalf("job %s needs=%v want=%v", name, got, dependencies)
+		}
+		if current.If != "" {
+			t.Fatalf("job %s must retain the default success dependency condition", name)
 		}
 		if len(current.Steps) == 0 {
 			t.Fatalf("job %s has no executable steps", name)
@@ -478,8 +482,8 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 			t.Fatalf("release workflow retains redundant or production-host gate %q", forbidden)
 		}
 	}
-	if !strings.Contains(text, "make workflow-shell-check fmt-check schema-check tidy-check test test-race vet staticcheck errcheck vuln-check") {
-		t.Fatal("release quality no longer covers source checks")
+	if !strings.Contains(text, "bash scripts/check-main-ci.sh") || strings.Contains(text, "release-quality") {
+		t.Fatal("release must reuse main CI through the verification gate")
 	}
 
 	if strings.Contains(text, "continue-on-error: true") {
