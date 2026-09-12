@@ -4,7 +4,7 @@
 
 ## クイックスタート
 
-`config.example.yaml`を`~/.agent-loop-monitor.yaml`へコピーし、`state_dir`と監視対象repositoryを実環境に合わせます。releaseに同梱されたbinaryを使います。
+`config.example.yaml`を`~/.agent-loop-monitor.yaml`へコピーし、`state_dir`と監視対象repositoryを実環境に合わせます。独立した `monitor-v*` Release の検証済みbinaryを使います（[取得・検証手順](docs/runbook.md)）。
 
 ```sh
 ./agent-loop-monitor_Darwin_arm64 install --config ~/.agent-loop-monitor.yaml --json

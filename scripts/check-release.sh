@@ -4,6 +4,27 @@ set -eu
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-release-check.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
 
+case "${1:-main}" in
+  main) ;;
+  monitor)
+    commit=$(git rev-parse HEAD)
+    source_epoch=$(git show -s --format=%ct HEAD)
+    for build in first second; do
+      scripts/build-release.sh monitor-v0.1.0 "$commit" "$source_epoch" "$temporary_root/$build"
+    done
+    for asset in agent-loop-monitor_Darwin_arm64 checksums.txt; do
+      cmp "$temporary_root/first/$asset" "$temporary_root/second/$asset"
+    done
+    (cd "$temporary_root/first" && shasum -a 256 -c checksums.txt)
+    "$temporary_root/first/agent-loop-monitor_Darwin_arm64" version --json |
+      jq -e --arg commit "$commit" '.version == "monitor-v0.1.0" and .commit == $commit and .target == "darwin/arm64" and .monitor_schema_version == 1'
+    set -- "$temporary_root/first/"*
+    test "$#" = 2
+    exit 0
+    ;;
+  *) echo "usage: check-release.sh [main|monitor]" >&2; exit 2 ;;
+esac
+
 commit=$(git rev-parse HEAD)
 source_epoch=$(git show -s --format=%ct HEAD)
 version=v0.0.0-test
@@ -19,15 +40,11 @@ run_host_go_test() {
 scripts/build-release.sh "$version" "$commit" "$source_epoch" "$temporary_root/first"
 scripts/build-release.sh "$version" "$commit" "$source_epoch" "$temporary_root/second"
 
-for name in agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
+test ! -e "$temporary_root/first/agent-loop-monitor_Darwin_arm64"
+
+for name in agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt; do
   cmp "$temporary_root/first/$name" "$temporary_root/second/$name"
 done
-
-monitor_version_json=$("$temporary_root/first/agent-loop-monitor_Darwin_arm64" version --json)
-printf '%s\n' "$monitor_version_json" | grep -Fq '"version":"v0.0.0-test"'
-printf '%s\n' "$monitor_version_json" | grep -Fq "\"commit\":\"$commit\""
-printf '%s\n' "$monitor_version_json" | grep -Fq '"target":"darwin/arm64"'
-printf '%s\n' "$monitor_version_json" | grep -Fq '"monitor_schema_version":1'
 
 version_json=$("$temporary_root/first/agent-loop_Darwin_arm64" version --json)
 printf '%s\n' "$version_json" | grep -Fq '"version":"v0.0.0-test"'

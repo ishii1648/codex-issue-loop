@@ -78,10 +78,13 @@ def version(binary):
 
 
 def verify_release(directory, tag, commit):
+    independent = tag.startswith('monitor-v')
+    workflow = 'monitor-release.yml' if independent else 'release.yml'
+    assets = [ASSET, 'checksums.txt'] if independent else [ASSET, 'checksums.txt', 'release-manifest.json']
     release = json.loads(command('gh', 'release', 'view', tag, '--repo', REPOSITORY,
                                  '--json', 'tagName,isDraft,isPrerelease'))
     require(release == {'tagName': tag, 'isDraft': False, 'isPrerelease': False}, 'release is not stable')
-    runs = json.loads(command('gh', 'run', 'list', '--repo', REPOSITORY, '--workflow', 'release.yml',
+    runs = json.loads(command('gh', 'run', 'list', '--repo', REPOSITORY, '--workflow', workflow,
                               '--commit', commit, '--json', 'headSha,headBranch,status,conclusion'))
     require(any(run['headSha'] == commit and run['headBranch'] == tag and run['status'] == 'completed' and
                 run['conclusion'] == 'success' for run in runs), 'no successful release workflow for tag/commit')
@@ -91,10 +94,10 @@ def verify_release(directory, tag, commit):
     require(tagged['tag'] == tag and tagged['object']['type'] == 'commit' and tagged['object']['sha'] == commit,
             'tag commit mismatch')
     command('gh', 'release', 'download', tag, '--repo', REPOSITORY, '--dir', directory,
-            '--pattern', ASSET, '--pattern', 'checksums.txt', '--pattern', 'release-manifest.json')
-    for asset in [ASSET, 'checksums.txt', 'release-manifest.json']:
+            *[argument for asset in assets for argument in ('--pattern', asset)])
+    for asset in assets:
         command('gh', 'attestation', 'verify', directory / asset, '--repo', REPOSITORY,
-                '--signer-workflow', REPOSITORY + '/.github/workflows/release.yml',
+                '--signer-workflow', REPOSITORY + '/.github/workflows/' + workflow,
                 '--source-ref', 'refs/tags/' + tag, '--source-digest', commit, '--deny-self-hosted-runners')
     checksums = {}
     for line in (directory / 'checksums.txt').read_text().splitlines():
@@ -102,10 +105,13 @@ def verify_release(directory, tag, commit):
         require(match is not None, 'invalid checksum line')
         require(match[2] not in checksums, 'duplicate checksum')
         checksums[match[2]] = match[1]
-    for asset in [ASSET, 'release-manifest.json']:
+    for asset in assets:
+        if asset == 'checksums.txt':
+            continue
         require(checksums.get(asset) == digest(directory / asset), 'checksum mismatch: ' + asset)
-    manifest = json.loads((directory / 'release-manifest.json').read_text())
-    require(manifest['version'] == tag and manifest['commit'] == commit, 'manifest identity mismatch')
+    if not independent:
+        manifest = json.loads((directory / 'release-manifest.json').read_text())
+        require(manifest['version'] == tag and manifest['commit'] == commit, 'manifest identity mismatch')
     binary = directory / ASSET
     binary.chmod(0o700)
     info = version(binary)
@@ -286,7 +292,7 @@ class Deployment:
 
 def main(args):
     require(platform.system() == 'Darwin' and platform.machine() == 'arm64', 'Darwin arm64 host required')
-    require(args.tag and re.fullmatch(r'v\d+\.\d+\.\d+', args.tag) and args.commit and
+    require(args.tag and re.fullmatch(r'(?:monitor-)?v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', args.tag) and args.commit and
             re.fullmatch(r'[0-9a-f]{40}', args.commit), '--tag stable tag and --commit full SHA are required')
     os.umask(0o077)
     config, root = args.config.resolve(strict=True), args.root.resolve(strict=True)

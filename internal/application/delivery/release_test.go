@@ -22,6 +22,8 @@ const testCommit = "0123456789abcdef0123456789abcdef01234567"
 const testTagObject = "abcdef0123456789abcdef0123456789abcdef01"
 
 type releaseRunner struct {
+	mixedReleases [6]Release
+
 	binaryRuns, updates, doctors, rollbacks int
 	releaseViews, downloads                 int
 	replaceReleaseAtView                    int
@@ -68,6 +70,26 @@ func (r *releaseRunner) Run(_ context.Context, name string, args ...string) ([]b
 		return []byte(`{"state_preserved":true}`), nil
 	}
 	if len(args) >= 2 && args[0] == "release" && args[1] == "view" {
+		if r.mixedReleases != ([6]Release{}) {
+			selected := ""
+			if len(args) > 2 && args[2] != "--repo" {
+				selected = args[2]
+			} else {
+				selected = "v1.2.3"
+			}
+			found := false
+			for _, release := range r.mixedReleases {
+				if release.Tag == selected {
+					if release.Draft || release.Prerelease {
+						return nil, errors.New("selected non-production release")
+					}
+					found = true
+				}
+			}
+			if !found {
+				return nil, errors.New("selected release missing")
+			}
+		}
 		r.releaseViews++
 		if r.replaceReleaseAtView > 0 && r.releaseViews >= r.replaceReleaseAtView {
 			return []byte(`{"tagName":"v1.2.4","isDraft":false,"isPrerelease":false}`), nil
@@ -718,5 +740,30 @@ func TestFaultControllerRejectsReleaseReplacementAfterDrain(t *testing.T) {
 	}
 	if _, statErr := os.Stat(RuntimePaths(root).Maintenance); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("release replacement retained maintenance fence before apply: %v", statErr)
+	}
+}
+
+func TestMixedReleaseSeriesUseMainLatestAndExactVersion(t *testing.T) {
+	for _, exact := range []string{"", "v1.2.3", "monitor-v0.1.0"} {
+		t.Run("version="+exact, func(t *testing.T) {
+			runner := &releaseRunner{mixedReleases: [6]Release{
+				{Tag: "v1.2.3"},
+				{Tag: "v1.2.4", Draft: true},
+				{Tag: "v2.0.0", Prerelease: true},
+				{Tag: "monitor-v0.2.0", Draft: true},
+				{Tag: "monitor-v0.3.0", Prerelease: true},
+				{Tag: "monitor-v0.1.0"},
+			}}
+			candidate, err := (Verifier{GH: "gh", Runner: runner, CacheDir: t.TempDir(), ExpectedVersion: exact}).Check(context.Background(), DefaultConfig("owner/repo"))
+			if strings.HasPrefix(exact, "monitor-") {
+				if err == nil || runner.releaseViews != 0 || runner.binaryRuns != 0 {
+					t.Fatalf("monitor exact version was not rejected before discovery: %v", err)
+				}
+				return
+			}
+			if err != nil || candidate.Release.Tag != "v1.2.3" || runner.binaryRuns != 1 {
+				t.Fatalf("main candidate=%+v err=%v", candidate, err)
+			}
+		})
 	}
 }
