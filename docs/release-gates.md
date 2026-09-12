@@ -16,16 +16,16 @@ Release workflowは次の依存関係で実行する。各jobの失敗はstable�
 
 | 段階 | jobと依存関係 |
 | --- | --- |
-| 並列開始 | `release-quality`、`build-candidate`、`replay-production-fixtures`、`lifecycle-conformance`、`cli-surface-contract` |
+| 並列開始 | `verify-main-ci`、`build-candidate`、`replay-production-fixtures`、`lifecycle-conformance`、`cli-surface-contract` |
 | candidate検証 | `build-candidate`後に`verify-reproducibility`と`verify-attestation-and-manifest`を並列実行 |
 | 隔離検証 | `build-candidate`と`cli-surface-contract`後に`credentialless-isolated-canary`を実行し、canonical bytesからcandidate prereleaseを作成 |
 | 公開前照合 | candidate prerelease作成後に`candidate-integrity` |
 | 公開許可 | 上記すべての成功後に`promotion-evidence` |
 | 公開・確認 | `promote-stable` → `verify-stable-release` |
 
-`release-quality`はformat、schema、module、workflow/shell lint、全体test、race、vet、Staticcheck、errcheck、脆弱性検査を行う。`make ci`に含まれる追加のbuild・release checkとfault/conformanceの再実行は、このjobでは行わない。配布artifactのbuildはcanonicalと再現性比較の計2回とし、fault/conformanceは専用jobで確認する。
+`verify-main-ci`は同一repositoryの`.github/workflows/ci.yml`について、release tagからpeelして照合する正確なcommitのmain push実行を確認する。対象runが複数あれば最大run IDを選び、その最新attemptがcompleted/successで、同じattemptの`Quality gates`が一意に存在して成功していることを必須とする。古いrunやattemptの成功へ戻らない。全jobの完了・成功と件数も検証し、skip・cancel・失敗・実行中・未実行・API失敗・不完全な取得（100件超を含む）では拒否する。確認中の再実行も最後のrun再取得で拒否する。run ID、attempt、commitとURLをActions logおよびjob summaryに残す。main CI成功後にReleaseを開始し、待機・poll・retryは行わない。tag pushとworkflow_dispatchのどちらも、このgateと既存のtag/commit照合を通らなければpromotionできない。main CIのtoolchainと品質検証項目は維持し、Releaseでは全体品質検証を再実行しない。配布artifactのbuildはcanonicalと再現性比較の計2回とし、fault/conformanceは専用jobで確認する。
 
-ローカルでは変更箇所のfocused testを行い、同じcommitの通常CIが成功していれば全量検証をローカルでも繰り返す必要はない。CIを使えない場合の全量確認は`make ci`を1回実行する。releaseはtagged sourceを独立に検証するため、PRのmerge前headに対するCI成功だけを公開根拠にはしない。
+ローカルでは変更箇所のfocused testを行い、同じcommitの通常CIが成功していれば全量検証をローカルでも繰り返す必要はない。CIを使えない場合の全量確認は`make ci`を1回実行する。PRのmerge前headに対するCI成功だけを公開根拠にはしない。
 
 `cli-surface-contract`は実際にinstallした`gh`とpinned Codex CLIの`--version`、`--help`、`features list`だけを検査し、GitHub API呼び出しもCodex inferenceも行わない。`credentialless-isolated-canary`はlocal bare Git remote、状態付きfake `gh`、状態付きfake Codex、隔離したstate rootを使い、外部networkを閉じて実candidate binaryを起動する。claimからmerge/terminalまでと、`needs_input`から停止・answer・true resume・merge/terminalまでの2 lifecycle、supervisor起動2回、5 crash boundary、webhook fixture replay、重複副作用と残存resourceが0であることを記録する。両scriptは`CANARY_GITHUB_TOKEN`または`OPENAI_API_KEY`が設定されている場合も失敗する。
 
