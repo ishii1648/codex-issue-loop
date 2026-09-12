@@ -1,0 +1,16 @@
+test	internal/application/supervisor/scheduler_test.go	isolation-following-dispatch-single-execution-cancellation
+test	internal/application/supervisor/supervisor_test.go	scheduler-shared-testLoop-and-worker-fixtures
+control	internal/application/supervisor/testdata/	supervisor-fixtures
+test	internal/adapter/state/execution_test.go	single-execution-fencing-and-shared-newStore
+test	internal/adapter/state/issue_transition_test.go	quarantined-cancellation
+test	internal/adapter/state/lifecycle_boundary_test.go	execution-release-and-checkpoint
+test	internal/adapter/state/validator_test.go	issue-isolation-and-shared-snapshot-fixture
+test	internal/adapter/state/state_test.go	durable-transaction-crash-recovery
+control	.github/protected-tests.tsv	protection-definition
+control	scripts/protected-tests/	trusted-classifier-and-regression-fixtures
+control	.github/workflows/	test-and-gate-execution
+control	Makefile	test-execution
+control	go.mod	toolchain-and-test-dependencies
+control	go.sum	test-dependency-integrity
+control	scripts/high-risk-review.sh	review-gate
+control	scripts/check-release.sh	release-test-execution
