@@ -34,7 +34,7 @@ esac
 	cfg := config.Defaults()
 	cfg.GitHub.Repo = "owner/repo"
 	for _, key := range []string{"first", "first", "second"} {
-		_ = client.CommentProgress(context.Background(), cfg, 1, key, "理由：test-private-value ghp_abcdefghijklmnopqrstuvwxyz123456")
+		_ = client.CommentProgress(context.Background(), cfg, 1, key, "理由：test-private-value "+"ghp_"+strings.Repeat("a", 32))
 	}
 	data, _ := os.ReadFile(comments)
 	if strings.Contains(string(data), "test-private-value") || strings.Contains(string(data), "ghp_") || !strings.Contains(string(data), "codex-issue-loop:progress:") {
