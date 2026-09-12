@@ -1,0 +1,63 @@
+package snapshot
+
+import (
+	"errors"
+	"fmt"
+)
+
+type Transaction struct {
+	Version  int      `json:"version"`
+	Snapshot Snapshot `json:"snapshot"`
+	Event    Event    `json:"event"`
+}
+
+func (txn Transaction) Validate(repoID string) error {
+	if txn.Version != CurrentVersion || txn.Snapshot.Version != CurrentVersion || txn.Event.Version != CurrentVersion {
+		version := txn.Version
+		if version == CurrentVersion && txn.Snapshot.Version != CurrentVersion {
+			version = txn.Snapshot.Version
+		}
+		if version == CurrentVersion && txn.Event.Version != CurrentVersion {
+			version = txn.Event.Version
+		}
+		return SchemaVersionError{Kind: "transaction", Version: version}
+	}
+	if txn.Snapshot.RepoID != repoID || txn.Event.RepoID != repoID {
+		return errors.New("transaction repository does not match state store")
+	}
+	if txn.Event.Sequence == 0 {
+		return errors.New("transaction event sequence must be positive")
+	}
+	if txn.Snapshot.StateRevision != txn.Event.Sequence {
+		return fmt.Errorf("transaction snapshot revision %d does not match event sequence %d", txn.Snapshot.StateRevision, txn.Event.Sequence)
+	}
+	if err := txn.Snapshot.Validate(); err != nil {
+		return fmt.Errorf("prepared transaction snapshot: %w", err)
+	}
+	return nil
+}
+
+func ValidateEventSequence(snapshot Snapshot, events []Event) error {
+	last := uint64(0)
+	for index, event := range events {
+		if event.Version != CurrentVersion {
+			return SchemaVersionError{Kind: "event", Version: event.Version}
+		}
+		if index == 0 && event.Type == "event_log_checkpoint" {
+			if event.Sequence == 0 {
+				return fmt.Errorf("event log checkpoint sequence must be positive")
+			}
+			last = event.Sequence
+			continue
+		}
+		expected := last + 1
+		if event.Sequence != expected {
+			return fmt.Errorf("event sequence at index %d is %d, expected %d", index, event.Sequence, expected)
+		}
+		last = event.Sequence
+	}
+	if snapshot.StateRevision != last {
+		return fmt.Errorf("state revision %d does not match last event sequence %d", snapshot.StateRevision, last)
+	}
+	return nil
+}

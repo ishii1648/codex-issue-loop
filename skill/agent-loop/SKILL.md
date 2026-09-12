@@ -5,6 +5,8 @@ description: Operate, monitor, and explicitly recover the codex-issue-loop super
 
 # agent-loop
 
+Snapshot v6 は #575/#536/#537 の統合・検証完了まで配布保留。既存 migrate は v5 までの経路であり、v6 の起動許可にはならない。旧 snapshot/隔離 backup は対応する旧 binary と停止下で扱い、v6 への移行不能状態は原本を変更せず全体中止する。詳細は [migration runbook](../../docs/migration.md) を参照する。
+
 Use the `agent-loop` CLI for lifecycle operations; GitHub Issue comments can also record answers. The Skill does not own the Issue loop or its durable state.
 
 ## Create an Issue

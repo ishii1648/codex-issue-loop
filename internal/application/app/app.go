@@ -22,7 +22,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
-	schema "github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/application/observe"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
@@ -36,7 +35,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/runtimemetadata"
-	schemaversion "github.com/ishii1648/codex-issue-loop/internal/platform/schema"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/userrules"
 )
 
@@ -103,7 +101,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 	if args[0] == "--version" || args[0] == "version" {
 		if len(args) > 1 && args[1] == "--json" {
 			_ = json.NewEncoder(a.Out).Encode(versionInfo{Version: Version, Commit: Commit, Target: runtime.GOOS + "/" + runtime.GOARCH, DeliveryProtocol: delivery.ProtocolVersion, AssignmentProtocol: delivery.AssignmentProtocolVersion,
-				StateSchemaCurrent: schema.CurrentVersion, StateSchemaMigrationFrom: schemaversion.Previous,
+				StateSchemaCurrent: state.CurrentVersion, StateSchemaMigrationFrom: statecontract.MigrationFromSchema,
 				SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,
 				IssueLifecycleAPICurrent: issuedomain.LifecycleAPICurrent, IssueLifecycleAPIMinimum: issuedomain.LifecycleAPIMinimum})
 		} else {

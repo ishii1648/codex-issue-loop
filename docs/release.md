@@ -26,7 +26,7 @@ candidate integrityは待機を挟まず、candidate prereleaseから取得し�
 
 通常CIはsourceの品質検証を行い、Release workflowがtagged sourceの品質検証と配布artifactの再現性・metadataを確認する。ローカルの`scripts/check-release.sh`はCIを使えない場合やrelease script変更時の検証に使い、同じcommitの成功済みCIとローカル全量検証を重複させない。
 
-release artifactの`version --json`とinstall manifestはstorage schemaのcurrent/migration-from、およびsemantic contractのcurrent/minimumを明示する。release checkはこの範囲とversioned state contractを検査し、execution-required provenance追加にmigration/compatibility ruleがないbuildを拒否する。release前にはsupported旧versionのactive、blocked、needs-input、retry、publication recovery fixtureへcurrent validatorを適用する。
+release artifact の `version --json` と manifest は snapshot の単一 version=6 を報告する。既存名 `state_schema_current` / `semantic_contract_current` は同じ契約値を参照する。既存 migration の移行先はまだ v5 であるため、#536/#537 統合まで [配布保留境界](release-gates.md) を維持する。release check は build の契約整合性を検証するが、通常配布の解除を意味しない。
 
 ## Release作成
 

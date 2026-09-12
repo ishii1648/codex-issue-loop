@@ -74,7 +74,7 @@ repositoryの正本は概念上、次の要素だけを持つ。
 RepositoryState
 ├── identity
 ├── mode: running | stopped | blocked
-├── lifecycle_api_version
+├── version
 ├── active_execution: none | (issue, run_id, generation)
 ├── issues: IssueEnvelope[]
 ├── pending_effects
@@ -98,7 +98,7 @@ IssueEnvelope = Managed(IssueAggregate) | Quarantined(QuarantineRecord)
 Issue aggregateは少なくとも次を一体として保持する。
 
 - Issue identityとauthor verification evidence
-- 公開lifecycle状態とそのAPI version
+- 公開lifecycle状態（互換性はsnapshot全体のversionで識別）
 - run IDとgeneration
 - workspace、branch、base commit
 - continuation checkpointとsuspension
@@ -216,21 +216,23 @@ GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠�
 
 公開lifecycle contractは、状態ごとの意味、許可遷移、terminal判定、実行枠消費、自動継続可否、人間操作要否を一つのversioned sourceとして定義する。CLI JSON、event、GitHub表示、migration、validatorはこのcontractから同じ意味へprojectする。
 
-内部storage schemaとIssue lifecycle APIを分離する。
+snapshot の永続化契約は単一整数 `version=6` で識別する。構造・JSON名・必須条件・相互不変条件は `internal/domain/snapshot`、フィールドの意味と実行要件は同層と `internal/domain/statecontract`、許可遷移は既存の `internal/domain/issue` が正本である。`state_revision` は transaction の更新番号であり、互換性識別には使わない。snapshot は直接編集用の公開 API ではなく、更新は正式操作と Store transaction を通す。
 
-- storage変更を決定的に移行でき、公開上の意味が変わらない場合はAPI majorを維持する。
-- 同一majorの旧minor fixtureは新minorで読み、同じ意味で継続できなければならない。
-- 公開状態の削除・改名・意味変更、terminal判定、実行枠消費、許可遷移の非互換変更ではAPI majorを更新する。
-- major更新でも、根拠が十分なIssueは決定的に移行する。
-- 移行不能なIssueは`Quarantined`へ変換し、他Issueを継続する。
+契約変更の検出対象は `internal/domain/snapshot/**`、`internal/domain/statecontract/**`、`internal/domain/issue/**`、埋め込む型の依存先である `internal/domain/publication/**`、`internal/domain/queue/**`。型だけでなく validator の受理条件、JSON decode、正規化、遷移 decision も対象とする。#536 はこのパス集合を基準に CI を実装する。
 
-migration decoderは旧形式を読む境界に限定する。旧scenario別runtime経路を互換性のために残さず、変換後は現行aggregateと共通lifecycleだけを使用する。
+同じ version を維持できるのは、新旧 reader が既存の正常 snapshot を同じ意味で受理できる変更だけである。必須条件・状態の意味・許可遷移・validator の受理集合の変更、旧 reader が拒否する optional field の追加でも version を更新する。非互換変更は version 更新と明示的 migration を対にする。CLI 出力自身の schema、config/registry、monitor、delivery protocol の version はこの識別子へ統合しない。release metadata の旧名 `state_schema_current` / `semantic_contract_current` は同じ単一 version を表示し、別々に更新しない。lifecycle API metadata は旧契約の情報であり snapshot reader の互換判定には使用しない。
+
+Store の load・保存直前の transaction・診断は domain の version/aggregate 判定を通す。`issue_transition.go` は domain decision の commit fence を確認して status を変更する既存境界を維持する。ファイル I/O、lock、atomic 保存、redaction、外部の process/Git/GitHub 観測は adapter/application に残す。観測結果は値として domain に渡し、domain から外部へ依存しない。
+
+旧入力 `(version, semantic_contract_version, issue_lifecycle_api_version)=(5,4,2.0/2.1)` は v6 とは別の移行元である。v6 reader は旧版、未知版、v6 に旧2項目が残る入力を拒否する。旧 reader は version=6 を拒否するため、旧 binary で直接開かない。既存 v4→v5 migration 専用の `ValidateLegacy` は domain の共通不変条件を検証するが、runtime load/commit の許可には使わない。v6 への起動前 migration は #537 で統合し、移行不能状態があれば原本を変更せず移行全体を中止する。配布保留・解除条件は [release gates](release-gates.md)、停止下の backup/binary を対にした rollback は [migration runbook](migration.md) を参照する。
 
 ## 11. Package境界
 
 ```text
 internal/
 ├── domain/
+│   ├── snapshot/    # 永続構造、version、validator、transaction契約
+│   ├── statecontract/ # フィールド意味・実行要件
 │   ├── issue/       # aggregate、lifecycle contract、decision、invariant
 │   └── queue/       # author policy、eligibility、deterministic ordering
 ├── application/

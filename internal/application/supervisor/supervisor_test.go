@@ -2303,6 +2303,17 @@ func TestZeitreise477LegacyAnsweredResumeWithSavedPullRequestSuspendsWithoutWork
 	}
 	data = bytes.ReplaceAll(data, []byte("/sanitized/zeitreise"), []byte(loop.Config.RepoPath))
 	data = bytes.ReplaceAll(data, []byte("/sanitized/worktrees/zeitreise/issue-477"), []byte(loop.Config.RepoPath))
+	var fixture map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	fixture["version"] = json.RawMessage(fmt.Sprint(state.CurrentVersion))
+	delete(fixture, "semantic_contract_version")
+	delete(fixture, "issue_lifecycle_api_version")
+	data, err = json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(loop.Store.StatePath(), data, 0o600); err != nil {
 		t.Fatal(err)
 	}

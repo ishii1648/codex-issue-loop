@@ -3,8 +3,6 @@ package state
 import (
 	"errors"
 	"fmt"
-	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"os"
 	"syscall"
 )
@@ -45,12 +43,6 @@ func (s Store) ReadDiagnosticSnapshot() (Snapshot, []Event, error) {
 	}
 	if snapshot.Version != CurrentVersion {
 		return Snapshot{}, nil, SchemaVersionError{Kind: "state", Version: snapshot.Version}
-	}
-	if snapshot.SemanticContractVersion != statecontract.CurrentVersion {
-		return Snapshot{}, nil, SemanticContractVersionError{Version: snapshot.SemanticContractVersion, Current: statecontract.CurrentVersion}
-	}
-	if snapshot.IssueLifecycleAPIVersion != issuedomain.LifecycleAPICurrent {
-		return Snapshot{}, nil, LifecycleAPIVersionError{Version: snapshot.IssueLifecycleAPIVersion, Current: issuedomain.LifecycleAPICurrent}
 	}
 	if snapshot.RepoPath != s.RepoPath {
 		return Snapshot{}, nil, errors.New("snapshot repository path differs")
