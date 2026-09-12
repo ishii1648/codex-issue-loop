@@ -18,12 +18,12 @@ Release workflowは次の依存関係で実行する。各jobの失敗はstable�
 | --- | --- |
 | 並列開始 | `verify-main-ci`、`build-candidate`、`replay-production-fixtures`、`lifecycle-conformance`、`cli-surface-contract` |
 | candidate検証 | `build-candidate`後に`verify-reproducibility`と`verify-attestation-and-manifest`を並列実行 |
-| 隔離検証 | `build-candidate`と`cli-surface-contract`後に`credentialless-isolated-canary`を実行し、canonical bytesからcandidate prereleaseを作成 |
-| 公開前照合 | candidate prerelease作成後に`candidate-integrity` |
+| 隔離検証 | `build-candidate`と`cli-surface-contract`後に`credentialless-isolated-canary`を実行し、canonical bytesの隔離検証を完了 |
+| 公開前照合 | 隔離検証と`verify-main-ci`成功後に`candidate-integrity`でcandidate prereleaseを公開・再取得して検証 |
 | 公開許可 | 上記すべての成功後に`promotion-evidence` |
 | 公開・確認 | `promote-stable` → `verify-stable-release` |
 
-`verify-main-ci`は同一repositoryの`.github/workflows/ci.yml`について、release tagからpeelして照合する正確なcommitのmain push実行を確認する。対象runが複数あれば最大run IDを選び、その最新attemptがcompleted/successで、同じattemptの`Quality gates`が一意に存在して成功していることを必須とする。古いrunやattemptの成功へ戻らない。全jobの完了・成功と件数も検証し、skip・cancel・失敗・実行中・未実行・API失敗・不完全な取得（100件超を含む）では拒否する。確認中の再実行も最後のrun再取得で拒否する。run ID、attempt、commitとURLをActions logおよびjob summaryに残す。main CI成功後にReleaseを開始し、待機・poll・retryは行わない。tag pushとworkflow_dispatchのどちらも、このgateと既存のtag/commit照合を通らなければpromotionできない。main CIのtoolchainと品質検証項目は維持し、Releaseでは全体品質検証を再実行しない。配布artifactのbuildはcanonicalと再現性比較の計2回とし、fault/conformanceは専用jobで確認する。
+`verify-main-ci`は同一repositoryの`.github/workflows/ci.yml`について、release tagからpeelして照合する正確なcommitのmain push実行を確認する。対象runが複数あれば最大run IDを選び、その最新attemptがcompleted/successで、同じattemptの`Quality gates`が一意に存在して成功していることを必須とする。古いrunやattemptの成功へ戻らない。全jobの完了・成功と件数も検証し、skip・cancel・失敗・実行中・未実行・API失敗・不完全な取得（100件超を含む）では拒否する。確認中の再実行も最後のrun再取得で拒否する。run ID、attempt、commitとURLをActions logおよびjob summaryに残す。main CIが開始された時点で対象commitのannotated tagを確定してReleaseを開始できる。実行中のCIは既存の`gh run watch --exit-status`で待ち、同じrun/attemptの全job成功を再取得して検証する。待機を含むjob上限は25分とし、失敗・cancel・取得不能・再実行で公開を拒否する。candidate prereleaseもCI成功後だけ公開し、準備中はそのrun専用のActions artifactに保持する。tag pushとworkflow_dispatchのどちらも、このgateと既存のtag/commit照合を通らなければpromotionできない。main CIのtoolchainと品質検証項目は維持し、Releaseでは全体品質検証を再実行しない。配布artifactのbuildはcanonicalと再現性比較の計2回とし、fault/conformanceは専用jobで確認する。
 
 ローカルでは変更箇所のfocused testを行い、同じcommitの通常CIが成功していれば全量検証をローカルでも繰り返す必要はない。CIを使えない場合の全量確認は`make ci`を1回実行する。PRのmerge前headに対するCI成功だけを公開根拠にはしない。
 

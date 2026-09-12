@@ -49,9 +49,9 @@ monitor の公開ゲートは別runnerの再現build、checksum、workflow/tag/c
 
 ## Release作成
 
-1. `main`の対象commitのCIとIssue/milestoneを確認する。同じcommitのCI成功後にローカル全量検証を追加で待たない。
+1. `main`の対象commitのCIとIssue/milestoneを確認する。対象commitのmain push CIが開始済みであれば、成功を待たず次へ進める。ローカル全量検証は追加で待たない。
 2. releaseするcommitへannotated tagを作る。
-3. tagをpushし、`verify-stable-release`までのRelease workflow成功を確認する。
+3. tagをpushしてmain CIと配布物準備を並行実行し、`verify-stable-release`までのRelease workflow成功を確認する。CIが失敗・cancelされた場合は公開されない。
 
 ```sh
 git tag -a v1.2.3 -m 'v1.2.3'
