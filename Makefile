@@ -1,4 +1,4 @@
-.PHONY: build test fault-test conformance-test incident-e2e test-race vet staticcheck errcheck vuln-check install-shellcheck workflow-shell-check fmt-check schema-check tidy-check release-check ci clean
+.PHONY: build test fault-test conformance-test incident-e2e test-race vet staticcheck errcheck vuln-check install-shellcheck workflow-shell-check fmt-check schema-check tidy-check release-check snapshot-contract-check ci clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -84,7 +84,10 @@ tidy-check:
 release-check:
 	scripts/check-release.sh
 
-ci: workflow-shell-check fmt-check schema-check tidy-check test fault-test conformance-test test-race vet staticcheck errcheck vuln-check build release-check
+snapshot-contract-check:
+	$(GO) run ./scripts/snapshot-contract
+
+ci: workflow-shell-check fmt-check schema-check tidy-check test snapshot-contract-check fault-test conformance-test test-race vet staticcheck errcheck vuln-check build release-check
 
 clean:
 	$(GO) clean
