@@ -136,7 +136,7 @@ func allowStoppedAssignmentHealth(diagnostics []diagnostic) []diagnostic {
 }
 
 func diagnoseSchemas(l layout.Layout) ([]diagnostic, bool) {
-	report, err := schema.Inspect(l)
+	report, err := schema.InspectSnapshots(l)
 	if err != nil {
 		return []diagnostic{failedDiagnostic("SCHEMA_INSPECTION_FAILED", "host", "", "永続schemaを検査できません", err.Error(), instruction("fileを削除せずbackupし、agent-loop migrate --jsonで再確認してください"))}, false
 	}

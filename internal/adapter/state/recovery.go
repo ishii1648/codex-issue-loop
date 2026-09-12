@@ -19,6 +19,9 @@ import (
 )
 
 func (s Store) recoverUnlocked() (Snapshot, error) {
+	if err := s.checkSnapshotMigration(); err != nil {
+		return Snapshot{}, err
+	}
 	if err := s.completeQuarantineRecoveryUnlocked(); err != nil {
 		return Snapshot{}, fmt.Errorf("complete quarantined snapshot recovery: %w", err)
 	}
@@ -393,4 +396,26 @@ func isVersionCompatibilityError(err error) bool {
 	}
 	var lifecycleError LifecycleAPIVersionError
 	return errors.As(err, &lifecycleError)
+}
+
+func (s Store) checkSnapshotMigration() error {
+	path := filepath.Join(filepath.Dir(filepath.Dir(s.Dir)), "migration.json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var journal struct {
+		Status string `json:"status"`
+		To     int    `json:"to_version"`
+	}
+	if err := json.Unmarshal(data, &journal); err != nil {
+		return fmt.Errorf("read migration barrier: %w", err)
+	}
+	if journal.Status == "prepared" && journal.To == CurrentVersion {
+		return fmt.Errorf("snapshot migration is prepared; complete migration before accessing durable state")
+	}
+	return nil
 }

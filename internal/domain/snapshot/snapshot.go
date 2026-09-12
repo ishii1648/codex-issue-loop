@@ -643,6 +643,13 @@ func (snapshot Snapshot) Validate() error {
 	if err := snapshot.ValidateVersion(); err != nil {
 		return err
 	}
+	for _, item := range snapshot.Issues {
+		if item != nil && item.Suspension != nil && item.Suspension.Status == issuedomain.SuspensionResolved && item.Suspension.Resolution == issuedomain.ResolutionCancel {
+			if item.Status != issuedomain.StatusCanceled || item.Cancellation == nil || item.Suspension.ResolvedAt.IsZero() || !item.Suspension.ResolvedAt.Equal(item.Cancellation.CanceledAt) {
+				return fmt.Errorf("Issue #%d resolved cancel does not match completed cancellation", item.Number)
+			}
+		}
+	}
 	return snapshot.validateContent()
 }
 

@@ -1,6 +1,6 @@
 # Mac mini常駐運用runbook
 
-Snapshot v6 は #575/#536/#537 の統合・検証完了まで配布保留。既存 migrate は v5 までの経路であり、v6 の起動許可にはならない。旧 snapshot/隔離 backup は対応する旧 binary と停止下で扱い、v6 への移行不能状態は原本を変更せず全体中止する。詳細は [migration runbook](migration.md) を参照する。
+Snapshot v6 は対応旧 `(5,4,2.0/2.1)` から起動前に移行する。更新前の preview、全対象停止、移行前 backup と対応 binary の保全が必要である。移行不能状態は原本を変更せず全体中止し、GitHub 同期失敗では内部取消を巻き戻さない。詳細は [migration runbook](migration.md) を参照する。
 
 最終確認日: 2026-08-16
 

@@ -56,8 +56,8 @@ grep -Fq '"semantic_contract_minimum": 6' "$temporary_root/first/release-manifes
 run_host_go_test ./internal/domain/statecontract ./internal/domain/snapshot ./internal/adapter/state \
   -run '^Test(CurrentContractHasMigrationRulesForEveryExecutionRequirement|EveryExecutionRequiredFieldHasRuntimeValidator)$' \
   -count=1
-run_host_go_test ./internal/application/migration \
-  -run '^Test(ProductionDerivedV4RecoveryMatrixMigratesElevenIssuesAndFourteenSubstatesWithoutLoss|V4PreparedTransactionMigratesItsSnapshotThroughTheSameV5Boundary)$' \
+run_host_go_test ./internal/application/migration ./internal/application/supervisor ./internal/adapter/github \
+  -run '^Test(ProductionDerivedV4RecoveryMatrixMigratesElevenIssuesAndFourteenSubstatesWithoutLoss|V4PreparedTransactionMigratesItsSnapshotThroughTheSameV5Boundary|SnapshotMigration.*|FaultSnapshotMigration.*|DecodeV6.*|RunCommitsMigrationBeforeAnyGitHubProjection|StartupMigratesLegacyCancellationBeforeGitHubAndRetriesProjection|CanceledPullRequestCloseIsVerifiedAndIdempotent)$' \
   -count=1
 run_host_go_test ./internal/application/delivery -run '^Test(ProductionStateIsolationRunsCredentiallessContractBetweenSnapshots|ProductionReleaseHealthFailsClosed|ProductionAssignmentHealthRequiresExactStableAssignmentsAndRollbackDrill|ReleaseWorkflowPreservesRequiredGateChain|ContractWorkflowsRequireNoLongLivedSecrets|HighRiskReviewUsesMachineVerifiableEvidence)$' -count=1
 

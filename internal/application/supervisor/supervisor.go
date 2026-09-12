@@ -24,10 +24,12 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
+	"github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/runtimemetadata"
@@ -56,6 +58,7 @@ type ProcessInspector interface {
 type Loop struct {
 	Config             config.Config
 	Store              state.Store
+	MigrationLayout    layout.Layout
 	GitHub             gh.Client
 	Worktrees          WorktreeManager
 	Worker             worker.Runner
@@ -107,6 +110,12 @@ func (l *Loop) Run(ctx context.Context) error {
 		return err
 	}
 	defer state.ReleaseSupervisorLock(lock)
+	if l.MigrationLayout.Root != "" {
+		if _, err := (migration.Migrator{Layout: l.MigrationLayout}).ApplySnapshots(l.Store.Dir); err != nil {
+			return BlockedError{Err: fmt.Errorf("prepare snapshot before startup: %w", err)}
+		}
+	}
+
 	if l.Logger == nil {
 		l.Logger = log.New(os.Stderr, "agent-loop: ", log.LstdFlags|log.LUTC)
 	}

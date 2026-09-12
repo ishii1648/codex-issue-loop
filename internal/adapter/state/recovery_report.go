@@ -178,6 +178,9 @@ func (s Store) ReadRecoveryInputs() (Snapshot, []Event, error) {
 // It deliberately does not inspect event history; events are audit evidence,
 // not continuation eligibility.
 func (s Store) ReadCanonicalSnapshot() (Snapshot, error) {
+	if err := s.checkSnapshotMigration(); err != nil {
+		return Snapshot{}, err
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		before, err := os.ReadFile(s.StatePath())
 		if err != nil {
@@ -186,6 +189,9 @@ func (s Store) ReadCanonicalSnapshot() (Snapshot, error) {
 		after, err := os.ReadFile(s.StatePath())
 		if err != nil || !bytes.Equal(before, after) {
 			continue
+		}
+		if err := s.checkSnapshotMigration(); err != nil {
+			return Snapshot{}, err
 		}
 		if err := contract.CheckVersion(before); err != nil {
 			return Snapshot{}, err

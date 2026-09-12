@@ -1084,7 +1084,7 @@ esac
 	}
 }
 
-func TestStartRejectsLegacySemanticStateWithoutQuarantineOrLaunchdMutation(t *testing.T) {
+func TestStartRejectsMixedSnapshotAndEventVersionsWithoutQuarantineOrLaunchdMutation(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1113,7 +1113,7 @@ func TestStartRejectsLegacySemanticStateWithoutQuarantineOrLaunchdMutation(t *te
 	snapshot.IssueLifecycleAPIVersion = "2.1"
 	writeJSONFixture(t, store.StatePath(), snapshot)
 	err = (App{Out: io.Discard, Err: io.Discard}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"})
-	if err == nil || !strings.Contains(err.Error(), "schema migration required") {
+	if err == nil || !strings.Contains(err.Error(), "event contract or repository mismatch") {
 		t.Fatalf("legacy semantic state was not rejected: %v", err)
 	}
 	data, readErr := os.ReadFile(store.StatePath())
@@ -1895,7 +1895,7 @@ func TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldManifest.SchemaVersion = schema.CurrentVersion - 1
+	oldManifest.SchemaVersion = state.CurrentVersion - 1
 	writeJSONFixture(t, filepath.Join(l.Root, "install.json"), oldManifest)
 	writeLegacySchemas(t, repo, l)
 
@@ -1915,7 +1915,7 @@ func TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback(t *testin
 		t.Fatalf("update result=%+v err=%v output=%s", updateResult, err, out.String())
 	}
 
-	migrationResult, err := (schema.Migrator{Layout: l}).Apply()
+	migrationResult, err := (schema.Migrator{Layout: l}).ApplySnapshots("")
 	if err != nil || migrationResult.Backup == "" {
 		t.Fatalf("migration=%+v err=%v", migrationResult, err)
 	}
@@ -1930,7 +1930,7 @@ func TestSchemaChangingUpdateRequiresStoppedMigrationAndPairedRollback(t *testin
 		t.Fatalf("paired installation rollback: %v", err)
 	}
 	restored, err := readInstallManifest(filepath.Join(l.Root, "install.json"))
-	if err != nil || restored.Version != "v0.1.0" || restored.SchemaVersion != schema.CurrentVersion-1 {
+	if err != nil || restored.Version != "v0.1.0" || restored.SchemaVersion != state.CurrentVersion-1 {
 		t.Fatalf("restored=%+v err=%v", restored, err)
 	}
 }
@@ -1950,7 +1950,7 @@ func TestSchemaOperationsRequireStoppedWebhookBroker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			manifest.SchemaVersion = schema.CurrentVersion - 1
+			manifest.SchemaVersion = state.CurrentVersion - 1
 			writeJSONFixture(t, filepath.Join(l.Root, "install.json"), manifest)
 			writeLegacySchemas(t, repo, l)
 			brokerState, _ := fakeInstallationBroker(t, l)
@@ -1973,7 +1973,7 @@ func TestSchemaOperationsRequireStoppedWebhookBroker(t *testing.T) {
 				}
 				run = func() error { return a.migrate(context.Background(), l, []string{"--apply", "--json"}) }
 			case "migration-rollback":
-				result, err := (schema.Migrator{Layout: l}).Apply()
+				result, err := (schema.Migrator{Layout: l}).ApplySnapshots("")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2032,7 +2032,7 @@ func TestUpdateRestartsLoadedWebhookBrokerWithoutMigration(t *testing.T) {
 	}
 	writeLegacySchemas(t, repo, l)
 	brokerState, logPath := fakeInstallationBroker(t, l)
-	if _, err := (schema.Migrator{Layout: l}).Apply(); err != nil {
+	if _, err := (schema.Migrator{Layout: l}).ApplySnapshots(""); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
@@ -2089,27 +2089,27 @@ esac
 		t.Fatal(err)
 	}
 	entries[0].Commands["launchctl"] = launchctl
-	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: schema.CurrentVersion - 1, Repos: map[string]registry.Entry{entries[0].RepoID: entries[0]}})
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: state.CurrentVersion - 1, Repos: map[string]registry.Entry{entries[0].RepoID: entries[0]}})
 	return brokerState, logPath
 }
 
 func writeLegacySchemas(t *testing.T, repo string, l layout.Layout) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte(fmt.Sprintf("version: %d\ngithub:\n  repo: owner/repo\nnotifications:\n  enabled: false\n", schema.CurrentVersion-1)), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, config.FileName), []byte("version: 5\ngithub:\n  repo: owner/repo\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	entry := registry.Entry{
-		RepoID: "repo-v3", RepoPath: repo, GitHubRepo: "owner/repo",
-		Commands: map[string]string{"launchctl": "/usr/bin/false"},
-	}
-	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: schema.CurrentVersion - 1, Repos: map[string]registry.Entry{entry.RepoID: entry}})
-	if err := os.MkdirAll(l.RepoDir(entry.RepoID), 0o700); err != nil {
+	entry := registry.Entry{RepoID: "repo-v3", RepoPath: repo, GitHubRepo: "owner/repo", Commands: map[string]string{"launchctl": "/usr/bin/false"}}
+	writeJSONFixture(t, l.RegistryPath, registry.Registry{Version: registry.CurrentVersion, Repos: map[string]registry.Entry{entry.RepoID: entry}})
+	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: repo}
+	if err := store.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	writeJSONFixture(t, filepath.Join(l.RepoDir(entry.RepoID), "state.json"), state.Snapshot{
-		Version: schema.CurrentVersion - 1, RepoID: entry.RepoID, RepoPath: repo,
-		Supervisor: state.Supervisor{State: "stopped"}, Issues: map[string]*state.Issue{}, PendingRequests: map[string]*state.Request{},
-	})
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Version, snapshot.SemanticContractVersion, snapshot.IssueLifecycleAPIVersion = 5, 4, "2.1"
+	writeJSONFixture(t, store.StatePath(), snapshot)
 }
 
 func writeJSONFixture(t *testing.T, path string, value any) {
@@ -2181,5 +2181,43 @@ func TestSuperviseRotationKeepsStderrVisibleInLogs(t *testing.T) {
 	}
 	if out.String() != "previous run\n"+string(active) {
 		t.Fatalf("logs=%q active=%q", out.String(), active)
+	}
+}
+
+func (resumedWorkspaceGitHub) ClosePullRequest(context.Context, config.Config, string) error {
+	return nil
+}
+
+func TestFaultMigrateCommandResumesPreparedSnapshotWrites(t *testing.T) {
+	for _, boundary := range []string{"migration.json", "events.jsonl", "state.json"} {
+		t.Run(boundary, func(t *testing.T) {
+			repo, l := testEnvironment(t)
+			if err := l.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			writeLegacySchemas(t, repo, l)
+			fault := errors.New("injected snapshot migration interruption")
+			m := schema.Migrator{Layout: l, AfterWrite: func(path string) error {
+				if filepath.Base(path) == boundary {
+					return fault
+				}
+				return nil
+			}}
+			if _, err := m.ApplySnapshots(""); !errors.Is(err, fault) {
+				t.Fatalf("err=%v", err)
+			}
+			a := App{Out: io.Discard, Err: io.Discard}
+			if err := a.migrate(context.Background(), l, []string{"--apply", "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			store := state.Store{Dir: l.RepoDir("repo-v3"), RepoID: "repo-v3", RepoPath: repo}
+			snapshot, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Version != state.CurrentVersion || snapshot.StateRevision != 1 {
+				t.Fatalf("snapshot=%+v", snapshot)
+			}
+		})
 	}
 }

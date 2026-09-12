@@ -1,77 +1,51 @@
-# 永続state schema / semantic migration runbook
+# Snapshot migration runbook
 
-開発中の snapshot 永続化契約は単一 `version=6`。旧 `(5,4,2.0/2.1)` を v6 として自動受理・読み替えしない。v6 に `semantic_contract_version` または `issue_lifecycle_api_version` が残る入力も拒否する。config/registry は v5、CLI/monitor の schema は従来どおりである。契約本体と version 更新規則は [architecture §10](architecture.md#10-issue-lifecycle-apiと互換性) を参照する。
+Snapshot API の現行契約は単一 `version=6`。移行元は `(version, semantic_contract_version, issue_lifecycle_api_version)=(5,4,2.0/2.1)` に限る。config/registry は v5 のままである。v6 reader は旧版、未知版、旧2項目が残る v6 を拒否する。旧 binary に v6 を直接読ませない。
 
-**#575→#536→#537 の統合・検証が完了するまで v6 のタグ発行・通常配布は禁止する。** 現在の migration は既存 v4→v5 および v5 semantic v4 までの経路を維持する。以下はその旧経路の手順であり、v6 への移行完了や v6 runtime の起動許可を意味しない。`ValidateLegacy` はこの旧出力専用であり、v6 の Store は拒否する。release metadata の migration-from=5 は v6 の移行元を識別し、移行済みの保証ではない。v6 向け起動前 migration と旧 cancel 正規化は #537 で実装する。
+## 更新の確認と起動
 
-v6 移行では、旧3項目を照合し、全 snapshot と prepared transaction を共通契約で検証する。移行不能状態が1件でもあれば、原本を変更せず移行全体を中止する。停止下で移行前 backup と対応 binary を対で保全し、rollback は停止したままその対へ戻す。旧 binary に v6 を直接読ませない。この文書の更新は、本番停止・migration・配布・rollback の実行承認ではない。
-
-## Read-only preview
-
-新しい検証済みartifactで、loopを停止する前にもpreviewできる。既定の`migrate`はstate、event、label、worktree、backup、journalを一切変更しない。
+更新前に、使用する検証済み binary で移行内容を確認する。
 
 ```sh
 agent-loop migrate --json
 ```
 
-`report.semantic_findings`はIssueごとに`repo_id`、`issue_number`、`status`、`field`、stable `code`、`migratable`、`reason`、`migration_rule`を返す。`report.unsupported`と`report.non_migratable`と`loaded_repositories`が空で、`loaded_webhook_broker`がfalseの場合だけ`apply_allowed`がtrueになる。
+preview は snapshot、event、worktree、GitHub、backup、journal を変更しない。対応しない契約、取消根拠の矛盾、実行権限、worker identity、未回答要求、未完了 effect があれば移行できない。旧 prepared transaction は対応する旧 binary で完了してから停止し、再度 preview する。supervisor PID が存在しないことだけでは停止確認にならない。
 
-主なcode:
-
-| code | 意味 |
-| --- | --- |
-| `SEMANTIC_COMPATIBLE` | 現releaseの実行不変条件を満たす |
-| `EXECUTION_REQUIRED_WORKSPACE_PROVENANCE_MISSING` | 実行済みrecovery stateにWorkspace authorityがない。自動合成しない |
-| `EXECUTION_REQUIRED_WORKSPACE_PROVENANCE_INVALID` | 保存provenanceがIssue/repository identityと不整合 |
-| `EXECUTION_REQUIRED_ACTIVE_EXECUTION_MISSING` | 実行statusに一致するroot active executionがない |
-| `PREPARED_TRANSACTION_REQUIRES_OLD_RUNTIME_RECOVERY` | 旧runtimeでprepared transactionを完了してから再previewする |
-
-unknown storage/contract version、decode error、non-migratable findingがある場合はapplyしない。versionやWorkspaceを手編集しない。
-
-旧releaseがsemantic contract不一致を`recovery_blocked`として隔離済みの場合、state/eventを手でcopyしない。repositoryをunloadしたまま`recover-semantic-quarantine --dry-run`でcurrent marker記載のexact backupを確認し、`--confirm-exact-backup`で1段ずつ戻す。`restored_recovery_marker=false`かつ元revision/Issue件数へ戻ったら通常の`status`を挟まず、全repository停止を確認してこの章の`migrate --json`へ進む。
-
-旧releaseがIssue lifecycle API不一致だけを`recovery_blocked`として隔離した場合も手動copyしない。repositoryをunloadし、`recover-lifecycle-quarantine --dry-run`でmarkerのexact reason、source/target version、recorded backup、digest、revision、snapshot/eventと任意のprepared transactionの整合性を確認してから、`--confirm-exact-backup`でbyte-exactに復元する。
-
-## v4 recovery recordの変換
-
-v4のscenario別recovery fieldは、status、旧lease/park、workspace、session、PR、request/answer、generationを同じsnapshotから読み、決定的にroot `active_execution`とIssue-local `continuation`、`suspension`へfoldする。event件数・順序はauthorityにしない。実行再開を一意に証明できないIssueだけを`recoverability=ambiguous`かつ`suspension.status=quarantined`にし、他Issueのmigrationとqueue進行は継続する。
-
-migration後のoperator操作は共通CLIだけを使う。
+preview を確認した operator が、全対象 loop と共有 webhook broker を停止して検証済み binary の `update` を実行する。`update` は artifact の更新と移行要否の表示を行い、snapshot は起動時に変換する。更新後の `start`、手動 `run`、再起動では改めて承認を求めない。起動要求から排他取得、version 判定、必要な移行、新契約の検証、永続確定、通常処理の順に進む。
 
 ```sh
-agent-loop issue plan --repo /absolute/path/to/repository --issue 123 --json
-agent-loop issue resolve --repo /absolute/path/to/repository --issue 123 --action resume --json
-```
-
-planがworkspace、git、GitHub、processの不一致を返した場合はstate/labelを手編集しない。外部状態を修復して再planするか、`cancel`でそのIssueだけを収束させる。
-
-## Apply、restart、idempotency
-
-```sh
-agent-loop stop --repo /absolute/path/to/repository
-agent-loop migrate --json
-agent-loop migrate --apply --json
-agent-loop doctor --json
+agent-loop update --json
 agent-loop start --repo /absolute/path/to/repository
 ```
 
-schema変更を伴う`update`、`migrate --apply`、`migrate --rollback`、旧schemaへの`rollback`は、全登録LaunchAgentに加えて共有webhook brokerの停止も要求する。`update`出力の`webhook_broker_restarted`はbrokerを再起動したかを示し、schema変更時はfalseになる。
+停止下で明示的に適用する場合は `agent-loop migrate --apply --json` を使える。repository assignment と自動 delivery の schema/major 更新拒否は維持する。互換性の異なる slot を通常 assignment で強制採用せず、停止下の更新手順を使う。新規 repository の登録は v6 の空 snapshot を作成する。既存旧 snapshot がある repository の再登録を migration の代用にしない。
 
-applyは全登録LaunchAgentと共有webhook brokerの停止を確認し、対象config/registry/state/active eventをchecksum付きbackupへ保存してから`migration.json`を`prepared`にする。stateの`semantic_contract_version`と同じtransaction boundaryを表す`semantic_migration_applied` eventにはmigration ID、authority、source、before/after、`operator_confirmation.apply=true`、`provenance_synthesized=false`を記録する。GitHub labelとworktreeはmigration対象外である。
+## 旧 cancel の predicate
 
-fileごとの置換はatomicで、同じprepared journalを使う再実行は同じmigration ID/event IDへ収束する。completed後の再applyは`changed:false`である。process crash後は同じartifactでpreviewしてからapplyを再実行し、別backupや別identityを作らない。fault後に旧versionへ戻す場合は下記rollbackを使う。
+対象は blocked/failed かつ suspension が resolved/cancel の記録である。Cancellation が未作成で、保存済み `resolved_at` と `suspended_at` が存在し、取消時刻が停止時刻より前でないことを要求する。実行権限・worker identity・未回答要求・未完了 effect が残る snapshot、取消根拠不足・矛盾がある snapshot は原本を変更せず全体を拒否する。新契約の aggregate 検証も全件に適用する。
 
-v4→v5 migrationは11 Issue・14 legacy recovery substateのproduction由来matrixで、Issue、request/answer、execution generation、session、publication/PR auditの件数とidentityを保存する。state本体とprepared transaction内のnested snapshotへ同じ変換を適用し、domain の旧 v5 専用 aggregate validatorを通す。
+取消記録は `source=legacy_cancel_migration`、`previous_status=旧status`、`canceled_at=保存済みresolved_at`、`execution_release_result=not_present` とする。`not_present` は移行時の実行権限不在を表し、過去に解放処理を実行した証明ではない。欠けた operator/process 情報は補完しない。移行時刻は別の `snapshot_migration_applied` event と journal の `completed_at` に記録する。
+
+既に canceled の記録は検証して保持し、別 resolution は取消変換しない。v6 は resolved/cancel と canceled/Cancellation/取消時刻の一致を要求する。再実行で取消記録を作り直さない。
+
+PR参照、open PR、PR終了証拠不足、worktree欠損だけでは移行を拒否しない。移行は GitHub 操作も worker 起動も行わない。通常起動後の reconciliation が保存済みPRの repository identity と現在状態を確認し、open PR を close して readback する。closed/merged は保持する。GitHub 同期失敗では内部取消を巻き戻さず、既存 reconciliation の再実行で収束する。worktree の復元や実装 worker の再投入はしない。
+
+## 排他・中断・再実行
+
+移行は既存 `migration.lock` と全対象の `supervisor.lock` / `state.lock` を保持する。起動元自身の supervisor lock は呼び出し側が保持する。別 supervisor・CLI と排他的に全入力を検証し、checksum 付き backup と `migration.json` を再利用する。
+
+journal の `prepared` 中は通常 Store の読み書きを拒否し、途中の snapshot/event を隔離しない。snapshot と version は同一の atomic file replacement で更新する。途中で終了した場合は同じ binary の `migrate --apply` または起動で、同じ backup・migration ID・event ID から変換を完了する。現在値が移行前または検証済み移行後のどちらでもない場合は、進捗を上書きせず拒否する。全 artifact の検証後にだけ journal を completed とする。
 
 ## Paired rollback
 
+全 loop と broker を停止したまま、移行前 backup と対応する旧 binary を対で戻す。
+
 ```sh
-agent-loop stop --repo /absolute/path/to/repository
-agent-loop migrate --rollback --backup '/absolute/path/from-apply' --json
-agent-loop rollback --backup '/absolute/install-backup' --json
-agent-loop doctor --json
+agent-loop migrate --rollback --backup /absolute/path/to/migration-backup --json
+agent-loop rollback --backup /absolute/path/to/install-backup --json
 ```
 
-rollbackは管理対象backup、restore先、全SHA-256を検証して全artifactを復元する。migrationが新規作成した空state用event logは削除する。active executionまたは未完了continuationがあれば拒否する。最新journalと異なるbackup、移行直後のstate revisionを記録していないbackup、現在のstate revisionが記録値と異なる場合も拒否する。prepared journalからの障害復旧では、backupと同一byteの未移行stateも復元できる。運用再開後にstateが更新された場合の強制rollbackは提供しない。storage versionを跨ぐ場合はschema backupを先、install backupを後に戻す。途中失敗、backup不足、version不一致では片方だけを推測で戻さず停止を維持する。
+既存 rollback 検証は backup の checksum・対象範囲・最新 journal・移行直後 revision を確認する。active execution や保持中 continuation、移行後の進捗、backup の不足・不一致があれば拒否する。新しい snapshot を古い backup へ黙って戻す強制手段は提供しない。state の復元が失敗した場合は旧 binary を起動せず停止を維持する。
 
-旧外部配送用`notification-token`はmigration/backup/rollback対象外であり、暗黙削除しない。
+この手順書やテストの成功は、本番停止・migration 適用・タグ発行・配布・rollback 実行の承認ではない。release の公開境界は [release gates](release-gates.md) を参照する。
