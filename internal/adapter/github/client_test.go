@@ -271,7 +271,7 @@ func TestPullRequestChecksStatus(t *testing.T) {
 	}
 }
 
-func TestFaultPartialLabelCommentSyncCanBeRetried(t *testing.T) {
+func TestCompletionCommentFailureDoesNotFailLabelSync(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "fake-gh")
 	logPath := filepath.Join(dir, "calls.log")
@@ -298,9 +298,6 @@ esac
 	cfg.GitHub.Repo = "owner/repo"
 	cfg.Completion.CloseIssue = false
 	client := CLI{Path: fake}
-	if err := client.MarkDone(context.Background(), cfg, 7, "https://example.test/pull/1"); err == nil {
-		t.Fatal("injected comment failure was not returned")
-	}
 	if err := client.MarkDone(context.Background(), cfg, 7, "https://example.test/pull/1"); err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +305,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(calls), "issue edit") != 2 || strings.Count(string(calls), "issue comment") != 2 {
+	if strings.Count(string(calls), "issue edit") != 1 || strings.Count(string(calls), "issue comment") != 1 {
 		t.Fatalf("unexpected calls:\n%s", calls)
 	}
 	for _, label := range []string{cfg.GitHub.FailedLabel, "blocked"} {

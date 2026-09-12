@@ -218,13 +218,17 @@ GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠�
 
 snapshot の永続化契約は単一整数 `version=6` で識別する。構造・JSON名・必須条件・相互不変条件は `internal/domain/snapshot`、フィールドの意味と実行要件は同層と `internal/domain/statecontract`、許可遷移は既存の `internal/domain/issue` が正本である。`state_revision` は transaction の更新番号であり、互換性識別には使わない。snapshot は直接編集用の公開 API ではなく、更新は正式操作と Store transaction を通す。
 
-契約変更の検出対象は `internal/domain/snapshot/**`、`internal/domain/statecontract/**`、`internal/domain/issue/**`、埋め込む型の依存先である `internal/domain/publication/**`、`internal/domain/queue/**`。型だけでなく validator の受理条件、JSON decode、正規化、遷移 decision も対象とする。#536 はこのパス集合を基準に CI を実装する。
+契約変更の検出対象は `internal/domain/snapshot/**`、`internal/domain/statecontract/**`、`internal/domain/issue/**`、埋め込む型の依存先である `internal/domain/publication/**`、`internal/domain/queue/**`。型だけでなく validator の受理条件、JSON decode、正規化、遷移 decision も対象とする。CI の `make snapshot-contract-check` はこの集合の全ファイル（`_test.go` を除く）の path・mode・blob を比較する。移動・削除、コメントや振る舞いを変えない整理も一律に検出するため、契約層内ではそれらにも version 更新が必要になる。adapter/application の具体実装だけの変更は更新不要であり、既存 architecture test による依存・status commit 境界の検証を併用する。
+
+比較元は公式 repository `ishii1648/codex-issue-loop` の GitHub Releases API を全ページ取得し、draft/prerelease を除く `vMAJOR.MINOR.PATCH` のうち公開日時が最も新しい release とする。初期適用下限は契約分離前の最終公開版 `v0.12.35`。以後の通常公開版すべてを対象に、API の tag object SHA と checkout 内の tag を照合する。PR base や直前 commit は使用しない。release・tag・version 定義の欠損、取得・build・test 不能、選択の曖昧さは非ゼロ終了となる。契約変更時は対象公開版全体の最大 version より大きい整数を要求し、既存番号の再利用と後退を拒否する。単一整数契約には major/minor の区別はない。
+
+同ゲートは公開 tag と対象 HEAD を一時ディレクトリへ展開し、それぞれの Store writer/診断 reader を build して #439 の匿名化 fixture を双方向に検証する。同じ version なら双方が受理し、解釈した snapshot が一致することを要求する。異なる version は双方の自己読み取り成功と相手 version の拒否を要求し、回答履歴を壊した入力も拒否する。診断前後の全ファイルのハッシュと集合を比較し、拒否時の修復・隔離を許さない。fixture の存在だけで成功とはせず、HEAD SHA・比較 release・実行結果を CI 出力に残す。これは fixture の範囲での互換性証拠であり、一般的な意味差分の証明ではない。release は、この契約検証と起動前 migration 検証を含む main CI が成功した対象 commit について、既存の manifest・attestation 検証を通して公開する。
 
 同じ version を維持できるのは、新旧 reader が既存の正常 snapshot を同じ意味で受理できる変更だけである。必須条件・状態の意味・許可遷移・validator の受理集合の変更、旧 reader が拒否する optional field の追加でも version を更新する。非互換変更は version 更新と明示的 migration を対にする。CLI 出力自身の schema、config/registry、monitor、delivery protocol の version はこの識別子へ統合しない。release metadata の旧名 `state_schema_current` / `semantic_contract_current` は同じ単一 version を表示し、別々に更新しない。lifecycle API metadata は旧契約の情報であり snapshot reader の互換判定には使用しない。
 
 Store の load・保存直前の transaction・診断は domain の version/aggregate 判定を通す。`issue_transition.go` は domain decision の commit fence を確認して status を変更する既存境界を維持する。ファイル I/O、lock、atomic 保存、redaction、外部の process/Git/GitHub 観測は adapter/application に残す。観測結果は値として domain に渡し、domain から外部へ依存しない。
 
-旧入力 `(version, semantic_contract_version, issue_lifecycle_api_version)=(5,4,2.0/2.1)` は v6 とは別の移行元である。v6 reader は旧版、未知版、v6 に旧2項目が残る入力を拒否する。旧 reader は version=6 を拒否するため、旧 binary で直接開かない。既存 v4→v5 migration 専用の `ValidateLegacy` は domain の共通不変条件を検証するが、runtime load/commit の許可には使わない。v6 への起動前 migration は #537 で統合し、移行不能状態があれば原本を変更せず移行全体を中止する。配布保留・解除条件は [release gates](release-gates.md)、停止下の backup/binary を対にした rollback は [migration runbook](migration.md) を参照する。
+旧入力 `(version, semantic_contract_version, issue_lifecycle_api_version)=(5,4,2.0/2.1)` は v6 とは別の移行元である。v6 reader は旧版、未知版、v6 に旧2項目が残る入力を拒否する。旧 reader は version=6 を拒否するため、旧 binary で直接開かない。既存 v4→v5 migration 専用の `ValidateLegacy` は domain の共通不変条件を検証するが、runtime load/commit の許可には使わない。v6 への起動前 migration は `application/migration` が全対象の supervisor/state 排他と既存 backup/journal を保持して実行する。旧 cancel の status commit は `adapter/state/issue_transition.go` と domain の取消 decision を通す。prepared journal 中の通常 Store 読み書きは拒否し、移行不能状態があれば原本を変更せず移行全体を中止する。取消時刻は保存済み値、移行時刻は別 audit とし、残存 PR は通常 reconciliation で close する。配布保留・解除条件は [release gates](release-gates.md)、停止下の backup/binary を対にした rollback は [migration runbook](migration.md) を参照する。
 
 ## 11. Package境界
 

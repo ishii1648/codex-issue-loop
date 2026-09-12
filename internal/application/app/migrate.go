@@ -55,7 +55,7 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 		return a.output(*jsonOut, result)
 	}
 
-	report, err := schema.Inspect(l)
+	report, err := schema.InspectSnapshots(l)
 	if err != nil {
 		return err
 	}
@@ -72,7 +72,7 @@ func (a App) migrate(ctx context.Context, l layout.Layout, args []string) error 
 
 	migrator := schema.Migrator{Layout: l}
 	var result schema.Result
-	result, err = migrator.Apply()
+	result, err = migrator.ApplySnapshots("")
 	if err != nil {
 		return err
 	}

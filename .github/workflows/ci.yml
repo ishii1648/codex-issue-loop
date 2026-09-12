@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -52,6 +54,11 @@ jobs:
 
       - name: Run tests
         run: make test
+
+      - name: Verify published Snapshot contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make snapshot-contract-check
 
       - name: Run fault injection suite
         run: make fault-test

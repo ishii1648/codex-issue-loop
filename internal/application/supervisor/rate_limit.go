@@ -229,3 +229,10 @@ func (l *Loop) revalidateStartupCooldown(ctx context.Context, cooldown ratelimit
 	}
 	return cooldown, nil
 }
+
+func (c *rateLimitedGitHub) ClosePullRequest(ctx context.Context, cfg config.Config, url string) error {
+	if err := c.before(ctx); err != nil {
+		return err
+	}
+	return c.delegate.ClosePullRequest(ctx, cfg, url)
+}

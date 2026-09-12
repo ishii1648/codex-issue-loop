@@ -17,16 +17,19 @@ import (
 	"github.com/fsnotify/fsnotify"
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/statusapi"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/conflict"
 	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	"github.com/ishii1648/codex-issue-loop/internal/application/incidentloop"
+	"github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/publication"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/failure"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/ratelimit"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/retention"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/runtimemetadata"
@@ -55,6 +58,7 @@ type ProcessInspector interface {
 type Loop struct {
 	Config             config.Config
 	Store              state.Store
+	MigrationLayout    layout.Layout
 	GitHub             gh.Client
 	Worktrees          WorktreeManager
 	Worker             worker.Runner
@@ -106,6 +110,12 @@ func (l *Loop) Run(ctx context.Context) error {
 		return err
 	}
 	defer state.ReleaseSupervisorLock(lock)
+	if l.MigrationLayout.Root != "" {
+		if _, err := (migration.Migrator{Layout: l.MigrationLayout}).ApplySnapshots(l.Store.Dir); err != nil {
+			return BlockedError{Err: fmt.Errorf("prepare snapshot before startup: %w", err)}
+		}
+	}
+
 	if l.Logger == nil {
 		l.Logger = log.New(os.Stderr, "agent-loop: ", log.LstdFlags|log.LUTC)
 	}
@@ -118,6 +128,13 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == state.RecoveryStateBlocked {
 		return BlockedError{Err: fmt.Errorf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)}
+	}
+	statusHandler := &statusapi.Handler{Store: l.Store, Repository: l.Config.GitHub.Repo, RuntimeID: state.NewID("runtime_"), StartedAt: time.Now().UTC(), AutoMerge: l.Config.Completion.AutoMerge}
+	statusCleanup, statusErr := statusapi.Start(ctx, statusHandler, l.Logger)
+	if statusErr != nil {
+		l.Logger.Printf("status API unavailable: %v", statusErr)
+	} else {
+		defer statusCleanup()
 	}
 	snapshot, _, err = l.Store.RecoverUnstartedConflictLaunch(l.now())
 	if err != nil {
@@ -183,6 +200,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		}()
 	}
 
+	statusHandler.Ready.Store(true)
 	return l.runWithIncidentAutomation(ctx, func(runCtx context.Context) error { return l.runScheduler(runCtx, watcher) })
 }
 
@@ -454,12 +472,12 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		var result worker.Result
 		if l.canResume(current) {
-			result, err = l.resumeWorker(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current))
+			result, err = l.resumeWorker(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(ctx, current))
 		} else {
 			if current.SessionID != "" {
 				instruction = "The saved session belongs to a different worker backend. Start a fresh session in the existing worktree and use durable state.\n\n" + instruction
 			}
-			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
+			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(ctx, current))
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
@@ -486,7 +504,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if current.LastError != "" {
 			instruction += " Retry reason: " + current.LastError
 		}
-		result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
+		result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(ctx, current))
 	} else {
 		previousIdentity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 		current.Attempts++
@@ -520,7 +538,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if current.LastError != "" {
 			instruction += " Retry reason: " + current.LastError
 		}
-		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
+		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(ctx, current))
 	}
 	return l.handleResult(ctx, issue, current, result, err)
 }

@@ -492,9 +492,9 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	if strings.Count(text, "scripts/build-release.sh") != 2 {
 		t.Fatal("release workflow must build the canonical candidate once and one comparison-only rebuild")
 	}
-	semanticPredicate := ".semantic_contract_current == 4"
+	semanticPredicate := ".semantic_contract_current == 6"
 	if strings.Count(text, semanticPredicate) != 1 {
-		t.Fatal("release workflow must retain the v5 publication hold until #536/#537 integration")
+		t.Fatal("release workflow must require the unified v6 contract after migration integration")
 	}
 	checkData, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts", "check-release.sh"))
 	if err != nil {

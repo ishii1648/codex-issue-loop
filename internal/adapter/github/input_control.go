@@ -86,20 +86,26 @@ func renderInputRequest(marker, legacyMarker string, payload inputRequestMarkerP
 	body.WriteString(marker)
 	body.WriteByte('\n')
 	body.WriteString(legacyMarker)
-	body.WriteString("\n## Input required\n\n")
-	body.WriteString(fmt.Sprintf("Issue: #%d\nRequest: `%s`\n\n", payload.IssueNumber, payload.RequestID))
+	body.WriteString("\n判断が必要なため、処理を一時停止しています。\n\n")
+	body.WriteString(fmt.Sprintf("Issue: #%d\n対象の質問：`%s`\n\n**質問：** ", payload.IssueNumber, payload.RequestID))
 	body.WriteString(payload.Question)
 	if payload.Reason != "" {
-		body.WriteString("\n\nReason: ")
+		body.WriteString("\n\n**理由：** ")
 		body.WriteString(payload.Reason)
 	}
 	if payload.RecommendedOption != "" {
-		body.WriteString("\n\nRecommended option: `")
+		body.WriteString("\n\n**推奨：** `")
 		body.WriteString(payload.RecommendedOption)
 		body.WriteByte('`')
+		for _, option := range payload.Options {
+			if option.ID == payload.RecommendedOption && option.Label != "" {
+				body.WriteString(": " + option.Label)
+				break
+			}
+		}
 	}
 	if len(payload.Options) > 0 {
-		body.WriteString("\n\nOptions:")
+		body.WriteString("\n\n選択肢：")
 		for _, option := range payload.Options {
 			body.WriteString("\n- `")
 			body.WriteString(option.ID)
@@ -107,10 +113,14 @@ func renderInputRequest(marker, legacyMarker string, payload inputRequestMarkerP
 			body.WriteString(option.Label)
 		}
 	}
-	body.WriteString(fmt.Sprintf("\n\nFree-text allowed: `%t`\nCreated: `%s`", payload.AllowFreeText, payload.CreatedAt.Format(time.RFC3339Nano)))
-	body.WriteString("\n\nReply with exactly:\n```text\n/agent-loop answer ")
+	if payload.AllowFreeText {
+		body.WriteString("\n\n自由記述で回答できます。")
+	} else {
+		body.WriteString("\n\n回答は選択肢のIDから選んでください。")
+	}
+	body.WriteString("\n\n次の形式で回答してください：\n```text\n/agent-loop answer ")
 	body.WriteString(payload.RequestID)
-	body.WriteString(" <answer>\n```")
+	body.WriteString(" {回答}\n```")
 	return body.String()
 }
 
@@ -186,9 +196,22 @@ func (c CLI) SyncInputAcknowledgement(ctx context.Context, cfg config.Config, nu
 	digest := sha256.Sum256(payload)
 	markerKey := fmt.Sprintf("<!-- codex-issue-loop:answer-ack:v1 comment=%d ", acknowledgement.CommentID)
 	marker := fmt.Sprintf("%spayload=%s digest=%s -->", markerKey, base64.RawURLEncoding.EncodeToString(payload), hex.EncodeToString(digest[:]))
-	body := fmt.Sprintf("%s\n`agent-loop` answer `%s`: **%s**.", marker, acknowledgement.RequestID, acknowledgement.Outcome)
+	message := "回答の受付結果を確認してください。"
+	switch acknowledgement.Outcome {
+	case "accepted":
+		message = "回答を受理しました。再開前の確認を行います。"
+	case "conflict":
+		message = "受理済みの回答と競合しています。保存された回答は変更していません。"
+	case "stale":
+		message = "この質問への回答は現在受け付けられません。最新の質問と受付状況を確認してください。"
+	case "unauthorized":
+		message = "回答者の権限を確認できないため、回答を受理しませんでした。supervisorと同じユーザーで回答してください。"
+	case "malformed":
+		message = "回答の形式が正しくありません。質問の選択肢と回答コマンドを確認してください。"
+	}
+	body := fmt.Sprintf("%s\n%s\n対象の質問：`%s`", marker, message, acknowledgement.RequestID)
 	if acknowledgement.Detail != "" {
-		body += " " + redact.StringWithSecrets(acknowledgement.Detail, c.Secrets)
+		body += "\n詳細：" + redact.StringWithSecrets(acknowledgement.Detail, c.Secrets)
 	}
 	return c.syncManagedComment(ctx, cfg.GitHub.Repo, number, markerKey, body)
 }
@@ -273,4 +296,38 @@ func (c CLI) deleteComment(ctx context.Context, endpoint string) error {
 
 func IsManagedInputComment(body string) bool {
 	return strings.Contains(body, "<!-- codex-issue-loop:input-request:") || strings.Contains(body, "<!-- codex-issue-loop:answer-ack:")
+}
+
+// Previously published v1 questions retain their exact body validation contract.
+func renderLegacyInputRequest(marker, legacyMarker string, payload inputRequestMarkerPayload) string {
+	var body strings.Builder
+	body.WriteString(marker)
+	body.WriteByte('\n')
+	body.WriteString(legacyMarker)
+	body.WriteString("\n## Input required\n\n")
+	body.WriteString(fmt.Sprintf("Issue: #%d\nRequest: `%s`\n\n", payload.IssueNumber, payload.RequestID))
+	body.WriteString(payload.Question)
+	if payload.Reason != "" {
+		body.WriteString("\n\nReason: ")
+		body.WriteString(payload.Reason)
+	}
+	if payload.RecommendedOption != "" {
+		body.WriteString("\n\nRecommended option: `")
+		body.WriteString(payload.RecommendedOption)
+		body.WriteByte('`')
+	}
+	if len(payload.Options) > 0 {
+		body.WriteString("\n\nOptions:")
+		for _, option := range payload.Options {
+			body.WriteString("\n- `")
+			body.WriteString(option.ID)
+			body.WriteString("`: ")
+			body.WriteString(option.Label)
+		}
+	}
+	body.WriteString(fmt.Sprintf("\n\nFree-text allowed: `%t`\nCreated: `%s`", payload.AllowFreeText, payload.CreatedAt.Format(time.RFC3339Nano)))
+	body.WriteString("\n\nReply with exactly:\n```text\n/agent-loop answer ")
+	body.WriteString(payload.RequestID)
+	body.WriteString(" <answer>\n```")
+	return body.String()
 }

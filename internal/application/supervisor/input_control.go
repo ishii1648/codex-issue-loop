@@ -105,7 +105,7 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 			if previous != nil && previous.CommentID == comment.ID &&
 				(previous.BodySHA256 != state.BodyDigest(comment.Body) || !previous.CommentEdited.Equal(comment.UpdatedAt)) {
 				if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, gh.InputAcknowledgement{
-					RequestID: request.ID, CommentID: comment.ID, Outcome: "conflict", Detail: "The accepted comment was edited; its recorded answer is unchanged.",
+					RequestID: request.ID, CommentID: comment.ID, Outcome: "conflict", Detail: "受理済みのコメントが編集されています。保存された回答は変更していません。",
 				}); err != nil {
 					return err
 				}
@@ -125,14 +125,14 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 		}
 		ack := gh.InputAcknowledgement{RequestID: requestID, CommentID: comment.ID}
 		if !valid {
-			ack.Outcome, ack.Detail = "malformed", "Expected `/agent-loop answer <request-id> <answer>`."
+			ack.Outcome, ack.Detail = "malformed", "`/agent-loop answer {request ID} {回答}` の形式で回答してください。"
 			if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, ack); err != nil {
 				return err
 			}
 			continue
 		}
 		if strings.EqualFold(comment.ActorType, "Bot") || strings.EqualFold(comment.ActorType, "App") {
-			ack.Outcome, ack.Detail = "unauthorized", "Automation accounts cannot answer needs-input requests."
+			ack.Outcome, ack.Detail = "unauthorized", "自動化アカウントからの回答は受け付けられません。"
 			if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, ack); err != nil {
 				return err
 			}
@@ -143,7 +143,7 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 			return verifyErr
 		}
 		if !verification.Trusted {
-			ack.Outcome, ack.Detail = "unauthorized", "The comment author is not the authenticated supervisor user."
+			ack.Outcome, ack.Detail = "unauthorized", "コメント投稿者がsupervisorの認証ユーザーと一致しません。"
 			if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, ack); err != nil {
 				return err
 			}
@@ -156,7 +156,7 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 		candidate, candidateErr := current.Request(requestID)
 		if candidateErr != nil || candidate.IssueNumber != issueNumber || candidate.Status == issuedomain.RequestStatusCanceled ||
 			comment.CreatedAt.Before(candidate.CreatedAt) {
-			ack.Outcome, ack.Detail = "stale", "The request is not current for this Issue."
+			ack.Outcome, ack.Detail = "stale", "このIssueで現在受け付けている質問ではありません。"
 			if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, ack); err != nil {
 				return err
 			}
@@ -171,7 +171,7 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 				runID = item.RunID
 			}
 			if runID != candidate.RunID {
-				ack.Outcome, ack.Detail = "stale", "The request belongs to a previous run."
+				ack.Outcome, ack.Detail = "stale", "以前の実行に対する質問です。"
 				if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, ack); err != nil {
 					return err
 				}
@@ -183,9 +183,9 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 			if candidate.AnswerProvenance != nil && candidate.AnswerProvenance.CommentID == comment.ID && candidate.AnswerProvenance.BodySHA256 == digest && candidate.Answer == answer && strings.EqualFold(candidate.AnswerProvenance.Actor, verification.Login) && candidate.AnswerProvenance.CommentEdited.Equal(comment.UpdatedAt) {
 				ack.Outcome = "accepted"
 			} else if candidate.Answer == answer && (candidate.AnswerProvenance == nil || candidate.AnswerProvenance.CommentID != comment.ID) {
-				ack.Outcome, ack.Detail = "stale", "This request was already answered."
+				ack.Outcome, ack.Detail = "stale", "この質問にはすでに回答が保存されています。"
 			} else {
-				ack.Outcome, ack.Detail = "conflict", "This request already has a different accepted answer or the accepted comment was edited."
+				ack.Outcome, ack.Detail = "conflict", "異なる回答が受理済みか、受理済みのコメントが編集されています。"
 			}
 			if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, ack); err != nil {
 				return err
@@ -224,7 +224,7 @@ func (l *Loop) reconcileInputIssue(ctx context.Context, issueNumber int) error {
 		if provenance != nil && !seen[provenance.CommentID] {
 			if err := control.SyncInputAcknowledgement(ctx, l.Config, issueNumber, gh.InputAcknowledgement{
 				RequestID: request.ID, CommentID: provenance.CommentID, Outcome: "accepted",
-				Detail: "The accepted answer remains recorded after comment deletion.",
+				Detail: "コメント削除後も受理済みの回答は保存されています。",
 			}); err != nil {
 				return err
 			}

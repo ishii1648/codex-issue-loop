@@ -25,13 +25,13 @@ candidate integrityは待機を挟まず、candidate prereleaseから取得し�
 
 通常CIはsourceの品質検証を行い、Release workflowは同じcommitのmain push CI成功をAPIで確認し、配布artifactの再現性・metadataを検証する。全体品質検証はReleaseで再実行しない。ローカルの`scripts/check-release.sh`はCIを使えない場合やrelease script変更時の検証に使い、同じcommitの成功済みCIとローカル全量検証を重複させない。
 
-release artifact の `version --json` と manifest は snapshot の単一 version=6 を報告する。既存名 `state_schema_current` / `semantic_contract_current` は同じ契約値を参照する。既存 migration の移行先はまだ v5 であるため、#536/#537 統合まで [配布保留境界](release-gates.md) を維持する。release check は build の契約整合性を検証するが、通常配布の解除を意味しない。
+release artifact の `version --json` と manifest は snapshot の単一 version=6 を報告する。既存名 `state_schema_current` / `semantic_contract_current` は同じ契約値を参照する。起動前 migration は旧 `(5,4,2.0/2.1)` から v6 を検証・確定する。公開には migration と互換性検証を含む対象 commit の main CI、および [既存の release gate](release-gates.md) が必要であり、auto_merge やローカルの release check だけでは公開しない。
 
 ## monitor の独立系列
 
 初回独立版は `monitor-v0.1.0` とし、以後 `monitor-vMAJOR.MINOR.PATCH` の annotated tag を使う。binary の `version` はタグ全体、`commit` はそのタグが指す40桁のcommitと一致させる。従来の `v*` Release に同梱された monitor の番号は本体の番号であり、独立系列とは大小比較しない。過去のタグ・成果物は変更しない。
 
-本体の `v*` は Release workflow、monitor の `monitor-v*` は Monitor Release workflow で単独公開する。monitor の成果物は `agent-loop-monitor_Darwin_arm64`、`checksums.txt` と両者の provenance attestation だけで、本体の manifest/SBOM/canary は要求しない。共通 Go module の品質ゲートは両 workflow で維持する。本体の Snapshot v6 配布保留条件はそのまま維持する。本体とホスト共通 CLI は本体系列を使用する。
+本体の `v*` は Release workflow、monitor の `monitor-v*` は Monitor Release workflow で単独公開する。monitor の成果物は `agent-loop-monitor_Darwin_arm64`、`checksums.txt` と両者の provenance attestation だけで、本体の manifest/SBOM/canary は要求しない。共通 Go module の品質ゲートは両 workflow で維持する。本体の公開には Snapshot v6 の migration・互換性検証を引き続き要求する。本体とホスト共通 CLI は本体系列を使用する。
 
 GitHub の Latest は本体専用とする。本体は `--latest=true`、monitor は必ず `--latest=false` で公開する（[GitHub CLI の仕様](https://cli.github.com/manual/gh_release_create)）。既配布 v0.8.5 と現行 delivery はタグ未指定の `gh release view` で Latest を取得するため、この公開指定は旧クライアントにも必要である。monitor の最新版を repository の Latest で取得してはならず、独立タグを明示する。draft/prerelease は双方の通常配備対象外で、exact version の本体 delivery は `vMAJOR.MINOR.PATCH` だけを受理する。
 

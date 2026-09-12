@@ -155,6 +155,11 @@ func (l *Loop) reconcileIssueProjection(ctx context.Context, number int) error {
 	} else if quarantine == nil {
 		return nil
 	}
+	if current != nil && current.Status == issuedomain.StatusCanceled && current.PullRequestURL != "" {
+		if err := l.GitHub.ClosePullRequest(ctx, l.Config, current.PullRequestURL); err != nil {
+			return failure.Wrap(failure.Transient, "close canceled Pull Request", err)
+		}
+	}
 	if err := l.GitHub.ReconcileIssue(ctx, l.Config, number, status, snapshot.NeedsHuman(number, l.Config.Completion.AutoMerge)); err != nil {
 		return failure.Wrap(failure.Transient, "reconcile GitHub Issue projection", err)
 	}

@@ -68,7 +68,7 @@ func (a App) update(ctx context.Context, l layout.Layout, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return exitError{2, err}
 	}
-	schemaReport, err := schema.Inspect(l)
+	schemaReport, err := schema.InspectSnapshots(l)
 	if err != nil {
 		return fmt.Errorf("inspect schema compatibility: %w", err)
 	}
@@ -183,7 +183,7 @@ func (a App) rollback(ctx context.Context, l layout.Layout, args []string) error
 	if backupSchemaVersion == 0 {
 		backupSchemaVersion = 1
 	}
-	schemaReport, err := schema.Inspect(l)
+	schemaReport, err := schema.InspectSnapshots(l)
 	if err != nil {
 		return err
 	}

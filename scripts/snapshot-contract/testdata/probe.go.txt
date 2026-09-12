@@ -1,0 +1,80 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+)
+
+func run() error {
+	mode, dir := os.Args[1], os.Args[2]
+	store := state.Store{Dir: dir, RepoID: "repo-deadbeef", RepoPath: "/tmp/repo"}
+	if mode == "write" {
+		if err := store.Initialize(); err != nil {
+			return err
+		}
+		initial, err := store.Load()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(os.Args[3])
+		if err != nil {
+			return err
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(initial)
+		if err != nil {
+			return err
+		}
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &envelope); err != nil {
+			return err
+		}
+		for _, key := range []string{"version", "semantic_contract_version", "issue_lifecycle_api_version"} {
+			delete(fields, key)
+			if value, ok := envelope[key]; ok {
+				fields[key] = value
+			}
+		}
+		data, err = json.Marshal(fields)
+		if err != nil {
+			return err
+		}
+		var snapshot state.Snapshot
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return err
+		}
+		if err := snapshot.Validate(); err != nil {
+			return err
+		}
+		_, err = store.Update("contract_fixture", 0, "", nil, func(s *state.Snapshot) error { *s = snapshot; return nil })
+		return err
+	}
+	if mode != "read" {
+		return fmt.Errorf("unknown mode")
+	}
+	snapshot, _, err := store.ReadDiagnosticSnapshot()
+	result := struct {
+		Accepted bool            `json:"accepted"`
+		Error    string          `json:"error,omitempty"`
+		Snapshot *state.Snapshot `json:"snapshot,omitempty"`
+	}{Accepted: err == nil}
+	if err != nil {
+		result.Error = err.Error()
+	} else {
+		result.Snapshot = &snapshot
+	}
+	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

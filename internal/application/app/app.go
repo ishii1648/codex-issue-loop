@@ -434,7 +434,7 @@ func (a App) supervise(ctx context.Context, l layout.Layout, args []string) erro
 	safeLog := redact.NewLineWriterWithSecrets(supervisorLog, secrets)
 	defer safeLog.Flush()
 	loop := &supervisor.Loop{
-		Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
+		MigrationLayout: l, Config: cfg, Store: store, GitHub: gh.CLI{Path: entry.Commands["gh"], Secrets: secrets},
 		RateLimits:                     ratelimit.Store{Path: l.RateLimitPath()},
 		Worktrees:                      worktree.Manager{StateRoot: l.Root, GitPath: entry.Commands["git"]},
 		Worker:                         backend,

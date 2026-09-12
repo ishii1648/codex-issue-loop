@@ -25,7 +25,7 @@ func TestRenderInputRequestIncludesCompleteHumanContract(t *testing.T) {
 		AllowFreeText: true, CreatedAt: created,
 	}
 	body := renderInputRequest("<!-- versioned -->", "<!-- legacy -->", payload)
-	for _, value := range []string{"<!-- versioned -->", "<!-- legacy -->", "Choose a mode.", "It changes behavior.", "`safe`: Safe mode", "`fast`: Fast mode", "Free-text allowed: `true`", created.Format(time.RFC3339Nano), "/agent-loop answer req_1 <answer>"} {
+	for _, value := range []string{"<!-- versioned -->", "<!-- legacy -->", "Choose a mode.", "It changes behavior.", "`safe`: Safe mode", "`fast`: Fast mode", "自由記述で回答できます。", "**推奨：** `safe`: Safe mode", "/agent-loop answer req_1 {回答}"} {
 		if !strings.Contains(body, value) {
 			t.Fatalf("rendered request omitted %q: %s", value, body)
 		}
@@ -126,6 +126,21 @@ esac
 	data, _ = os.ReadFile(bodyPath)
 	if err := json.Unmarshal(data, &posted); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(posted.Body, "回答を受理しました。再開前の確認を行います。") || strings.Contains(posted.Body, "再開しました") {
+		t.Fatal(posted.Body)
+	}
+	var receipt struct {
+		Version   int    `json:"version"`
+		RequestID string `json:"request_id"`
+		CommentID int64  `json:"comment_id"`
+		Outcome   string `json:"outcome"`
+	}
+	if err := decodeInputMarker(posted.Body, "<!-- codex-issue-loop:answer-ack:v1 comment=42 ", &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Version != 1 || receipt.RequestID != "req_1" || receipt.CommentID != 42 || receipt.Outcome != "accepted" {
+		t.Fatalf("receipt=%+v", receipt)
 	}
 	writeComments([]map[string]any{comment(4, "loop", posted.Body)})
 	before, _ = os.ReadFile(mutationsPath)
