@@ -522,7 +522,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 			t.Fatalf("local release check lifecycle %s does not match domain contract %q", contract.field, contract.version)
 		}
 	}
-	if !strings.Contains(text, `[[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]`) ||
+	if !strings.Contains(text, `[[ "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]`) ||
 		strings.Contains(text, `([.-][0-9A-Za-z.-]+)?`) {
 		t.Fatal("stable workflow accepts a prerelease tag suffix")
 	}
@@ -531,11 +531,10 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		`test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${RELEASE_COMMIT}"`,
 		`chmod 0755 "$CANDIDATE_BINARY"`,
 		`chmod 0755 dist/stable/agent-loop_Darwin_arm64`,
-		`chmod 0755 dist/stable/agent-loop-monitor_Darwin_arm64`,
 		`gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY"`,
 		`candidate-integrity/report.json`,
 		`cmp "dist/prerelease/$asset" "dist/stable/$asset"`,
-		`agent-loop_Darwin_arm64 agent-loop-monitor_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json`,
+		`agent-loop_Darwin_arm64 agent-loop_Darwin_arm64.spdx.json release-manifest.json checksums.txt cli-surface-report.json offline-contract-report.json`,
 		`mode:"machine-verifiable"`,
 		`.candidate_sha256 == $digest`,
 		`required_evidence:["cli-surface","offline-contract","candidate-integrity"]`,
@@ -726,5 +725,56 @@ wait() { return 0; }
 				}
 			})
 		}
+	}
+}
+
+func TestMonitorReleasePreservesProductAndLatestBoundaries(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), ".github", "workflows", "monitor-release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Needs any `yaml:"needs"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string][]string{
+		"release-quality":       nil,
+		"build-candidate":       nil,
+		"verify-candidate":      {"build-candidate"},
+		"publish":               {"release-quality", "verify-candidate"},
+		"verify-stable-release": {"publish"},
+	} {
+		job, ok := workflow.Jobs[name]
+		if !ok || !reflect.DeepEqual(normalizedNeeds(job.Needs), want) {
+			t.Fatalf("monitor gate %s: %+v", name, job)
+		}
+	}
+	text := string(data)
+	for _, required := range []string{
+		`- "monitor-v*"`, "--latest=false", "--source-ref", "--source-digest",
+		"--deny-self-hosted-runners", "shasum -a 256 -c checksums.txt",
+		".version == $version and .commit == $commit", "cmp ",
+		"gh release view --repo", "python3 -m unittest",
+		"make workflow-shell-check fmt-check schema-check tidy-check test test-race vet staticcheck errcheck vuln-check",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("monitor release missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"agent-loop_Darwin_arm64", "release-manifest.json", "isolated-canary", "continue-on-error"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("monitor release contains %q", forbidden)
+		}
+	}
+	main, err := os.ReadFile(filepath.Join(repositoryRoot(t), ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(main), "agent-loop-monitor_Darwin_arm64") || !strings.Contains(string(main), "--latest=true") {
+		t.Fatal("main release must publish only main artifacts and own Latest")
 	}
 }

@@ -83,6 +83,7 @@ tidy-check:
 
 release-check:
 	scripts/check-release.sh
+	scripts/check-release.sh monitor
 
 ci: workflow-shell-check fmt-check schema-check tidy-check test fault-test conformance-test test-race vet staticcheck errcheck vuln-check build release-check
 

@@ -33,11 +33,17 @@ class DeployTests(unittest.TestCase):
         for path in self.preserved[1:3]:
             path.parent.mkdir(exist_ok=True, parents=True)
             path.write_bytes(b'history must survive')
+        for name in ['agent-loop/bin/agent-loop', 'agent-loop/assignments.json', 'agent-loop/supervisor.plist']:
+            path = self.home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'unchanged main installation')
+            self.preserved.append(path)
         self.original = {p: p.read_bytes() for p in self.preserved}
         self.loaded = dict(zip(deploy.LABELS, [100, 101]))
+        self.loaded["com.codex-issue-loop.supervisor"] = 999
         self.pid = 200
         self.commands = []
-        self.args = types.SimpleNamespace(root=self.root, config=self.config, tag='v1.2.3', commit='a' * 40, action='deploy')
+        self.args = types.SimpleNamespace(root=self.root, config=self.config, tag='monitor-v0.1.0', commit='a' * 40, action='deploy')
         self.fail_bootstrap = False
         self.fail_health = False
         self.fail_compatibility = False
@@ -110,6 +116,7 @@ class DeployTests(unittest.TestCase):
         return {'status': 'success', 'data': {'result': [{'value': [0, str(deploy.time.time())]}]}}
 
     def assert_preserved(self):
+        self.assertEqual(self.loaded.get("com.codex-issue-loop.supervisor"), 999)
         for path, data in self.original.items():
             self.assertEqual(path.read_bytes(), data)
         self.assertTrue(all('supervisor' not in str(c) and 'prometheus' not in str(c) for c in self.commands))
@@ -182,10 +189,10 @@ class DeployTests(unittest.TestCase):
         self.fail_health = True
         with self.assertRaisesRegex(RuntimeError, 'health'):
             deploy.main(self.args)
-        self.args.tag = 'v1.2.4'
+        self.args.tag = 'monitor-v0.1.1'
         with self.assertRaisesRegex(RuntimeError, 'another deployment'):
             deploy.main(self.args)
-        self.args.tag = 'v1.2.3'
+        self.args.tag = 'monitor-v0.1.0'
         self.args.action = 'rollback'
         self.fail_health = False
         deploy.main(self.args)
@@ -198,7 +205,7 @@ class DeployTests(unittest.TestCase):
         self.args.action = 'rollback'
         with self.assertRaisesRegex(RuntimeError, 'unsupported decision'):
             deploy.main(self.args)
-        self.assertEqual(self.loaded, {})
+        self.assertEqual(self.loaded, {"com.codex-issue-loop.supervisor": 999})
         self.assertEqual([p.read_bytes() for p in self.binaries], [b'new', b'new'])
         self.assert_preserved()
 
@@ -245,17 +252,22 @@ class ServiceIdentityTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    tag = 'v1.2.3'
+
     def test_release_checks_before_execution(self):
-        for failure in [None, 'checksum', 'attestation', 'commit', 'prerelease', 'workflow']:
+        for failure in [None, 'checksum', 'attestation', 'commit', 'prerelease', 'draft', 'workflow', 'version', 'binary_commit', 'schema']:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 calls = []
-                tag, commit = 'v1.2.3', 'a' * 40
+                tag, commit = self.tag, 'a' * 40
+                independent = tag.startswith('monitor-v')
+                workflow = 'monitor-release.yml' if independent else 'release.yml'
                 def command(*args):
                     calls.append(args)
                     if args[:3] == ('gh', 'release', 'view'):
-                        return json.dumps({'tagName': tag, 'isDraft': False, 'isPrerelease': failure == 'prerelease'})
+                        return json.dumps({'tagName': tag, 'isDraft': failure == 'draft', 'isPrerelease': failure == 'prerelease'})
                     if args[:3] == ('gh', 'run', 'list'):
+                        self.assertEqual(args[args.index('--workflow') + 1], workflow)
                         return json.dumps([{'headSha': commit, 'headBranch': tag, 'status': 'completed', 'conclusion': 'failure' if failure == 'workflow' else 'success'}])
                     if args[:2] == ('gh', 'api'):
                         if '/ref/' in args[2]:
@@ -263,27 +275,38 @@ class ReleaseTests(unittest.TestCase):
                         return json.dumps({'tag': tag, 'object': {'type': 'commit', 'sha': 'bad' if failure == 'commit' else commit}})
                     if args[:3] == ('gh', 'release', 'download'):
                         (directory / deploy.ASSET).write_bytes(b'binary')
-                        (directory / 'release-manifest.json').write_text(json.dumps({'version': tag, 'commit': commit}))
-                        (directory / 'checksums.txt').write_text(''.join(deploy.digest(directory / asset) + '  ' + asset + '\n' for asset in [deploy.ASSET, 'release-manifest.json']))
+                        assets = [deploy.ASSET]
+                        if not independent:
+                            assets.append('release-manifest.json')
+                            (directory / 'release-manifest.json').write_text(json.dumps({'version': tag, 'commit': commit}))
+                        self.assertEqual([args[i + 1] for i, value in enumerate(args) if value == '--pattern'], [deploy.ASSET, 'checksums.txt'] + ([] if independent else ['release-manifest.json']))
+                        (directory / 'checksums.txt').write_text(''.join(deploy.digest(directory / asset) + '  ' + asset + '\n' for asset in assets))
                         if failure == 'checksum':
                             (directory / deploy.ASSET).write_bytes(b'tampered')
                     if args[:3] == ('gh', 'attestation', 'verify') and failure == 'attestation':
                         raise RuntimeError('attestation rejected')
                     return ''
-                with patch('deploy.command', side_effect=command), patch('deploy.version', return_value={'version': tag, 'commit': commit, 'target': 'darwin/arm64', 'monitor_schema_version': 1}) as execute:
+                with patch('deploy.command', side_effect=command), patch('deploy.version', return_value={'version': 'wrong' if failure == 'version' else tag, 'commit': 'wrong' if failure == 'binary_commit' else commit, 'target': 'darwin/arm64', 'monitor_schema_version': 99 if failure == 'schema' else 1}) as execute:
                     if failure:
                         with self.assertRaises(RuntimeError):
                             deploy.verify_release(directory, tag, commit)
-                        execute.assert_not_called()
+                        if failure in ['version', 'binary_commit', 'schema']:
+                            execute.assert_called_once()
+                        else:
+                            execute.assert_not_called()
                     else:
                         deploy.verify_release(directory, tag, commit)
                         execute.assert_called_once()
                         attestations = [c for c in calls if c[:3] == ('gh', 'attestation', 'verify')]
-                        self.assertEqual(len(attestations), 3)
+                        self.assertEqual(len(attestations), 2 if independent else 3)
                         for c in attestations:
                             self.assertIn('--source-digest', c)
                             self.assertIn(commit, c)
-                            self.assertIn(deploy.REPOSITORY + '/.github/workflows/release.yml', c)
+                            self.assertIn(deploy.REPOSITORY + '/.github/workflows/' + workflow, c)
+
+
+class IndependentReleaseTests(ReleaseTests):
+    tag = 'monitor-v0.1.0'
 
 
 if __name__ == '__main__':
