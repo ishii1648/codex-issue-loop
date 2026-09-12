@@ -186,7 +186,7 @@ checkpointは同じ作業を継続するためのworkspace、branch、base、ses
 
 管理対象Issueのlifecycle authorityはcanonical snapshotに置く。worker結果、supervisorが検証したPR・process・worktreeの事実、正式なoperator commandがdomain decisionを経て内部状態を変更する。GitHubの管理labelとIssueの開閉状態はその投影であり、手動変更から内部status、実行権、retryを決めない。未管理Issueのready/exclusionによる受付と、正式なrequestへの回答は入力として扱う。
 
-reconciliationの責務は二つに分ける。実行復旧はprocess・worktree・PR identityを検証してdomain decisionを適用する。表示同期は現在の内部statusから期待する管理label・開閉状態を導出し、GitHubの差分だけを書き戻す。`completed`、`canceled`、quarantined Issueも表示同期の対象とする。quarantineからworkerを再開せず、GitHubにはblocked相当を表示する。
+reconciliationの責務は二つに分ける。実行復旧はprocess・worktree・PR identityを検証してdomain decisionを適用する。表示同期は現在の内部statusから期待する管理label・開閉状態を導出し、GitHubの差分だけを書き戻す。`completed`、`canceled` Issueは定期巡回の対象外とし、状態変更時・未完了effectの再試行・対象Webhookで表示同期する。quarantined Issueは定期的な表示同期の対象とする。quarantineからworkerを再開せず、GitHubにはblocked相当を表示する。
 
 ```text
 worker / supervisor / operator command

@@ -1949,7 +1949,7 @@ func TestSchedulerMaintenanceCompletionPreservesPollInterval(t *testing.T) {
 	_, err := loop.Store.Update("maintenance_fixture", 0, "", nil, func(snapshot *state.Snapshot) error {
 		for number := 1; number <= maintenanceJobs; number++ {
 			snapshot.Issues[strconv.Itoa(number)] = &state.Issue{
-				Number: number, Status: issuedomain.StatusCompleted, RunID: fmt.Sprintf("run_%d", number),
+				Number: number, Status: issuedomain.StatusBlocked, RunID: fmt.Sprintf("run_%d", number),
 			}
 		}
 		return nil
