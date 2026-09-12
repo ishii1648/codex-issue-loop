@@ -2277,20 +2277,20 @@ func TestWorkerProcessCallbackFencesRunAndPersistsProcessGroup(t *testing.T) {
 	valid := worker.ProcessStart{PID: 1234, PGID: 1234, ExpectedCWD: loop.Config.RepoPath, ActualCWD: loop.Config.RepoPath}
 	stale := current
 	stale.RunID = "run_stale"
-	if err := loop.recordWorkerPID(stale)(valid); err == nil {
+	if err := loop.recordWorkerPID(context.Background(), stale)(valid); err == nil {
 		t.Fatal("stale run callback was accepted")
 	}
 	invalid := valid
 	invalid.PID, invalid.PGID = 0, 0
-	if err := loop.recordWorkerPID(current)(invalid); err == nil {
+	if err := loop.recordWorkerPID(context.Background(), current)(invalid); err == nil {
 		t.Fatal("invalid PID callback was accepted")
 	}
 	mismatched := valid
 	mismatched.ActualCWD = t.TempDir()
-	if err := loop.recordWorkerPID(current)(mismatched); err == nil {
+	if err := loop.recordWorkerPID(context.Background(), current)(mismatched); err == nil {
 		t.Fatal("mismatched spawn cwd was accepted")
 	}
-	if err := loop.recordWorkerPID(current)(valid); err != nil {
+	if err := loop.recordWorkerPID(context.Background(), current)(valid); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := loop.Store.Load()

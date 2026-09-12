@@ -131,9 +131,10 @@ func (l *Loop) beginConflictRecovery(ctx context.Context, current state.Issue, p
 		return err
 	}
 	if preparation.Published {
-		return l.finishConflictPublication(current, preparation.Commit)
+		return l.finishConflictPublication(ctx, current, preparation.Commit)
 	}
 	if preparation.Resolved {
+		l.commentConflictStart(ctx, current)
 		issue, getErr := l.getIssue(ctx, current.Number)
 		if getErr != nil {
 			return failure.Wrap(failure.Transient, "refresh Issue for mechanical conflict recovery", getErr)
@@ -170,9 +171,10 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 		return failure.Wrap(failure.Transient, "resume Pull Request conflict recovery", prepareErr)
 	}
 	if preparation.Published {
-		return l.finishConflictPublication(current, preparation.Commit)
+		return l.finishConflictPublication(ctx, current, preparation.Commit)
 	}
 	if preparation.Resolved && (len(current.ConflictRecovery.ConflictFiles) == 0 || conflictVerificationGreen(current.ConflictRecovery.Verification)) {
+		l.commentConflictStart(ctx, current)
 		issue, getErr := l.getIssue(ctx, current.Number)
 		if getErr != nil {
 			return failure.Wrap(failure.Transient, "refresh Issue for resolved conflict publication", getErr)
@@ -232,7 +234,7 @@ func (l *Loop) processConflictRecovery(ctx context.Context, current state.Issue)
 	}
 	workerCfg := l.Config
 	workerCfg.RepoPath = current.Worktree
-	result, runErr := l.runWorker(ctx, workerCfg, issue, current, worker.BuildConflictPrompt(current), l.recordWorkerPID(current))
+	result, runErr := l.runWorker(ctx, workerCfg, issue, current, worker.BuildConflictPrompt(current), l.recordWorkerPID(ctx, current))
 	return l.handleConflictResult(ctx, issue, current, result, runErr)
 }
 
@@ -345,10 +347,10 @@ func (l *Loop) publishConflictRecovery(ctx context.Context, issue gh.Issue, curr
 		}
 		return l.scheduleConflictRetry(ctx, current, "publish resolved conflict: "+err.Error())
 	}
-	return l.finishConflictPublication(current, published.Commit)
+	return l.finishConflictPublication(ctx, current, published.Commit)
 }
 
-func (l *Loop) finishConflictPublication(current state.Issue, commit string) error {
+func (l *Loop) finishConflictPublication(ctx context.Context, current state.Issue, commit string) error {
 	retryAt := l.now().Add(l.Config.Queue.PollInterval.Duration)
 	checksDecision, decisionErr := issuedomain.AwaitChecks(current.Status)
 	if decisionErr != nil {
@@ -371,6 +373,9 @@ func (l *Loop) finishConflictPublication(current state.Issue, commit string) err
 		item.UpdatedAt = l.now()
 		return nil
 	})
+	if err == nil {
+		l.commentPublication(ctx, current, current.PullRequestURL, commit)
+	}
 	return failure.Wrap(failure.Supervisor, "persist conflict recovery publication", err)
 }
 
@@ -437,6 +442,9 @@ func (l *Loop) scheduleConflictRetry(ctx context.Context, current state.Issue, r
 		item.UpdatedAt = l.now()
 		return nil
 	})
+	if err == nil {
+		l.commentRetry(ctx, current, "競合解消", reason, retryAt)
+	}
 	return failure.Wrap(failure.Supervisor, "persist conflict recovery retry", err)
 }
 

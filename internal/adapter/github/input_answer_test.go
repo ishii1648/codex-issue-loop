@@ -132,7 +132,7 @@ esac
 
 func TestGitHubAnswerRejectsBeforePost(t *testing.T) {
 	now := time.Now().UTC()
-	for _, test := range []string{"option", "secret", "control", "utf8", "oversize", "forged", "tampered", "other issue", "stale", "unknown", "managed", "wrong run", "duplicate question"} {
+	for _, test := range []string{"option", "secret", "control", "utf8", "oversize", "forged", "tampered", "legacy tampered", "other issue", "stale", "unknown", "managed", "wrong run", "duplicate question"} {
 		t.Run(test, func(t *testing.T) {
 			dir := t.TempDir()
 			script := filepath.Join(dir, "gh")
@@ -161,6 +161,13 @@ func TestGitHubAnswerRejectsBeforePost(t *testing.T) {
 				question.ActorID = 8
 			case "tampered":
 				question.Body += " extra"
+			case "legacy tampered":
+				var payload inputRequestMarkerPayload
+				if err := decodeInputMarker(question.Body, "<!-- codex-issue-loop:input-request:v1 request=req_1 ", &payload); err != nil {
+					t.Fatal(err)
+				}
+				marker, _, _ := strings.Cut(question.Body, "\n")
+				question.Body = renderLegacyInputRequest(marker, "<!-- codex-issue-loop:request:req_1 -->", payload) + " extra"
 			case "other issue":
 				question.Body = answerTestQuestion("req_1", 2, now)
 			case "stale":

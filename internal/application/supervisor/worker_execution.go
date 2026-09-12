@@ -103,7 +103,7 @@ func (l *Loop) runClaimed(ctx context.Context, issue gh.Issue, runID string, wt 
 	}
 	workerCfg := l.Config
 	workerCfg.RepoPath = workspace.Path
-	result, runErr := l.runWorker(ctx, workerCfg, issue, current, "", l.recordWorkerPID(current))
+	result, runErr := l.runWorker(ctx, workerCfg, issue, current, "", l.recordWorkerPID(ctx, current))
 	return l.handleResult(ctx, issue, current, result, runErr)
 }
 
@@ -198,6 +198,7 @@ func (l *Loop) handleResult(ctx context.Context, issue gh.Issue, current state.I
 			if publishErr != nil {
 				return l.schedulePublicationRetry(ctx, current, fmt.Errorf("publish completed work: %w", publishErr), result.Summary)
 			}
+			l.commentPublication(ctx, current, published.PullRequestURL, published.Commit)
 			result.Git = &published
 		}
 		if result.Git == nil {
@@ -538,7 +539,7 @@ func (l *Loop) validateWorkerLaunch(ctx context.Context, cfg config.Config, expe
 	return validation, nil
 }
 
-func (l *Loop) recordWorkerPID(expected state.Issue) worker.Started {
+func (l *Loop) recordWorkerPID(ctx context.Context, expected state.Issue) worker.Started {
 	return func(start worker.ProcessStart) error {
 		number, runID := expected.Number, expected.RunID
 		validation := worktree.LaunchValidation{
@@ -583,6 +584,7 @@ func (l *Loop) recordWorkerPID(expected state.Issue) worker.Started {
 		if err != nil {
 			return fail(err)
 		}
+		l.commentWorkerStart(ctx, expected)
 		return nil
 	}
 }
@@ -610,6 +612,13 @@ func (l *Loop) scheduleRetry(ctx context.Context, issue state.Issue, reason stri
 		item.UpdatedAt = l.now()
 		return nil
 	})
+	if err == nil {
+		stage := "実装・検証"
+		if issue.Status == issuedomain.StatusAwaitingChecks || issue.Status == issuedomain.StatusAwaitingMerge {
+			stage = "CI確認"
+		}
+		l.commentRetry(ctx, issue, stage, reason, retryAt)
+	}
 	return failure.Wrap(failure.Supervisor, "persist Issue retry", err)
 }
 
@@ -650,6 +659,9 @@ func (l *Loop) schedulePublicationRetry(ctx context.Context, issue state.Issue, 
 		item.UpdatedAt = l.now()
 		return nil
 	})
+	if err == nil {
+		l.commentRetry(ctx, issue, "PR公開", reason, retryAt)
+	}
 	return failure.Wrap(failure.Supervisor, "persist publication retry", err)
 }
 

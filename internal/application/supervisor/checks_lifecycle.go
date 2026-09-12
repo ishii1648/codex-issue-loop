@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
@@ -17,6 +18,10 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	remote, err := l.inspectIssue(ctx, current)
 	if err != nil {
 		return failure.Wrap(failure.Transient, "inspect Pull Request lifecycle", err)
+	}
+	if current.RetryAfter == nil && current.Continuation != nil && current.Continuation.Stage == issuedomain.ContinuationStageChecks &&
+		current.Suspension != nil && current.Suspension.Status == issuedomain.SuspensionResolved {
+		l.commentResume(ctx, current, "CI確認")
 	}
 	var selected *gh.PullRequest
 	for index := range remote.PullRequests {
@@ -52,7 +57,9 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 	if selected.MergedAt != nil {
 		return l.completeIssue(ctx, current, *selected, nil)
 	}
-	if selected.HeadSHA != "" && current.HeadSHA != selected.HeadSHA {
+	headChanged := selected.HeadSHA != "" && current.HeadSHA != selected.HeadSHA
+	reviewChanged := selected.ReviewDecision != "" && current.ReviewDecision != selected.ReviewDecision
+	if headChanged {
 		_, err := l.Store.Update("pull_request_head_observed", current.Number, current.RunID, map[string]string{"head_sha": selected.HeadSHA}, func(s *state.Snapshot) error {
 			item := s.Issues[strconv.Itoa(current.Number)]
 			item.HeadSHA = selected.HeadSHA
@@ -80,7 +87,18 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 		return l.blockPullRequestLifecycle(ctx, current, *selected, remote.PullRequests, "Pull Request was closed without merge")
 	}
 	if current.ReviewDecision == "CHANGES_REQUESTED" || current.ReviewDecision == "REVIEW_REQUIRED" {
-		return l.schedulePullRequestPoll(current, "waiting for required review to pass")
+		err := l.schedulePullRequestPoll(current, "waiting for required review to pass")
+		if err == nil && (headChanged || reviewChanged || current.LastError != "waiting for required review to pass") {
+			message := "PRがレビュー待ちになっています：" + selected.URL + "\n必要なレビューが承認されるまで、自動マージを待機します。レビュー担当者の対応が必要です。"
+			if !l.Config.Completion.AutoMerge {
+				message = "PRがレビュー待ちになっています：" + selected.URL + "\n必要なレビューの承認を待っています。レビュー担当者の対応が必要です。自動マージは無効です。"
+			}
+			if current.ReviewDecision == "CHANGES_REQUESTED" {
+				message = "PRで変更が要求されています：" + selected.URL + "\nレビュー指摘への対応と再レビューが必要です。現在の処理は、レビュー状態が更新されるまで待機します。"
+			}
+			l.commentProgress(ctx, current, "review:"+current.ReviewDecision+":"+current.UpdatedAt.Format(time.RFC3339Nano), message)
+		}
+		return err
 	}
 	inspection, inspectErr := l.Worktrees.Inspect(ctx, l.Config, current.Worktree, current.Branch)
 	if inspectErr != nil {
@@ -102,7 +120,11 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 			if err := l.GitHub.UpdatePullRequest(ctx, l.Config, selected.URL); err != nil {
 				return failure.Wrap(failure.Transient, "update Pull Request branch", err)
 			}
-			return l.schedulePullRequestPoll(current, "Pull Request branch updated; waiting for checks")
+			err := l.schedulePullRequestPoll(current, "Pull Request branch updated; waiting for checks")
+			if err == nil && (headChanged || current.LastError != "Pull Request branch updated; waiting for checks") {
+				l.commentProgress(ctx, current, "branch-updated", fmt.Sprintf("PRのブランチを最新の `%s` に更新しました。CIの再実行結果を待っています。", l.Config.Git.BaseBranch))
+			}
+			return err
 		case "dirty":
 			return l.beginConflictRecovery(ctx, current, *selected)
 		case "unknown", "unstable":
@@ -148,6 +170,13 @@ func (l *Loop) processPullRequest(ctx context.Context, current state.Issue) erro
 			item.UpdatedAt = l.now()
 			return nil
 		})
+		if err == nil && (current.Status != issuedomain.StatusAwaitingMerge || headChanged) {
+			message := "CIの成功を確認し、PRのマージを要求しました：" + selected.URL + "\nGitHub上でマージ済みになるまで確認を続けます。"
+			if !l.Config.Completion.AutoMerge {
+				message = "CIの成功を確認しました：" + selected.URL + "\n自動マージは無効のため、手動でのマージを待っています。"
+			}
+			l.commentProgress(ctx, current, "merge-wait", message)
+		}
 		return failure.Wrap(failure.Supervisor, "persist Pull Request ready state", err)
 	default:
 		return failure.Wrap(failure.Issue, "inspect Pull Request checks", fmt.Errorf("unknown check status %q", selected.ChecksStatus))
