@@ -11,6 +11,9 @@ import (
 )
 
 func TestStatusRuntimeIsLatestResponseMetadataOnly(t *testing.T) {
+	previous := Version
+	Version = "monitor-v0.1.0"
+	t.Cleanup(func() { Version = previous })
 	cfg, _, at := dashboardFixture(t)
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {

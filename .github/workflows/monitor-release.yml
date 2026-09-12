@@ -1,0 +1,165 @@
+name: Monitor Release
+
+on:
+  push:
+    tags:
+      - "monitor-v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing annotated stable monitor tag
+        required: true
+        type: string
+      release_commit:
+        description: Commit peeled from release_tag
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  RELEASE_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.release_commit || github.sha }}
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release-quality:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+      - run: make install-shellcheck
+      - run: make workflow-shell-check fmt-check schema-check tidy-check test test-race vet staticcheck errcheck vuln-check
+      - run: python3 -m unittest discover -s monitor/dashboard -p 'test_*.py'
+
+  build-candidate:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+      - name: Validate annotated monitor tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          [[ "$RELEASE_TAG" =~ ^monitor-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -t "$RELEASE_TAG" | grep -qx tag
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$RELEASE_COMMIT"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+      - name: Build canonical monitor
+        run: |
+          source_epoch=$(git show -s --format=%ct "$RELEASE_COMMIT")
+          scripts/build-release.sh "$RELEASE_TAG" "$RELEASE_COMMIT" "$source_epoch" dist/candidate
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/candidate/agent-loop-monitor_Darwin_arm64
+            dist/candidate/checksums.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: monitor-candidate-${{ github.run_id }}
+          path: dist/candidate
+          if-no-files-found: error
+
+  verify-candidate:
+    needs: build-candidate
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.13"
+          cache: true
+      - uses: actions/download-artifact@v7
+        with:
+          name: monitor-candidate-${{ github.run_id }}
+          path: dist/candidate
+      - name: Verify reproducibility and provenance before execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source_epoch=$(git show -s --format=%ct "$RELEASE_COMMIT")
+          scripts/build-release.sh "$RELEASE_TAG" "$RELEASE_COMMIT" "$source_epoch" dist/comparison
+          for asset in agent-loop-monitor_Darwin_arm64 checksums.txt; do
+            cmp "dist/candidate/$asset" "dist/comparison/$asset"
+            gh attestation verify "dist/candidate/$asset" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/monitor-release.yml" \
+              --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$RELEASE_COMMIT" --deny-self-hosted-runners
+          done
+          cd dist/candidate
+          shasum -a 256 -c checksums.txt
+          chmod 0755 agent-loop-monitor_Darwin_arm64
+          ./agent-loop-monitor_Darwin_arm64 version --json | jq -e \
+            --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
+            '.version == $version and .commit == $commit and .target == "darwin/arm64" and .monitor_schema_version == 1'
+
+  publish:
+    needs: [release-quality, verify-candidate]
+    runs-on: macos-15
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: monitor-candidate-${{ github.run_id }}
+          path: dist/candidate
+      - name: Publish monitor without changing the main Latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/candidate/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --latest=false --generate-notes --title "$RELEASE_TAG"
+
+  verify-stable-release:
+    needs: publish
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: monitor-candidate-${{ github.run_id }}
+          path: dist/candidate
+      - name: Read back stable monitor identity and bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,assets |
+            jq -e --arg tag "$RELEASE_TAG" '.tagName == $tag and (.isDraft|not) and (.isPrerelease|not) and ([.assets[].name] | sort) == ["agent-loop-monitor_Darwin_arm64","checksums.txt"]'
+          gh release view --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease |
+            jq -e '.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")'
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir dist/stable
+          for asset in agent-loop-monitor_Darwin_arm64 checksums.txt; do
+            cmp "dist/candidate/$asset" "dist/stable/$asset"
+            gh attestation verify "dist/stable/$asset" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/monitor-release.yml" \
+              --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$RELEASE_COMMIT" --deny-self-hosted-runners
+          done
+          cd dist/stable
+          shasum -a 256 -c checksums.txt
+          chmod 0755 agent-loop-monitor_Darwin_arm64
+          ./agent-loop-monitor_Darwin_arm64 version --json | jq -e \
+            --arg version "$RELEASE_TAG" --arg commit "$RELEASE_COMMIT" \
+            '.version == $version and .commit == $commit and .target == "darwin/arm64" and .monitor_schema_version == 1'

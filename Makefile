@@ -83,6 +83,7 @@ tidy-check:
 
 release-check:
 	scripts/check-release.sh
+	scripts/check-release.sh monitor
 
 snapshot-contract-check:
 	$(GO) run ./scripts/snapshot-contract
