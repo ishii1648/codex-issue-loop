@@ -463,12 +463,12 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		}
 		var result worker.Result
 		if l.canResume(current) {
-			result, err = l.resumeWorker(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(current))
+			result, err = l.resumeWorker(ctx, workerCfg, issue, current, worker.BuildContinuationPrompt(current, instruction), l.recordWorkerPID(ctx, current))
 		} else {
 			if current.SessionID != "" {
 				instruction = "The saved session belongs to a different worker backend. Start a fresh session in the existing worktree and use durable state.\n\n" + instruction
 			}
-			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
+			result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(ctx, current))
 		}
 		return l.handleResult(ctx, issue, current, result, err)
 	}
@@ -495,7 +495,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if current.LastError != "" {
 			instruction += " Retry reason: " + current.LastError
 		}
-		result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
+		result, err = l.resumeWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(ctx, current))
 	} else {
 		previousIdentity := state.ExecutionIdentity{RunID: current.RunID, Generation: current.Generation}
 		current.Attempts++
@@ -529,7 +529,7 @@ func (l *Loop) processExisting(ctx context.Context, current state.Issue) error {
 		if current.LastError != "" {
 			instruction += " Retry reason: " + current.LastError
 		}
-		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(current))
+		result, err = l.runWorker(ctx, workerCfg, issue, current, instruction, l.recordWorkerPID(ctx, current))
 	}
 	return l.handleResult(ctx, issue, current, result, err)
 }

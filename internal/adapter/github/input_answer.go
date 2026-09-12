@@ -86,7 +86,8 @@ func (c CLI) inputAnswerContext(ctx context.Context, repo string, issue int, req
 		}
 		if payload.Version != InputControlVersion || payload.RequestID != id || !state.ValidID(id, "req_") ||
 			payload.IssueNumber != issue || (payload.RunID != "" && !state.ValidID(payload.RunID, "run_")) || payload.Question == "" || payload.CreatedAt.IsZero() ||
-			comment.Body != renderInputRequest(line, "<!-- codex-issue-loop:request:"+id+" -->", payload) {
+			(comment.Body != renderInputRequest(line, "<!-- codex-issue-loop:request:"+id+" -->", payload) &&
+				comment.Body != renderLegacyInputRequest(line, "<!-- codex-issue-loop:request:"+id+" -->", payload)) {
 			return target, nil, fmt.Errorf("question does not match its Issue/request/run contract")
 		}
 		if latest.CreatedAt.IsZero() || !payload.CreatedAt.Before(latest.CreatedAt) {

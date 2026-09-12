@@ -103,6 +103,7 @@ func (l *Loop) processPublicationCheckpoint(ctx context.Context, current state.I
 	published, audit, publishErr := l.Publisher.Publish(ctx, l.Config, remote.Issue, current.Worktree, current.Branch, current.PullRequestURL,
 		checkpoint.Summary, checkpoint.BaseSHA)
 	l.publicationMu.Unlock()
+	l.commentResume(ctx, current, "PR公開")
 	_, auditErr := l.Store.Update("publication_checkpoint_audited", current.Number, current.RunID, audit, func(snapshot *state.Snapshot) error {
 		item := snapshot.Issues[strconv.Itoa(current.Number)]
 		if item == nil || item.Status != issuedomain.StatusLaunching || !state.OwnsActiveExecution(snapshot, current.Number, identity) ||
@@ -124,6 +125,7 @@ func (l *Loop) processPublicationCheckpoint(ctx context.Context, current state.I
 	if publishErr != nil {
 		return l.failCheckpointStage(ctx, current, "publication checkpoint failed: "+publishErr.Error())
 	}
+	l.commentPublication(ctx, current, published.PullRequestURL, published.Commit)
 	result.Git = &published
 	if published.PullRequestURL == "" {
 		return l.completeIssue(ctx, current, gh.PullRequest{}, result)

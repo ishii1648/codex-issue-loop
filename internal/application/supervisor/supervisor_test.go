@@ -1383,6 +1383,8 @@ func TestRequiredReviewGatesMergeUntilApproved(t *testing.T) {
 func TestFailedPullRequestChecksReturnWorkerToRetry(t *testing.T) {
 	result := worker.Result{Version: 1, Status: "completed", ExecutionProfile: "extended", Summary: "done", SessionID: "session", Git: &worker.GitResult{PullRequestURL: "https://example.test/pr/1"}}
 	loop, github := testLoop(t, result)
+	progress := &progressGitHub{fakeGitHub: github, err: errors.New("comment failed")}
+	loop.GitHub = progress
 	if _, err := loop.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1413,6 +1415,11 @@ func TestFailedPullRequestChecksReturnWorkerToRetry(t *testing.T) {
 	}
 	if len(recorder.resumePrompts) != 1 || !strings.Contains(recorder.resumePrompts[0], "https://example.test/pr/1") {
 		t.Fatalf("resume prompts=%q", recorder.resumePrompts)
+	}
+	for _, expected := range []string{"PRのCIが失敗しました", "UTC以降にworkerを再実行", "再試行予定に基づき、実装・検証を開始しました"} {
+		if !strings.Contains(strings.Join(progress.bodies, "\n"), expected) {
+			t.Fatalf("missing %q: %v", expected, progress.bodies)
+		}
 	}
 }
 
@@ -1692,6 +1699,8 @@ func TestNonDirtyPendingChecksAndUnstableMergeStateKeepPolling(t *testing.T) {
 
 func TestDirtyPullRequestRunsDurableConflictWorkerAndReturnsToChecks(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
+	progress := &progressGitHub{fakeGitHub: github, err: errors.New("comment failed")}
+	loop.GitHub = progress
 	loop.Config.Completion.AutoMerge = true
 	prURL := "https://example.test/pr/1"
 	if _, _, err := loop.Store.StartExecution(state.ExecutionStart{IssueNumber: 1, Title: "Test", RunID: "run_1", StartedAt: time.Now().UTC()}); err != nil {
@@ -1746,6 +1755,9 @@ func TestDirtyPullRequestRunsDurableConflictWorkerAndReturnsToChecks(t *testing.
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("conflict prompt missing %q: %s", expected, prompt)
 		}
+	}
+	if len(progress.bodies) != 2 || !strings.Contains(progress.bodies[0], "自動解消を開始しました") || !strings.Contains(progress.bodies[1], "PRに修正を反映しました") {
+		t.Fatalf("comments=%v", progress.bodies)
 	}
 }
 
@@ -1968,7 +1980,7 @@ func TestPublishedConflictRecoveryUsesNormalChecksRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := loop.finishConflictPublication(current, "merge-commit"); err != nil {
+			if err := loop.finishConflictPublication(context.Background(), current, "merge-commit"); err != nil {
 				t.Fatal(err)
 			}
 			current, err = loop.issueState(1)
@@ -2731,6 +2743,8 @@ func TestRestartRecoversPIDlessConflictLaunchBeforeMaintenanceDrain(t *testing.T
 
 func TestPublicationCheckpointPublishesSavedCompletedResultWithoutWorker(t *testing.T) {
 	loop, github := testLoop(t, worker.Result{})
+	progress := &progressGitHub{fakeGitHub: github, err: errors.New("comment failed")}
+	loop.GitHub = progress
 	github.issue.State = "OPEN"
 	github.issue.Labels = []string{loop.Config.GitHub.RunningLabel}
 	runID := "run_publication_checkpoint"
@@ -2810,6 +2824,9 @@ func TestPublicationCheckpointPublishesSavedCompletedResultWithoutWorker(t *test
 	}
 	if issue = snapshot.Issues["1"]; issue.Status != issuedomain.StatusCompleted || snapshot.ActiveExecution != nil || !issue.PullRequestMerged || !github.done {
 		t.Fatalf("recovered publication did not reach done: issue=%+v github=%+v", issue, github)
+	}
+	if len(progress.bodies) < 2 || !strings.Contains(progress.bodies[0], "回答に基づき、PR公開を再開しました") || !strings.Contains(progress.bodies[1], "実装結果をPRに公開しました") {
+		t.Fatalf("comments=%v", progress.bodies)
 	}
 }
 
