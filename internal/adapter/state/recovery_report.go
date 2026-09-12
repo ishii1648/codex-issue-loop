@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	contract "github.com/ishii1648/codex-issue-loop/internal/domain/snapshot"
 	"os"
 	"strings"
 )
@@ -186,14 +187,17 @@ func (s Store) ReadCanonicalSnapshot() (Snapshot, error) {
 		if err != nil || !bytes.Equal(before, after) {
 			continue
 		}
+		if err := contract.CheckVersion(before); err != nil {
+			return Snapshot{}, err
+		}
 		var snapshot Snapshot
 		if err := json.Unmarshal(before, &snapshot); err != nil {
 			return Snapshot{}, fmt.Errorf("decode canonical state: %w", err)
 		}
 		normalizeSnapshot(&snapshot)
 		NormalizeLegacyWorkerLaunches(&snapshot)
-		if snapshot.Version != CurrentVersion || snapshot.RepoID != s.RepoID {
-			return Snapshot{}, fmt.Errorf("canonical state schema or repository identity differs")
+		if snapshot.RepoID != s.RepoID {
+			return Snapshot{}, fmt.Errorf("canonical state repository identity differs")
 		}
 		if err := snapshot.Validate(); err != nil {
 			return Snapshot{}, err
