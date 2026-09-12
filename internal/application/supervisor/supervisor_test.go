@@ -655,6 +655,7 @@ func TestWorkerEnvironmentBlockAllowsFollowingRepositoryIssue(t *testing.T) {
 		Summary: "public network is unavailable", SessionID: "session-314",
 	}
 	loop, github := testLoop(t, blocked)
+	loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
 	loop.Config.Queue.Concurrency = 1
 	github.issue = gh.Issue{Number: 314, Title: "Public verification", Body: "Verify production", Labels: []string{"codex-loop:ready"}}
 	if worked, err := loop.RunOnce(context.Background()); err != nil || !worked {
