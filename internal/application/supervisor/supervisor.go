@@ -17,6 +17,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	gh "github.com/ishii1648/codex-issue-loop/internal/adapter/github"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/statusapi"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worker"
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
@@ -119,6 +120,13 @@ func (l *Loop) Run(ctx context.Context) error {
 	if snapshot.Recovery != nil && snapshot.Recovery.Status == state.RecoveryStateBlocked {
 		return BlockedError{Err: fmt.Errorf("durable state recovery blocked: %s (backup: %s)", snapshot.Recovery.Reason, snapshot.Recovery.BackupDir)}
 	}
+	statusHandler := &statusapi.Handler{Store: l.Store, Repository: l.Config.GitHub.Repo, RuntimeID: state.NewID("runtime_"), StartedAt: time.Now().UTC(), AutoMerge: l.Config.Completion.AutoMerge}
+	statusCleanup, statusErr := statusapi.Start(ctx, statusHandler, l.Logger)
+	if statusErr != nil {
+		l.Logger.Printf("status API unavailable: %v", statusErr)
+	} else {
+		defer statusCleanup()
+	}
 	snapshot, _, err = l.Store.RecoverUnstartedConflictLaunch(l.now())
 	if err != nil {
 		return BlockedError{Err: fmt.Errorf("recover unstarted conflict launch: %w", err)}
@@ -183,6 +191,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		}()
 	}
 
+	statusHandler.Ready.Store(true)
 	return l.runWithIncidentAutomation(ctx, func(runCtx context.Context) error { return l.runScheduler(runCtx, watcher) })
 }
 

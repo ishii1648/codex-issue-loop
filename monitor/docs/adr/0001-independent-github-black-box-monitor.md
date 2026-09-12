@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted（入力境界は [runtime ADR-0008](../../../docs/adr/0008-runtime-status-api.md) により一部変更。monitor実装の移行は後続作業）
 
 ## Decision
 
