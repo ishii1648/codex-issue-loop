@@ -452,6 +452,12 @@ func (m Migrator) Restore(backup string) (Result, error) {
 	}
 	defer unlock()
 
+	releaseStores, err := m.lockSnapshotStores("")
+	if err != nil {
+		return Result{}, err
+	}
+	defer releaseStores()
+
 	resolved, manifest, err := m.verifyBackup(backup)
 	if err != nil {
 		return Result{}, err
@@ -543,8 +549,8 @@ func (m Migrator) createBackup(report Report, from int) (string, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
 	}
-	suffix := fmt.Sprintf("-v%d-to-v%d", from, CurrentVersion)
-	if from == CurrentVersion {
+	suffix := fmt.Sprintf("-v%d-to-v%d", from, report.TargetVersion)
+	if from == report.TargetVersion {
 		suffix = fmt.Sprintf("-v%d-semantic-v%d", CurrentVersion, 4)
 	}
 	backup := filepath.Join(root, m.now().UTC().Format("20060102T150405.000000000Z")+suffix)
@@ -555,7 +561,7 @@ func (m Migrator) createBackup(report Report, from int) (string, error) {
 	if err := os.Mkdir(filesDir, 0o700); err != nil {
 		return "", err
 	}
-	manifest := backupManifest{Version: 1, From: from, To: CurrentVersion, CreatedAt: m.now()}
+	manifest := backupManifest{Version: 1, From: from, To: report.TargetVersion, CreatedAt: m.now()}
 	for _, repository := range report.Repositories {
 		manifest.RepositoryPaths = append(manifest.RepositoryPaths, repository.RepoPath)
 	}
@@ -1224,7 +1230,7 @@ func readManifest(path string) (backupManifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return backupManifest{}, err
 	}
-	if manifest.Version != 1 || (manifest.From != schemaversion.Previous && manifest.From != CurrentVersion) || manifest.To != CurrentVersion {
+	if manifest.Version != 1 || (manifest.From != schemaversion.Previous && manifest.From != CurrentVersion) || (manifest.To != CurrentVersion && !(manifest.From == 5 && manifest.To == state.CurrentVersion)) {
 		return backupManifest{}, fmt.Errorf("unsupported migration backup manifest")
 	}
 	return manifest, nil

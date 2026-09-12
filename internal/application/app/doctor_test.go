@@ -243,7 +243,7 @@ func TestDiagnoseSchemasDistinguishesSupportedRequiredAndUnsupported(t *testing.
 		ready   bool
 	}{
 		{name: "supported", version: 5, code: "SCHEMA_VERSION_SUPPORTED", ready: true},
-		{name: "migration-required", version: 4, code: "SCHEMA_MIGRATION_REQUIRED"},
+		{name: "unsupported-old-registry", version: 4, code: "SCHEMA_VERSION_UNSUPPORTED"},
 		{name: "unsupported", version: 6, code: "SCHEMA_VERSION_UNSUPPORTED"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -2998,3 +2998,14 @@ func TestWebhookReviewDecisionGatesMergeAndPreservesUnknown(t *testing.T) {
 		})
 	}
 }
+
+func (f *fakeGitHub) ClosePullRequest(_ context.Context, _ config.Config, url string) error {
+	if f.remote != nil {
+		for i := range f.remote.PullRequests {
+			if f.remote.PullRequests[i].URL == url && f.remote.PullRequests[i].MergedAt == nil {
+				f.remote.PullRequests[i].State = "CLOSED"
+			}
+		}
+	}
+	return nil
+}

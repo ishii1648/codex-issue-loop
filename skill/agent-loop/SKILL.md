@@ -5,7 +5,7 @@ description: Operate, monitor, and explicitly recover the codex-issue-loop super
 
 # agent-loop
 
-Snapshot v6 は #575/#536/#537 の統合・検証完了まで配布保留。既存 migrate は v5 までの経路であり、v6 の起動許可にはならない。旧 snapshot/隔離 backup は対応する旧 binary と停止下で扱い、v6 への移行不能状態は原本を変更せず全体中止する。詳細は [migration runbook](../../docs/migration.md) を参照する。
+Snapshot v6 は旧 `(5,4,2.0/2.1)` を起動前に移行する。更新前に `migrate --json` の結果を確認し、全対象を停止して更新する。起動時の再承認は不要。prepared journal 中は通常 state 操作を拒否し、同じ binary で移行を再実行する。旧 cancel の残存 PR は通常 reconciliation が close し、同期失敗で内部取消を巻き戻さない。rollback は停止下で移行前 backup と旧 binary を対に戻す。[migration runbook](../../docs/migration.md) を参照する。
 
 Use the `agent-loop` CLI for lifecycle operations; GitHub Issue comments can also record answers. The Skill does not own the Issue loop or its durable state.
 

@@ -30,6 +30,46 @@ func ApplyIssueTransition(item *Issue, transition issuedomain.Transition) error 
 	return nil
 }
 
+func MigrateLegacyCancellation(snapshot *Snapshot, number int) error {
+	if snapshot == nil || snapshot.Version != 5 || snapshot.SemanticContractVersion != 4 || (snapshot.IssueLifecycleAPIVersion != "2.0" && snapshot.IssueLifecycleAPIVersion != "2.1") {
+		return fmt.Errorf("legacy cancellation requires snapshot (5,4,2.0/2.1)")
+	}
+	item := snapshot.Issues[strconv.Itoa(number)]
+	if item == nil {
+		return fmt.Errorf("Issue #%d is missing", number)
+	}
+	suspension := item.Suspension
+	if suspension == nil || suspension.Status != issuedomain.SuspensionResolved || suspension.Resolution != issuedomain.ResolutionCancel || item.Status == issuedomain.StatusCanceled {
+		return nil
+	}
+	if item.Cancellation != nil || suspension.ResolvedAt.IsZero() || suspension.SuspendedAt.IsZero() || suspension.ResolvedAt.Before(suspension.SuspendedAt) {
+		return fmt.Errorf("Issue #%d legacy cancellation evidence is incomplete or contradictory", number)
+	}
+	if snapshot.ActiveExecution != nil || item.WorkerPID != 0 || item.WorkerPGID != 0 {
+		return fmt.Errorf("Issue #%d legacy cancellation retains execution authority or worker identity", number)
+	}
+	for _, request := range snapshot.PendingRequests {
+		if request != nil && request.IssueNumber == number && request.Status == issuedomain.RequestStatusPending {
+			return fmt.Errorf("Issue #%d legacy cancellation has an unanswered request", number)
+		}
+	}
+	for _, effect := range snapshot.PendingEffects {
+		if effect != nil && effect.IssueNumber == number {
+			return fmt.Errorf("Issue #%d legacy cancellation has an unfinished effect", number)
+		}
+	}
+	transition, err := issuedomain.ResolveSuspension(item.Status, issuedomain.ResolutionCancel, issuedomain.ContinuationStageNone)
+	if err != nil {
+		return err
+	}
+	previous := item.Status
+	if err := ApplyIssueTransition(item, transition); err != nil {
+		return err
+	}
+	item.Cancellation = &Cancellation{Source: "legacy_cancel_migration", PreviousStatus: previous, CanceledAt: suspension.ResolvedAt, ExecutionReleaseResult: "not_present"}
+	return nil
+}
+
 func ApplyNotPlannedCancellation(snapshot *Snapshot, issueNumber int, expected *Issue, now time.Time) (string, error) {
 	if snapshot == nil || expected == nil || now.IsZero() {
 		return "", fmt.Errorf("not planned cancellation requires snapshot, expected Issue, and time")

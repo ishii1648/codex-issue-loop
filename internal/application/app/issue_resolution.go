@@ -453,7 +453,7 @@ func (a App) issueResolve(ctx context.Context, l layout.Layout, args []string) e
 		}
 		return a.output(*jsonOut, map[string]any{"schema_version": 1, "issue_number": *number, "action": action, "idempotent": true, "status": issuedomain.StatusCompleted})
 	}
-	if planned.issue.Suspension != nil && planned.issue.Suspension.Status == issuedomain.SuspensionResolved && planned.issue.Suspension.Resolution == action {
+	if action != issuedomain.ResolutionCancel && planned.issue.Suspension != nil && planned.issue.Suspension.Status == issuedomain.SuspensionResolved && planned.issue.Suspension.Resolution == action {
 		if effect := state.PendingEffect(&planned.snapshot, planned.issue.Number); effect != nil && effect.Kind == issuedomain.EffectApplyResolution {
 			if err := a.synchronizeIssueResolution(ctx, planned, action, *number); err != nil {
 				return err

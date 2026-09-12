@@ -79,6 +79,7 @@ type Client interface {
 	ReadyPullRequest(context.Context, config.Config, string) error
 	UpdatePullRequest(context.Context, config.Config, string) error
 	MergePullRequest(context.Context, config.Config, string) error
+	ClosePullRequest(context.Context, config.Config, string) error
 }
 
 type CLI struct {
@@ -676,4 +677,57 @@ func OrderIssues(issues []Issue, queue config.Queue) {
 			return issues[i].Number < issues[j].Number
 		}
 	})
+}
+
+// ClosePullRequest verifies the saved repository-local identity and reads back
+// closure. Already closed or merged Pull Requests are preserved.
+func (c CLI) ClosePullRequest(ctx context.Context, cfg config.Config, prURL string) error {
+	path := c.Path
+	if path == "" {
+		path = "gh"
+	}
+	inspect := func() (string, error) {
+		out, err := exec.CommandContext(ctx, path, "pr", "view", prURL, "--repo", cfg.GitHub.Repo, "--json", "number,url,state,mergedAt").CombinedOutput()
+		if err != nil {
+			return "", c.commandError(ctx, path, "inspect canceled Pull Request", err, out)
+		}
+		var pr struct {
+			Number   int        `json:"number"`
+			URL      string     `json:"url"`
+			State    string     `json:"state"`
+			MergedAt *time.Time `json:"mergedAt"`
+		}
+		if err := json.Unmarshal(out, &pr); err != nil {
+			return "", err
+		}
+		if pr.Number < 1 || pr.URL != prURL || prURL != fmt.Sprintf("https://github.com/%s/pull/%d", cfg.GitHub.Repo, pr.Number) {
+			return "", fmt.Errorf("canceled Pull Request repository identity differs")
+		}
+		if pr.MergedAt != nil {
+			return "MERGED", nil
+		}
+		return strings.ToUpper(pr.State), nil
+	}
+	status, err := inspect()
+	if err != nil {
+		return err
+	}
+	if status == "CLOSED" || status == "MERGED" {
+		return nil
+	}
+	if status != "OPEN" {
+		return fmt.Errorf("unknown canceled Pull Request state %q", status)
+	}
+	out, err := exec.CommandContext(ctx, path, "pr", "close", prURL, "--repo", cfg.GitHub.Repo).CombinedOutput()
+	if err != nil {
+		return c.commandError(ctx, path, "close canceled Pull Request", err, out)
+	}
+	status, err = inspect()
+	if err != nil {
+		return err
+	}
+	if status != "CLOSED" && status != "MERGED" {
+		return fmt.Errorf("canceled Pull Request closure did not converge")
+	}
+	return nil
 }

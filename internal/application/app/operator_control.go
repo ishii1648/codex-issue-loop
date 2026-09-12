@@ -17,6 +17,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/webhook"
 	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
+	"github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	"github.com/ishii1648/codex-issue-loop/internal/application/operatorcontrol"
 	"github.com/ishii1648/codex-issue-loop/internal/application/supervisor"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
@@ -187,6 +188,18 @@ func (a App) control(ctx context.Context, l layout.Layout, command string, args 
 	lm := launchd.Manager{Layout: l, Launchctl: entry.Commands["launchctl"]}
 	store := state.Store{Dir: l.RepoDir(entry.RepoID), RepoID: entry.RepoID, RepoPath: entry.RepoPath, Secrets: cfg.RedactionValues()}
 	if command == "start" || command == "restart" {
+		report, inspectErr := migration.InspectSnapshots(l)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if len(report.Unsupported) > 0 {
+			return fmt.Errorf("unsupported snapshot migration contract")
+		}
+		if report.NeedsMigration {
+			if _, err := (migration.Migrator{Layout: l}).ApplySnapshots(""); err != nil {
+				return err
+			}
+		}
 		snapshot, loadErr := store.Load()
 		if loadErr != nil {
 			return fmt.Errorf("load durable state before %s: %w", command, loadErr)
