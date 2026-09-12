@@ -14,6 +14,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/application/delivery"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
+	meta "github.com/ishii1648/codex-issue-loop/internal/platform/deliverymeta"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 )
 
@@ -50,8 +51,12 @@ func generateManifest(artifact, version, commit, output string) error {
 		return err
 	}
 	sum := sha256.Sum256(data)
+	if filepath.Base(artifact) == "agent-loopctl_Darwin_arm64" {
+		return fsutil.WriteJSON(output, map[string]any{"manifest_version": 1, "version": version, "commit": commit, "target": "darwin/arm64", "artifact": filepath.Base(artifact), "artifact_sha256": hex.EncodeToString(sum[:]), "repository_command_protocol": meta.RepositoryCommandProtocol}, 0o644)
+	}
 	manifest := delivery.ReleaseManifest{
-		ManifestVersion: 1, DeliveryProtocol: delivery.ProtocolVersion, AssignmentProtocol: delivery.AssignmentProtocolVersion, Version: version, Commit: commit,
+		RepositoryCommandProtocol: meta.RepositoryCommandProtocol,
+		ManifestVersion:           1, DeliveryProtocol: delivery.ProtocolVersion, AssignmentProtocol: delivery.AssignmentProtocolVersion, Version: version, Commit: commit,
 		Target: "darwin/arm64", Artifact: filepath.Base(artifact), ArtifactSHA256: hex.EncodeToString(sum[:]),
 		StateSchemaCurrent: statecontract.CurrentVersion, StateSchemaMigrationFrom: statecontract.MigrationFromSchema,
 		SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,

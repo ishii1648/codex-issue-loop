@@ -9,29 +9,15 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/ishii1648/codex-issue-loop/internal/adapter/githubqueue"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
 
-type Issue struct {
-	Number      int
-	Title       string
-	Body        string
-	URL         string
-	CreatedAt   time.Time
-	Labels      []string
-	Assignees   []string
-	Milestone   string
-	Comments    []string
-	State       string
-	StateReason string `json:"StateReason,omitempty"`
-	AuthorLogin string `json:"author_login,omitempty"`
-	AuthorType  string `json:"author_type,omitempty"`
-}
+type Issue = githubqueue.Issue
 
 type PullRequest struct {
 	Number           int
@@ -85,11 +71,6 @@ type CLI struct {
 	Path    string
 	Secrets []string
 }
-
-const (
-	maxIssueTitleBytes = 512
-	maxIssueBodyBytes  = 64 * 1024
-)
 
 type rawIssue struct {
 	Number      int       `json:"number"`
@@ -351,48 +332,6 @@ func pullRequestChecksStatus(mergeState string, checks []checkRollup) string {
 	return result
 }
 
-func Eligible(labels []string, cfg config.GitHub) bool {
-	set := map[string]bool{}
-	for _, label := range labels {
-		set[labelKey(label)] = true
-	}
-	for _, label := range cfg.ReadyLabels {
-		if !set[labelKey(label)] {
-			return false
-		}
-	}
-	for _, label := range cfg.ExcludeLabels {
-		if set[labelKey(label)] {
-			return false
-		}
-	}
-	for _, label := range []string{cfg.RunningLabel, cfg.NeedsInputLabel, cfg.FailedLabel, cfg.DoneLabel} {
-		if label != "" && set[labelKey(label)] {
-			return false
-		}
-	}
-	return true
-}
-
-func EligibleIssue(issue Issue, cfg config.GitHub) bool {
-	if !strings.EqualFold(issue.State, "open") {
-		return false
-	}
-	if !Eligible(issue.Labels, cfg) {
-		return false
-	}
-	if cfg.Assignee != "" {
-		matched := false
-		for _, assignee := range issue.Assignees {
-			matched = matched || strings.EqualFold(assignee, cfg.Assignee)
-		}
-		if !matched {
-			return false
-		}
-	}
-	return cfg.Milestone == "" || issue.Milestone == cfg.Milestone
-}
-
 func (c CLI) Claim(ctx context.Context, cfg config.Config, issue Issue, runID string) error {
 	labels := map[string]bool{}
 	for _, label := range issue.Labels {
@@ -586,74 +525,20 @@ func (c CLI) safe(data []byte) string {
 	return strings.TrimSpace(redact.StringWithSecrets(string(data), c.Secrets))
 }
 
-func NormalizeIssue(issue Issue) Issue {
-	issue.State = strings.ToUpper(strings.TrimSpace(issue.State))
-	issue.StateReason = strings.ToUpper(strings.TrimSpace(issue.StateReason))
-	issue.Title = safeText(issue.Title, maxIssueTitleBytes)
-	issue.Body = safeText(issue.Body, maxIssueBodyBytes)
-	issue.URL = safeText(issue.URL, 2048)
-	comments := make([]string, len(issue.Comments))
-	for index, comment := range issue.Comments {
-		comments[index] = safeText(comment, len(comment))
-	}
-	if issue.Comments != nil {
-		issue.Comments = comments
-	}
-	return issue
-}
+var OrderIssues = githubqueue.OrderIssues
 
-func safeText(value string, limit int) string {
-	value = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' || r >= ' ' && r != 0x7f {
-			return r
-		}
-		return -1
-	}, value)
-	if len(value) <= limit {
-		return value
-	}
-	value = value[:limit]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value + "\n[TRUNCATED]"
-}
+const maxIssueTitleBytes = githubqueue.MaxIssueTitleBytes
 
-func OrderIssues(issues []Issue, queue config.Queue) {
-	priorityRank := make(map[string]int, len(queue.PriorityLabels))
-	for index, label := range queue.PriorityLabels {
-		priorityRank[strings.ToLower(label)] = index
-	}
-	rank := func(issue Issue) int {
-		result := len(priorityRank)
-		for _, label := range issue.Labels {
-			if candidate, ok := priorityRank[strings.ToLower(label)]; ok && candidate < result {
-				result = candidate
-			}
-		}
-		return result
-	}
-	createdBefore := func(left, right Issue) bool {
-		if left.CreatedAt.IsZero() != right.CreatedAt.IsZero() {
-			return !left.CreatedAt.IsZero()
-		}
-		if !left.CreatedAt.Equal(right.CreatedAt) {
-			return left.CreatedAt.Before(right.CreatedAt)
-		}
-		return left.Number < right.Number
-	}
-	sort.SliceStable(issues, func(i, j int) bool {
-		switch queue.Order {
-		case "created_at_asc":
-			return createdBefore(issues[i], issues[j])
-		case "priority_then_created_at":
-			left, right := rank(issues[i]), rank(issues[j])
-			if left != right {
-				return left < right
-			}
-			return createdBefore(issues[i], issues[j])
-		default:
-			return issues[i].Number < issues[j].Number
-		}
-	})
-}
+const maxIssueBodyBytes = githubqueue.MaxIssueBodyBytes
+
+const maxIssueComments = githubqueue.MaxIssueComments
+
+const maxCommentBytes = githubqueue.MaxCommentBytes
+
+var Eligible = githubqueue.Eligible
+
+var EligibleIssue = githubqueue.EligibleIssue
+
+var NormalizeIssue = githubqueue.NormalizeIssue
+
+var safeText = githubqueue.SafeText

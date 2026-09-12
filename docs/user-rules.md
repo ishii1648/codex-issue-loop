@@ -1,23 +1,23 @@
 # user-scope Issue作成ルール
 
-`agent-loop init`は、通常のCodex / Claude Codeセッションが`.agent-loop.yaml`のあるrepositoryで変更依頼を受けたとき、自ら実装せず、ready label付きIssueとしてloopへ委譲するためのuser-level ruleを管理する。repositoryにはruleをcommitしない。
+`agent-loopctl init`は、通常のCodex / Claude Codeセッションが`.agent-loop.yaml`のあるrepositoryで変更依頼を受けたとき、自ら実装せず、ready label付きIssueとしてloopへ委譲するためのuser-level ruleを管理する。repositoryにはruleをcommitしない。
 
 ## Previewと適用
 
 既定ではCodexとClaude Codeの両方を対象にする。`--apply`なしのpreviewは、agent-loopの内部ディレクトリ、対象file、backupを含めて一切作成・変更しない。
 
 ```sh
-agent-loop init --json
-agent-loop init --apply --json
-agent-loop init --json
+agent-loopctl init --json
+agent-loopctl init --apply --json
+agent-loopctl init --json
 ```
 
 最後の再実行では各targetが`status: current`、`action: none`、`apply_result: not_applied`となる。適用を再実行した場合も`apply_result: unchanged`となり、fileを変更しない。対象を限定する場合は次のように指定する。
 
 ```sh
-agent-loop init --agents codex --json
-agent-loop init --agents codex --apply --json
-agent-loop init --agents claude --json
+agent-loopctl init --agents codex --json
+agent-loopctl init --agents codex --apply --json
+agent-loopctl init --agents claude --json
 ```
 
 JSONには`agent`、user scope上の`path`、実際の書き込み先`resolved_path`、`symlink`、`status`、予定`action`、`applied`、`apply_result`、`backup_path`を出力する。`status`は`missing`、`current`、`outdated`、`conflict`のいずれかである。
@@ -50,10 +50,10 @@ $AGENT_LOOP_HOME/user-rules-backups/<timestamp>/<agent>/<file>
 
 ```sh
 cp -p "$backup_path" "$resolved_path"
-agent-loop init --agents codex --json
+agent-loopctl init --agents codex --json
 ```
 
-Claude Codeを復元する場合は`--agents claude`を指定する。backupは変更前file全体であり、Codexの管理外内容も復元される。`install`、`update`、`doctor`の自動修復、`uninstall`はuser ruleを変更・削除しない。`doctor`は不足・旧version・競合を検出したとき、明示的な`agent-loop init`をremediationとして表示するだけである。
+Claude Codeを復元する場合は`--agents claude`を指定する。backupは変更前file全体であり、Codexの管理外内容も復元される。`install`、`update`、`doctor`の自動修復、`uninstall`はuser ruleを変更・削除しない。
 
 ## Ruleの判断境界
 

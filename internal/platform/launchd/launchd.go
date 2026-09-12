@@ -107,6 +107,8 @@ func (m Manager) Program(entry registry.Entry) (string, error) {
 	return programFromPlist(m.Layout.PlistPath(entry.RepoID))
 }
 
+func (m Manager) BrokerProgram() (string, error) { return programFromPlist(m.Layout.BrokerPlistPath()) }
+
 func (m Manager) DeliveryProgram() (string, error) {
 	return programFromPlist(m.Layout.DeliveryPlistPath())
 }

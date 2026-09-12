@@ -13,6 +13,16 @@
 
 安全側に停止する単位は、影響を受ける最小範囲とする。Issue固有の不整合や失敗はIssue単位で隔離し、canonical repository state全体を解釈できない場合だけsupervisor全体を停止する。
 
+## ホスト CLI と repository runtime
+
+`cmd/agent-loopctl` / `internal/application/hostcli` は repository の選択、assignment の解決、ホスト install/update/rollback/uninstall、delivery の入口、共有 broker を担当する。`cmd/agent-loop` / `internal/application/app` は supervisor、repository 操作、snapshot/event の解釈・検証・更新・migration を担当する。既存の delivery controller が行う snapshot 判定も runtime 内で実行する。
+
+`internal/platform/deliverymeta` は既存の assignment/config/slot/release 検証の共通実装で、snapshot/domain validator に依存しない。共有 broker が必要とする GitHub queue の参照は `internal/adapter/githubqueue` に置き、snapshot に依存する GitHub adapter 全体をホストへリンクしない。`TestHostHasNoSnapshotDependency` が binary 全体の推移的な依存を検査する。
+
+共通 CLI は canonical slot、manifest、digest を検証し、`version --json` の version/commit と `repository_command_protocol: 1` を確認する。repository command は `dispatch --repo <path> --repository-id <id> --generation <n> -- <元のコマンド>` で呼ぶ。runtime は既存 delivery lock を保持して assignment を再取得し、自身の slot と generation を照合してから実行する。stdin と stdout/stderr は直接接続し、JSON payload は解釈せず転送する。終了コードを保存し、cancellation は子プロセス群へ伝える。失敗・中断時に操作を再送しない。
+
+新規 register は host-install の検証済み bootstrap runtime を明示的に使い、同じ lock 内で未登録であることを再確認する。通常操作の runtime 欠損、不正、非互換、generation 変更には共通 snapshot reader へ fallback せず終了する。repository migration は既存 migrator を repository 単位に限定し、backup/restore も同じ repository に制限する。
+
 ## 2. システム境界
 
 ```text

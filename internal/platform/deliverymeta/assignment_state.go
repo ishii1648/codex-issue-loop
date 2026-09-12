@@ -1,4 +1,4 @@
-package delivery
+package deliverymeta
 
 import (
 	"errors"
@@ -57,17 +57,17 @@ func LoadAssignmentTransaction(path string) (AssignmentTransaction, error) {
 	if err := fsutil.DecodeStrictJSON(data, &tx); err != nil {
 		return tx, fmt.Errorf("decode assignment transaction: %w", err)
 	}
-	if tx.Version != 1 || tx.RepositoryID == "" || !knownAssignmentPhase(tx.Phase) {
+	if tx.Version != 1 || tx.RepositoryID == "" || !KnownAssignmentPhase(tx.Phase) {
 		return tx, errors.New("assignment transaction is incomplete or unsupported")
 	}
-	if err := validateAssignmentTransaction(tx); err != nil {
+	if err := ValidateAssignmentTransaction(tx); err != nil {
 		return tx, err
 	}
 	return tx, nil
 }
 
-func validateAssignmentTransaction(tx AssignmentTransaction) error {
-	if tx.RepositoryID == "" || !knownAssignmentPhase(tx.Phase) {
+func ValidateAssignmentTransaction(tx AssignmentTransaction) error {
+	if tx.RepositoryID == "" || !KnownAssignmentPhase(tx.Phase) {
 		return errors.New("assignment transaction is incomplete or unsupported")
 	}
 	if tx.Operation != AssignmentOperationApply && tx.Operation != AssignmentOperationRollback {
@@ -79,10 +79,10 @@ func validateAssignmentTransaction(tx AssignmentTransaction) error {
 	if tx.StartedAt.IsZero() {
 		return errors.New("assignment transaction start time is missing")
 	}
-	if err := validateAssignmentRef(tx.Current); err != nil {
+	if err := ValidateAssignmentRef(tx.Current); err != nil {
 		return fmt.Errorf("assignment transaction current: %w", err)
 	}
-	if err := validateAssignmentRef(tx.Desired); err != nil {
+	if err := ValidateAssignmentRef(tx.Desired); err != nil {
 		return fmt.Errorf("assignment transaction desired: %w", err)
 	}
 	if tx.Current == tx.Desired {
@@ -92,10 +92,10 @@ func validateAssignmentTransaction(tx AssignmentTransaction) error {
 }
 
 func SaveAssignmentTransaction(path string, tx AssignmentTransaction) error {
-	if err := validateAssignmentTransaction(tx); err != nil {
+	if err := ValidateAssignmentTransaction(tx); err != nil {
 		return err
 	}
-	if err := ensurePrivateDirectory(filepath.Dir(path)); err != nil {
+	if err := EnsurePrivateDirectory(filepath.Dir(path)); err != nil {
 		return err
 	}
 	tx.Version = 1
@@ -103,7 +103,7 @@ func SaveAssignmentTransaction(path string, tx AssignmentTransaction) error {
 	return fsutil.WriteJSON(path, tx, 0o600)
 }
 
-func knownAssignmentPhase(phase AssignmentPhase) bool {
+func KnownAssignmentPhase(phase AssignmentPhase) bool {
 	switch phase {
 	case AssignmentPlanned, AssignmentDraining, AssignmentApplying, AssignmentValidating, AssignmentRollingBack, AssignmentSucceeded, AssignmentRolledBack, AssignmentRollbackFailed:
 		return true

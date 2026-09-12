@@ -77,9 +77,10 @@ type Result struct {
 }
 
 type Migrator struct {
-	Layout     layout.Layout
-	Now        func() time.Time
-	AfterWrite func(path string) error
+	RepositoryID string
+	Layout       layout.Layout
+	Now          func() time.Time
+	AfterWrite   func(path string) error
 }
 
 type journal struct {
@@ -117,7 +118,9 @@ func RegisteredRepositories(l layout.Layout) ([]registry.Entry, error) {
 	return repositories, err
 }
 
-func Inspect(l layout.Layout) (Report, error) {
+func Inspect(l layout.Layout) (Report, error) { return InspectRepository(l, "") }
+
+func InspectRepository(l layout.Layout, repositoryID string) (Report, error) {
 	report := Report{TargetVersion: CurrentVersion, SemanticFindings: []SemanticFinding{}, Compatibility: ReleaseCompatibility{
 		StateSchemaCurrent: state.CurrentVersion, StateSchemaMigrationFrom: statecontract.MigrationFromSchema,
 		SemanticContractCurrent: statecontract.CurrentVersion, SemanticContractMinimum: statecontract.MinimumVersion,
@@ -125,6 +128,22 @@ func Inspect(l layout.Layout) (Report, error) {
 	repositories, registryArtifact, err := inspectRegistry(l.RegistryPath)
 	if err != nil {
 		return Report{}, err
+	}
+	if repositoryID != "" {
+		selected := []registry.Entry{}
+		for _, entry := range repositories {
+			if entry.RepoID == repositoryID {
+				selected = append(selected, entry)
+			}
+		}
+		if len(selected) != 1 {
+			return Report{}, fmt.Errorf("migration repository is not registered: %s", repositoryID)
+		}
+		if registryArtifact != nil && registryArtifact.Version != CurrentVersion {
+			return Report{}, fmt.Errorf("host registry migration is required before repository migration")
+		}
+		repositories = selected
+		registryArtifact = nil
 	}
 	report.Repositories = repositories
 	if registryArtifact != nil {
@@ -152,7 +171,7 @@ func Inspect(l layout.Layout) (Report, error) {
 		return Report{}, fmt.Errorf("inspect state root: %w", err)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || repositoryID != "" && entry.Name() != repositoryID {
 			continue
 		}
 		dir := filepath.Join(l.ReposRoot, entry.Name())
@@ -357,7 +376,7 @@ func (m Migrator) Apply() (Result, error) {
 	}
 	defer unlock()
 
-	report, err := Inspect(m.Layout)
+	report, err := InspectRepository(m.Layout, m.RepositoryID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -430,7 +449,7 @@ func (m Migrator) Apply() (Result, error) {
 			}
 		}
 	}
-	verified, err := Inspect(m.Layout)
+	verified, err := InspectRepository(m.Layout, m.RepositoryID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -498,6 +517,26 @@ func (m Migrator) verifyBackup(backup string) (string, backupManifest, error) {
 	if err != nil {
 		return "", backupManifest{}, err
 	}
+	if m.RepositoryID != "" {
+		entries, err := RegisteredRepositories(m.Layout)
+		if err != nil {
+			return "", backupManifest{}, err
+		}
+		var repoPath string
+		for _, entry := range entries {
+			if entry.RepoID == m.RepositoryID {
+				repoPath = entry.RepoPath
+			}
+		}
+		if repoPath == "" {
+			return "", backupManifest{}, fmt.Errorf("migration repository is not registered")
+		}
+		for _, entry := range manifest.Entries {
+			if filepath.Dir(entry.Source) != m.Layout.RepoDir(m.RepositoryID) && entry.Source != filepath.Join(repoPath, config.FileName) {
+				return "", backupManifest{}, fmt.Errorf("backup targets another repository")
+			}
+		}
+	}
 	for _, entry := range manifest.Entries {
 		if err := validateRestoreTarget(m.Layout, manifest.RepositoryPaths, entry.Source); err != nil {
 			return "", backupManifest{}, err
@@ -539,7 +578,7 @@ func backupEntryPath(root, name string) (string, error) {
 }
 
 func (m Migrator) createBackup(report Report, from int) (string, error) {
-	root := filepath.Join(m.Layout.Root, "migrations")
+	root := filepath.Join(m.storageRoot(), "migrations")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
 	}
@@ -1158,7 +1197,7 @@ func (m Migrator) lock() (func(), error) {
 	}, nil
 }
 
-func (m Migrator) journalPath() string { return filepath.Join(m.Layout.Root, "migration.json") }
+func (m Migrator) journalPath() string { return filepath.Join(m.storageRoot(), "migration.json") }
 
 func (m Migrator) loadJournal() (journal, bool, error) {
 	data, err := os.ReadFile(m.journalPath())
@@ -1186,7 +1225,7 @@ func (m Migrator) validateBackup(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	root, err := filepath.EvalSymlinks(filepath.Join(m.Layout.Root, "migrations"))
+	root, err := filepath.EvalSymlinks(filepath.Join(m.storageRoot(), "migrations"))
 	if err != nil {
 		return "", err
 	}
@@ -1267,4 +1306,11 @@ func (m Migrator) now() time.Time {
 		return m.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (m Migrator) storageRoot() string {
+	if m.RepositoryID != "" {
+		return m.Layout.RepoDir(m.RepositoryID)
+	}
+	return m.Layout.Root
 }

@@ -80,8 +80,10 @@ func (a App) doctor(ctx context.Context, l layout.Layout, args []string) error {
 		}
 		diagnostics = append(filtered, passedDiagnostic("ASSIGNMENT_RUNTIME_ISOLATED", "host", "", "repository assignment runtimeをglobal operator installと分離して検査します", "global install diagnostics omitted for this scoped health check"))
 	}
-	schemaDiagnostics, _ := diagnoseSchemas(l)
-	diagnostics = append(diagnostics, schemaDiagnostics...)
+	if !*assignmentHealth {
+		schemaDiagnostics, _ := diagnoseSchemas(l)
+		diagnostics = append(diagnostics, schemaDiagnostics...)
+	}
 	registryStore := registry.Store{Path: l.RegistryPath}
 	registered, registryErr := registryStore.Load()
 	if registryErr != nil {

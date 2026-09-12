@@ -1,4 +1,4 @@
-package delivery
+package deliverymeta
 
 import (
 	"bufio"
@@ -39,34 +39,36 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 }
 
 type ReleaseManifest struct {
-	ManifestVersion          int    `json:"manifest_version"`
-	DeliveryProtocol         int    `json:"delivery_protocol"`
-	AssignmentProtocol       int    `json:"assignment_protocol"`
-	Version                  string `json:"version"`
-	Commit                   string `json:"commit"`
-	Target                   string `json:"target"`
-	Artifact                 string `json:"artifact"`
-	ArtifactSHA256           string `json:"artifact_sha256"`
-	StateSchemaCurrent       int    `json:"state_schema_current"`
-	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
-	SemanticContractCurrent  int    `json:"semantic_contract_current"`
-	SemanticContractMinimum  int    `json:"semantic_contract_minimum"`
-	IssueLifecycleAPICurrent string `json:"issue_lifecycle_api_current,omitempty"`
-	IssueLifecycleAPIMinimum string `json:"issue_lifecycle_api_minimum,omitempty"`
+	ManifestVersion           int    `json:"manifest_version"`
+	DeliveryProtocol          int    `json:"delivery_protocol"`
+	RepositoryCommandProtocol int    `json:"repository_command_protocol,omitempty"`
+	AssignmentProtocol        int    `json:"assignment_protocol"`
+	Version                   string `json:"version"`
+	Commit                    string `json:"commit"`
+	Target                    string `json:"target"`
+	Artifact                  string `json:"artifact"`
+	ArtifactSHA256            string `json:"artifact_sha256"`
+	StateSchemaCurrent        int    `json:"state_schema_current"`
+	StateSchemaMigrationFrom  int    `json:"state_schema_migration_from"`
+	SemanticContractCurrent   int    `json:"semantic_contract_current"`
+	SemanticContractMinimum   int    `json:"semantic_contract_minimum"`
+	IssueLifecycleAPICurrent  string `json:"issue_lifecycle_api_current,omitempty"`
+	IssueLifecycleAPIMinimum  string `json:"issue_lifecycle_api_minimum,omitempty"`
 }
 
 type BinaryInfo struct {
-	Version                  string `json:"version"`
-	Commit                   string `json:"commit"`
-	Target                   string `json:"target"`
-	DeliveryProtocol         int    `json:"delivery_protocol"`
-	AssignmentProtocol       int    `json:"assignment_protocol"`
-	StateSchemaCurrent       int    `json:"state_schema_current"`
-	StateSchemaMigrationFrom int    `json:"state_schema_migration_from"`
-	SemanticContractCurrent  int    `json:"semantic_contract_current"`
-	SemanticContractMinimum  int    `json:"semantic_contract_minimum"`
-	IssueLifecycleAPICurrent string `json:"issue_lifecycle_api_current,omitempty"`
-	IssueLifecycleAPIMinimum string `json:"issue_lifecycle_api_minimum,omitempty"`
+	Version                   string `json:"version"`
+	Commit                    string `json:"commit"`
+	Target                    string `json:"target"`
+	DeliveryProtocol          int    `json:"delivery_protocol"`
+	RepositoryCommandProtocol int    `json:"repository_command_protocol,omitempty"`
+	AssignmentProtocol        int    `json:"assignment_protocol"`
+	StateSchemaCurrent        int    `json:"state_schema_current"`
+	StateSchemaMigrationFrom  int    `json:"state_schema_migration_from"`
+	SemanticContractCurrent   int    `json:"semantic_contract_current"`
+	SemanticContractMinimum   int    `json:"semantic_contract_minimum"`
+	IssueLifecycleAPICurrent  string `json:"issue_lifecycle_api_current,omitempty"`
+	IssueLifecycleAPIMinimum  string `json:"issue_lifecycle_api_minimum,omitempty"`
 }
 
 type Release struct {
@@ -138,7 +140,7 @@ func (v Verifier) Check(ctx context.Context, cfg Config) (Candidate, error) {
 		return Candidate{}, err
 	}
 	desired := VersionRef{Version: release.Tag, Commit: commit}
-	if err := v.reportProgress(VerificationProgress{Phase: PhaseDiscovered, Desired: desired}); err != nil {
+	if err := v.ReportProgress(VerificationProgress{Phase: PhaseDiscovered, Desired: desired}); err != nil {
 		return Candidate{}, err
 	}
 	tmp, err := os.MkdirTemp(v.CacheDir, ".candidate-")
@@ -155,11 +157,11 @@ func (v Verifier) Check(ctx context.Context, cfg Config) (Candidate, error) {
 	if _, err := v.Runner.Run(ctx, v.GH, args...); err != nil {
 		return Candidate{}, fmt.Errorf("download release assets: %w", err)
 	}
-	if err := v.reportProgress(VerificationProgress{Phase: PhaseDownloaded, Desired: desired, Candidate: tmp}); err != nil {
+	if err := v.ReportProgress(VerificationProgress{Phase: PhaseDownloaded, Desired: desired, Candidate: tmp}); err != nil {
 		return Candidate{}, err
 	}
 
-	manifest, digest, err := verifyStaticAssets(tmp, release.Tag, commit)
+	manifest, digest, err := VerifyStaticAssets(tmp, release.Tag, commit)
 	if err != nil {
 		return Candidate{}, err
 	}
@@ -182,7 +184,7 @@ func (v Verifier) Check(ctx context.Context, cfg Config) (Candidate, error) {
 	if err := fsutil.DecodeStrictJSON(out, &binary); err != nil {
 		return Candidate{}, fmt.Errorf("decode candidate binary metadata: %w", err)
 	}
-	if err := compareBinaryManifest(binary, manifest); err != nil {
+	if err := CompareBinaryManifest(binary, manifest); err != nil {
 		return Candidate{}, err
 	}
 	// Re-resolve after verification so an edited Release or replaced tag cannot
@@ -199,7 +201,7 @@ func (v Verifier) Check(ctx context.Context, cfg Config) (Candidate, error) {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return Candidate{}, errors.New("existing delivery cache entry is not a regular directory")
 		}
-		existingManifest, existingDigest, verifyErr := verifyStaticAssets(final, release.Tag, commit)
+		existingManifest, existingDigest, verifyErr := VerifyStaticAssets(final, release.Tag, commit)
 		if verifyErr != nil || existingDigest != digest || existingManifest != manifest {
 			return Candidate{}, errors.New("existing delivery cache entry does not match the verified candidate")
 		}
@@ -214,13 +216,13 @@ func (v Verifier) Check(ctx context.Context, cfg Config) (Candidate, error) {
 		keep = true
 	}
 	candidate := Candidate{Release: release, Manifest: manifest, Binary: binary, Dir: final, Digest: digest}
-	if err := v.reportProgress(VerificationProgress{Phase: PhaseVerified, Desired: desired, Digest: digest, Candidate: final}); err != nil {
+	if err := v.ReportProgress(VerificationProgress{Phase: PhaseVerified, Desired: desired, Digest: digest, Candidate: final}); err != nil {
 		return Candidate{}, err
 	}
 	return candidate, nil
 }
 
-func (v Verifier) reportProgress(progress VerificationProgress) error {
+func (v Verifier) ReportProgress(progress VerificationProgress) error {
 	if v.Progress == nil {
 		return nil
 	}
@@ -264,7 +266,7 @@ func (v Verifier) resolveProduction(ctx context.Context, repository string) (Rel
 	if err := json.Unmarshal(out, &ref); err != nil {
 		return Release{}, "", err
 	}
-	if ref.Object.Type != "tag" || !validSHA(ref.Object.SHA) {
+	if ref.Object.Type != "tag" || !ValidSHA(ref.Object.SHA) {
 		return Release{}, "", errors.New("release tag must be an annotated Git tag")
 	}
 	out, err = v.Runner.Run(ctx, v.GH, "api", "repos/"+repository+"/git/tags/"+ref.Object.SHA)
@@ -275,13 +277,13 @@ func (v Verifier) resolveProduction(ctx context.Context, repository string) (Rel
 	if err := json.Unmarshal(out, &tag); err != nil {
 		return Release{}, "", err
 	}
-	if tag.Tag != release.Tag || tag.Object.Type != "commit" || !validSHA(tag.Object.SHA) {
+	if tag.Tag != release.Tag || tag.Object.Type != "commit" || !ValidSHA(tag.Object.SHA) {
 		return Release{}, "", errors.New("annotated release tag does not peel uniquely to a commit")
 	}
 	return release, tag.Object.SHA, nil
 }
 
-func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error) {
+func VerifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, ManifestAsset))
 	if err != nil {
 		return ReleaseManifest{}, "", fmt.Errorf("read release manifest: %w", err)
@@ -299,7 +301,7 @@ func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error
 	if manifest.Target != "darwin/arm64" || manifest.Artifact != BinaryAsset {
 		return manifest, "", errors.New("release target or artifact name is not darwin/arm64")
 	}
-	if !validSHA(manifest.Commit) || !validDigest(manifest.ArtifactSHA256) {
+	if !ValidSHA(manifest.Commit) || !ValidDigest(manifest.ArtifactSHA256) {
 		return manifest, "", errors.New("release manifest contains an invalid commit or digest")
 	}
 	if manifest.StateSchemaCurrent <= 0 || manifest.StateSchemaMigrationFrom <= 0 || manifest.StateSchemaMigrationFrom > manifest.StateSchemaCurrent ||
@@ -309,7 +311,7 @@ func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error
 	if (manifest.IssueLifecycleAPICurrent == "") != (manifest.IssueLifecycleAPIMinimum == "") {
 		return manifest, "", errors.New("release manifest contains an incomplete Issue lifecycle API range")
 	}
-	checksums, err := parseChecksums(filepath.Join(dir, ChecksumAsset))
+	checksums, err := ParseChecksums(filepath.Join(dir, ChecksumAsset))
 	if err != nil {
 		return manifest, "", err
 	}
@@ -318,7 +320,7 @@ func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error
 		if !ok {
 			return manifest, "", fmt.Errorf("checksums.txt does not cover %s", name)
 		}
-		got, err := fileDigest(filepath.Join(dir, name))
+		got, err := FileDigest(filepath.Join(dir, name))
 		if err != nil {
 			return manifest, "", err
 		}
@@ -332,8 +334,8 @@ func verifyStaticAssets(dir, tag, commit string) (ReleaseManifest, string, error
 	return manifest, manifest.ArtifactSHA256, nil
 }
 
-func compareBinaryManifest(binary BinaryInfo, manifest ReleaseManifest) error {
-	if binary.Version != manifest.Version || binary.Commit != manifest.Commit || binary.Target != manifest.Target || binary.DeliveryProtocol != manifest.DeliveryProtocol || binary.AssignmentProtocol != manifest.AssignmentProtocol ||
+func CompareBinaryManifest(binary BinaryInfo, manifest ReleaseManifest) error {
+	if binary.RepositoryCommandProtocol != manifest.RepositoryCommandProtocol || binary.Version != manifest.Version || binary.Commit != manifest.Commit || binary.Target != manifest.Target || binary.DeliveryProtocol != manifest.DeliveryProtocol || binary.AssignmentProtocol != manifest.AssignmentProtocol ||
 		binary.StateSchemaCurrent != manifest.StateSchemaCurrent || binary.StateSchemaMigrationFrom != manifest.StateSchemaMigrationFrom ||
 		binary.SemanticContractCurrent != manifest.SemanticContractCurrent || binary.SemanticContractMinimum != manifest.SemanticContractMinimum {
 		return errors.New("binary embedded metadata does not match release manifest")
@@ -344,7 +346,7 @@ func compareBinaryManifest(binary BinaryInfo, manifest ReleaseManifest) error {
 	return nil
 }
 
-func parseChecksums(path string) (map[string]string, error) {
+func ParseChecksums(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -354,7 +356,7 @@ func parseChecksums(path string) (map[string]string, error) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) != 2 || !validDigest(fields[0]) {
+		if len(fields) != 2 || !ValidDigest(fields[0]) {
 			return nil, errors.New("invalid checksums.txt format")
 		}
 		name := strings.TrimPrefix(fields[1], "*")
@@ -372,7 +374,7 @@ func parseChecksums(path string) (map[string]string, error) {
 	return result, nil
 }
 
-func fileDigest(path string) (string, error) {
+func FileDigest(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -380,12 +382,12 @@ func fileDigest(path string) (string, error) {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
 }
-func validDigest(value string) bool {
+func ValidDigest(value string) bool {
 	_, err := hex.DecodeString(value)
 	return len(value) == 64 && err == nil && value == strings.ToLower(value)
 }
-func validSHA(value string) bool { return len(value) == 40 && validHex(value) }
-func validHex(value string) bool {
+func ValidSHA(value string) bool { return len(value) == 40 && ValidHex(value) }
+func ValidHex(value string) bool {
 	_, err := hex.DecodeString(value)
 	return err == nil && value == strings.ToLower(value)
 }

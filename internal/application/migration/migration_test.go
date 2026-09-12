@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +16,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 
 	"github.com/ishii1648/codex-issue-loop/internal/platform/config"
+	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/registry"
 )
@@ -567,4 +567,60 @@ func writeV4Fixture(t *testing.T, withTransaction bool) (layout.Layout, string, 
 		original[path] = append([]byte(nil), data...)
 	}
 	return l, repo, original
+}
+
+func TestRepositoryMigrationDoesNotInspectOrRestoreOtherRepository(t *testing.T) {
+	l, _, _ := writeV4Fixture(t, false)
+	raw, err := os.ReadFile(l.RegistryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registered registry.Registry
+	if err := json.Unmarshal(raw, &registered); err != nil {
+		t.Fatal(err)
+	}
+	registered.Version = registry.CurrentVersion
+	otherRepo := filepath.Join(l.Root, "other")
+	if err := os.MkdirAll(otherRepo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registered.Repos["other"] = registry.Entry{RepoID: "other", RepoPath: otherRepo, GitHubRepo: "owner/other"}
+	if err := fsutil.WriteJSON(l.RegistryPath, registered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	untouched := map[string][]byte{filepath.Join(l.RepoDir("other"), "state.json"): []byte("future and invalid snapshot"), filepath.Join(otherRepo, config.FileName): []byte("future and invalid config")}
+	for path, data := range untouched {
+		if err := fsutil.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original, err := os.ReadFile(filepath.Join(l.RepoDir("repo-1"), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrator := Migrator{Layout: l, RepositoryID: "repo-1"}
+	result, err := migrator.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := InspectRepository(l, "repo-1")
+	if err != nil || report.NeedsMigration {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	if _, err := migrator.Restore(result.Backup); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(l.RepoDir("repo-1"), "state.json"))
+	if err != nil || !bytes.Equal(after, original) {
+		t.Fatal("selected snapshot not restored")
+	}
+	for path, data := range untouched {
+		after, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(after, data) {
+			t.Fatalf("changed %s", path)
+		}
+	}
+	if _, err := (Migrator{Layout: l, RepositoryID: "other"}).Restore(result.Backup); err == nil {
+		t.Fatal("cross-repository restore accepted")
+	}
 }

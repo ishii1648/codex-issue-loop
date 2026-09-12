@@ -30,8 +30,7 @@ if [ -n "$rollback_drill_file" ]; then
   rollback_json=$(cat "$rollback_drill_file")
 fi
 
-actual_operator_digest=$(shasum -a 256 "$operator_binary" | awk '{print $1}')
-[ "$actual_operator_digest" = "$stable_digest" ]
+"$operator_binary" version --json | jq -e ' .repository_command_protocol == 1 ' >/dev/null
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/agent-loop-assignment-health.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
 mkdir -p "$artifact_dir"

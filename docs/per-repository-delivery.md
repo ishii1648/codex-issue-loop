@@ -28,6 +28,8 @@ previewはfileを変更しない。applyは現在binaryをimmutable slotへcopy�
 
 ## Repository単位の適用
 
+ホスト切替後は `operator_binary=agent-loopctl` を使用する。切替前の config migration は上記の検証済み旧 operator を使い、通常の repository 操作と区別する。
+
 `--version`は既存のexact stable tagを指定する。release公開待ち、artifact取得・検証、previewの間はloopを稼働させ、事前に`stop`しない。previewが返したgenerationをapplyへ渡す。apply自身が検証済みartifactをstageした後にfenceを設定してdrainし、checkpoint到達後に切り替える。drain timeoutではworkerを止めず通常運転へ戻す。
 
 ```sh
@@ -91,3 +93,5 @@ CLIは保存済みtarget slotのdigest、fence generation、repository stateを�
 - Issue、active execution、pending request、managed worktreeの要約
 
 対象repositoryは`assignment verify`、`doctor --repo ... --assignment-health --json`、`status --repo ... --json`を保存する。最終状態は全repositoryでworker limit 1、pending assignment transactionなし、repository fenceなしを必須とする。
+
+rollout health の `PRODUCTION_AGENT_LOOP_BINARY` には検証済みの `agent-loopctl` を指定する。`STABLE_BINARY_SHA256` は対象 repository runtime の digest であり、ホスト CLI の digest とは比較しない。

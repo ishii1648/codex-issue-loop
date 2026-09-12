@@ -14,6 +14,7 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/state"
 	"github.com/ishii1648/codex-issue-loop/internal/application/drain"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
+	meta "github.com/ishii1648/codex-issue-loop/internal/platform/deliverymeta"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/fsutil"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/launchd"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/layout"
@@ -21,6 +22,7 @@ import (
 )
 
 type AssignmentController struct {
+	Lock       *Lock
 	Layout     layout.Layout
 	ConfigPath string
 	GH         string
@@ -78,7 +80,7 @@ func (c AssignmentController) EnsureRepositoryAssignment(entry registry.Entry) (
 		}
 		return RepositoryAssignment{}, false, err
 	}
-	lock, err := AcquireLock(RuntimePaths(c.Layout.Root).Lock)
+	lock, err := c.acquireLock()
 	if err != nil {
 		return RepositoryAssignment{}, false, err
 	}
@@ -111,21 +113,28 @@ func (c AssignmentController) EnsureRepositoryAssignment(entry registry.Entry) (
 			return RepositoryAssignment{}, false, fmt.Errorf("assignment repository %s is not registered", id)
 		}
 	}
-	installed, err := readInstalled(filepath.Join(c.Layout.Root, "install.json"))
-	if err != nil {
-		return RepositoryAssignment{}, false, err
-	}
-	binary := filepath.Join(c.Layout.BinDir, "agent-loop")
-	digest, err := fileDigest(binary)
-	if err != nil {
-		return RepositoryAssignment{}, false, err
-	}
-	if installed.BinarySHA256 != "" && installed.BinarySHA256 != digest {
-		return RepositoryAssignment{}, false, errors.New("installed binary digest does not match install manifest")
-	}
-	ref := SlotRef(c.Layout, installed.Version, installed.Commit, digest)
-	if err := StageSlot(c.Layout, ref, binary); err != nil {
-		return RepositoryAssignment{}, false, err
+	var ref AssignmentRef
+	if host, hostErr := meta.ReadHostInstallation(c.Layout); hostErr == nil {
+		ref = host.Bootstrap
+	} else if !errors.Is(hostErr, os.ErrNotExist) {
+		return RepositoryAssignment{}, false, hostErr
+	} else {
+		installed, err := readInstalled(filepath.Join(c.Layout.Root, "install.json"))
+		if err != nil {
+			return RepositoryAssignment{}, false, err
+		}
+		binary := filepath.Join(c.Layout.BinDir, "agent-loop")
+		digest, err := fileDigest(binary)
+		if err != nil {
+			return RepositoryAssignment{}, false, err
+		}
+		if installed.BinarySHA256 != "" && installed.BinarySHA256 != digest {
+			return RepositoryAssignment{}, false, errors.New("installed binary digest does not match install manifest")
+		}
+		ref = SlotRef(c.Layout, installed.Version, installed.Commit, digest)
+		if err := StageSlot(c.Layout, ref, binary); err != nil {
+			return RepositoryAssignment{}, false, err
+		}
 	}
 	assignment := RepositoryAssignment{RepositoryID: entry.RepoID, AssignmentRef: ref, Generation: 1, UpdatedAt: c.now()}
 	cfg.Assignments[entry.RepoID] = assignment
@@ -147,7 +156,7 @@ func (c AssignmentController) RemoveRepositoryAssignment(repoID string) (bool, e
 		}
 		return false, err
 	}
-	lock, err := AcquireLock(RuntimePaths(c.Layout.Root).Lock)
+	lock, err := c.acquireLock()
 	if err != nil {
 		return false, err
 	}
@@ -237,7 +246,7 @@ func (c AssignmentController) MigrateConfig(ctx context.Context, apply bool) (As
 	if !apply {
 		return report, nil
 	}
-	lock, err := AcquireLock(RuntimePaths(c.Layout.Root).Lock)
+	lock, err := c.acquireLock()
 	if err != nil {
 		return report, err
 	}
@@ -454,7 +463,7 @@ func (c AssignmentController) Rollback(ctx context.Context, repoPath string, exp
 }
 
 func (c AssignmentController) RetryRollback(ctx context.Context, repoPath string) (AssignmentReport, error) {
-	lock, err := AcquireLock(RuntimePaths(c.Layout.Root).Lock)
+	lock, err := c.acquireLock()
 	if err != nil {
 		return AssignmentReport{}, err
 	}
@@ -540,7 +549,7 @@ func (c AssignmentController) RetryRollback(ctx context.Context, repoPath string
 }
 
 func (c AssignmentController) switchTo(ctx context.Context, repoPath string, desired AssignmentRef, expectedGeneration uint64, rollback, retryRetainedFence bool) (AssignmentReport, error) {
-	lock, err := AcquireLock(RuntimePaths(c.Layout.Root).Lock)
+	lock, err := c.acquireLock()
 	if err != nil {
 		return AssignmentReport{}, err
 	}
@@ -1018,6 +1027,12 @@ func (c AssignmentController) health(ctx context.Context, entry registry.Entry, 
 }
 
 func (c AssignmentController) ensureDeliveryController(ctx context.Context, cfg Config, manager launchd.Manager, desired AssignmentRef) error {
+	if _, err := meta.ReadHostInstallation(c.Layout); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
 	if err := VerifySlot(desired); err != nil {
 		return err
 	}
@@ -1186,4 +1201,11 @@ func (c AssignmentController) validateAssignmentSet(cfg Config, registered regis
 		}
 	}
 	return nil
+}
+
+func (c AssignmentController) acquireLock() (*Lock, error) {
+	if c.Lock != nil {
+		return c.Lock.Borrow(), nil
+	}
+	return AcquireLock(RuntimePaths(c.Layout.Root).Lock)
 }

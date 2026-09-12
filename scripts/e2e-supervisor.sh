@@ -2,7 +2,7 @@
 
 set -u
 
-agent_loop_bin=${AGENT_LOOP_BIN:-agent-loop}
+agent_loop_bin=${AGENT_LOOP_BIN:-agent-loopctl}
 repo_path=
 timeout_seconds=0
 child_pid=

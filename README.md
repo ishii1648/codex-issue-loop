@@ -51,17 +51,17 @@ gh release download "$agent_loop_version" \
 
 cd "$agent_loop_download_dir"
 shasum -a 256 -c checksums.txt
-gh attestation verify agent-loop_Darwin_arm64 \
+gh attestation verify agent-loopctl_Darwin_arm64 \
   --repo ishii1648/codex-issue-loop
-chmod 0755 agent-loop_Darwin_arm64
-./agent-loop_Darwin_arm64 version --json
-./agent-loop_Darwin_arm64 install --json
+chmod 0755 agent-loopctl_Darwin_arm64
+./agent-loopctl_Darwin_arm64 version --json
+./agent-loopctl_Darwin_arm64 install --json
 
-agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loop"
+agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loopctl"
 "$agent_loop_bin" init --json
 "$agent_loop_bin" init --apply --json
 "$agent_loop_bin" init --json
-"$agent_loop_bin" doctor --json
+"$agent_loop_bin" version --json
 ```
 
 `init`はCodexとClaude Codeのuser scopeへ、`.agent-loop.yaml`があるrepositoryの変更依頼をIssueへ委譲するルールを設定します。preview、対象agentの限定、競合、backupと復旧は[user-scope Issue作成ルール](docs/user-rules.md)を参照してください。`install`、`update`、`doctor`、`uninstall`がこの設定を暗黙に変更することはありません。
@@ -104,7 +104,7 @@ release binaryと同じtagの設定例を使い、repository、入口label、並
 ラベルの変更計画を確認してから不足分を作成し、リポジトリをLaunchAgentへ登録します。
 
 ```sh
-agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loop"
+agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loopctl"
 
 "$agent_loop_bin" bootstrap-labels --repo "$PWD" --json
 "$agent_loop_bin" bootstrap-labels --repo "$PWD" --apply --json
@@ -142,7 +142,7 @@ local HTTP/CDP検証が必要なrepositoryだけ、固定の`worker.command_netw
 CLIのinstallはMacごとに1回だけ行います。各リポジトリへ`.agent-loop.yaml`とラベルを用意し、それぞれを`register`、`start`します。
 
 ```sh
-agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loop"
+agent_loop_bin="$HOME/Library/Application Support/codex-issue-loop/bin/agent-loopctl"
 
 "$agent_loop_bin" register --repo /absolute/path/to/repo-a --json
 "$agent_loop_bin" register --repo /absolute/path/to/repo-b --json

@@ -63,7 +63,7 @@ func (a App) deliveryAssignment(ctx context.Context, l layout.Layout, args []str
 	if resolved, lookErr := exec.LookPath("gh"); lookErr == nil {
 		ghPath = resolved
 	}
-	controller := delivery.AssignmentController{Layout: l, ConfigPath: path, GH: ghPath}
+	controller := delivery.AssignmentController{Lock: a.assignmentLock, Layout: l, ConfigPath: path, GH: ghPath}
 	switch operation {
 	case "migrate":
 		if *repoPath != "" || *version != "" || *expectedGeneration != 0 || *confirmRetainedFence {
