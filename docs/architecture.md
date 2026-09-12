@@ -218,7 +218,11 @@ GitHubへの状態同期が失敗しても、localのIssue終端化と実行枠�
 
 snapshot の永続化契約は単一整数 `version=6` で識別する。構造・JSON名・必須条件・相互不変条件は `internal/domain/snapshot`、フィールドの意味と実行要件は同層と `internal/domain/statecontract`、許可遷移は既存の `internal/domain/issue` が正本である。`state_revision` は transaction の更新番号であり、互換性識別には使わない。snapshot は直接編集用の公開 API ではなく、更新は正式操作と Store transaction を通す。
 
-契約変更の検出対象は `internal/domain/snapshot/**`、`internal/domain/statecontract/**`、`internal/domain/issue/**`、埋め込む型の依存先である `internal/domain/publication/**`、`internal/domain/queue/**`。型だけでなく validator の受理条件、JSON decode、正規化、遷移 decision も対象とする。#536 はこのパス集合を基準に CI を実装する。
+契約変更の検出対象は `internal/domain/snapshot/**`、`internal/domain/statecontract/**`、`internal/domain/issue/**`、埋め込む型の依存先である `internal/domain/publication/**`、`internal/domain/queue/**`。型だけでなく validator の受理条件、JSON decode、正規化、遷移 decision も対象とする。CI の `make snapshot-contract-check` はこの集合の全ファイル（`_test.go` を除く）の path・mode・blob を比較する。移動・削除、コメントや振る舞いを変えない整理も一律に検出するため、契約層内ではそれらにも version 更新が必要になる。adapter/application の具体実装だけの変更は更新不要であり、既存 architecture test による依存・status commit 境界の検証を併用する。
+
+比較元は公式 repository `ishii1648/codex-issue-loop` の GitHub Releases API を全ページ取得し、draft/prerelease を除く `vMAJOR.MINOR.PATCH` のうち公開日時が最も新しい release とする。初期適用下限は契約分離前の最終公開版 `v0.12.35`。以後の通常公開版すべてを対象に、API の tag object SHA と checkout 内の tag を照合する。PR base や直前 commit は使用しない。release・tag・version 定義の欠損、取得・build・test 不能、選択の曖昧さは非ゼロ終了となる。契約変更時は対象公開版全体の最大 version より大きい整数を要求し、既存番号の再利用と後退を拒否する。単一整数契約には major/minor の区別はない。
+
+同ゲートは公開 tag と対象 HEAD を一時ディレクトリへ展開し、それぞれの Store writer/診断 reader を build して #439 の匿名化 fixture を双方向に検証する。同じ version なら双方が受理し、解釈した snapshot が一致することを要求する。異なる version は双方の自己読み取り成功と相手 version の拒否を要求し、回答履歴を壊した入力も拒否する。診断前後の全ファイルのハッシュと集合を比較し、拒否時の修復・隔離を許さない。fixture の存在だけで成功とはせず、HEAD SHA・比較 release・実行結果を CI 出力に残す。これは fixture の範囲での互換性証拠であり、一般的な意味差分の証明ではない。release の既存 manifest による v6 配布保留は #587 の統合・検証まで維持する。
 
 同じ version を維持できるのは、新旧 reader が既存の正常 snapshot を同じ意味で受理できる変更だけである。必須条件・状態の意味・許可遷移・validator の受理集合の変更、旧 reader が拒否する optional field の追加でも version を更新する。非互換変更は version 更新と明示的 migration を対にする。CLI 出力自身の schema、config/registry、monitor、delivery protocol の version はこの識別子へ統合しない。release metadata の旧名 `state_schema_current` / `semantic_contract_current` は同じ単一 version を表示し、別々に更新しない。lifecycle API metadata は旧契約の情報であり snapshot reader の互換判定には使用しない。
 
