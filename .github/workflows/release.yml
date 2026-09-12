@@ -32,7 +32,7 @@ jobs:
   verify-main-ci:
     name: verify-main-ci
     runs-on: macos-15
-    timeout-minutes: 5
+    timeout-minutes: 25
     permissions:
       contents: read
       actions: read
@@ -97,7 +97,7 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ github.run_id }}
           path: dist/candidate
           if-no-files-found: error
           retention-days: 30
@@ -118,7 +118,7 @@ jobs:
           cache: true
       - uses: actions/download-artifact@v7
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ github.run_id }}
           path: dist/candidate
       - name: Compare a verification-only rebuild
         run: |
@@ -139,7 +139,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v7
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ github.run_id }}
           path: dist/candidate
       - name: Verify checksums, manifest, and candidate attestation
         env:
@@ -206,7 +206,7 @@ jobs:
         run: go test ./internal/adapter/github ./internal/adapter/worker ./internal/platform/compat -count=1
       - uses: actions/upload-artifact@v6
         with:
-          name: cli-surface-contract-${{ github.sha }}
+          name: cli-surface-contract-${{ github.run_id }}
           path: contract-artifacts/cli-surface-report.json
           if-no-files-found: error
 
@@ -224,11 +224,11 @@ jobs:
           go-version: "1.25.13"
       - uses: actions/download-artifact@v7
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ github.run_id }}
           path: dist/candidate
       - uses: actions/download-artifact@v7
         with:
-          name: cli-surface-contract-${{ github.sha }}
+          name: cli-surface-contract-${{ github.run_id }}
           path: contract-artifacts
       - name: Prime the module cache before disabling external network access
         run: go mod download
@@ -247,7 +247,7 @@ jobs:
           go test ./internal/application/delivery -run '^(TestPerRepositoryApplyAndRollbackLeaveOtherRepositoryBytesUnchanged|TestRunningRepositorySwitchPreservesOtherPIDAndSnapshot|TestLegacyRuntimeSwitchUsesTargetStateLockWithoutGlobalFence|TestAssignmentResumesCrashAfterConfigCommit|TestAssignmentResumesInterruptedRollback|TestAssignmentRollbackFailureRetainsRepositoryFence|TestAssignmentDrainTimeoutDoesNotStopActiveWorker)$' -count=1
       - uses: actions/upload-artifact@v6
         with:
-          name: offline-contract-report-${{ github.sha }}
+          name: offline-contract-report-${{ github.run_id }}
           path: contract-artifacts/offline-contract-report.json
           if-no-files-found: error
       - name: Attest credentialless contract evidence
@@ -256,24 +256,32 @@ jobs:
           subject-path: |
             contract-artifacts/cli-surface-report.json
             contract-artifacts/offline-contract-report.json
+
+  candidate-integrity:
+    name: candidate-integrity
+    needs: [isolated-canary, verify-main-ci]
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-${{ github.run_id }}
+          path: dist/candidate
+      - uses: actions/download-artifact@v7
+        with:
+          name: cli-surface-contract-${{ github.run_id }}
+          path: contract-artifacts
+      - uses: actions/download-artifact@v7
+        with:
+          name: offline-contract-report-${{ github.run_id }}
+          path: contract-artifacts
       - name: Publish the candidate prerelease from canonical bytes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           candidate_tag="candidate-${RELEASE_TAG}-${GITHUB_RUN_ID}"
           gh release create "$candidate_tag" dist/candidate/* contract-artifacts/*.json \
-            --target "$RELEASE_COMMIT" --prerelease --title "$candidate_tag" --notes "Release candidate for $RELEASE_TAG from $RELEASE_COMMIT"
-
-  candidate-integrity:
-    name: candidate-integrity
-    needs: isolated-canary
-    runs-on: macos-15
-    timeout-minutes: 10
-    steps:
-      - uses: actions/download-artifact@v7
-        with:
-          name: release-candidate-${{ github.sha }}
-          path: dist/candidate
+            --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" --prerelease --title "$candidate_tag" --notes "Release candidate for $RELEASE_TAG from $RELEASE_COMMIT"
       - name: Verify immutable candidate bytes and attestation
         env:
           GH_TOKEN: ${{ github.token }}
@@ -294,7 +302,7 @@ jobs:
             >candidate-integrity/report.json
       - uses: actions/upload-artifact@v6
         with:
-          name: candidate-integrity-${{ github.sha }}
+          name: candidate-integrity-${{ github.run_id }}
           path: candidate-integrity/report.json
           if-no-files-found: error
 
@@ -306,19 +314,19 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ github.run_id }}
           path: evidence/candidate
       - uses: actions/download-artifact@v7
         with:
-          name: cli-surface-contract-${{ github.sha }}
+          name: cli-surface-contract-${{ github.run_id }}
           path: evidence/contracts
       - uses: actions/download-artifact@v7
         with:
-          name: offline-contract-report-${{ github.sha }}
+          name: offline-contract-report-${{ github.run_id }}
           path: evidence/contracts
       - uses: actions/download-artifact@v7
         with:
-          name: candidate-integrity-${{ github.sha }}
+          name: candidate-integrity-${{ github.run_id }}
           path: evidence/integrity
       - name: Authorize promotion from machine-verifiable evidence
         shell: bash
@@ -346,7 +354,7 @@ jobs:
           subject-path: promotion-evidence.json
       - uses: actions/upload-artifact@v6
         with:
-          name: promotion-evidence-${{ github.sha }}
+          name: promotion-evidence-${{ github.run_id }}
           path: promotion-evidence.json
           if-no-files-found: error
 
@@ -362,15 +370,15 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v7
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ github.run_id }}
           path: dist/candidate
       - uses: actions/download-artifact@v7
         with:
-          name: cli-surface-contract-${{ github.sha }}
+          name: cli-surface-contract-${{ github.run_id }}
           path: dist/contracts
       - uses: actions/download-artifact@v7
         with:
-          name: offline-contract-report-${{ github.sha }}
+          name: offline-contract-report-${{ github.run_id }}
           path: dist/contracts
       - name: Publish stable release without rebuilding
         env:
@@ -390,7 +398,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v7
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ github.run_id }}
           path: dist/candidate
       - name: Read back stable metadata, attestation, and candidate byte equality
         env:

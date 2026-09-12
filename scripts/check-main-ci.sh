@@ -17,11 +17,15 @@ run=$(jq -ec --arg repo "$GITHUB_REPOSITORY" --arg sha "$RELEASE_COMMIT" --argjs
     .head_sha == $sha and .head_branch == "main" and .event == "push" and
     .workflow_id == $workflow and .path == ".github/workflows/ci.yml" and (.id | type) == "number")) |
   max_by(.id) |
-  select(.status == "completed" and .conclusion == "success" and .run_attempt > 0)
+  select(.run_attempt > 0)
 ' <<<"$runs")
 run_id=$(jq -r '.id' <<<"$run")
 attempt=$(jq -r '.run_attempt' <<<"$run")
 printf 'Checking main CI run %s attempt %s for %s\n' "$run_id" "$attempt" "$RELEASE_COMMIT"
+
+if [[ $(jq -r '.status' <<<"$run") != completed ]]; then
+  gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 15
+fi
 
 jobs=$(gh api "$api/runs/$run_id/attempts/$attempt/jobs?per_page=100")
 jq -e --arg sha "$RELEASE_COMMIT" --argjson run "$run_id" --argjson attempt "$attempt" '
@@ -42,5 +46,11 @@ jq -e --argjson expected "$run" '
   .head_sha == $expected.head_sha and .head_branch == "main" and .event == "push" and
   .status == "completed" and .conclusion == "success"
 ' <<<"$current" >/dev/null
+latest=$(gh api "$api/workflows/$workflow_id/runs?branch=main&event=push&head_sha=$RELEASE_COMMIT&per_page=100")
+jq -e --argjson run "$run_id" --argjson attempt "$attempt" '
+  select(.total_count > 0 and .total_count <= 100 and .total_count == (.workflow_runs | length)) |
+  .workflow_runs | max_by(.id) |
+  .id == $run and .run_attempt == $attempt and .status == "completed" and .conclusion == "success"
+' <<<"$latest" >/dev/null
 printf 'Verified https://github.com/%s/actions/runs/%s/attempts/%s commit %s\n' \
   "$GITHUB_REPOSITORY" "$run_id" "$attempt" "$RELEASE_COMMIT" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"

@@ -451,7 +451,7 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 		"lifecycle-conformance":           nil,
 		"cli-surface-contract":            nil,
 		"isolated-canary":                 {"build-candidate", "cli-surface-contract"},
-		"candidate-integrity":             {"isolated-canary"},
+		"candidate-integrity":             {"isolated-canary", "verify-main-ci"},
 		"promotion-evidence":              {"verify-main-ci", "verify-reproducibility", "verify-attestation-and-manifest", "replay-production-fixtures", "lifecycle-conformance", "candidate-integrity"},
 		"promote-stable":                  {"build-candidate", "promotion-evidence"},
 		"verify-stable-release":           {"promote-stable"},

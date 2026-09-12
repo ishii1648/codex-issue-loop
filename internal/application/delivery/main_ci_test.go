@@ -12,7 +12,7 @@ import (
 )
 
 func TestReleaseMainCIFailsClosed(t *testing.T) {
-	for _, scenario := range []string{"rerun-success", "latest-run-success", "wrong-sha", "pull-request", "wrong-workflow", "wrong-path", "wrong-repository", "wrong-head-repository", "wrong-branch", "no-runs", "running", "failed", "cancelled", "skipped", "missing-quality", "duplicate-quality", "quality-failed", "quality-skipped", "quality-cancelled", "quality-running", "wrong-job-attempt", "wrong-job-run", "wrong-job-sha", "truncated-runs", "truncated-jobs", "too-many-runs", "old-success-new-failure", "old-failure-new-success", "rerun-started", "api-workflow", "api-runs", "api-jobs", "api-current", "malformed"} {
+	for _, scenario := range []string{"waiting-success", "queued-success", "waiting-failure", "waiting-rerun", "waiting-new-run", "waiting-api", "rerun-success", "latest-run-success", "wrong-sha", "pull-request", "wrong-workflow", "wrong-path", "wrong-repository", "wrong-head-repository", "wrong-branch", "no-runs", "running", "failed", "cancelled", "skipped", "missing-quality", "duplicate-quality", "quality-failed", "quality-skipped", "quality-cancelled", "quality-running", "wrong-job-attempt", "wrong-job-run", "wrong-job-sha", "truncated-runs", "truncated-jobs", "too-many-runs", "old-success-new-failure", "old-failure-new-success", "rerun-started", "api-workflow", "api-runs", "api-jobs", "api-current", "malformed"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			run := map[string]any{"id": 42, "run_attempt": 2, "workflow_id": 7, "path": ".github/workflows/ci.yml", "repository": map[string]any{"full_name": "owner/repo"}, "head_repository": map[string]any{"full_name": "owner/repo"}, "head_sha": evidenceCommit, "head_branch": "main", "event": "push", "status": "completed", "conclusion": "success"}
@@ -37,8 +37,11 @@ func TestReleaseMainCIFailsClosed(t *testing.T) {
 				run["head_branch"] = "feature"
 			case "no-runs":
 				runs = nil
-			case "running":
+			case "waiting-success", "waiting-failure", "waiting-rerun", "waiting-new-run", "waiting-api", "queued-success", "running":
 				run["status"] = "in_progress"
+				if scenario == "queued-success" {
+					run["status"] = "queued"
+				}
 			case "failed":
 				run["conclusion"] = "failure"
 			case "cancelled", "skipped":
@@ -99,13 +102,22 @@ func TestReleaseMainCIFailsClosed(t *testing.T) {
 			writeJSON("workflow", workflow)
 			writeJSON("runs", map[string]any{"total_count": runCount, "workflow_runs": runs})
 			writeJSON("jobs", map[string]any{"total_count": jobCount, "jobs": jobs})
-			if scenario == "rerun-started" {
+			if strings.HasPrefix(scenario, "waiting-") || scenario == "queued-success" {
+				run["status"] = "completed"
+			}
+			if scenario == "rerun-started" || scenario == "waiting-rerun" {
 				run["run_attempt"] = 3
 				run["status"] = "in_progress"
 			}
 			writeJSON("current", run)
 			writeExecutable(t, root, "gh", `#!/bin/sh
 set -eu
+if [ "$1" = run ]; then
+ [ "$*" = "run watch 42 --repo owner/repo --exit-status --interval 15" ] || exit 91
+ [ "$SCENARIO" != waiting-failure ] && [ "$SCENARIO" != waiting-api ] || exit 1
+ touch "$FIXTURE/watched"
+ exit 0
+fi
 [ "$1" = api ]
 case "$2" in
  repos/owner/repo/actions/workflows/ci.yml) file=workflow ;;
@@ -116,12 +128,20 @@ case "$2" in
 esac
 [ "$SCENARIO" != "api-$file" ] || exit 1
 if [ "$SCENARIO" = malformed ]; then printf '{'; exit 0; fi
-cat "$FIXTURE/$file"
+if [ "$file" = runs ] && [ -f "$FIXTURE/watched" ]; then
+ if [ "$SCENARIO" = waiting-new-run ]; then
+  jq '{total_count:1,workflow_runs:[. + {id:43}]}' "$FIXTURE/current"
+ else
+  jq '{total_count:1,workflow_runs:[.]}' "$FIXTURE/current"
+ fi
+else
+ cat "$FIXTURE/$file"
+fi
 `)
 			cmd := exec.Command("bash", filepath.Join(repositoryRoot(t), "scripts/check-main-ci.sh"))
 			cmd.Env = append(os.Environ(), "PATH="+root+":"+os.Getenv("PATH"), "FIXTURE="+root, "SCENARIO="+scenario, "GITHUB_REPOSITORY=owner/repo", "RELEASE_COMMIT="+evidenceCommit, "GH_TOKEN=", "GITHUB_STEP_SUMMARY="+filepath.Join(root, "summary"))
 			output, err := cmd.CombinedOutput()
-			wantOK := scenario == "rerun-success" || scenario == "latest-run-success" || scenario == "old-failure-new-success"
+			wantOK := scenario == "waiting-success" || scenario == "queued-success" || scenario == "rerun-success" || scenario == "latest-run-success" || scenario == "old-failure-new-success"
 			if (err == nil) != wantOK {
 				t.Fatalf("success=%v want=%v: %s", err == nil, wantOK, output)
 			}
