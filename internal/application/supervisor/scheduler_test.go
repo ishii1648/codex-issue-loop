@@ -108,7 +108,7 @@ func TestSelectReadySkipsUntrustedAuthorAndContinues(t *testing.T) {
 	}
 }
 
-func TestSelectReadyWaitsForQuarantinedIssue(t *testing.T) {
+func TestSelectReadySkipsQuarantinedIssueAndContinues(t *testing.T) {
 	loop, _ := testLoop(t, worker.Result{})
 	loop.Logger = log.New(io.Discard, "", 0)
 	s := &scheduler{loop: loop, active: map[int]activeJob{}}
@@ -126,7 +126,7 @@ func TestSelectReadyWaitsForQuarantinedIssue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
+	if !ok || selected.Number != 2 {
 		t.Fatalf("selected=%+v ok=%v", selected, ok)
 	}
 }
@@ -1867,7 +1867,7 @@ func TestSchedulerCancellationStopsAllWorkers(t *testing.T) {
 	}
 }
 
-func TestSchedulerWaitsAfterNeedsInput(t *testing.T) {
+func TestSchedulerContinuesAfterNeedsInput(t *testing.T) {
 	question := worker.Result{Version: 1, Status: "needs_input", ExecutionProfile: "standard", Summary: "decision", SessionID: "session", Question: &worker.Question{Text: "Choose?", AllowFreeText: true}}
 	loop, github := testLoop(t, question)
 	if _, err := loop.RunOnce(context.Background()); err != nil {
@@ -1882,8 +1882,8 @@ func TestSchedulerWaitsAfterNeedsInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Issues["2"] != nil || snapshot.ActiveExecution != nil || snapshot.Issues["1"].Status != issuedomain.StatusNeedsInput {
-		t.Fatalf("input wait did not retain ordering: %+v", snapshot)
+	if snapshot.Issues["2"] == nil || snapshot.Issues["2"].Status != issuedomain.StatusNeedsInput || snapshot.ActiveExecution != nil || snapshot.Issues["1"].Status != issuedomain.StatusNeedsInput {
+		t.Fatalf("input wait blocked the following worker: %+v", snapshot)
 	}
 }
 
@@ -2343,7 +2343,7 @@ func TestSchedulerSkipsReadyIssueWithRetainedLifecycle(t *testing.T) {
 				github.issue,
 				{Number: 2, State: "OPEN", Labels: loop.Config.GitHub.ReadyLabels},
 			}, before)
-			if err != nil || ok {
+			if err != nil || ok != (status == issuedomain.StatusFailed) || ok && selected.Number != 2 {
 				t.Fatalf("selected=%+v ok=%v err=%v", selected, ok, err)
 			}
 			cause := loop.startIssue(ctx, github.issue, "new_run")
@@ -2851,7 +2851,8 @@ func TestSchedulerAdmissionAcrossRetainedLifecycles(t *testing.T) {
 			}}
 			candidate := gh.Issue{Number: 2, State: "OPEN", Labels: loop.Config.GitHub.ReadyLabels}
 			_, ok, err := s.selectReady(context.Background(), []gh.Issue{candidate}, snapshot)
-			want := status == issuedomain.StatusUnset || status == issuedomain.StatusCompleted || status == issuedomain.StatusCanceled
+			want := status == issuedomain.StatusUnset || status == issuedomain.StatusCompleted || status == issuedomain.StatusCanceled ||
+				status == issuedomain.StatusFailed || status == issuedomain.StatusBlocked || status == issuedomain.StatusNeedsInput
 			if err != nil || ok != want {
 				t.Fatalf("admitted=%v want=%v err=%v", ok, want, err)
 			}
@@ -2967,5 +2968,94 @@ func TestWebhookAdmissionRetainsIntentUntilAllExistingIssuesFinish(t *testing.T)
 	remaining, err := webhook.ReadMailbox(loop.Store.Dir)
 	if err != nil || len(remaining) != 1 {
 		t.Fatalf("lost unadmitted intent: remaining=%v err=%v", remaining, err)
+	}
+}
+
+func TestFaultSchedulerAdmitsPastIsolatedIssuesAndDefersAnsweredResume(t *testing.T) {
+	for _, mode := range []string{"poll", "webhook"} {
+		t.Run(mode, func(t *testing.T) {
+			question := worker.Result{Version: 1, Status: "needs_input", ExecutionProfile: "extended", Summary: "decision", SessionID: "session", Question: &worker.Question{Text: "Choose?", AllowFreeText: true}}
+			loop, github := testLoop(t, question)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if _, err := loop.RunOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			before, err := loop.Store.Update("isolated_history", 0, "", nil, func(snapshot *state.Snapshot) error {
+				snapshot.Issues["3"] = &state.Issue{Number: 3, Status: issuedomain.StatusFailed, LastError: "retry exhausted"}
+				snapshot.Issues["4"] = &state.Issue{Number: 4, Status: issuedomain.StatusBlocked, LastError: "environment unavailable"}
+				snapshot.QuarantinedIssues["5"] = &state.QuarantineRecord{IssueNumber: 5, ReasonCode: "fixture", Reason: "ambiguous evidence", QuarantinedAt: loop.now()}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			github.issue = gh.Issue{Number: 2, Title: "Next", State: "OPEN", Labels: loop.Config.GitHub.ReadyLabels}
+			loop.GitHub = numberedFakeGitHub{fakeGitHub: github}
+			if mode == "webhook" {
+				loop.Config.Webhook.Mode = "webhook"
+				loop.GitHub = &webhookFakeGitHub{fakeGitHub: github}
+				for _, id := range []string{"first", "duplicate"} {
+					if err := webhook.EnqueueMailbox(loop.Store.Dir, webhook.Delivery{Version: webhook.InboxVersion, DeliveryID: id, Event: "issues", Action: "labeled", RepoID: loop.Store.RepoID, Repository: loop.Config.GitHub.Repo, IssueNumber: 2, AcceptedAt: loop.now()}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			pool := &blockingPoolWorker{started: make(chan int, 2), release: make(chan struct{}, 2)}
+			loop.Worker = pool
+			s := &scheduler{loop: loop, events: make(chan schedulerEvent, 2), active: map[int]activeJob{}, issueRetry: map[int]time.Time{}, issueFails: map[int]int{}, terminalPoll: map[int]time.Time{}}
+			defer s.cancelAndDrain()
+			for _, number := range []int{1, 2, 3, 4, 5} {
+				s.terminalPoll[number] = loop.now().Add(time.Hour)
+			}
+			if _, err := s.schedule(ctx, mode == "poll"); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case number := <-pool.started:
+				if number != 2 {
+					t.Fatalf("started Issue %d, want 2", number)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("isolated history blocked the following worker")
+			}
+			running, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"1", "3", "4"} {
+				if !reflect.DeepEqual(before.Issues[key], running.Issues[key]) {
+					t.Fatalf("isolated Issue %s changed", key)
+				}
+			}
+			if !reflect.DeepEqual(before.PendingRequests, running.PendingRequests) || !reflect.DeepEqual(before.QuarantinedIssues, running.QuarantinedIssues) {
+				t.Fatal("admission changed saved questions or quarantine evidence")
+			}
+			var requestID string
+			for id := range before.PendingRequests {
+				requestID = id
+			}
+			if _, _, err := loop.Store.RecordAnswer(requestID, "Continue", loop.now()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.schedule(ctx, mode == "poll"); err != nil {
+				t.Fatal(err)
+			}
+			after, err := loop.Store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(running.ActiveExecution, after.ActiveExecution) || after.ActiveExecution == nil || after.ActiveExecution.IssueNumber != 2 || s.workerCount() != 1 {
+				t.Fatal("answer stole the following worker's execution")
+			}
+			if after.PendingRequests[requestID].Status != issuedomain.RequestStatusAnswered {
+				t.Fatal("answer was not preserved while execution was occupied")
+			}
+			select {
+			case number := <-pool.started:
+				t.Fatalf("duplicate worker started for Issue %d", number)
+			default:
+			}
+		})
 	}
 }

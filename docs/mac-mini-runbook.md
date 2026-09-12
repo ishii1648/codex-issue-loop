@@ -172,7 +172,7 @@ printf '%s\n' '選択した方針と必要な補足' | agent-loop answer \
   --json
 ```
 
-新規Issueの受付は、先行IssueのPRマージ確認による内部完了、PR不要の正当な完了、または正式キャンセルまで待機する。CI・レビュー・回答待ちやfailed/blocked/quarantineでは後続はreadyのままになる。待ちの原因はstatusのIssue状態・エラーとsupervisor messageで確認し、既存の回答・復旧・キャンセル経路を使う。導入時に複数の既存Issueがある場合も、新規受付を止めたまま既存分を収束させる。
+新規Issueの受付は、正常に進行する先行IssueのPRマージ確認による内部完了、PR不要の正当な完了、または正式キャンセルまで待機する。予算内の自動retry・競合解消でも順序を維持する。回答待ちやfailed/blocked/quarantineでは対象Issueの成果と復旧経路を保持して後続を進める。過去の停止Issueを一括キャンセルする必要はない。全体の順序待ちはsupervisor message、個別attentionはIssue状態・エラーで確認する。保留Issueの回答・復旧後も、別Issueの実行枠を奪わず既存schedulerを通して再開する。
 
 記録後、同じrequest IDがansweredになったことをstatusで確認する。別Issueがroot `active_execution`を保持していれば、回答済みIssueはcontinuationを保持して待機し、実行枠が空いた後にschedulerが再開する。ready/running label、state、execution identityを手動編集しない。古いrequestや異なる二重回答はconflictとして扱い、推測で別requestへ転用しない。
 

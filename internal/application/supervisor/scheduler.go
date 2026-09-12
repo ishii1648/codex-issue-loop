@@ -1110,16 +1110,11 @@ func admissionWait(snapshot state.Snapshot) string {
 			waiting = append(waiting, fmt.Sprintf("Issue #%d (%s)", current.Number, current.Status))
 		}
 	}
-	for _, current := range snapshot.QuarantinedIssues {
-		if current != nil {
-			waiting = append(waiting, fmt.Sprintf("Issue #%d (quarantined: %s)", current.IssueNumber, current.Reason))
-		}
-	}
 	sort.Strings(waiting)
 	if len(waiting) == 0 {
 		return ""
 	}
-	return "new Issue admission waits for completion or cancellation: " + strings.Join(waiting, ", ")
+	return "new Issue admission waits for in-progress lifecycle: " + strings.Join(waiting, ", ")
 }
 
 func (s *scheduler) markPollingIfIdle(snapshot state.Snapshot, message string) error {
