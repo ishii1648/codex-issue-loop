@@ -1,5 +1,7 @@
 # Mac mini常駐運用runbook
 
+Snapshot v6 は #575/#536/#537 の統合・検証完了まで配布保留。既存 migrate は v5 までの経路であり、v6 の起動許可にはならない。旧 snapshot/隔離 backup は対応する旧 binary と停止下で扱い、v6 への移行不能状態は原本を変更せず全体中止する。詳細は [migration runbook](migration.md) を参照する。
+
 最終確認日: 2026-08-16
 
 repositoryごとのversion更新は[Repository別stable delivery](per-repository-delivery.md)を、`codex-issue-loop`自身が壊れて通常loopを利用できない場合は[break-glass repair](break-glass-repair.md)を正本とする。stable Release公開だけでは登録repositoryを自動更新しない。

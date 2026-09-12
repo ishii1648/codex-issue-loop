@@ -1108,10 +1108,12 @@ func TestStartRejectsLegacySemanticStateWithoutQuarantineOrLaunchdMutation(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot.SemanticContractVersion = 0
+	snapshot.Version = 5
+	snapshot.SemanticContractVersion = 4
+	snapshot.IssueLifecycleAPIVersion = "2.1"
 	writeJSONFixture(t, store.StatePath(), snapshot)
 	err = (App{Out: io.Discard, Err: io.Discard}).control(context.Background(), l, "start", []string{"--repo", repo, "--json"})
-	if err == nil || !strings.Contains(err.Error(), "semantic contract version") {
+	if err == nil || !strings.Contains(err.Error(), "schema migration required") {
 		t.Fatalf("legacy semantic state was not rejected: %v", err)
 	}
 	data, readErr := os.ReadFile(store.StatePath())
@@ -1122,7 +1124,7 @@ func TestStartRejectsLegacySemanticStateWithoutQuarantineOrLaunchdMutation(t *te
 	if err := json.Unmarshal(data, &unchanged); err != nil {
 		t.Fatal(err)
 	}
-	if unchanged.SemanticContractVersion != 0 || unchanged.StateRevision != snapshot.StateRevision || unchanged.Recovery != nil {
+	if unchanged.Version != 5 || unchanged.SemanticContractVersion != 4 || unchanged.StateRevision != snapshot.StateRevision || unchanged.Recovery != nil {
 		t.Fatalf("semantic mismatch changed durable state: %+v", unchanged)
 	}
 	if _, statErr := os.Stat(filepath.Join(store.Dir, "recovery")); !errors.Is(statErr, os.ErrNotExist) {
@@ -1130,7 +1132,7 @@ func TestStartRejectsLegacySemanticStateWithoutQuarantineOrLaunchdMutation(t *te
 	}
 }
 
-func TestRecoverSemanticQuarantineRequiresAndRestoresExactRecordedBackup(t *testing.T) {
+func TestRecoverSemanticQuarantineRejectsLegacyMarkerWithoutMutation(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1171,7 +1173,7 @@ func TestRecoverSemanticQuarantineRequiresAndRestoresExactRecordedBackup(t *test
 	}
 	now := time.Now().UTC()
 	reason := fmt.Sprintf("snapshot semantic contract version %d does not match %d", original.SemanticContractVersion, original.SemanticContractVersion+1)
-	marker := state.Snapshot{Version: state.CurrentVersion, SemanticContractVersion: original.SemanticContractVersion + 1,
+	marker := state.Snapshot{Version: 5, SemanticContractVersion: original.SemanticContractVersion + 1,
 		IssueLifecycleAPIVersion: issuedomain.LifecycleAPICurrent,
 		RepoID:                   entry.RepoID, RepoPath: entry.RepoPath, StateRevision: 1,
 		Supervisor: state.Supervisor{State: state.SupervisorStateBlocked, UpdatedAt: now,
@@ -1185,37 +1187,31 @@ func TestRecoverSemanticQuarantineRequiresAndRestoresExactRecordedBackup(t *test
 	if err := os.WriteFile(store.EventsPath(), append(event, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var out bytes.Buffer
-	a := App{Out: &out, Err: io.Discard}
-	if err := a.recoverSemanticQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", filepath.Join(store.Dir, "recovery", "wrong"), "--dry-run", "--json"}); err == nil {
-		t.Fatal("unrecorded backup was accepted")
-	}
-	if err := a.recoverSemanticQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--dry-run", "--json"}); err != nil {
-		t.Fatal(err)
-	}
-	var preview semanticMismatchRecoveryReport
-	if err := json.Unmarshal(out.Bytes(), &preview); err != nil || !preview.Eligible || preview.Applied || preview.RestoredRevision != original.StateRevision {
-		t.Fatalf("preview=%+v err=%v", preview, err)
-	}
-	out.Reset()
-	if err := a.recoverSemanticQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--confirm-exact-backup", "--json"}); err != nil {
-		t.Fatal(err)
-	}
-	var applied semanticMismatchRecoveryReport
-	if err := json.Unmarshal(out.Bytes(), &applied); err != nil || !applied.Applied || applied.RecoveryMarkerBackup == "" {
-		t.Fatalf("applied=%+v err=%v", applied, err)
-	}
-	restoredData, err := os.ReadFile(store.StatePath())
+	beforeState, err := os.ReadFile(store.StatePath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var restored state.Snapshot
-	if err := json.Unmarshal(restoredData, &restored); err != nil || restored.StateRevision != original.StateRevision || restored.SemanticContractVersion != original.SemanticContractVersion {
-		t.Fatalf("restored=%+v err=%v", restored, err)
+	beforeEvents, err := os.ReadFile(store.EventsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := App{Out: io.Discard, Err: io.Discard}
+	for _, flag := range []string{"--dry-run", "--confirm-exact-backup"} {
+		if err := a.recoverSemanticQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, flag, "--json"}); err == nil {
+			t.Fatal("v6 accepted a legacy recovery marker")
+		}
+	}
+	afterState, err := os.ReadFile(store.StatePath())
+	if err != nil || !bytes.Equal(beforeState, afterState) {
+		t.Fatalf("rejected recovery changed snapshot: %v", err)
+	}
+	afterEvents, err := os.ReadFile(store.EventsPath())
+	if err != nil || !bytes.Equal(beforeEvents, afterEvents) {
+		t.Fatalf("rejected recovery changed events: %v", err)
 	}
 }
 
-func TestRecoverLifecycleQuarantineRequiresUnloadedExactBackup(t *testing.T) {
+func TestRecoverLifecycleQuarantineRejectsLegacyMarkerWithoutMutation(t *testing.T) {
 	repo, l := testEnvironment(t)
 	if err := l.Ensure(); err != nil {
 		t.Fatal(err)
@@ -1255,7 +1251,7 @@ func TestRecoverLifecycleQuarantineRequiresUnloadedExactBackup(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	reason := (state.LifecycleAPIVersionError{Version: issuedomain.LifecycleAPICurrent, Current: issuedomain.LifecycleAPIPreviousMinor}).Error()
-	marker := state.Snapshot{Version: state.CurrentVersion, SemanticContractVersion: statecontract.CurrentVersion,
+	marker := state.Snapshot{Version: 5, SemanticContractVersion: statecontract.CurrentVersion,
 		IssueLifecycleAPIVersion: issuedomain.LifecycleAPIPreviousMinor,
 		RepoID:                   entry.RepoID, RepoPath: entry.RepoPath, StateRevision: 1,
 		Supervisor: state.Supervisor{State: state.SupervisorStateBlocked, UpdatedAt: now,
@@ -1271,31 +1267,27 @@ func TestRecoverLifecycleQuarantineRequiresUnloadedExactBackup(t *testing.T) {
 	if err := os.WriteFile(store.EventsPath(), append(event, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var out bytes.Buffer
-	a := App{Out: &out, Err: io.Discard}
-	if err := a.recoverLifecycleQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--dry-run", "--json"}); err != nil {
+	beforeState, err := os.ReadFile(store.StatePath())
+	if err != nil {
 		t.Fatal(err)
 	}
-	var preview lifecycleMismatchRecoveryReport
-	if err := json.Unmarshal(out.Bytes(), &preview); err != nil || !preview.Eligible || preview.Applied || preview.RestoredLifecycleAPI != issuedomain.LifecycleAPICurrent {
-		t.Fatalf("preview=%+v err=%v", preview, err)
-	}
-	if err := os.WriteFile(loadedPath, nil, 0o600); err != nil {
+	beforeEvents, err := os.ReadFile(store.EventsPath())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.recoverLifecycleQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--confirm-exact-backup", "--json"}); err == nil || !strings.Contains(err.Error(), "must be unloaded") {
-		t.Fatalf("loaded recovery error=%v", err)
+	a := App{Out: io.Discard, Err: io.Discard}
+	for _, flag := range []string{"--dry-run", "--confirm-exact-backup"} {
+		if err := a.recoverLifecycleQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, flag, "--json"}); err == nil {
+			t.Fatal("v6 accepted a legacy recovery marker")
+		}
 	}
-	if err := os.Remove(loadedPath); err != nil {
-		t.Fatal(err)
+	afterState, err := os.ReadFile(store.StatePath())
+	if err != nil || !bytes.Equal(beforeState, afterState) {
+		t.Fatalf("rejected recovery changed snapshot: %v", err)
 	}
-	out.Reset()
-	if err := a.recoverLifecycleQuarantine(context.Background(), l, []string{"--repo", repo, "--backup", backup, "--confirm-exact-backup", "--json"}); err != nil {
-		t.Fatal(err)
-	}
-	var applied lifecycleMismatchRecoveryReport
-	if err := json.Unmarshal(out.Bytes(), &applied); err != nil || !applied.Applied || applied.RecoveryMarkerBackup == "" {
-		t.Fatalf("applied=%+v err=%v", applied, err)
+	afterEvents, err := os.ReadFile(store.EventsPath())
+	if err != nil || !bytes.Equal(beforeEvents, afterEvents) {
+		t.Fatalf("rejected recovery changed events: %v", err)
 	}
 }
 

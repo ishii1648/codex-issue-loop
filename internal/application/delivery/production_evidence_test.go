@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	yaml "gopkg.in/yaml.v3"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +15,6 @@ import (
 	"time"
 
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
-	"gopkg.in/yaml.v3"
 )
 
 const evidenceCommit = "0123456789abcdef0123456789abcdef01234567"
@@ -489,9 +488,9 @@ func TestReleaseWorkflowPreservesRequiredGateChain(t *testing.T) {
 	if strings.Count(text, "scripts/build-release.sh") != 2 {
 		t.Fatal("release workflow must build the canonical candidate once and one comparison-only rebuild")
 	}
-	semanticPredicate := fmt.Sprintf(".semantic_contract_current == %d", statecontract.CurrentVersion)
+	semanticPredicate := ".semantic_contract_current == 4"
 	if strings.Count(text, semanticPredicate) != 1 {
-		t.Fatalf("release workflow does not require current semantic contract %d", statecontract.CurrentVersion)
+		t.Fatal("release workflow must retain the v5 publication hold until #536/#537 integration")
 	}
 	checkData, err := os.ReadFile(filepath.Join(repositoryRoot(t), "scripts", "check-release.sh"))
 	if err != nil {

@@ -1566,8 +1566,6 @@ func TestLegacyDrainBeforeWorkerPIDIsSaved(t *testing.T) {
 					t.Fatal(err)
 				}
 				fixture["version"] = empty.Version
-				fixture["semantic_contract_version"] = empty.SemanticContractVersion
-				fixture["issue_lifecycle_api_version"] = empty.IssueLifecycleAPIVersion
 			}
 			if tc.idle {
 				fixture["issues"].(map[string]any)["1"].(map[string]any)["status"] = "completed"

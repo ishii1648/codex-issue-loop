@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-const statePackagePath = "github.com/ishii1648/codex-issue-loop/internal/adapter/state"
+const statePackagePath = "github.com/ishii1648/codex-issue-loop/internal/domain/snapshot"
 const issueDomainPackagePath = "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
 const internalPackagePrefix = "github.com/ishii1648/codex-issue-loop/internal/"
 
@@ -152,7 +152,7 @@ func namedTypeIdentity(value types.Type) (string, string) {
 	if pointer, ok := value.(*types.Pointer); ok {
 		value = pointer.Elem()
 	}
-	named, ok := value.(*types.Named)
+	named, ok := types.Unalias(value).(*types.Named)
 	if !ok || named.Obj().Pkg() == nil {
 		return "", ""
 	}
@@ -214,7 +214,7 @@ func TestIssueStatusStringConversionsStayAtSerializationBoundaries(t *testing.T)
 		"internal/application/app/status.go":                  1,
 		"internal/application/lifecycle/worktrees.go":         1,
 		"internal/application/migration/migration.go":         3,
-		"internal/adapter/state/semantic.go":                  1,
+		"internal/domain/snapshot/snapshot.go":                1,
 		"internal/application/supervisor/worker_execution.go": 2,
 	}
 	seen := map[string]int{}
@@ -249,12 +249,12 @@ func isIssueStatusStringCall(info *types.Info, call *ast.CallExpr) bool {
 }
 
 func isIssueStatusType(value types.Type) bool {
-	named, ok := value.(*types.Named)
+	named, ok := types.Unalias(value).(*types.Named)
 	return ok && named.Obj().Name() == "Status" && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == issueDomainPackagePath
 }
 
 func isIssueLifecycleVocabularyType(value types.Type) bool {
-	named, ok := value.(*types.Named)
+	named, ok := types.Unalias(value).(*types.Named)
 	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != issueDomainPackagePath {
 		return false
 	}
@@ -458,6 +458,6 @@ func isIssueStatusSelector(info *types.Info, selector *ast.SelectorExpr) bool {
 	if pointer, ok := receiver.(*types.Pointer); ok {
 		receiver = pointer.Elem()
 	}
-	named, ok := receiver.(*types.Named)
+	named, ok := types.Unalias(receiver).(*types.Named)
 	return ok && named.Obj().Name() == "Issue" && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == statePackagePath
 }

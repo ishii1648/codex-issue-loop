@@ -1,5 +1,9 @@
 # Release gates
 
+Snapshot v6 の配布保留（#575）: merge 順は #575 → #536 → #537。auto_merge は source 統合だけを許可し、release を許可しない。既存 `release.yml` の `verify-attestation-and-manifest` は旧条件（state=5、semantic=4/minimum=1、lifecycle=2.1）を維持する。v6 manifest はここで失敗し、`promotion-evidence` の `needs`、続く `promote-stable` により通常配布を止める。build・isolated canary・candidate integrity は公開許可ではない。新しい job・設定・配布機構は加えず、統合前の非互換版のタグは発行しない。
+
+解除は #537 の PR で、#575/#536 を含む統合 SHA に対する証拠を確認した後、同じ PR で manifest 条件を v6 に更新する。必要な証拠は、契約変更/version CI、旧 `(5,4,2.0/2.1)` からの停止下 migration、旧 cancel 正規化、移行不能時の全体中止と原本 byte 一致、snapshot/event/prepared transaction の整合性、#439 の回答履歴と別 checkpoint の正常受理、未知版と新旧 reader の非破壊拒否、移行前 backup と旧 binary を対に戻す rollback fixture、必須品質 gate の成功。証拠を対象 SHA と結び付け、通常の release gate も維持する。本番操作・タグ発行・配布・rollback の実行は別の承認対象とする。
+
 ローカルの`make ci`と通常PR CIは、Go 1.25.13でStaticcheck v0.7.0のSA系（`make staticcheck`）とerrcheck v1.10.0の`-blank`（`make errcheck`）を必須とする。errcheckは`internal/platform/fsutil`、`internal/adapter/state`、`internal/adapter/publish`をテスト込みで検査し、限定除外とその理由は`scripts/errcheck-excludes.txt`で管理する。lint導入を戻す場合は導入commitをrevertし、`make ci`で従来の品質ゲートを再検証する。この導入によるruntime依存、永続schema、公開APIの変更はなく、state migrationやproduction stateの書き換えは不要である。
 
 外形監視のcursor/snapshot境界変更（Issue #282）はmonitor schema version 1と既存のstate配置を維持する。rollback evidenceは`monitor/internal/github`の固定page上限fixture、`monitor/internal/model`のlabel更新順序・terminal境界fixture、`monitor/internal/monitor`のsnapshot競合retry・非重複interval・観測gap優先順位fixtureと、`go test ./...`、monitor race、`go vet ./...`、`scripts/check-release.sh`の検証結果で確認する。配備前は変更commitのrevertで戻せる。配備後はmonitorを停止して専用stateを保全し、旧releaseのmonitor binaryでinstall/register/restartする（`monitor/docs/runbook.md`）。永続schema migrationやsupervisor stateの変更はない。旧版へ戻すとfail-closed保証も旧挙動へ戻るため、既存UNKNOWN区間を再分類せず保持する。productionでのrollback drill実施済みを意味する証拠ではなく、release公開には下記の既存gateを引き続き要求する。

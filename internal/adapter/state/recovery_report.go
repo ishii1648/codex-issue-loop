@@ -231,5 +231,5 @@ func decodeRecoveryEvents(data []byte, repoID string) ([]Event, error) {
 }
 
 func supportedRecoverySchema(version int) bool {
-	return version == CurrentVersion || version == CurrentVersion-1
+	return version == CurrentVersion || version == 5 || version == 4
 }

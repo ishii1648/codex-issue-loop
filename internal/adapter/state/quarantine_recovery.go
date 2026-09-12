@@ -740,6 +740,25 @@ func (s Store) completeQuarantineRecoveryUnlocked() error {
 	if fileSHA256(stateData) != txn.StateSHA256 || fileSHA256(eventsData) != txn.EventsSHA256 {
 		return errors.New("staged quarantined snapshot recovery digest changed")
 	}
+	var restored Snapshot
+	if err := json.Unmarshal(stateData, &restored); err != nil {
+		return err
+	}
+	if err := restored.Validate(); err != nil {
+		return err
+	}
+	if restored.RepoID != s.RepoID {
+		return errors.New("staged recovery repository identity differs")
+	}
+	events, err := decodeRecoveryEvents(eventsData, s.RepoID)
+	if err != nil {
+		return err
+	}
+	if txn.TransactionFile == "" {
+		if err := validateEventSequence(restored, events); err != nil {
+			return err
+		}
+	}
 	var transactionData []byte
 	if txn.TransactionFile != "" {
 		if err := s.validateManagedRecoveryFile(txn.TransactionFile); err != nil {
@@ -751,6 +770,13 @@ func (s Store) completeQuarantineRecoveryUnlocked() error {
 		}
 		if fileSHA256(transactionData) != txn.TransactionSHA256 {
 			return errors.New("staged quarantined snapshot recovery transaction digest changed")
+		}
+		var prepared transaction
+		if err := json.Unmarshal(transactionData, &prepared); err != nil {
+			return err
+		}
+		if _, err := validatePreparedRecoveryState(s, restored, events, prepared, true); err != nil {
+			return err
 		}
 		if err := fsutil.WriteFile(s.TransactionPath(), transactionData, 0o600); err != nil {
 			return err

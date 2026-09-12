@@ -3,7 +3,8 @@ package state
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
+	"reflect"
+
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,156 +71,47 @@ func TestRecoveryValidatorsEnforceManagedRoot(t *testing.T) {
 	}
 }
 
-func TestSemanticMismatchRecoveryRestoresOneExactBackupWithoutRewritingIt(t *testing.T) {
+func TestSemanticMismatchRecoveryRejectsV6WithoutChangingFiles(t *testing.T) {
 	store := newStore(t)
 	if _, err := store.Update("checkpoint", 0, "", nil, func(*Snapshot) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(store.StatePath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var original Snapshot
-	if err := json.Unmarshal(data, &original); err != nil {
-		t.Fatal(err)
-	}
-	original.SemanticContractVersion--
-	if err := fsutil.WriteJSON(store.StatePath(), original, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	blocked, err := store.quarantineUnlocked(SemanticContractVersionError{Version: original.SemanticContractVersion, Current: original.SemanticContractVersion + 1})
+	blocked, err := store.quarantineUnlocked(SemanticContractVersionError{Version: 3, Current: 4})
 	if err != nil || blocked.Recovery == nil {
 		t.Fatalf("blocked=%+v err=%v", blocked, err)
 	}
+	before := diagnosticFiles(t, store.Dir)
 	backup := blocked.Recovery.BackupDir
-	backupStateBefore, err := os.ReadFile(filepath.Join(backup, "state.json"))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := store.PreviewSemanticMismatchRecovery(backup); err == nil {
+		t.Fatal("legacy recovery accepted v6 marker")
 	}
-	backupEventsBefore, err := os.ReadFile(filepath.Join(backup, "events.jsonl"))
-	if err != nil {
-		t.Fatal(err)
+	if _, _, err := store.ApplySemanticMismatchRecovery(backup); err == nil {
+		t.Fatal("legacy recovery rewrote v6 marker")
 	}
-	if _, err := store.PreviewSemanticMismatchRecovery(filepath.Join(store.Dir, "recovery", "wrong")); err == nil {
-		t.Fatal("mismatched semantic recovery backup was accepted")
-	}
-	plan, err := store.PreviewSemanticMismatchRecovery(backup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !plan.Eligible || !plan.SemanticMigrationRequired || plan.RestoredRecoveryMarker || plan.RestoredRevision != original.StateRevision || plan.RestoredSemanticContract != original.SemanticContractVersion {
-		t.Fatalf("plan=%+v", plan)
-	}
-	applied, markerBackup, err := store.ApplySemanticMismatchRecovery(backup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !applied.Eligible || markerBackup == "" {
-		t.Fatalf("applied=%+v marker=%q", applied, markerBackup)
-	}
-	liveState, err := os.ReadFile(store.StatePath())
-	if err != nil || !bytes.Equal(liveState, backupStateBefore) {
-		t.Fatalf("restored state differs from backup: err=%v", err)
-	}
-	liveEvents, err := os.ReadFile(store.EventsPath())
-	if err != nil || !bytes.Equal(liveEvents, backupEventsBefore) {
-		t.Fatalf("restored events differ from backup: err=%v", err)
-	}
-	if _, err := store.Load(); err == nil {
-		t.Fatal("restored older semantic contract was accepted before migration")
-	} else {
-		var versionErr SemanticContractVersionError
-		if !errors.As(err, &versionErr) {
-			t.Fatalf("restored error=%T %v", err, err)
-		}
-	}
-	for _, name := range []string{"state.json", "events.jsonl", "restore-journal.json"} {
-		if _, err := os.Stat(filepath.Join(markerBackup, name)); err != nil {
-			t.Fatalf("missing marker audit %s: %v", name, err)
-		}
-	}
-	backupStateAfter, err := os.ReadFile(filepath.Join(backup, "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	backupEventsAfter, err := os.ReadFile(filepath.Join(backup, "events.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(backupStateBefore, backupStateAfter) || !bytes.Equal(backupEventsBefore, backupEventsAfter) {
-		t.Fatal("exact semantic recovery backup was modified")
+	if !reflect.DeepEqual(before, diagnosticFiles(t, store.Dir)) {
+		t.Fatal("rejected recovery changed files")
 	}
 }
 
-func TestLifecycleMismatchRecoveryRestoresExactBackupAndPreparedTransaction(t *testing.T) {
+func TestLifecycleMismatchRecoveryRejectsV6WithoutChangingFiles(t *testing.T) {
 	store := newStore(t)
-	base, err := store.Update("checkpoint", 0, "", nil, func(*Snapshot) error { return nil })
-	if err != nil {
+	if _, err := store.Update("checkpoint", 0, "", nil, func(*Snapshot) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	prepared := base
-	prepared.StateRevision++
-	prepared.Supervisor.UpdatedAt = time.Now().UTC()
-	preparedEvent := Event{Version: CurrentVersion, EventID: NewID("evt"), Sequence: prepared.StateRevision,
-		Timestamp: prepared.Supervisor.UpdatedAt, RepoID: store.RepoID, Type: "prepared_fixture"}
-	if err := fsutil.WriteJSON(store.TransactionPath(), transaction{Version: CurrentVersion, Snapshot: prepared, Event: preparedEvent}, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	blocked, err := store.quarantineUnlocked(LifecycleAPIVersionError{Version: issuedomain.LifecycleAPICurrent, Current: issuedomain.LifecycleAPIPreviousMinor})
+	blocked, err := store.quarantineUnlocked(LifecycleAPIVersionError{Version: "2.1", Current: "2.0"})
 	if err != nil || blocked.Recovery == nil {
 		t.Fatalf("blocked=%+v err=%v", blocked, err)
 	}
+	before := diagnosticFiles(t, store.Dir)
 	backup := blocked.Recovery.BackupDir
-	markerData, err := os.ReadFile(store.StatePath())
-	if err != nil {
-		t.Fatal(err)
+	if _, err := store.PreviewLifecycleMismatchRecovery(backup); err == nil {
+		t.Fatal("legacy recovery accepted v6 marker")
 	}
-	markerData = bytes.Replace(markerData,
-		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPICurrent+`"`),
-		[]byte(`"issue_lifecycle_api_version": "`+issuedomain.LifecycleAPIPreviousMinor+`"`), 1)
-	if err := os.WriteFile(store.StatePath(), markerData, 0o600); err != nil {
-		t.Fatal(err)
+	if _, _, err := store.ApplyLifecycleMismatchRecovery(backup); err == nil {
+		t.Fatal("legacy recovery rewrote v6 marker")
 	}
-	before := map[string][]byte{}
-	for _, name := range []string{"state.json", "events.jsonl", "state.txn.json"} {
-		before[name], err = os.ReadFile(filepath.Join(backup, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	plan, err := store.PreviewLifecycleMismatchRecovery(backup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !plan.Eligible || !plan.PreparedTransaction || plan.RestoredRevision != prepared.StateRevision ||
-		plan.MarkerLifecycleAPI != issuedomain.LifecycleAPIPreviousMinor || plan.RestoredLifecycleAPI != issuedomain.LifecycleAPICurrent {
-		t.Fatalf("plan=%+v", plan)
-	}
-	applied, markerBackup, err := store.ApplyLifecycleMismatchRecovery(backup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !applied.Eligible || markerBackup == "" {
-		t.Fatalf("applied=%+v marker=%q", applied, markerBackup)
-	}
-	for name, want := range before {
-		got, readErr := os.ReadFile(filepath.Join(store.Dir, name))
-		if readErr != nil || !bytes.Equal(got, want) {
-			t.Fatalf("restored %s differs from exact backup: %v", name, readErr)
-		}
-	}
-	loaded, err := store.Load()
-	if err != nil || loaded.StateRevision != prepared.StateRevision {
-		t.Fatalf("loaded revision=%d err=%v", loaded.StateRevision, err)
-	}
-	if _, err := os.Stat(store.TransactionPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("prepared transaction was not completed: %v", err)
-	}
-	for name, want := range before {
-		got, readErr := os.ReadFile(filepath.Join(backup, name))
-		if readErr != nil || !bytes.Equal(got, want) {
-			t.Fatalf("backup %s was modified: %v", name, readErr)
-		}
+	if !reflect.DeepEqual(before, diagnosticFiles(t, store.Dir)) {
+		t.Fatal("rejected recovery changed files")
 	}
 }
 
@@ -343,6 +235,26 @@ func TestFaultPreparedQuarantineRecoveryCompletesBeforeNormalLoad(t *testing.T) 
 	if _, err := os.Stat(store.quarantineRecoveryTransactionPath()); !os.IsNotExist(err) {
 		t.Fatalf("recovery transaction remains: %v", err)
 	}
+	result.Issues["67"].Status = invalidIssueStatus
+	stateData, err = json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stagedState, stateData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	txn.StateSHA256 = fileSHA256(stateData)
+	if err := fsutil.WriteJSON(store.quarantineRecoveryTransactionPath(), txn, 0600); err != nil {
+		t.Fatal(err)
+	}
+	before := diagnosticFiles(t, store.Dir)
+	if _, err := store.Load(); err == nil {
+		t.Fatal("valid digest bypassed snapshot contract")
+	}
+	if !reflect.DeepEqual(before, diagnosticFiles(t, store.Dir)) {
+		t.Fatal("invalid staged snapshot changed durable files")
+	}
+
 }
 
 func quarantinedLegacyMergedStore(t *testing.T, additionalViolation bool) (Store, string) {

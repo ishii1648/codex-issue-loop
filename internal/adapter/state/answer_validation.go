@@ -13,10 +13,6 @@ import (
 
 const MaxAnswerBytes = 16 * 1024
 
-type ConflictError struct{ Message string }
-
-func (e ConflictError) Error() string { return e.Message }
-
 func ValidateAnswer(request *Request, answer string, secrets []string) error {
 	if strings.TrimSpace(answer) == "" {
 		return fmt.Errorf("answer must not be empty")

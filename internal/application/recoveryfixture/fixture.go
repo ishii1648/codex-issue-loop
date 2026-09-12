@@ -25,7 +25,6 @@ import (
 	"github.com/ishii1648/codex-issue-loop/internal/adapter/worktree"
 	"github.com/ishii1648/codex-issue-loop/internal/application/migration"
 	issuedomain "github.com/ishii1648/codex-issue-loop/internal/domain/issue"
-	"github.com/ishii1648/codex-issue-loop/internal/domain/statecontract"
 	"github.com/ishii1648/codex-issue-loop/internal/platform/redact"
 )
 
@@ -298,21 +297,30 @@ func migratedFixtureSnapshot(bundle Bundle) (state.Snapshot, error) {
 		pending[identity.ID] = raw
 	}
 	raw := map[string]any{
-		"version":                     bundle.Manifest.SourceSchemaVersion,
-		"semantic_contract_version":   statecontract.CurrentVersion,
-		"issue_lifecycle_api_version": issuedomain.LifecycleAPICurrent,
-		"repo_id":                     bundle.Capture.Durable.RepoID, "repo_path": bundle.Capture.Durable.RepoPath,
+		"version": bundle.Manifest.SourceSchemaVersion,
+		"repo_id": bundle.Capture.Durable.RepoID, "repo_path": bundle.Capture.Durable.RepoPath,
 		"state_revision":   bundle.Capture.Durable.StateRevision,
 		"supervisor":       map[string]any{"state": "stopped", "updated_at": bundle.Manifest.CapturedAt},
 		"issues":           map[string]json.RawMessage{strconv.Itoa(bundle.Manifest.IssueNumber): bundle.Capture.Durable.Issue},
 		"pending_requests": pending,
 	}
+	if bundle.Manifest.SourceSchemaVersion == migration.CurrentVersion {
+		raw["semantic_contract_version"] = 4
+		raw["issue_lifecycle_api_version"] = issuedomain.LifecycleAPICurrent
+	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {
 		return state.Snapshot{}, err
 	}
-	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion-1 {
+	if bundle.Manifest.SourceSchemaVersion == migration.CurrentVersion-1 {
 		return migration.DecodePreviousSnapshot(encoded, bundle.Manifest.CapturedAt)
+	}
+	if bundle.Manifest.SourceSchemaVersion == migration.CurrentVersion {
+		var snapshot state.Snapshot
+		if err := json.Unmarshal(encoded, &snapshot); err != nil {
+			return state.Snapshot{}, err
+		}
+		return snapshot, snapshot.ValidateLegacy()
 	}
 	if bundle.Manifest.SourceSchemaVersion == state.CurrentVersion {
 		var snapshot state.Snapshot

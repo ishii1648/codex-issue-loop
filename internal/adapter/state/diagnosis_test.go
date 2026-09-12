@@ -162,6 +162,13 @@ func TestDiagnosticIssue439AnsweredNextCheckpoint(t *testing.T) {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		t.Fatal(err)
 	}
+	snapshot.Version = CurrentVersion
+	snapshot.SemanticContractVersion = 0
+	snapshot.IssueLifecycleAPIVersion = ""
+	data, err = json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := newStore(t)
 	store.RepoID, store.RepoPath = snapshot.RepoID, snapshot.RepoPath
 	if err := store.Initialize(); err != nil {
